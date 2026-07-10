@@ -1,2 +1,2 @@
 # mezon-sfu
-A high-performance realtime runtime for modern distributed applications.
+A high-performance optimized for HD meetings and large-scale deployment. 
