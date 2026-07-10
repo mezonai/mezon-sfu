@@ -7,6 +7,7 @@
 
 #include "sfu/packet.h"
 #include "memory/packet_pool.h"
+#include "util/ringbuffer.h"
 
 /*
  * sfu_ring_t wraps one io_uring instance plus one kernel provided-buffer
@@ -82,6 +83,14 @@ int sfu_ring_submit(sfu_ring_t *r);
  *     initial "send submitted" completion -- releasing on the first CQE
  *     is a use-after-free waiting to happen once the NIC is still mid-DMA
  *     on the buffer).
+ *
+ * `release_to_dispatcher`: pass NULL when `r` is the dispatcher's own
+ * recv ring (it owns the buf_ring directly, so the NOTIF-completion
+ * release path can recycle kernel buffers itself). Pass a worker's own
+ * release-queue ring otherwise -- required whenever `r` is a send-only
+ * worker ring, since it has no buf_ring of its own and must hand kernel
+ * buffer indices back to the dispatcher instead of touching one.
+ *
  * Returns the number of CQEs processed.
  */
 typedef void (*sfu_on_recv_fn)(void *user_data, sfu_packet_t *pkt);
@@ -89,16 +98,49 @@ typedef void (*sfu_on_send_complete_fn)(void *user_data, sfu_packet_t *pkt);
 
 unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count,
                         sfu_packet_pool_t *pp,
+                        sfu_spsc_ring_t *release_to_dispatcher,
                         sfu_on_recv_fn on_recv,
                         sfu_on_send_complete_fn on_send_complete,
                         void *user_data);
 
 /* Releases a packet's reference; recycles it (kernel buf_ring_add for
  * SFU_BUF_SOURCE_KERNEL, or packet_pool free for SFU_BUF_SOURCE_POOL)
- * once the refcount reaches zero. Safe to call from any core, but the
- * SFU_BUF_SOURCE_KERNEL recycle path must run on the ring that owns the
- * buffer ring the packet came from (i.e. hand it back to the dispatcher
- * if a worker is the one dropping the last reference). */
+ * once the refcount reaches zero. Only safe to call from the ring `r`
+ * that actually owns the buffer ring the packet's kernel buffer (if
+ * any) came from -- i.e. the dispatcher, for kernel-sourced packets.
+ * Workers must use sfu_worker_release_packet() instead; see its
+ * comment for why. */
 void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt);
+
+/*
+ * Worker-safe packet release. A worker is very often the one dropping
+ * the *last* reference to a packet whose kernel buffer lives in the
+ * *dispatcher's* provided-buffer ring (e.g. after a remote fan-out
+ * send_zc completes) -- but io_uring_buf_ring_add/advance are not
+ * thread-safe for concurrent producers, so only the dispatcher's own
+ * thread may ever touch its buf_ring. Calling sfu_ring_release_packet()
+ * from a worker on a kernel-sourced packet would corrupt the buffer
+ * ring exactly the way handle_cross_thread_inbox's missing-else UAF
+ * corrupted mimalloc slice metadata in mezon-proto-server.
+ *
+ * Instead: the packet's *metadata* slot is freed locally (the slab pool
+ * is already MPMC-safe), and the *kernel buffer index* is pushed onto
+ * an SPSC ring back to the dispatcher, which drains it once per tick
+ * via sfu_ring_drain_kernel_buffer_returns() and is the only thread
+ * that ever calls io_uring_buf_ring_add for that buffer ring.
+ *
+ * `to_dispatcher` is the calling worker's dedicated release ring (see
+ * runtime/worker.h) -- one per worker, so this stays a proper SPSC
+ * producer/consumer pair, no locking needed on either side.
+ */
+void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher,
+                                sfu_packet_t *pkt);
+
+/* Dispatcher-only: drains a worker's kernel-buffer-return ring and
+ * hands each index back to the kernel provided-buffer ring in one
+ * batched add+advance. Called once per dispatcher tick, once per
+ * worker's release ring. */
+unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *from_worker,
+                                               unsigned max_count);
 
 #endif /* SFU_NET_IO_URING_H */

@@ -25,6 +25,31 @@
 /* Dispatcher -> worker SPSC ring buffer capacity. Must be a power of two. */
 #define SFU_WORKER_QUEUE_CAPACITY  16384
 
+/* -------- cross-worker fan-out -------- */
+/* One SPSC ring per (source worker, dest worker) pair, so any worker can
+ * hand a packet to any other worker's send path without locking. Must be
+ * a power of two. */
+#define SFU_FANOUT_RING_CAPACITY   4096
+/* Shared pool of small "fanout job" structs (packet ptr + destination
+ * addr) that ride through the mesh rings -- see runtime/fanout.h. */
+#define SFU_FANOUT_JOB_POOL_CAPACITY 16384
+/* Per-worker SPSC ring returning kernel provided-buffer indices back to
+ * the dispatcher -- only the dispatcher's thread may touch its own
+ * io_uring_buf_ring, so a worker that drops the last reference to a
+ * kernel-sourced packet must hand the index back rather than recycle it
+ * itself. See net/io_uring.c's sfu_worker_release_packet(). */
+#define SFU_RELEASE_QUEUE_CAPACITY 8192
+
+/* -------- room registry (placeholder before real signaling/SSRC demux) -------- */
+/* Fixed-capacity, mutex-guarded peer table. This is a control-plane-style
+ * placeholder, NOT the final concurrency design -- every packet currently
+ * pays a mutex lock to look up subscribers. Once real join/publish
+ * signaling and SSRC-based routing exist, replace with a sharded or
+ * RCU/seqlock-style per-room structure so the packet hot path never
+ * blocks on a lock (see the mutex-guarded hash table lesson from
+ * mezon-proto-server's handshake rate limiter). */
+#define SFU_ROOM_MAX_PEERS         256
+
 /* -------- ports -------- */
 #define SFU_DEFAULT_MEDIA_PORT     7000    /* shared RTP/RTCP/STUN UDP port   */
 

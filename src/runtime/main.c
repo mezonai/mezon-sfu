@@ -10,6 +10,8 @@
 #include "runtime/signal.h"
 #include "runtime/cpu.h"
 #include "memory/packet_pool.h"
+#include "room/room.h"
+#include "runtime/fanout.h"
 #include "util/log.h"
 
 /*
@@ -72,10 +74,23 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    sfu_room_t room;
+    if (sfu_room_init(&room) != 0) {
+        SFU_LOG_ERROR("failed to init room registry");
+        return 1;
+    }
+
+    sfu_fanout_mesh_t mesh;
+    if (sfu_fanout_mesh_init(&mesh, worker_count, SFU_FANOUT_RING_CAPACITY,
+                              SFU_FANOUT_JOB_POOL_CAPACITY) != 0) {
+        SFU_LOG_ERROR("failed to init fanout mesh");
+        return 1;
+    }
+
     for (uint32_t i = 0; i < worker_count; i++) {
         int core_id = (int)(i + 1) % (online > 1 ? online : 1);
         int send_bgid = SFU_PROVIDED_BUF_GROUP_ID + 1 + (int)i; /* distinct bgid per ring, unused for send-only but kept unique */
-        if (sfu_worker_init(&workers[i], core_id, fd, &pp,
+        if (sfu_worker_init(&workers[i], core_id, i, fd, &pp, &room, &mesh,
                              SFU_WORKER_QUEUE_CAPACITY, send_bgid) != 0) {
             SFU_LOG_ERROR("failed to init worker %u", i);
             return 1;
@@ -110,6 +125,8 @@ int main(int argc, char **argv) {
         sfu_worker_destroy(&workers[i]);
     }
     free(workers);
+    sfu_fanout_mesh_destroy(&mesh);
+    sfu_room_destroy(&room);
     sfu_packet_pool_destroy(&pp);
     close(fd);
 

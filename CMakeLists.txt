@@ -43,8 +43,10 @@ add_library(sfu_core STATIC
   src/net/io_uring.c
   src/net/batch.c
   src/net/zerocopy.c
+  src/room/room.c
   src/runtime/cpu.c
   src/runtime/timer.c
+  src/runtime/fanout.c
   src/runtime/worker.c
   src/runtime/scheduler.c
   src/runtime/signal.c

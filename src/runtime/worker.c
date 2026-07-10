@@ -1,7 +1,6 @@
 #include "runtime/worker.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
-#include "net/zerocopy.h"
 #include "memory/refcount.h"
 #include "util/log.h"
 
@@ -13,22 +12,33 @@
 #define SFU_WORKER_REAP_BATCH      128
 #define SFU_WORKER_IDLE_SLEEP_US   200
 
-int sfu_worker_init(sfu_worker_t *w, int core_id, int fd, sfu_packet_pool_t *pp,
+int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
+                     sfu_packet_pool_t *pp, sfu_room_t *room, sfu_fanout_mesh_t *mesh,
                      uint32_t inbox_capacity, int send_bgid) {
     memset(w, 0, sizeof(*w));
-    w->core_id = core_id;
-    w->fd      = fd;
-    w->pp      = pp;
+    w->core_id      = core_id;
+    w->worker_index = worker_index;
+    w->fd           = fd;
+    w->pp           = pp;
+    w->room         = room;
+    w->mesh         = mesh;
 
     if (sfu_spsc_ring_init(&w->inbox, inbox_capacity) != 0) {
-        SFU_LOG_ERROR("worker %d: failed to init inbox ring", core_id);
+        SFU_LOG_ERROR("worker %u: failed to init inbox ring", worker_index);
+        return -1;
+    }
+
+    if (sfu_spsc_ring_init(&w->release_to_dispatcher, SFU_RELEASE_QUEUE_CAPACITY) != 0) {
+        SFU_LOG_ERROR("worker %u: failed to init release queue", worker_index);
+        sfu_spsc_ring_destroy(&w->inbox);
         return -1;
     }
 
     /* Send-only ring: no provided buffers, this worker never recvs. */
     if (sfu_ring_init(&w->send_ring, fd, SFU_WORKER_SEND_SQ_ENTRIES,
                        SFU_WORKER_SEND_CQ_ENTRIES, 0, 0, send_bgid, false) != 0) {
-        SFU_LOG_ERROR("worker %d: failed to init send ring", core_id);
+        SFU_LOG_ERROR("worker %u: failed to init send ring", worker_index);
+        sfu_spsc_ring_destroy(&w->release_to_dispatcher);
         sfu_spsc_ring_destroy(&w->inbox);
         return -1;
     }
@@ -38,45 +48,90 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, int fd, sfu_packet_pool_t *pp,
 
 void sfu_worker_destroy(sfu_worker_t *w) {
     sfu_ring_destroy(&w->send_ring);
+    sfu_spsc_ring_destroy(&w->release_to_dispatcher);
     sfu_spsc_ring_destroy(&w->inbox);
 }
 
 /*
- * Placeholder forward step: echoes the packet back to its sender via
- * zero-copy send. This exercises the full refcount / ZC-completion path
- * end to end (pop -> queue send -> reap NOTIF -> release) before any
- * real RTP routing exists. Once rtp/router.c and room/publisher.c land,
- * this is where subscriber fan-out (sfu_fanout_send_zc against the
- * room's actual subscriber list) replaces the echo.
+ * Real forward step, replacing the earlier echo placeholder now that
+ * room membership and cross-worker fan-out exist. For each subscriber
+ * in the room (every other known peer, until real publish/subscribe
+ * signaling narrows that down):
+ *   - same worker as the sender -> queue send_zc directly on this
+ *     worker's own send_ring.
+ *   - different worker -> hand it to the fan-out mesh, which queues it
+ *     on the owning worker's send_ring on that worker's own next tick.
+ *
+ * Ends by dropping the reference this function was handed (the
+ * dispatcher's transferred ownership) via the worker-safe release path,
+ * regardless of how many subscribers it fanned out to -- each fan-out
+ * target holds its own independently-retained reference by that point.
  */
 static void worker_forward(sfu_worker_t *w, sfu_packet_t *pkt) {
-    struct sockaddr_storage dsts[1];
-    socklen_t dst_lens[1];
+    sfu_room_touch_peer(w->room, &pkt->peer_addr, pkt->peer_addr_len, w->worker_index);
 
-    memcpy(&dsts[0], &pkt->peer_addr, sizeof(dsts[0]));
-    dst_lens[0] = pkt->peer_addr_len;
+    sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
+    uint32_t n = sfu_room_list_subscribers_excluding(
+        w->room, &pkt->peer_addr, pkt->peer_addr_len, subs, SFU_ROOM_MAX_PEERS);
 
-    size_t queued = sfu_fanout_send_zc(&w->send_ring, pkt, dsts, dst_lens, 1);
-    if (queued < 1) {
-        SFU_LOG_WARN("worker %d: send queue full, flushing and dropping remainder",
-                     w->core_id);
+    for (uint32_t i = 0; i < n; i++) {
+        sfu_peer_entry_t *sub = &subs[i];
+
+        if (sub->worker_id == w->worker_index) {
+            /* Same core: sfu_ring_queue_send_zc retains its own
+             * reference internally before queuing. */
+            if (sfu_ring_queue_send_zc(&w->send_ring, pkt,
+                                        (const struct sockaddr *)&sub->addr,
+                                        sub->addr_len) != 0) {
+                SFU_LOG_WARN("worker %u: local send SQ full, dropping to one subscriber",
+                             w->worker_index);
+            }
+        } else {
+            /* Different core: retain before handing off -- the mesh job
+             * carries exactly one reference, matching the local case's
+             * internal retain. */
+            sfu_packet_retain(pkt, 1);
+            if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub->worker_id,
+                                          pkt, &sub->addr, sub->addr_len)) {
+                /* Enqueue failed: ownership never transferred, so the
+                 * retain above must be undone rather than leaked. */
+                sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+            }
+        }
     }
 
-    /* Drop the reference this function was handed (the dispatcher's
-     * transferred ownership); the in-flight send(s) hold their own
-     * reference each via sfu_ring_queue_send_zc's internal retain. */
-    sfu_ring_release_packet(&w->send_ring, w->pp, pkt);
+    /* Drop this function's own reference -- the one the dispatcher
+     * transferred when it pushed pkt into our inbox. */
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+}
+
+/* Consumes one job handed to this worker by another worker's fan-out
+ * (runtime/fanout.h). Queues the actual send on this worker's own
+ * send_ring, releases the reference the job carried, and returns the
+ * job struct to the shared pool. */
+static void handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
+    sfu_worker_t *w = (sfu_worker_t *)user_data;
+
+    if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt,
+                                (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
+        SFU_LOG_WARN("worker %u: remote-fanout send SQ full, dropping", w->worker_index);
+    }
+
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
+    sfu_fanout_mesh_free_job(w->mesh, job);
 }
 
 static void *worker_thread_main(void *arg) {
     sfu_worker_t *w = (sfu_worker_t *)arg;
     sfu_pin_current_thread_to_core(w->core_id);
 
-    SFU_LOG_INFO("worker %d started", w->core_id);
+    SFU_LOG_INFO("worker %u started (core %d)", w->worker_index, w->core_id);
 
     while (!sfu_shutdown_requested()) {
         bool did_work = false;
 
+        /* 1. Packets received directly from the dispatcher (this
+         *    worker's own inbox). */
         void *item;
         int drained = 0;
         while (drained < SFU_WORKER_REAP_BATCH && sfu_spsc_ring_pop(&w->inbox, &item)) {
@@ -85,12 +140,27 @@ static void *worker_thread_main(void *arg) {
             did_work = true;
         }
 
-        if (drained > 0) {
+        /* 2. Jobs handed to this worker by *other* workers' fan-out --
+         *    this is the cross-thread delivery path: a publisher's
+         *    packet whose sender happened to land on a different core
+         *    than one of its subscribers. */
+        unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index,
+                                                 SFU_WORKER_REAP_BATCH,
+                                                 handle_fanout_job, w);
+        if (fanned > 0) did_work = true;
+
+        if (drained > 0 || fanned > 0) {
             sfu_ring_submit(&w->send_ring);
         }
 
+        /* release_to_dispatcher is passed here (non-NULL) because this
+         * is a send-only ring with no buf_ring of its own -- NOTIF
+         * completions for kernel-sourced packets must route the buffer
+         * index back to the dispatcher rather than touch a buf_ring
+         * that doesn't exist on this ring. See sfu_ring_reap's doc. */
         unsigned reaped = sfu_ring_reap(&w->send_ring, SFU_WORKER_REAP_BATCH,
-                                         w->pp, NULL, NULL, w);
+                                         w->pp, &w->release_to_dispatcher,
+                                         NULL, NULL, w);
         if (reaped > 0) did_work = true;
 
         if (!did_work) {
@@ -98,7 +168,7 @@ static void *worker_thread_main(void *arg) {
         }
     }
 
-    SFU_LOG_INFO("worker %d shutting down", w->core_id);
+    SFU_LOG_INFO("worker %u shutting down", w->worker_index);
     return NULL;
 }
 

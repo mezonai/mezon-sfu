@@ -149,6 +149,52 @@ void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t 
     }
 }
 
+void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher,
+                                sfu_packet_t *pkt) {
+    if (!sfu_packet_release(pkt)) {
+        return;
+    }
+
+    if (pkt->buf_source == SFU_BUF_SOURCE_KERNEL) {
+        /* The metadata slab pool is MPMC-safe (Treiber stack), so this
+         * half is fine to do locally from any thread. */
+        uint16_t kbuf_index = pkt->kbuf_index;
+        sfu_packet_pool_free_meta(pp, pkt);
+
+        /* Only the kernel buffer itself needs to go back through the
+         * dispatcher, which is the sole thread allowed to touch its
+         * own buf_ring. Pack the index as a tagged pointer-sized value
+         * so the SPSC ring's void* slots don't need a separate pool. */
+        void *item = (void *)(uintptr_t)((uint64_t)kbuf_index + 1); /* +1: never push NULL */
+        if (!sfu_spsc_ring_push(to_dispatcher, item)) {
+            SFU_LOG_WARN("release queue to dispatcher full, kernel buffer %u "
+                         "temporarily leaked (transient under sustained overload)",
+                         kbuf_index);
+        }
+    } else {
+        sfu_packet_pool_free(pp, pkt);
+    }
+}
+
+unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *from_worker,
+                                               unsigned max_count) {
+    unsigned n = 0;
+    int mask = io_uring_buf_ring_mask(r->buf_count);
+    void *item;
+
+    while (n < max_count && sfu_spsc_ring_pop(from_worker, &item)) {
+        uint16_t kbuf_index = (uint16_t)(((uint64_t)(uintptr_t)item) - 1);
+        void *addr = (uint8_t *)r->buf_ring_mem + (size_t)kbuf_index * r->buf_size;
+        io_uring_buf_ring_add(r->buf_ring, addr, r->buf_size, kbuf_index, mask, (int)n);
+        n++;
+    }
+
+    if (n > 0) {
+        io_uring_buf_ring_advance(r->buf_ring, (int)n);
+    }
+    return n;
+}
+
 /* Handles one RECV-tagged CQE: validates/unpacks the packed
  * io_uring_recvmsg_out header, wraps the provided buffer into a fresh
  * sfu_packet_t (no copy), and re-arms the multishot request if the
@@ -223,6 +269,7 @@ maybe_rearm:
 
 unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count,
                         sfu_packet_pool_t *pp,
+                        sfu_spsc_ring_t *release_to_dispatcher,
                         sfu_on_recv_fn on_recv,
                         sfu_on_send_complete_fn on_send_complete,
                         void *user_data) {
@@ -247,7 +294,16 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count,
             sfu_packet_t *pkt = (sfu_packet_t *)(uintptr_t)data;
             if (cqe->flags & IORING_CQE_F_NOTIF) {
                 if (on_send_complete) on_send_complete(user_data, pkt);
-                sfu_ring_release_packet(r, pp, pkt);
+
+                /* r may be a send-only worker ring with no buf_ring of
+                 * its own -- if so, release_to_dispatcher routes
+                 * kernel-sourced packets back to the dispatcher instead
+                 * of touching a buf_ring that doesn't exist here. */
+                if (release_to_dispatcher) {
+                    sfu_worker_release_packet(pp, release_to_dispatcher, pkt);
+                } else {
+                    sfu_ring_release_packet(r, pp, pkt);
+                }
             } else if (cqe->res < 0) {
                 SFU_LOG_WARN("send_zc error: %s", strerror(-cqe->res));
             }

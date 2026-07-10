@@ -84,8 +84,21 @@ static void *scheduler_thread_main(void *arg) {
 
     while (!sfu_shutdown_requested()) {
         unsigned reaped = sfu_ring_reap(&s->recv_ring, SFU_DISPATCH_REAP_BATCH,
-                                         s->pp, on_recv, NULL, &ctx);
-        if (reaped == 0) {
+                                         s->pp, NULL, on_recv, NULL, &ctx);
+
+        /* Only this thread may touch its own buf_ring -- drain every
+         * worker's release queue here and hand kernel buffer indices
+         * back to the kernel, batched per worker. See
+         * sfu_worker_release_packet's doc for why workers can't do
+         * this themselves. */
+        unsigned returned = 0;
+        for (uint32_t i = 0; i < s->worker_count; i++) {
+            returned += sfu_ring_drain_kernel_buffer_returns(
+                &s->recv_ring, &s->workers[i].release_to_dispatcher,
+                SFU_DISPATCH_REAP_BATCH);
+        }
+
+        if (reaped == 0 && returned == 0) {
             usleep(SFU_DISPATCH_IDLE_SLEEP_US);
         }
     }
