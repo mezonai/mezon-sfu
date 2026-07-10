@@ -1,0 +1,10 @@
+#ifndef SFU_VERSION_H
+#define SFU_VERSION_H
+
+#define SFU_VERSION_MAJOR 0
+#define SFU_VERSION_MINOR 1
+#define SFU_VERSION_PATCH 0
+
+#define SFU_VERSION_STRING "0.1.0-dev"
+
+#endif /* SFU_VERSION_H */
