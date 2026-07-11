@@ -7,7 +7,8 @@ A high-performance optimized for HD meetings and large-scale deployment.
 
 # build
 build liburing
-```git clone https://github.com/axboe/liburing.git
+```
+git clone https://github.com/axboe/liburing.git
 cd liburing
 
 ./configure
