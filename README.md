@@ -6,7 +6,7 @@ A high-performance optimized for HD meetings and large-scale deployment.
 
 
 # build
-Build liburing
+build liburing
 ```git clone https://github.com/axboe/liburing.git
 cd liburing
 
@@ -14,6 +14,8 @@ cd liburing
 make -j$(nproc)
 sudo make install
 ```
+
+build mezon sfu
 ```
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Debug
