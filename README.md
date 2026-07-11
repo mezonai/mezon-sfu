@@ -6,6 +6,14 @@ A high-performance optimized for HD meetings and large-scale deployment.
 
 
 # build
+Build liburing
+```git clone https://github.com/axboe/liburing.git
+cd liburing
+
+./configure
+make -j$(nproc)
+sudo make install
+```
 ```
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Debug
