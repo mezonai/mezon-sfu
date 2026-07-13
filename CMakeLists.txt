@@ -31,6 +31,7 @@ endif()
 
 find_library(URING_LIB uring REQUIRED)
 find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # --- core static lib: runtime + net + memory + util -------------------------
 add_library(sfu_core STATIC
@@ -43,7 +44,11 @@ add_library(sfu_core STATIC
   src/net/io_uring.c
   src/net/batch.c
   src/net/zerocopy.c
+  src/transport/stun/stun.c
+  src/transport/dtls/dtls.c
+  src/peer/session.c
   src/room/room.c
+  src/pipeline/dispatch.c
   src/runtime/cpu.c
   src/runtime/timer.c
   src/runtime/fanout.c
@@ -58,7 +63,7 @@ target_include_directories(sfu_core PUBLIC
   ${URING_INCLUDE_DIR}
 )
 
-target_link_libraries(sfu_core PUBLIC ${URING_LIB} pthread m)
+target_link_libraries(sfu_core PUBLIC ${URING_LIB} OpenSSL::SSL OpenSSL::Crypto pthread m)
 
 # --- main server binary -------------------------------------------------
 add_executable(mezon-sfu src/runtime/main.c)

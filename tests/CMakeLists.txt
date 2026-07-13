@@ -17,3 +17,11 @@ add_test(NAME fanout_mesh COMMAND test_fanout_mesh)
 add_executable(test_room test_room.c)
 target_link_libraries(test_room PRIVATE sfu_core)
 add_test(NAME room COMMAND test_room)
+
+add_executable(test_stun test_stun.c)
+target_link_libraries(test_stun PRIVATE sfu_core)
+add_test(NAME stun COMMAND test_stun)
+
+add_executable(test_dtls_handshake test_dtls_handshake.c)
+target_link_libraries(test_dtls_handshake PRIVATE sfu_core)
+add_test(NAME dtls_handshake COMMAND test_dtls_handshake)

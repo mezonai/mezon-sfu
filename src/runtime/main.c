@@ -12,6 +12,9 @@
 #include "memory/packet_pool.h"
 #include "room/room.h"
 #include "runtime/fanout.h"
+#include "peer/session.h"
+#include "transport/dtls/dtls.h"
+#include "transport/stun/stun.h"
 #include "util/log.h"
 
 /*
@@ -87,10 +90,30 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    sfu_dtls_ctx_t dtls_ctx;
+    if (sfu_dtls_ctx_init(&dtls_ctx) != 0) {
+        SFU_LOG_ERROR("failed to init DTLS context");
+        return 1;
+    }
+
+    sfu_session_table_t sessions;
+    if (sfu_session_table_init(&sessions, &dtls_ctx) != 0) {
+        SFU_LOG_ERROR("failed to init session table");
+        return 1;
+    }
+
+    sfu_ice_credentials_t ice_creds;
+    sfu_ice_credentials_generate(&ice_creds);
+    /* No signaling channel exists yet to hand these to a client (see
+     * protocol/signaling/) -- logged so a test client can be configured
+     * with them out of band in the meantime. */
+    SFU_LOG_INFO("local ICE credentials: ufrag=%s pwd=%s", ice_creds.ufrag, ice_creds.pwd);
+
     for (uint32_t i = 0; i < worker_count; i++) {
         int core_id = (int)(i + 1) % (online > 1 ? online : 1);
         int send_bgid = SFU_PROVIDED_BUF_GROUP_ID + 1 + (int)i; /* distinct bgid per ring, unused for send-only but kept unique */
         if (sfu_worker_init(&workers[i], core_id, i, fd, &pp, &room, &mesh,
+                             &sessions, &ice_creds,
                              SFU_WORKER_QUEUE_CAPACITY, send_bgid) != 0) {
             SFU_LOG_ERROR("failed to init worker %u", i);
             return 1;
@@ -127,6 +150,8 @@ int main(int argc, char **argv) {
     free(workers);
     sfu_fanout_mesh_destroy(&mesh);
     sfu_room_destroy(&room);
+    sfu_session_table_destroy(&sessions);
+    sfu_dtls_ctx_destroy(&dtls_ctx);
     sfu_packet_pool_destroy(&pp);
     close(fd);
 

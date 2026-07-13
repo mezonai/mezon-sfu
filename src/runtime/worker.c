@@ -1,6 +1,7 @@
 #include "runtime/worker.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
+#include "pipeline/dispatch.h"
 #include "memory/refcount.h"
 #include "util/log.h"
 
@@ -14,6 +15,7 @@
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
                      sfu_packet_pool_t *pp, sfu_room_t *room, sfu_fanout_mesh_t *mesh,
+                     sfu_session_table_t *sessions, const sfu_ice_credentials_t *ice_creds,
                      uint32_t inbox_capacity, int send_bgid) {
     memset(w, 0, sizeof(*w));
     w->core_id      = core_id;
@@ -22,6 +24,8 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
     w->pp           = pp;
     w->room         = room;
     w->mesh         = mesh;
+    w->sessions     = sessions;
+    w->ice_creds    = ice_creds;
 
     if (sfu_spsc_ring_init(&w->inbox, inbox_capacity) != 0) {
         SFU_LOG_ERROR("worker %u: failed to init inbox ring", worker_index);
@@ -67,7 +71,7 @@ void sfu_worker_destroy(sfu_worker_t *w) {
  * regardless of how many subscribers it fanned out to -- each fan-out
  * target holds its own independently-retained reference by that point.
  */
-static void worker_forward(sfu_worker_t *w, sfu_packet_t *pkt) {
+void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_room_touch_peer(w->room, &pkt->peer_addr, pkt->peer_addr_len, w->worker_index);
 
     sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
@@ -135,7 +139,7 @@ static void *worker_thread_main(void *arg) {
         void *item;
         int drained = 0;
         while (drained < SFU_WORKER_REAP_BATCH && sfu_spsc_ring_pop(&w->inbox, &item)) {
-            worker_forward(w, (sfu_packet_t *)item);
+            sfu_dispatch_packet(w, (sfu_packet_t *)item);
             drained++;
             did_work = true;
         }
