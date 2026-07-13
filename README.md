@@ -12,6 +12,8 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 
 
 # build
+`sudo apt install libsrtp2-1 libsrtp2-dev`
+
 build liburing
 ```
 git clone https://github.com/axboe/liburing.git

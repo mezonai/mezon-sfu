@@ -15,6 +15,7 @@
 #include "peer/session.h"
 #include "transport/dtls/dtls.h"
 #include "transport/stun/stun.h"
+#include "transport/srtp/srtp.h"
 #include "util/log.h"
 
 /*
@@ -53,6 +54,11 @@ int main(int argc, char **argv) {
                  online, worker_count);
 
     sfu_install_shutdown_handler();
+
+    if (sfu_srtp_global_init() != 0) {
+        SFU_LOG_ERROR("failed to init SRTP library");
+        return 1;
+    }
 
     int fd = sfu_udp_socket_create(port);
     if (fd < 0) {
@@ -154,6 +160,7 @@ int main(int argc, char **argv) {
     sfu_dtls_ctx_destroy(&dtls_ctx);
     sfu_packet_pool_destroy(&pp);
     close(fd);
+    sfu_srtp_global_deinit();
 
     SFU_LOG_INFO("mezon-sfu stopped cleanly");
     return 0;

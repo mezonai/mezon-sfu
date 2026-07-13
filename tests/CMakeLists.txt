@@ -25,3 +25,7 @@ add_test(NAME stun COMMAND test_stun)
 add_executable(test_dtls_handshake test_dtls_handshake.c)
 target_link_libraries(test_dtls_handshake PRIVATE sfu_core)
 add_test(NAME dtls_handshake COMMAND test_dtls_handshake)
+
+add_executable(test_srtp test_srtp.c)
+target_link_libraries(test_srtp PRIVATE sfu_core)
+add_test(NAME srtp COMMAND test_srtp)

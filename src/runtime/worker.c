@@ -57,22 +57,51 @@ void sfu_worker_destroy(sfu_worker_t *w) {
 }
 
 /*
- * Real forward step, replacing the earlier echo placeholder now that
- * room membership and cross-worker fan-out exist. For each subscriber
- * in the room (every other known peer, until real publish/subscribe
- * signaling narrows that down):
+ * Real forward step. A publisher's ciphertext was encrypted with keys
+ * only its own DTLS session knows -- every subscriber negotiated
+ * independent keys of their own -- so this is necessarily a decrypt-
+ * once, re-encrypt-per-subscriber relay, not a byte-for-byte fan-out.
+ * The zero-copy machinery still pays for itself on the *send* side
+ * (send_zc avoids a syscall-side copy per subscriber); it just can't
+ * avoid the crypto operation itself, which is unavoidably per-destination
+ * once each peer has its own key.
+ *
+ * For each subscriber in the room (every other known peer, until real
+ * publish/subscribe signaling narrows that down):
  *   - same worker as the sender -> queue send_zc directly on this
  *     worker's own send_ring.
- *   - different worker -> hand it to the fan-out mesh, which queues it
- *     on the owning worker's send_ring on that worker's own next tick.
+ *   - different worker -> hand the freshly-encrypted, uniquely-owned
+ *     buffer to the fan-out mesh, which queues it on the owning
+ *     worker's send_ring on that worker's own next tick.
  *
  * Ends by dropping the reference this function was handed (the
- * dispatcher's transferred ownership) via the worker-safe release path,
- * regardless of how many subscribers it fanned out to -- each fan-out
- * target holds its own independently-retained reference by that point.
+ * dispatcher's transferred ownership) via the worker-safe release path.
  */
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_room_touch_peer(w->room, &pkt->peer_addr, pkt->peer_addr_len, w->worker_index);
+
+    sfu_peer_session_t *sender_session =
+        sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
+    if (!sender_session || sender_session->state != SFU_SESSION_ESTABLISHED) {
+        /* No completed DTLS handshake means no keys -- can't decrypt,
+         * so there's nothing safe to forward. Drop rather than pass
+         * ciphertext through blindly (which would just be noise to
+         * every subscriber, since none of their keys would decrypt it
+         * either). */
+        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+        return;
+    }
+
+    bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
+    int plain_len = (int)pkt->len;
+    bool unprotected = is_rtcp
+        ? sfu_srtp_unprotect_rtcp(&sender_session->srtp, pkt->data, &plain_len)
+        : sfu_srtp_unprotect_rtp(&sender_session->srtp, pkt->data, &plain_len);
+    if (!unprotected) {
+        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+        return;
+    }
+    pkt->len = (uint32_t)plain_len; /* pkt->data now holds plaintext */
 
     sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
     uint32_t n = sfu_room_list_subscribers_excluding(
@@ -81,31 +110,57 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     for (uint32_t i = 0; i < n; i++) {
         sfu_peer_entry_t *sub = &subs[i];
 
+        sfu_peer_session_t *sub_session =
+            sfu_session_table_find(w->sessions, &sub->addr, sub->addr_len);
+        if (!sub_session || sub_session->state != SFU_SESSION_ESTABLISHED) {
+            continue; /* this subscriber hasn't finished its own handshake yet */
+        }
+
+        sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
+        if (!enc) {
+            SFU_LOG_WARN("worker %u: packet pool exhausted, dropping one subscriber send",
+                         w->worker_index);
+            continue;
+        }
+        if (pkt->len > enc->cap) {
+            SFU_LOG_WARN("worker %u: plaintext too large to re-encrypt (%u > %u)",
+                         w->worker_index, pkt->len, enc->cap);
+            sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
+            continue;
+        }
+        memcpy(enc->data, pkt->data, pkt->len);
+        int enc_len = (int)pkt->len;
+        bool protected_ = is_rtcp
+            ? sfu_srtp_protect_rtcp(&sub_session->srtp, enc->data, &enc_len, enc->cap)
+            : sfu_srtp_protect_rtp(&sub_session->srtp, enc->data, &enc_len, enc->cap);
+        if (!protected_) {
+            sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
+            continue;
+        }
+        enc->len = (uint32_t)enc_len;
+
         if (sub->worker_id == w->worker_index) {
-            /* Same core: sfu_ring_queue_send_zc retains its own
-             * reference internally before queuing. */
-            if (sfu_ring_queue_send_zc(&w->send_ring, pkt,
+            if (sfu_ring_queue_send_zc(&w->send_ring, enc,
                                         (const struct sockaddr *)&sub->addr,
                                         sub->addr_len) != 0) {
                 SFU_LOG_WARN("worker %u: local send SQ full, dropping to one subscriber",
                              w->worker_index);
             }
+            /* Drop our allocation reference; the in-flight send (if it
+             * was queued) holds its own via the internal retain. */
+            sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
         } else {
-            /* Different core: retain before handing off -- the mesh job
-             * carries exactly one reference, matching the local case's
-             * internal retain. */
-            sfu_packet_retain(pkt, 1);
+            /* enc is freshly allocated and uniquely owned by this
+             * subscriber's encryption -- unlike the old shared-
+             * ciphertext design, the mesh job just takes over this one
+             * reference wholesale, no extra retain needed. */
             if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub->worker_id,
-                                          pkt, &sub->addr, sub->addr_len)) {
-                /* Enqueue failed: ownership never transferred, so the
-                 * retain above must be undone rather than leaked. */
-                sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+                                          enc, &sub->addr, sub->addr_len)) {
+                sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
             }
         }
     }
 
-    /* Drop this function's own reference -- the one the dispatcher
-     * transferred when it pushed pkt into our inbox. */
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 

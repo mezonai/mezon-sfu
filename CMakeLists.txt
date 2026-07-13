@@ -32,6 +32,8 @@ endif()
 find_library(URING_LIB uring REQUIRED)
 find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SRTP2 REQUIRED libsrtp2)
 
 # --- core static lib: runtime + net + memory + util -------------------------
 add_library(sfu_core STATIC
@@ -46,6 +48,7 @@ add_library(sfu_core STATIC
   src/net/zerocopy.c
   src/transport/stun/stun.c
   src/transport/dtls/dtls.c
+  src/transport/srtp/srtp.c
   src/peer/session.c
   src/room/room.c
   src/pipeline/dispatch.c
@@ -61,9 +64,11 @@ target_include_directories(sfu_core PUBLIC
   include
   src
   ${URING_INCLUDE_DIR}
+  ${SRTP2_INCLUDE_DIRS}
 )
 
-target_link_libraries(sfu_core PUBLIC ${URING_LIB} OpenSSL::SSL OpenSSL::Crypto pthread m)
+target_link_libraries(sfu_core PUBLIC ${URING_LIB} OpenSSL::SSL OpenSSL::Crypto ${SRTP2_LIBRARIES} pthread m)
+target_link_directories(sfu_core PUBLIC ${SRTP2_LIBRARY_DIRS})
 
 # --- main server binary -------------------------------------------------
 add_executable(mezon-sfu src/runtime/main.c)
