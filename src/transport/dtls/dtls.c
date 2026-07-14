@@ -1,0 +1,213 @@
+#include "transport/dtls/dtls.h"
+#include "util/log.h"
+
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/x509.h>
+#include <stdio.h>
+#include <string.h>
+
+static int generate_self_signed_cert(EVP_PKEY **out_pkey, X509 **out_cert) {
+  EVP_PKEY *pkey = NULL;
+  EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+
+  if (ctx) {
+    if (EVP_PKEY_keygen_init(ctx) > 0) {
+      // Set curve to P-256 (NID_X9_62_prime256v1)
+      if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) >
+          0) {
+        EVP_PKEY_keygen(ctx, &pkey);
+      }
+    }
+    EVP_PKEY_CTX_free(ctx);
+  }
+  if (!pkey)
+    return -1;
+
+  X509 *cert = X509_new();
+  if (!cert) {
+    EVP_PKEY_free(pkey);
+    return -1;
+  }
+
+  ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+  X509_gmtime_adj(X509_getm_notBefore(cert), 0);
+  X509_gmtime_adj(X509_getm_notAfter(cert), 60L * 60 * 24 * 365); /* 1 year */
+
+  X509_NAME *name = X509_get_subject_name(cert);
+  X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                             (const unsigned char *)"mezon-sfu", -1, -1, 0);
+  X509_set_issuer_name(cert, name); /* self-signed: issuer == subject */
+
+  X509_set_pubkey(cert, pkey);
+  if (!X509_sign(cert, pkey, EVP_sha256())) {
+    X509_free(cert);
+    EVP_PKEY_free(pkey);
+    return -1;
+  }
+
+  *out_pkey = pkey;
+  *out_cert = cert;
+  return 0;
+}
+
+static void compute_fingerprint(X509 *cert, char *out, size_t out_cap) {
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len = 0;
+  X509_digest(cert, EVP_sha256(), digest, &digest_len);
+
+  size_t pos = 0;
+  for (unsigned int i = 0; i < digest_len && pos + 3 < out_cap; i++) {
+    pos += (size_t)snprintf(out + pos, out_cap - pos, "%s%02X", i ? ":" : "",
+                            digest[i]);
+  }
+}
+
+int sfu_dtls_ctx_init(sfu_dtls_ctx_t *ctx) {
+  memset(ctx, 0, sizeof(*ctx));
+
+  EVP_PKEY *pkey = NULL;
+  X509 *cert = NULL;
+  if (generate_self_signed_cert(&pkey, &cert) != 0) {
+    SFU_LOG_ERROR("DTLS: failed to generate self-signed certificate");
+    return -1;
+  }
+
+  compute_fingerprint(cert, ctx->fingerprint, sizeof(ctx->fingerprint));
+
+  ctx->ssl_ctx = SSL_CTX_new(DTLS_server_method());
+  if (!ctx->ssl_ctx) {
+    SFU_LOG_ERROR("DTLS: SSL_CTX_new failed");
+    X509_free(cert);
+    EVP_PKEY_free(pkey);
+    return -1;
+  }
+
+  SSL_CTX_set_min_proto_version(ctx->ssl_ctx, DTLS1_2_VERSION);
+  SSL_CTX_set_max_proto_version(ctx->ssl_ctx, DTLS1_2_VERSION);
+
+  /* WebRTC pins the cert by SDP fingerprint, not a CA chain -- no
+   * verification here is correct, not a shortcut. */
+  SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_NONE, NULL);
+  SSL_CTX_set_cipher_list(ctx->ssl_ctx, "DEFAULT:!aNULL:!eNULL");
+
+  if (SSL_CTX_use_certificate(ctx->ssl_ctx, cert) != 1 ||
+      SSL_CTX_use_PrivateKey(ctx->ssl_ctx, pkey) != 1) {
+    SFU_LOG_ERROR("DTLS: failed to install certificate/key into SSL_CTX");
+    X509_free(cert);
+    EVP_PKEY_free(pkey);
+    SSL_CTX_free(ctx->ssl_ctx);
+    ctx->ssl_ctx = NULL;
+    return -1;
+  }
+
+  /* SSL_CTX_use_certificate/PrivateKey take their own reference. */
+  X509_free(cert);
+  EVP_PKEY_free(pkey);
+
+  if (SSL_CTX_set_tlsext_use_srtp(ctx->ssl_ctx, "SRTP_AES128_CM_SHA1_80") !=
+      0) {
+    SFU_LOG_ERROR("DTLS: failed to offer SRTP_AES128_CM_SHA1_80 profile");
+    SSL_CTX_free(ctx->ssl_ctx);
+    ctx->ssl_ctx = NULL;
+    return -1;
+  }
+
+  SFU_LOG_INFO("DTLS context ready, cert fingerprint sha-256 %s",
+               ctx->fingerprint);
+  return 0;
+}
+
+void sfu_dtls_ctx_destroy(sfu_dtls_ctx_t *ctx) {
+  if (ctx->ssl_ctx) {
+    SSL_CTX_free(ctx->ssl_ctx);
+    ctx->ssl_ctx = NULL;
+  }
+}
+
+int sfu_dtls_conn_init(sfu_dtls_conn_t *conn, sfu_dtls_ctx_t *ctx) {
+  memset(conn, 0, sizeof(*conn));
+
+  conn->ssl = SSL_new(ctx->ssl_ctx);
+  if (!conn->ssl)
+    return -1;
+
+  conn->rbio = BIO_new(BIO_s_mem());
+  conn->wbio = BIO_new(BIO_s_mem());
+  if (!conn->rbio || !conn->wbio) {
+    SSL_free(conn->ssl); /* frees any BIO already assigned */
+    if (conn->rbio && !conn->wbio)
+      BIO_free(conn->rbio);
+    return -1;
+  }
+
+  /* Empty mem BIO normally signals EOF (return 0); we want it to
+   * signal "no data right now, try again" (-1, i.e. WANT_READ)
+   * instead, since more datagrams may arrive later over UDP. */
+  BIO_set_mem_eof_return(conn->rbio, -1);
+
+  SSL_set_bio(conn->ssl, conn->rbio, conn->wbio); /* SSL now owns both BIOs */
+  SSL_set_accept_state(conn->ssl); /* we are always the DTLS server */
+
+  return 0;
+}
+
+void sfu_dtls_conn_destroy(sfu_dtls_conn_t *conn) {
+  if (conn->ssl) {
+    SSL_free(conn->ssl); /* also frees rbio/wbio via SSL_set_bio ownership */
+    conn->ssl = NULL;
+    conn->rbio = NULL;
+    conn->wbio = NULL;
+  }
+}
+
+sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn,
+                                          const uint8_t *data, size_t len) {
+  if (conn->established) {
+    return SFU_DTLS_FEED_ESTABLISHED; /* stray post-handshake DTLS record
+                                         (rekey, alert) */
+  }
+
+  BIO_write(conn->rbio, data, (int)len);
+
+  int rc = SSL_do_handshake(conn->ssl);
+  if (rc == 1) {
+    if (SSL_export_keying_material(
+            conn->ssl, conn->srtp_keying_material, SFU_SRTP_KEY_MATERIAL_LEN,
+            "EXTRACTOR-dtls_srtp", 20, NULL, 0, 0) != 1) {
+      SFU_LOG_ERROR("DTLS: handshake completed but SRTP key export failed");
+      return SFU_DTLS_FEED_ERROR;
+    }
+    conn->established = true;
+    SFU_LOG_INFO("DTLS handshake established, SRTP keying material derived");
+    return SFU_DTLS_FEED_ESTABLISHED;
+  }
+
+  int err = SSL_get_error(conn->ssl, rc);
+  if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+    return SFU_DTLS_FEED_IN_PROGRESS;
+  }
+
+  SFU_LOG_WARN("DTLS handshake error: %s",
+               ERR_reason_error_string(ERR_get_error()));
+  return SFU_DTLS_FEED_ERROR;
+}
+
+size_t sfu_dtls_conn_drain_output(sfu_dtls_conn_t *conn, uint8_t *out,
+                                  size_t cap) {
+  size_t total = 0;
+  while (total < cap) {
+    int rc = BIO_read(conn->wbio, out + total, (int)(cap - total));
+    if (rc <= 0)
+      break;
+    total += (size_t)rc;
+  }
+  return total;
+}
+
+bool sfu_dtls_is_dtls_packet(const uint8_t *data, size_t len) {
+  if (len < 1)
+    return false;
+  return data[0] >= 20 && data[0] <= 63; /* RFC 7983 */
+}

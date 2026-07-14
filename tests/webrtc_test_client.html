@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>mezon-sfu WebRTC test client</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #c9d1d9; --muted: #8b949e; --accent: #58a6ff;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --mono: ui-monospace, "SF Mono", Consolas, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); margin: 0; padding: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1100px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); margin: 0 0 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input {
+    width: 100%; background: #0d1117; border: 1px solid var(--border); color: var(--text);
+    padding: 7px 9px; border-radius: 6px; font-family: var(--mono); font-size: 13px;
+  }
+  input:focus { outline: 1px solid var(--accent); }
+  button {
+    margin-top: 14px; width: 100%; background: var(--accent); color: #0d1117; border: none;
+    padding: 9px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .row { display: flex; gap: 8px; }
+  .row > button { margin-top: 8px; }
+  .status-line { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-family: var(--mono); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.err { background: var(--err); }
+  #log {
+    background: #010409; border: 1px solid var(--border); border-radius: 6px;
+    height: 260px; overflow-y: auto; padding: 10px; font-family: var(--mono);
+    font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  }
+  .log-ok { color: var(--ok); } .log-warn { color: var(--warn); } .log-err { color: var(--err); }
+  .log-sdp { color: var(--muted); }
+  audio { width: 100%; margin-top: 8px; }
+  .hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 10px; }
+  code { background: #010409; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<h1>mezon-sfu WebRTC test client</h1>
+<p class="sub">No signaling server exists yet, so this builds the SDP answer by hand from the server's logged ICE/DTLS credentials. Open this in two tabs to test the actual media relay between two peers.</p>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Server credentials</h2>
+    <p class="hint">Copy these from the mezon-sfu process log at startup (<code>local ICE credentials: ufrag=... pwd=...</code> and <code>cert fingerprint sha-256 ...</code>).</p>
+
+    <label>Host</label>
+    <input id="host" value="127.0.0.1">
+    <label>Port</label>
+    <input id="port" value="17000">
+    <label>ICE ufrag</label>
+    <input id="ufrag" placeholder="e.g. XKrsH3xm">
+    <label>ICE pwd</label>
+    <input id="pwd" placeholder="e.g. dHkzP4aajGOJsWhquFzy3pxr">
+    <label>DTLS fingerprint (sha-256, colon-hex)</label>
+    <input id="fingerprint" placeholder="e.g. 32:01:9A:1C:...">
+
+    <div class="row">
+      <button id="connectBtn" onclick="connect()">Connect (mic)</button>
+      <button id="hangupBtn" class="secondary" onclick="hangup()" disabled>Hang up</button>
+    </div>
+    <div class="hint">Serve this file over <code>http://localhost</code> (e.g. <code>python3 -m http.server</code> from the <code>tools/</code> directory) rather than opening it directly as <code>file://</code> -- some browsers only allow microphone access from a secure context.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Connection state</h2>
+    <div class="status-line"><span id="dot-ice" class="dot"></span> ICE: <span id="state-ice">idle</span></div>
+    <div class="status-line"><span id="dot-conn" class="dot"></span> Connection: <span id="state-conn">idle</span></div>
+    <div class="status-line"><span id="dot-track" class="dot"></span> Remote track: <span id="state-track">none yet</span></div>
+
+    <label>Local mic (muted playback)</label>
+    <audio id="localAudio" autoplay muted></audio>
+    <label>Remote audio (from another connected peer, via the SFU relay)</label>
+    <audio id="remoteAudio" autoplay></audio>
+  </div>
+</div>
+
+<div class="panel" style="max-width: 1100px; margin-top: 16px;">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+let pc = null;
+let statsTimer = null;
+
+function log(msg, cls) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setDot(id, level) {
+  const dot = document.getElementById('dot-' + id);
+  dot.className = 'dot' + (level ? ' ' + level : '');
+}
+
+/*
+ * Builds an SDP answer by cloning the browser's own offer and swapping
+ * only the security/transport attributes that must reflect the SFU's
+ * side: ICE credentials, DTLS fingerprint + role, and a single static
+ * host candidate (this is an ICE-lite server -- one candidate, no
+ * gathering, no trickle). Every codec/rtpmap/fmtp/mid/direction line is
+ * passed through unchanged, since the answer just needs to accept a
+ * compatible subset of what was offered.
+ *
+ * a=setup:passive here means the SFU is the DTLS *server* (waits for
+ * ClientHello) -- matching mezon-sfu's transport/dtls/dtls.c, which
+ * always calls SSL_set_accept_state. The browser, as the offerer with
+ * a=setup:actpass, becomes the DTLS client and initiates the handshake.
+ */
+function buildAnswer(offerSdp, opts) {
+  const lines = offerSdp.split('\r\n').filter(Boolean);
+  const out = [];
+  let inMedia = false;
+
+  const skipInMedia = new Set([
+    'a=ice-ufrag', 'a=ice-pwd', 'a=fingerprint', 'a=setup',
+    'a=candidate', 'c=IN', 'a=ice-options', 'a=end-of-candidates'
+  ]);
+
+  for (const line of lines) {
+    if (line.startsWith('m=')) {
+      inMedia = true;
+      const parts = line.split(' ');
+      parts[1] = String(opts.port);
+      out.push(parts.join(' '));
+      out.push(`c=IN IP4 ${opts.host}`);
+      out.push('a=ice-lite');
+      out.push(`a=ice-ufrag:${opts.ufrag}`);
+      out.push(`a=ice-pwd:${opts.pwd}`);
+      out.push(`a=fingerprint:sha-256 ${opts.fingerprint}`);
+      out.push('a=setup:passive');
+      out.push(`a=candidate:1 1 udp 2130706431 ${opts.host} ${opts.port} typ host`);
+      out.push('a=end-of-candidates');
+      continue;
+    }
+    if (line.startsWith('o=')) { out.push(`o=- ${Date.now()} 2 IN IP4 ${opts.host}`); continue; }
+    if (!inMedia) { out.push(line); continue; }
+
+    const prefix = [...skipInMedia].find(p => line.startsWith(p));
+    if (prefix) continue;
+    out.push(line);
+  }
+  return out.join('\r\n') + '\r\n';
+}
+
+async function connect() {
+  const opts = {
+    host: document.getElementById('host').value.trim(),
+    port: document.getElementById('port').value.trim(),
+    ufrag: document.getElementById('ufrag').value.trim(),
+    pwd: document.getElementById('pwd').value.trim(),
+    fingerprint: document.getElementById('fingerprint').value.trim().toUpperCase(),
+  };
+  if (!opts.ufrag || !opts.pwd || !opts.fingerprint) {
+    log('Fill in ufrag, pwd, and fingerprint from the server log first.', 'log-err');
+    return;
+  }
+
+  document.getElementById('connectBtn').disabled = true;
+
+  try {
+    pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
+
+    pc.oniceconnectionstatechange = () => {
+      const s = pc.iceConnectionState;
+      document.getElementById('state-ice').textContent = s;
+      setDot('ice', s === 'connected' || s === 'completed' ? 'ok' : s === 'failed' ? 'err' : 'warn');
+      log('ICE state -> ' + s, s === 'failed' ? 'log-err' : null);
+    };
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      document.getElementById('state-conn').textContent = s;
+      setDot('conn', s === 'connected' ? 'ok' : s === 'failed' ? 'err' : 'warn');
+      log('Connection state -> ' + s, s === 'failed' ? 'log-err' : null);
+    };
+    pc.ontrack = (e) => {
+      document.getElementById('state-track').textContent = e.track.kind + ' (' + e.track.id.slice(0, 8) + ')';
+      setDot('track', 'ok');
+      log('Remote track received: ' + e.track.kind, 'log-ok');
+      document.getElementById('remoteAudio').srcObject = e.streams[0];
+    };
+
+    log('Requesting microphone...');
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    document.getElementById('localAudio').srcObject = stream;
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+    log('Mic acquired, track added.', 'log-ok');
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    log('Local offer set. Waiting briefly for ICE gathering to start...');
+    await new Promise(r => setTimeout(r, 300));
+
+    const answerSdp = buildAnswer(pc.localDescription.sdp, opts);
+    log('--- constructed answer SDP ---\n' + answerSdp, 'log-sdp');
+
+    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+    log('Remote description set. ICE connectivity checks and DTLS should begin now -- ' +
+        'watch the server log for "STUN binding" and "DTLS handshake established" lines.', 'log-ok');
+
+    document.getElementById('hangupBtn').disabled = false;
+    startStatsPolling();
+  } catch (err) {
+    log('Connect failed: ' + err.message, 'log-err');
+    document.getElementById('connectBtn').disabled = false;
+  }
+}
+
+function startStatsPolling() {
+  statsTimer = setInterval(async () => {
+    if (!pc) return;
+    const stats = await pc.getStats();
+    stats.forEach(r => {
+      if (r.type === 'candidate-pair' && r.state === 'succeeded') {
+        // Only log once per state change to avoid spamming -- cheap
+        // dedupe via a data attribute on the log container.
+        const el = document.getElementById('log');
+        if (el.dataset.lastPair !== r.id) {
+          el.dataset.lastPair = r.id;
+          log(`Selected candidate pair succeeded (bytes sent=${r.bytesSent ?? '?'}, received=${r.bytesReceived ?? '?'})`, 'log-ok');
+        }
+      }
+    });
+  }, 2000);
+}
+
+function hangup() {
+  if (pc) { pc.close(); pc = null; }
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  document.getElementById('connectBtn').disabled = false;
+  document.getElementById('hangupBtn').disabled = true;
+  document.getElementById('state-ice').textContent = 'idle';
+  document.getElementById('state-conn').textContent = 'idle';
+  document.getElementById('state-track').textContent = 'none yet';
+  setDot('ice', ''); setDot('conn', ''); setDot('track', '');
+  log('Hung up.');
+}
+
+// Prefill from URL query params for convenience, e.g.
+// client.html?host=127.0.0.1&port=17030&ufrag=X&pwd=Y&fp=AA:BB:...
+(function prefillFromQuery() {
+  const q = new URLSearchParams(location.search);
+  ['host', 'port', 'ufrag', 'pwd'].forEach(k => { if (q.get(k)) document.getElementById(k).value = q.get(k); });
+  if (q.get('fp')) document.getElementById('fingerprint').value = q.get('fp');
+})();
+</script>
+</body>
+</html>
