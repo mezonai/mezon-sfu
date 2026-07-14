@@ -24,6 +24,25 @@ make -j$(nproc)
 sudo make install
 ```
 
+build boringSSL
+```
+git clone https://boringssl.googlesource.com/boringssl
+cd boringssl
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+```
+cd boringssl
+sudo mkdir /usr/local/include/boringssl
+sudo cp -rf include/* /usr/local/include/boringssl/
+sudo cp -rf build/bssl /usr/local/bin/
+sudo mkdir /usr/local/lib/boringssl
+sudo cp -rf build/lib* /usr/local/lib/boringssl/
+```
+
 build mezon sfu
 ```
 mkdir build && cd build
