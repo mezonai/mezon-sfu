@@ -43,6 +43,16 @@ sudo mkdir /usr/local/lib/boringssl
 sudo cp -rf build/lib* /usr/local/lib/boringssl/
 ```
 
+build  libsrtp
+```
+https://github.com/cisco/libsrtp.git
+cd libsrtp
+./configure --enable-openssl \
+  crypto_CFLAGS="-I/usr/local/include/boringssl/" \
+  crypto_LIBS="-L/usr/local/lib/boringssl/ -lcrypto"
+make
+```
+
 build mezon sfu
 ```
 mkdir build && cd build
