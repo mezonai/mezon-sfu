@@ -24,6 +24,8 @@ add_test(NAME stun COMMAND test_stun)
 
 add_executable(test_dtls_handshake test_dtls_handshake.c)
 target_link_libraries(test_dtls_handshake PRIVATE sfu_core)
+set_target_properties(test_dtls_handshake PROPERTIES LINKER_LANGUAGE CXX)
+
 add_test(NAME dtls_handshake COMMAND test_dtls_handshake)
 
 add_executable(test_srtp test_srtp.c)

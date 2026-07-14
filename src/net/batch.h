@@ -14,9 +14,8 @@
 
 /* Fills cqes[] with up to max_count ready completions without blocking.
  * Returns the number actually filled (0 if none ready). */
-unsigned sfu_batch_peek_cqe(struct io_uring *ring,
-                             struct io_uring_cqe **cqes,
-                             unsigned max_count);
+unsigned sfu_batch_peek_cqe(struct io_uring *ring, struct io_uring_cqe **cqes,
+                            unsigned max_count);
 
 /* Advances the CQ head by `count` after the caller has finished reading
  * cqes[0..count). Must be called exactly once per peek, after processing
