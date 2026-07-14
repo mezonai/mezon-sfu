@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  sfu_worker_t *workers = calloc(worker_count, sizeof(sfu_worker_t));
+  sfu_worker_t *workers = mi_calloc(worker_count, sizeof(sfu_worker_t));
   if (!workers) {
     SFU_LOG_ERROR("failed to allocate worker array");
     return 1;

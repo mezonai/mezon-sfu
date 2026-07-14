@@ -18,7 +18,7 @@ int sfu_spsc_ring_init(sfu_spsc_ring_t *ring, uint32_t capacity_pow2) {
   }
 
   memset(ring, 0, sizeof(*ring));
-  ring->slots = calloc(capacity_pow2, sizeof(void *));
+  ring->slots = mi_calloc(capacity_pow2, sizeof(void *));
   if (!ring->slots)
     return -1;
 

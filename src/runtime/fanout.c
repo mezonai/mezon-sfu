@@ -17,7 +17,7 @@ int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count,
   }
 
   uint32_t cell_count = worker_count * worker_count;
-  mesh->rings = calloc(cell_count, sizeof(sfu_spsc_ring_t));
+  mesh->rings = mi_calloc(cell_count, sizeof(sfu_spsc_ring_t));
   if (!mesh->rings) {
     SFU_LOG_ERROR("fanout mesh: failed to allocate ring array");
     sfu_pool_destroy(&mesh->job_pool);

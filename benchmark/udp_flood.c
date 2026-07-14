@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  char *buf = malloc(pkt_size);
+  char *buf = mi_malloc(pkt_size);
   memset(buf, 0x42, pkt_size);
 
   uint64_t start = now_ns();
