@@ -44,7 +44,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
   r->buf_count = buf_count;
   r->bgid = bgid;
   r->buf_ring_mem =
-      aligned_alloc(SFU_CACHELINE_SIZE, (size_t)buf_count * buf_size);
+      mi_zalloc_aligned((size_t)buf_count * buf_size, SFU_CACHELINE_SIZE);
   if (!r->buf_ring_mem) {
     SFU_LOG_ERROR("failed to allocate provided-buffer backing store");
     io_uring_queue_exit(&r->ring);
