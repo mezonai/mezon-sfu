@@ -1,9 +1,9 @@
 #ifndef SFU_TRANSPORT_STUN_H
 #define SFU_TRANSPORT_STUN_H
 
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 
 /*
@@ -27,8 +27,8 @@
  * handed to the browser.
  */
 typedef struct sfu_ice_credentials {
-  char ufrag[32];
-  char pwd[64];
+    char ufrag[32];
+    char pwd[64];
 } sfu_ice_credentials_t;
 
 /* Generates a random ufrag/pwd pair (base64-alphabet, ICE-legal chars). */
@@ -49,9 +49,9 @@ bool sfu_stun_is_stun_packet(const uint8_t *data, size_t len);
  * responder simple; a malformed/unauthenticated request gets no reply).
  */
 size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len,
-                                       const sfu_ice_credentials_t *local,
-                                       const struct sockaddr_storage *src_addr,
-                                       socklen_t src_addr_len, uint8_t *out_buf,
-                                       size_t out_buf_cap);
+                                        const sfu_ice_credentials_t *local,
+                                        const struct sockaddr_storage *src_addr,
+                                        socklen_t src_addr_len,
+                                        uint8_t *out_buf, size_t out_buf_cap);
 
 #endif /* SFU_TRANSPORT_STUN_H */

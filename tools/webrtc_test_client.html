@@ -60,23 +60,15 @@
 <body>
 
 <h1>mezon-sfu WebRTC test client</h1>
-<p class="sub">No signaling server exists yet, so this builds the SDP answer by hand from the server's logged ICE/DTLS credentials. Open this in two tabs to test the actual media relay between two peers.</p>
+<p class="sub">Connects to the real signaling server over WebSocket, sends an SDP offer, and applies the server's answer directly -- no manual SDP construction needed anymore. Open this in two tabs to test the actual media relay between two peers.</p>
 
 <div class="grid">
   <div class="panel">
-    <h2>Server credentials</h2>
-    <p class="hint">Copy these from the mezon-sfu process log at startup (<code>local ICE credentials: ufrag=... pwd=...</code> and <code>cert fingerprint sha-256 ...</code>).</p>
+    <h2>Server</h2>
+    <p class="hint">Point this at mezon-sfu's signaling port (default 8080).</p>
 
-    <label>Host</label>
-    <input id="host" value="127.0.0.1">
-    <label>Port</label>
-    <input id="port" value="17000">
-    <label>ICE ufrag</label>
-    <input id="ufrag" placeholder="e.g. XKrsH3xm">
-    <label>ICE pwd</label>
-    <input id="pwd" placeholder="e.g. dHkzP4aajGOJsWhquFzy3pxr">
-    <label>DTLS fingerprint (sha-256, colon-hex)</label>
-    <input id="fingerprint" placeholder="e.g. 32:01:9A:1C:...">
+    <label>Signaling WebSocket URL</label>
+    <input id="wsUrl" value="ws://127.0.0.1:8080">
 
     <div class="row">
       <button id="connectBtn" onclick="connect()">Connect (mic)</button>
@@ -87,6 +79,7 @@
 
   <div class="panel">
     <h2>Connection state</h2>
+    <div class="status-line"><span id="dot-ws" class="dot"></span> Signaling: <span id="state-ws">idle</span></div>
     <div class="status-line"><span id="dot-ice" class="dot"></span> ICE: <span id="state-ice">idle</span></div>
     <div class="status-line"><span id="dot-conn" class="dot"></span> Connection: <span id="state-conn">idle</span></div>
     <div class="status-line"><span id="dot-track" class="dot"></span> Remote track: <span id="state-track">none yet</span></div>
@@ -105,6 +98,7 @@
 
 <script>
 let pc = null;
+let ws = null;
 let statsTimer = null;
 
 function log(msg, cls) {
@@ -121,69 +115,8 @@ function setDot(id, level) {
   dot.className = 'dot' + (level ? ' ' + level : '');
 }
 
-/*
- * Builds an SDP answer by cloning the browser's own offer and swapping
- * only the security/transport attributes that must reflect the SFU's
- * side: ICE credentials, DTLS fingerprint + role, and a single static
- * host candidate (this is an ICE-lite server -- one candidate, no
- * gathering, no trickle). Every codec/rtpmap/fmtp/mid/direction line is
- * passed through unchanged, since the answer just needs to accept a
- * compatible subset of what was offered.
- *
- * a=setup:passive here means the SFU is the DTLS *server* (waits for
- * ClientHello) -- matching mezon-sfu's transport/dtls/dtls.c, which
- * always calls SSL_set_accept_state. The browser, as the offerer with
- * a=setup:actpass, becomes the DTLS client and initiates the handshake.
- */
-function buildAnswer(offerSdp, opts) {
-  const lines = offerSdp.split('\r\n').filter(Boolean);
-  const out = [];
-  let inMedia = false;
-
-  const skipInMedia = new Set([
-    'a=ice-ufrag', 'a=ice-pwd', 'a=fingerprint', 'a=setup',
-    'a=candidate', 'c=IN', 'a=ice-options', 'a=end-of-candidates'
-  ]);
-
-  for (const line of lines) {
-    if (line.startsWith('m=')) {
-      inMedia = true;
-      const parts = line.split(' ');
-      parts[1] = String(opts.port);
-      out.push(parts.join(' '));
-      out.push(`c=IN IP4 ${opts.host}`);
-      out.push('a=ice-lite');
-      out.push(`a=ice-ufrag:${opts.ufrag}`);
-      out.push(`a=ice-pwd:${opts.pwd}`);
-      out.push(`a=fingerprint:sha-256 ${opts.fingerprint}`);
-      out.push('a=setup:passive');
-      out.push(`a=candidate:1 1 udp 2130706431 ${opts.host} ${opts.port} typ host`);
-      out.push('a=end-of-candidates');
-      continue;
-    }
-    if (line.startsWith('o=')) { out.push(`o=- ${Date.now()} 2 IN IP4 ${opts.host}`); continue; }
-    if (!inMedia) { out.push(line); continue; }
-
-    const prefix = [...skipInMedia].find(p => line.startsWith(p));
-    if (prefix) continue;
-    out.push(line);
-  }
-  return out.join('\r\n') + '\r\n';
-}
-
 async function connect() {
-  const opts = {
-    host: document.getElementById('host').value.trim(),
-    port: document.getElementById('port').value.trim(),
-    ufrag: document.getElementById('ufrag').value.trim(),
-    pwd: document.getElementById('pwd').value.trim(),
-    fingerprint: document.getElementById('fingerprint').value.trim().toUpperCase(),
-  };
-  if (!opts.ufrag || !opts.pwd || !opts.fingerprint) {
-    log('Fill in ufrag, pwd, and fingerprint from the server log first.', 'log-err');
-    return;
-  }
-
+  const wsUrl = document.getElementById('wsUrl').value.trim();
   document.getElementById('connectBtn').disabled = true;
 
   try {
@@ -214,20 +147,43 @@ async function connect() {
     stream.getTracks().forEach(t => pc.addTrack(t, stream));
     log('Mic acquired, track added.', 'log-ok');
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    log('Local offer set. Waiting briefly for ICE gathering to start...');
-    await new Promise(r => setTimeout(r, 300));
+    log('Connecting to signaling server: ' + wsUrl);
+    ws = new WebSocket(wsUrl);
 
-    const answerSdp = buildAnswer(pc.localDescription.sdp, opts);
-    log('--- constructed answer SDP ---\n' + answerSdp, 'log-sdp');
+    ws.onopen = async () => {
+      setDot('ws', 'ok');
+      document.getElementById('state-ws').textContent = 'connected';
+      log('Signaling WebSocket open.', 'log-ok');
 
-    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-    log('Remote description set. ICE connectivity checks and DTLS should begin now -- ' +
-        'watch the server log for "STUN binding" and "DTLS handshake established" lines.', 'log-ok');
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      log('Local offer created, sending to signaling server...');
+      ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
+    };
 
-    document.getElementById('hangupBtn').disabled = false;
-    startStatsPolling();
+    ws.onmessage = async (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'answer') {
+        log('--- received answer SDP ---\n' + msg.sdp, 'log-sdp');
+        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+        log('Remote description set. ICE connectivity checks and DTLS should begin now.', 'log-ok');
+        document.getElementById('hangupBtn').disabled = false;
+        startStatsPolling();
+      } else {
+        log('Unrecognized signaling message: ' + evt.data, 'log-warn');
+      }
+    };
+
+    ws.onerror = () => {
+      setDot('ws', 'err');
+      document.getElementById('state-ws').textContent = 'error';
+      log('Signaling WebSocket error.', 'log-err');
+    };
+    ws.onclose = () => {
+      setDot('ws', 'warn');
+      document.getElementById('state-ws').textContent = 'closed';
+      log('Signaling WebSocket closed.');
+    };
   } catch (err) {
     log('Connect failed: ' + err.message, 'log-err');
     document.getElementById('connectBtn').disabled = false;
@@ -240,8 +196,6 @@ function startStatsPolling() {
     const stats = await pc.getStats();
     stats.forEach(r => {
       if (r.type === 'candidate-pair' && r.state === 'succeeded') {
-        // Only log once per state change to avoid spamming -- cheap
-        // dedupe via a data attribute on the log container.
         const el = document.getElementById('log');
         if (el.dataset.lastPair !== r.id) {
           el.dataset.lastPair = r.id;
@@ -254,22 +208,22 @@ function startStatsPolling() {
 
 function hangup() {
   if (pc) { pc.close(); pc = null; }
+  if (ws) { ws.close(); ws = null; }
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
   document.getElementById('connectBtn').disabled = false;
   document.getElementById('hangupBtn').disabled = true;
+  document.getElementById('state-ws').textContent = 'idle';
   document.getElementById('state-ice').textContent = 'idle';
   document.getElementById('state-conn').textContent = 'idle';
   document.getElementById('state-track').textContent = 'none yet';
-  setDot('ice', ''); setDot('conn', ''); setDot('track', '');
+  setDot('ws', ''); setDot('ice', ''); setDot('conn', ''); setDot('track', '');
   log('Hung up.');
 }
 
-// Prefill from URL query params for convenience, e.g.
-// client.html?host=127.0.0.1&port=17030&ufrag=X&pwd=Y&fp=AA:BB:...
+// Prefill from URL query params for convenience, e.g. client.html?ws=ws://192.168.1.5:8080
 (function prefillFromQuery() {
   const q = new URLSearchParams(location.search);
-  ['host', 'port', 'ufrag', 'pwd'].forEach(k => { if (q.get(k)) document.getElementById(k).value = q.get(k); });
-  if (q.get('fp')) document.getElementById('fingerprint').value = q.get('fp');
+  if (q.get('ws')) document.getElementById('wsUrl').value = q.get('ws');
 })();
 </script>
 </body>

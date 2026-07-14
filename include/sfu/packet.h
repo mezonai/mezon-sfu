@@ -1,9 +1,9 @@
 #ifndef SFU_PACKET_H
 #define SFU_PACKET_H
 
-#include <netinet/in.h>
-#include <stddef.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 /*
@@ -29,27 +29,27 @@
 /* Where pkt->data physically lives, and therefore how it must be recycled
  * once the refcount reaches zero. */
 typedef enum sfu_buf_source {
-  SFU_BUF_SOURCE_POOL = 0,   /* owned by packet_pool's own data slab      */
-  SFU_BUF_SOURCE_KERNEL = 1, /* a kernel provided-buffer-ring slot; must  */
-                             /* be handed back via io_uring_buf_ring_add */
+    SFU_BUF_SOURCE_POOL   = 0, /* owned by packet_pool's own data slab      */
+    SFU_BUF_SOURCE_KERNEL = 1, /* a kernel provided-buffer-ring slot; must  */
+                                /* be handed back via io_uring_buf_ring_add */
 } sfu_buf_source_t;
 
 typedef struct sfu_packet {
-  uint8_t *data; /* points into pool-owned buffer memory */
-  uint32_t len;  /* valid bytes in data                  */
-  uint32_t cap;  /* buffer capacity (SFU_PACKET_BUF_SIZE) */
+    uint8_t              *data;       /* points into pool-owned buffer memory */
+    uint32_t               len;        /* valid bytes in data                  */
+    uint32_t               cap;        /* buffer capacity (SFU_PACKET_BUF_SIZE) */
 
-  _Atomic uint32_t refcount;
-  _Atomic uint32_t generation;
+    _Atomic uint32_t        refcount;
+    _Atomic uint32_t        generation;
 
-  uint16_t pool_index; /* slot index within the packet pool    */
-  uint16_t kbuf_index; /* index in the kernel provided buf ring */
-  uint8_t buf_source;  /* sfu_buf_source_t                     */
+    uint16_t                pool_index; /* slot index within the packet pool    */
+    uint16_t                kbuf_index; /* index in the kernel provided buf ring */
+    uint8_t                 buf_source; /* sfu_buf_source_t                     */
 
-  struct sockaddr_storage peer_addr;
-  socklen_t peer_addr_len;
+    struct sockaddr_storage peer_addr;
+    socklen_t                peer_addr_len;
 
-  uint64_t recv_ts_ns; /* monotonic recv timestamp             */
+    uint64_t                 recv_ts_ns; /* monotonic recv timestamp             */
 } sfu_packet_t;
 
 #endif /* SFU_PACKET_H */

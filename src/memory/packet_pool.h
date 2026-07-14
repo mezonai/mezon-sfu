@@ -1,8 +1,8 @@
 #ifndef SFU_MEMORY_PACKET_POOL_H
 #define SFU_MEMORY_PACKET_POOL_H
 
-#include "memory/pool.h"
 #include "sfu/packet.h"
+#include "memory/pool.h"
 
 /*
  * Packet pool: pairs two parallel slab pools --
@@ -13,12 +13,11 @@
  * pkt->pool_index always addresses the matching data buffer too.
  */
 typedef struct sfu_packet_pool {
-  sfu_pool_t meta; /* slots of sizeof(sfu_packet_t) */
-  sfu_pool_t data; /* slots of SFU_PACKET_BUF_SIZE  */
+    sfu_pool_t meta;   /* slots of sizeof(sfu_packet_t) */
+    sfu_pool_t data;   /* slots of SFU_PACKET_BUF_SIZE  */
 } sfu_packet_pool_t;
 
-int sfu_packet_pool_init(sfu_packet_pool_t *pp, uint32_t capacity,
-                         uint32_t buf_size);
+int  sfu_packet_pool_init(sfu_packet_pool_t *pp, uint32_t capacity, uint32_t buf_size);
 void sfu_packet_pool_destroy(sfu_packet_pool_t *pp);
 
 /* Allocates a packet slot; data buffer is uninitialized. Refcount starts

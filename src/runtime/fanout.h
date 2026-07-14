@@ -1,12 +1,12 @@
 #ifndef SFU_RUNTIME_FANOUT_H
 #define SFU_RUNTIME_FANOUT_H
 
-#include <stdbool.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 
-#include "memory/pool.h"
 #include "sfu/packet.h"
+#include "memory/pool.h"
 #include "util/ringbuffer.h"
 
 /*
@@ -39,19 +39,19 @@
  * then releases the reference the job carried.
  */
 typedef struct sfu_fanout_job {
-  sfu_packet_t *pkt;
-  struct sockaddr_storage dst;
-  socklen_t dst_len;
+    sfu_packet_t             *pkt;
+    struct sockaddr_storage    dst;
+    socklen_t                   dst_len;
 } sfu_fanout_job_t;
 
 typedef struct sfu_fanout_mesh {
-  sfu_pool_t job_pool;    /* shared, thread-safe alloc/free of jobs */
-  sfu_spsc_ring_t *rings; /* flattened worker_count x worker_count  */
-  uint32_t worker_count;
+    sfu_pool_t        job_pool;   /* shared, thread-safe alloc/free of jobs */
+    sfu_spsc_ring_t   *rings;      /* flattened worker_count x worker_count  */
+    uint32_t            worker_count;
 } sfu_fanout_mesh_t;
 
-int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count,
-                         uint32_t ring_capacity, uint32_t job_pool_capacity);
+int  sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count,
+                           uint32_t ring_capacity, uint32_t job_pool_capacity);
 void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh);
 
 /* Producer side (any worker). Takes ownership of one reference on pkt.
@@ -59,9 +59,8 @@ void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh);
  * is full) -- caller must release its own reference on failure, since
  * ownership did not transfer. */
 bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker,
-                             uint32_t dst_worker, sfu_packet_t *pkt,
-                             const struct sockaddr_storage *dst_addr,
-                             socklen_t dst_len);
+                              uint32_t dst_worker, sfu_packet_t *pkt,
+                              const struct sockaddr_storage *dst_addr, socklen_t dst_len);
 
 /* Consumer side: pops up to max_count jobs addressed to dst_worker
  * across every source worker's ring into it, invoking on_job for each.
@@ -69,8 +68,7 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker,
 typedef void (*sfu_fanout_job_fn)(void *user_data, sfu_fanout_job_t *job);
 
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker,
-                               unsigned max_count, sfu_fanout_job_fn on_job,
-                               void *user_data);
+                                unsigned max_count, sfu_fanout_job_fn on_job, void *user_data);
 
 /* Returns a drained job's struct back to the shared pool. Caller must
  * have already handled job->pkt's reference (queued a send and released
