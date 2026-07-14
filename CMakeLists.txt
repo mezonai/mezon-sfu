@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mezon-sfu C)
+project(mezon-sfu C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -31,9 +31,17 @@ endif()
 
 find_library(URING_LIB uring REQUIRED)
 find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SRTP2 REQUIRED libsrtp2)
+
+# --- BoringSSL Setup ------------------------------------------------------
+# Explicitly target the paths provided to avoid picking up system OpenSSL
+set(BORINGSSL_INCLUDE_DIR "/usr/local/include/boringssl")
+find_library(BORINGSSL_SSL_LIB NAMES ssl PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
+find_library(BORINGSSL_CRYPTO_LIB NAMES crypto PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
+
+# --- libsrtp Setup --------------------------------------------------------
+# Set libsrtp include path and locate the library
+set(SRTP_INCLUDE_DIR "/usr/local/include/srtp3")
+find_library(SRTP_LIB NAMES srtp2 srtp REQUIRED)
 
 # --- core static lib: runtime + net + memory + util -------------------------
 add_library(sfu_core STATIC
@@ -64,15 +72,24 @@ target_include_directories(sfu_core PUBLIC
   include
   src
   ${URING_INCLUDE_DIR}
-  ${SRTP2_INCLUDE_DIRS}
+  ${BORINGSSL_INCLUDE_DIR}
+  ${SRTP_INCLUDE_DIR}
 )
 
-target_link_libraries(sfu_core PUBLIC ${URING_LIB} OpenSSL::SSL OpenSSL::Crypto ${SRTP2_LIBRARIES} pthread m)
-target_link_directories(sfu_core PUBLIC ${SRTP2_LIBRARY_DIRS})
+# Link directly using resolved absolute library paths
+target_link_libraries(sfu_core PUBLIC
+  ${URING_LIB}
+  ${BORINGSSL_SSL_LIB}
+  ${BORINGSSL_CRYPTO_LIB}
+  ${SRTP_LIB}
+  pthread
+  m
+)
 
 # --- main server binary -------------------------------------------------
 add_executable(mezon-sfu src/runtime/main.c)
 target_link_libraries(mezon-sfu PRIVATE sfu_core)
+set_target_properties(mezon-sfu PROPERTIES LINKER_LANGUAGE CXX)
 
 # --- tests / benchmarks ---------------------------------------------------
 enable_testing()
