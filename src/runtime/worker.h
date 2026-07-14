@@ -4,13 +4,13 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include "net/io_uring.h"
 #include "memory/packet_pool.h"
-#include "util/ringbuffer.h"
+#include "net/io_uring.h"
+#include "peer/session.h"
 #include "room/room.h"
 #include "runtime/fanout.h"
-#include "peer/session.h"
 #include "transport/stun/stun.h"
+#include "util/ringbuffer.h"
 
 /*
  * One sfu_worker_t owns one pinned core: its own io_uring send ring, and
@@ -30,29 +30,32 @@
  * answering a STUN/DTLS handshake packet directly, or dropping it.
  */
 typedef struct sfu_worker {
-    int              core_id;      /* which CPU core this thread is pinned to */
-    uint32_t         worker_index; /* stable 0..worker_count-1 identity, used
-                                     * for room/mesh addressing -- distinct
-                                     * from core_id so pinning policy can
-                                     * change independently of routing */
-    sfu_ring_t        send_ring;
-    sfu_spsc_ring_t   inbox;             /* dispatcher -> this worker */
-    sfu_spsc_ring_t   release_to_dispatcher; /* this worker -> dispatcher, kernel buffer returns */
+  int core_id;           /* which CPU core this thread is pinned to */
+  uint32_t worker_index; /* stable 0..worker_count-1 identity, used
+                          * for room/mesh addressing -- distinct
+                          * from core_id so pinning policy can
+                          * change independently of routing */
+  sfu_ring_t send_ring;
+  sfu_spsc_ring_t inbox;                 /* dispatcher -> this worker */
+  sfu_spsc_ring_t release_to_dispatcher; /* this worker -> dispatcher, kernel
+                                            buffer returns */
 
-    sfu_packet_pool_t   *pp;      /* shared with the dispatcher, not owned */
-    sfu_room_t            *room;    /* shared peer registry, not owned */
-    sfu_fanout_mesh_t       *mesh;    /* shared cross-worker fan-out mesh, not owned */
-    sfu_session_table_t       *sessions;   /* shared ICE/DTLS session table, not owned */
-    const sfu_ice_credentials_t *ice_creds; /* shared local ICE ufrag/pwd, not owned */
+  sfu_packet_pool_t *pp;   /* shared with the dispatcher, not owned */
+  sfu_room_t *room;        /* shared peer registry, not owned */
+  sfu_fanout_mesh_t *mesh; /* shared cross-worker fan-out mesh, not owned */
+  sfu_session_table_t *sessions; /* shared ICE/DTLS session table, not owned */
+  const sfu_ice_credentials_t
+      *ice_creds; /* shared local ICE ufrag/pwd, not owned */
 
-    pthread_t         thread;
-    int                fd;       /* same UDP socket the dispatcher recvs on */
+  pthread_t thread;
+  int fd; /* same UDP socket the dispatcher recvs on */
 } sfu_worker_t;
 
-int  sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
-                      sfu_packet_pool_t *pp, sfu_room_t *room, sfu_fanout_mesh_t *mesh,
-                      sfu_session_table_t *sessions, const sfu_ice_credentials_t *ice_creds,
-                      uint32_t inbox_capacity, int send_bgid);
+int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
+                    sfu_packet_pool_t *pp, sfu_room_t *room,
+                    sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions,
+                    const sfu_ice_credentials_t *ice_creds,
+                    uint32_t inbox_capacity, int send_bgid);
 
 /*
  * Forwards one RTP/RTCP packet to every other room member per the
@@ -68,7 +71,7 @@ void sfu_worker_destroy(sfu_worker_t *w);
 
 /* Spawns the worker's thread, which pins itself to core_id and runs
  * until sfu_shutdown_requested() is observed. */
-int  sfu_worker_start(sfu_worker_t *w);
+int sfu_worker_start(sfu_worker_t *w);
 void sfu_worker_join(sfu_worker_t *w);
 
 #endif /* SFU_RUNTIME_WORKER_H */

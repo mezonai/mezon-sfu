@@ -12,7 +12,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 
 
 # build
-`sudo apt install libsrtp2-1 libsrtp2-dev`
+`sudo apt install libmimalloc-dev`
 
 build liburing
 ```

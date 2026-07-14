@@ -29,21 +29,20 @@ if(SFU_ENABLE_TSAN)
   add_link_options(-fsanitize=thread -no-pie)
 endif()
 
+find_package(mimalloc REQUIRED)
+
 find_library(URING_LIB uring REQUIRED)
 find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
 
-# --- BoringSSL Setup ------------------------------------------------------
 # Explicitly target the paths provided to avoid picking up system OpenSSL
 set(BORINGSSL_INCLUDE_DIR "/usr/local/include/boringssl")
 find_library(BORINGSSL_SSL_LIB NAMES ssl PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
 find_library(BORINGSSL_CRYPTO_LIB NAMES crypto PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
 
-# --- libsrtp Setup --------------------------------------------------------
 # Set libsrtp include path and locate the library
 set(SRTP_INCLUDE_DIR "/usr/local/include/srtp3")
 find_library(SRTP_LIB NAMES srtp2 srtp REQUIRED)
 
-# --- core static lib: runtime + net + memory + util -------------------------
 add_library(sfu_core STATIC
   src/memory/pool.c
   src/memory/packet_pool.c
@@ -82,16 +81,15 @@ target_link_libraries(sfu_core PUBLIC
   ${BORINGSSL_SSL_LIB}
   ${BORINGSSL_CRYPTO_LIB}
   ${SRTP_LIB}
+  mimalloc
   pthread
   m
 )
 
-# --- main server binary -------------------------------------------------
 add_executable(mezon-sfu src/runtime/main.c)
-target_link_libraries(mezon-sfu PRIVATE sfu_core)
+target_link_libraries(mezon-sfu PRIVATE sfu_core mimalloc)
 set_target_properties(mezon-sfu PROPERTIES LINKER_LANGUAGE CXX)
 
-# --- tests / benchmarks ---------------------------------------------------
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(benchmark)

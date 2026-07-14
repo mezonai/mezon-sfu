@@ -2,8 +2,8 @@
 #define SFU_UTIL_RINGBUFFER_H
 
 #include <stdatomic.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "sfu/config.h"
 
@@ -20,15 +20,17 @@
  * cores on every operation.
  */
 typedef struct sfu_spsc_ring {
-    void          **slots;
-    uint32_t        capacity;   /* power of two */
-    uint32_t        mask;
+  void **slots;
+  uint32_t capacity; /* power of two */
+  uint32_t mask;
 
-    _Atomic uint32_t head __attribute__((aligned(SFU_CACHELINE_SIZE))); /* consumer reads here, producer writes */
-    _Atomic uint32_t tail __attribute__((aligned(SFU_CACHELINE_SIZE))); /* producer reads here, consumer writes */
+  _Atomic uint32_t head __attribute__((
+      aligned(SFU_CACHELINE_SIZE))); /* consumer reads here, producer writes */
+  _Atomic uint32_t tail __attribute__((
+      aligned(SFU_CACHELINE_SIZE))); /* producer reads here, consumer writes */
 } sfu_spsc_ring_t;
 
-int  sfu_spsc_ring_init(sfu_spsc_ring_t *ring, uint32_t capacity_pow2);
+int sfu_spsc_ring_init(sfu_spsc_ring_t *ring, uint32_t capacity_pow2);
 void sfu_spsc_ring_destroy(sfu_spsc_ring_t *ring);
 
 /* Producer side only. Returns false if the ring is full (backpressure --
@@ -39,9 +41,11 @@ bool sfu_spsc_ring_push(sfu_spsc_ring_t *ring, void *item);
 bool sfu_spsc_ring_pop(sfu_spsc_ring_t *ring, void **out_item);
 
 static inline uint32_t sfu_spsc_ring_size(const sfu_spsc_ring_t *ring) {
-    uint32_t head = atomic_load_explicit((_Atomic uint32_t *)&ring->head, memory_order_relaxed);
-    uint32_t tail = atomic_load_explicit((_Atomic uint32_t *)&ring->tail, memory_order_relaxed);
-    return (tail - head) & ring->mask;
+  uint32_t head = atomic_load_explicit((_Atomic uint32_t *)&ring->head,
+                                       memory_order_relaxed);
+  uint32_t tail = atomic_load_explicit((_Atomic uint32_t *)&ring->tail,
+                                       memory_order_relaxed);
+  return (tail - head) & ring->mask;
 }
 
 #endif /* SFU_UTIL_RINGBUFFER_H */
