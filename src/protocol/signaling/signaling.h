@@ -1,11 +1,11 @@
 #ifndef SFU_PROTOCOL_SIGNALING_H
 #define SFU_PROTOCOL_SIGNALING_H
 
-#include <stdint.h>
 #include <pthread.h>
+#include <stdint.h>
 
-#include "transport/stun/stun.h"
 #include "transport/dtls/dtls.h"
+#include "transport/stun/stun.h"
 
 /*
  * WebSocket signaling server (RFC 6455 transport, a hand-rolled JSON
@@ -29,20 +29,20 @@
  * fully independent of this WebSocket connection.
  */
 typedef struct sfu_signaling_server {
-    int              listen_fd;
-    pthread_t         thread;
-    volatile int        running;
+  int listen_fd;
+  pthread_t thread;
+  volatile int running;
 
-    char               media_host[64];
-    uint16_t             media_port;
-    const sfu_ice_credentials_t *ice_creds; /* shared, not owned */
-    const sfu_dtls_ctx_t           *dtls_ctx;  /* shared, not owned */
+  char media_host[64];
+  uint16_t media_port;
+  const sfu_ice_credentials_t *ice_creds; /* shared, not owned */
+  const sfu_dtls_ctx_t *dtls_ctx;         /* shared, not owned */
 } sfu_signaling_server_t;
 
-int  sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port,
-                                 const char *media_host, uint16_t media_port,
-                                 const sfu_ice_credentials_t *ice_creds,
-                                 const sfu_dtls_ctx_t *dtls_ctx);
+int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port,
+                               const char *media_host, uint16_t media_port,
+                               const sfu_ice_credentials_t *ice_creds,
+                               const sfu_dtls_ctx_t *dtls_ctx);
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */

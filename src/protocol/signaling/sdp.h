@@ -21,10 +21,8 @@
  * Returns the answer length on success, or -1 if out_cap is too small
  * or the offer has no m= line.
  */
-int sfu_sdp_build_answer(const char *offer, size_t offer_len,
-                          const char *host, uint16_t port,
-                          const char *ufrag, const char *pwd,
-                          const char *fingerprint,
-                          char *out, size_t out_cap);
+int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host,
+                         uint16_t port, const char *ufrag, const char *pwd,
+                         const char *fingerprint, char *out, size_t out_cap);
 
 #endif /* SFU_PROTOCOL_SDP_H */

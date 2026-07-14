@@ -2,8 +2,8 @@
 #define SFU_ROOM_ROOM_H
 
 #include <pthread.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/socket.h>
 
 #include "sfu/config.h"
@@ -26,19 +26,19 @@
  * table scan.
  */
 typedef struct sfu_peer_entry {
-    struct sockaddr_storage addr;
-    socklen_t                 addr_len;
-    uint32_t                   worker_id; /* which worker core owns this peer's send path */
-    bool                        active;
+  struct sockaddr_storage addr;
+  socklen_t addr_len;
+  uint32_t worker_id; /* which worker core owns this peer's send path */
+  bool active;
 } sfu_peer_entry_t;
 
 typedef struct sfu_room {
-    sfu_peer_entry_t peers[SFU_ROOM_MAX_PEERS];
-    uint32_t          peer_count;
-    pthread_mutex_t    lock;
+  sfu_peer_entry_t peers[SFU_ROOM_MAX_PEERS];
+  uint32_t peer_count;
+  pthread_mutex_t lock;
 } sfu_room_t;
 
-int  sfu_room_init(sfu_room_t *room);
+int sfu_room_init(sfu_room_t *room);
 void sfu_room_destroy(sfu_room_t *room);
 
 /* Registers a peer's address + owning worker on first sight, or
@@ -47,15 +47,14 @@ void sfu_room_destroy(sfu_room_t *room);
  * now; real signaling should call this from join/publish handling
  * instead of implicit discovery. */
 void sfu_room_touch_peer(sfu_room_t *room, const struct sockaddr_storage *addr,
-                          socklen_t addr_len, uint32_t worker_id);
+                         socklen_t addr_len, uint32_t worker_id);
 
 /* Copies up to max_out peer entries, excluding the peer matching
  * `exclude` (the packet's sender, which shouldn't receive its own
  * packet echoed back). Returns the number copied. Snapshot semantics:
  * copies under the lock, then the caller iterates the copy lock-free. */
-uint32_t sfu_room_list_subscribers_excluding(sfu_room_t *room,
-                                              const struct sockaddr_storage *exclude,
-                                              socklen_t exclude_len,
-                                              sfu_peer_entry_t *out, uint32_t max_out);
+uint32_t sfu_room_list_subscribers_excluding(
+    sfu_room_t *room, const struct sockaddr_storage *exclude,
+    socklen_t exclude_len, sfu_peer_entry_t *out, uint32_t max_out);
 
 #endif /* SFU_ROOM_ROOM_H */

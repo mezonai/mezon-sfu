@@ -1,10 +1,10 @@
 #ifndef SFU_TRANSPORT_SRTP_H
 #define SFU_TRANSPORT_SRTP_H
 
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
 #include <srtp2/srtp.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /*
  * Wraps libsrtp2 around the keying material DTLS-SRTP hands us
@@ -26,12 +26,12 @@
  * runtime/worker.c's sfu_room_forward_packet for where that happens.
  */
 typedef struct sfu_srtp_ctx {
-    srtp_t inbound;   /* decrypts packets FROM this peer */
-    srtp_t outbound;  /* encrypts packets TO this peer   */
+  srtp_t inbound;  /* decrypts packets FROM this peer */
+  srtp_t outbound; /* encrypts packets TO this peer   */
 } sfu_srtp_ctx_t;
 
 /* Call once at process startup/shutdown (libsrtp2 keeps global state). */
-int  sfu_srtp_global_init(void);
+int sfu_srtp_global_init(void);
 void sfu_srtp_global_deinit(void);
 
 /* Derives both directions' keys from a completed DTLS-SRTP handshake's
@@ -39,8 +39,8 @@ void sfu_srtp_global_deinit(void);
  * SSRC-wildcard policies (ssrc_any_inbound/outbound) since there's no
  * per-SSRC tracking yet (rtp/parser.c doesn't exist). Returns 0 on
  * success. */
-int  sfu_srtp_ctx_init_from_dtls(sfu_srtp_ctx_t *ctx,
-                                  const uint8_t keying_material[60]);
+int sfu_srtp_ctx_init_from_dtls(sfu_srtp_ctx_t *ctx,
+                                const uint8_t keying_material[60]);
 void sfu_srtp_ctx_destroy(sfu_srtp_ctx_t *ctx);
 
 /*
@@ -53,9 +53,11 @@ void sfu_srtp_ctx_destroy(sfu_srtp_ctx_t *ctx);
  * packet, never forward on a failed unprotect).
  */
 bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len);
-bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap);
+bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len,
+                          size_t cap);
 bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len);
-bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap);
+bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len,
+                           size_t cap);
 
 /* RFC 7983-adjacent split within the RTP/RTCP first-byte range
  * (128-191): RTCP packet types occupy 192-223 in the *second* byte
