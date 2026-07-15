@@ -63,7 +63,6 @@ else()
   set(SFU_SSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
 endif()
 
-# --- core static lib: runtime + net + memory + util -------------------------
 add_library(sfu_core STATIC
   src/memory/pool.c
   src/memory/packet_pool.c
@@ -110,11 +109,9 @@ target_link_libraries(sfu_core PUBLIC
 )
 target_link_directories(sfu_core PUBLIC ${SRTP2_LIBRARY_DIRS})
 
-# --- main server binary -------------------------------------------------
 add_executable(mezon-sfu src/runtime/main.c)
 target_link_libraries(mezon-sfu PRIVATE sfu_core)
 
-# --- tests / benchmarks ---------------------------------------------------
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(benchmark)
