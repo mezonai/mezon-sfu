@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -19,21 +18,6 @@
 #include "transport/stun/stun.h"
 #include "util/alloc.h"
 #include "util/log.h"
-
-/*
- * Topology this wires up (see README/docs for the full diagram):
- *
- *   [NIC] -> [dispatcher core: multishot recvmsg, SSRC/4-tuple hash]
- *                  |  SPSC ring per worker
- *                  v
- *   [worker core 0..N: pop inbox, forward via send_zc, reap completions]
- *
- * Core 0 is reserved for the dispatcher; cores 1..N-1 are workers. This
- * is a placeholder policy -- production topology should account for NUMA
- * nodes and leave a core free for the kernel's network softirq handling,
- * but the mapping itself is what matters for now: one dispatcher, N
- * workers, no shared mutable state between them beyond the SPSC rings.
- */
 
 static uint16_t parse_port(int argc, char **argv, int index,
                            uint16_t default_port) {
