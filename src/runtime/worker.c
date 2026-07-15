@@ -199,7 +199,7 @@ static void *worker_thread_main(void *arg) {
   while (!sfu_shutdown_requested()) {
     bool did_work = false;
 
-    /* 1. Packets received directly from the dispatcher (this
+    /* packets received directly from the dispatcher (this
      *    worker's own inbox). */
     void *item;
     int drained = 0;
@@ -210,7 +210,7 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    /* 2. Jobs handed to this worker by *other* workers' fan-out --
+    /* jobs handed to this worker by *other* workers' fan-out --
      *    this is the cross-thread delivery path: a publisher's
      *    packet whose sender happened to land on a different core
      *    than one of its subscribers. */

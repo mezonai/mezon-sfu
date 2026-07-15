@@ -10,13 +10,10 @@
 #include <stdio.h>
 #include <string.h>
 #ifdef OPENSSL_IS_BORINGSSL
-#include <openssl/ec_key.h> /* EC_KEY_new_by_curve_name/generate_key live here on BoringSSL; openssl/ec.h alone has them on OpenSSL */
+#include <openssl/ec_key.h>
 #endif
 
 static int generate_self_signed_cert(EVP_PKEY **out_pkey, X509 **out_cert) {
-  /* EVP_EC_gen() is an OpenSSL-3.0-only convenience wrapper and does
-   * not exist in BoringSSL -- this lower-level EC_KEY sequence is the
-   * portable form and works identically on both. */
   EC_KEY *ec_key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
   if (!ec_key)
     return -1;
@@ -32,8 +29,6 @@ static int generate_self_signed_cert(EVP_PKEY **out_pkey, X509 **out_cert) {
       EVP_PKEY_free(pkey);
     return -1;
   }
-  /* EVP_PKEY_assign_EC_KEY takes ownership of ec_key on success --
-   * no separate EC_KEY_free after this point. */
 
   X509 *cert = X509_new();
   if (!cert) {
