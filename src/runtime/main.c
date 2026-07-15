@@ -5,6 +5,7 @@
 #include "memory/packet_pool.h"
 #include "net/socket.h"
 #include "peer/session.h"
+#include "protocol/signaling/signaling.h"
 #include "room/room.h"
 #include "runtime/cpu.h"
 #include "runtime/fanout.h"
@@ -16,8 +17,8 @@
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
 #include "transport/stun/stun.h"
+#include "util/alloc.h"
 #include "util/log.h"
-#include <mimalloc.h>
 
 /*
  * Topology this wires up (see README/docs for the full diagram):
@@ -34,20 +35,23 @@
  * workers, no shared mutable state between them beyond the SPSC rings.
  */
 
-static uint16_t parse_port(int argc, char **argv) {
-  if (argc >= 2) {
-    int p = atoi(argv[1]);
+static uint16_t parse_port(int argc, char **argv, int index,
+                           uint16_t default_port) {
+  if (argc > index) {
+    int p = atoi(argv[index]);
     if (p > 0 && p < 65536)
       return (uint16_t)p;
   }
-  return SFU_DEFAULT_MEDIA_PORT;
+  return default_port;
 }
 
 int main(int argc, char **argv) {
   sfu_log_set_level(SFU_LOG_LEVEL_INFO);
   SFU_LOG_INFO("mezon-sfu %s starting", SFU_VERSION_STRING);
 
-  uint16_t port = parse_port(argc, argv);
+  uint16_t port = parse_port(argc, argv, 1, SFU_DEFAULT_MEDIA_PORT);
+  uint16_t signaling_port =
+      parse_port(argc, argv, 2, SFU_DEFAULT_SIGNALING_PORT);
 
   int online = sfu_online_cpu_count();
   uint32_t worker_count = (uint32_t)(online > 1 ? online - 1 : 1);
@@ -81,7 +85,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  sfu_worker_t *workers = mi_calloc(worker_count, sizeof(sfu_worker_t));
+  sfu_worker_t *workers = SFU_CALLOC(worker_count, sizeof(sfu_worker_t));
   if (!workers) {
     SFU_LOG_ERROR("failed to allocate worker array");
     return 1;
@@ -114,11 +118,23 @@ int main(int argc, char **argv) {
 
   sfu_ice_credentials_t ice_creds;
   sfu_ice_credentials_generate(&ice_creds);
-  /* No signaling channel exists yet to hand these to a client (see
-   * protocol/signaling/) -- logged so a test client can be configured
-   * with them out of band in the meantime. */
   SFU_LOG_INFO("local ICE credentials: ufrag=%s pwd=%s", ice_creds.ufrag,
                ice_creds.pwd);
+
+  /* The host advertised in SDP answers (ICE candidate + c= line) --
+   * defaults to loopback for local testing. Override with
+   * SFU_PUBLIC_HOST for testing across machines; a real deployment
+   * would detect/configure its actual public IP here instead. */
+  const char *public_host = getenv("SFU_PUBLIC_HOST");
+  if (!public_host)
+    public_host = "127.0.0.1";
+
+  sfu_signaling_server_t signaling;
+  if (sfu_signaling_server_start(&signaling, signaling_port, public_host, port,
+                                 &ice_creds, &dtls_ctx) != 0) {
+    SFU_LOG_ERROR("failed to start signaling server");
+    return 1;
+  }
 
   for (uint32_t i = 0; i < worker_count; i++) {
     int core_id = (int)(i + 1) % (online > 1 ? online : 1);
@@ -149,7 +165,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  SFU_LOG_INFO("mezon-sfu ready on UDP port %u (pid=%d)", port, getpid());
+  SFU_LOG_INFO(
+      "mezon-sfu ready: media UDP port %u, signaling ws://%s:%u (pid=%d)", port,
+      public_host, signaling_port, getpid());
 
   sfu_scheduler_join(&scheduler);
   for (uint32_t i = 0; i < worker_count; i++) {
@@ -160,7 +178,8 @@ int main(int argc, char **argv) {
   for (uint32_t i = 0; i < worker_count; i++) {
     sfu_worker_destroy(&workers[i]);
   }
-  mi_free(workers);
+  SFU_FREE(workers);
+  sfu_signaling_server_stop(&signaling);
   sfu_fanout_mesh_destroy(&mesh);
   sfu_room_destroy(&room);
   sfu_session_table_destroy(&sessions);

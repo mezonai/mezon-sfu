@@ -1,8 +1,8 @@
 #include "runtime/fanout.h"
+#include "util/alloc.h"
 #include "util/log.h"
-#include <mimalloc.h>
+
 #include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
 
 int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count,
@@ -17,7 +17,7 @@ int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count,
   }
 
   uint32_t cell_count = worker_count * worker_count;
-  mesh->rings = mi_calloc(cell_count, sizeof(sfu_spsc_ring_t));
+  mesh->rings = SFU_CALLOC(cell_count, sizeof(sfu_spsc_ring_t));
   if (!mesh->rings) {
     SFU_LOG_ERROR("fanout mesh: failed to allocate ring array");
     sfu_pool_destroy(&mesh->job_pool);
@@ -33,7 +33,7 @@ int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count,
       SFU_LOG_ERROR("fanout mesh: failed to init ring %u", i);
       for (uint32_t j = 0; j < i; j++)
         sfu_spsc_ring_destroy(&mesh->rings[j]);
-      mi_free(mesh->rings);
+      SFU_FREE(mesh->rings);
       sfu_pool_destroy(&mesh->job_pool);
       return -1;
     }
@@ -49,7 +49,7 @@ void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh) {
   for (uint32_t i = 0; i < cell_count; i++) {
     sfu_spsc_ring_destroy(&mesh->rings[i]);
   }
-  mi_free(mesh->rings);
+  SFU_FREE(mesh->rings);
   sfu_pool_destroy(&mesh->job_pool);
 }
 

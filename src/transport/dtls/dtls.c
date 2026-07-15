@@ -1,29 +1,34 @@
 #include "transport/dtls/dtls.h"
 #include "util/log.h"
 
+#include <openssl/ec.h>
 #include <openssl/err.h>
+#include <openssl/obj_mac.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef OPENSSL_IS_BORINGSSL
+#include <openssl/ec_key.h>
+#endif
 
 static int generate_self_signed_cert(EVP_PKEY **out_pkey, X509 **out_cert) {
-  EVP_PKEY *pkey = NULL;
-  EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
-
-  if (ctx) {
-    if (EVP_PKEY_keygen_init(ctx) > 0) {
-      // Set curve to P-256 (NID_X9_62_prime256v1)
-      if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) >
-          0) {
-        EVP_PKEY_keygen(ctx, &pkey);
-      }
-    }
-    EVP_PKEY_CTX_free(ctx);
-  }
-  if (!pkey)
+  EC_KEY *ec_key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+  if (!ec_key)
     return -1;
+  if (!EC_KEY_generate_key(ec_key)) {
+    EC_KEY_free(ec_key);
+    return -1;
+  }
+
+  EVP_PKEY *pkey = EVP_PKEY_new();
+  if (!pkey || !EVP_PKEY_assign_EC_KEY(pkey, ec_key)) {
+    EC_KEY_free(ec_key);
+    if (pkey)
+      EVP_PKEY_free(pkey);
+    return -1;
+  }
 
   X509 *cert = X509_new();
   if (!cert) {

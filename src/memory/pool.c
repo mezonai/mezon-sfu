@@ -1,6 +1,6 @@
 #include "memory/pool.h"
-#include <mimalloc.h>
-#include <stdlib.h>
+#include "util/alloc.h"
+
 #include <string.h>
 
 static inline uint64_t pack(uint32_t tag, uint32_t index) {
@@ -14,14 +14,13 @@ static inline uint32_t unpack_index(uint64_t v) {
 int sfu_pool_init(sfu_pool_t *pool, uint32_t capacity, uint32_t slot_size) {
   memset(pool, 0, sizeof(*pool));
 
-  pool->slab = mi_zalloc_aligned((size_t)capacity * slot_size, 64);
-
+  pool->slab = SFU_ALIGNED_ALLOC(64, (size_t)capacity * slot_size);
   if (!pool->slab)
     return -1;
 
-  pool->next = mi_malloc(sizeof(uint32_t) * capacity);
+  pool->next = SFU_MALLOC(sizeof(uint32_t) * capacity);
   if (!pool->next) {
-    mi_free(pool->slab);
+    SFU_FREE(pool->slab);
     pool->slab = NULL;
     return -1;
   }
@@ -40,8 +39,8 @@ int sfu_pool_init(sfu_pool_t *pool, uint32_t capacity, uint32_t slot_size) {
 }
 
 void sfu_pool_destroy(sfu_pool_t *pool) {
-  mi_free(pool->slab);
-  mi_free(pool->next);
+  SFU_FREE(pool->slab);
+  SFU_FREE(pool->next);
   pool->slab = NULL;
   pool->next = NULL;
 }
