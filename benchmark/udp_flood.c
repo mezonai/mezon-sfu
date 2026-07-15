@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #endif
 #include <arpa/inet.h>
+#include <mimalloc.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +53,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  char *buf = malloc(pkt_size);
+  char *buf = mi_malloc(pkt_size);
   memset(buf, 0x42, pkt_size);
 
   uint64_t start = now_ns();
@@ -74,7 +75,7 @@ int main(int argc, char **argv) {
   printf("sent=%lu duration=%.2fs pps=%.0f throughput=%.2f Mbps\n",
          (unsigned long)sent, secs, pps, (pps * pkt_size * 8) / 1e6);
 
-  free(buf);
+  mi_free(buf);
   close(fd);
   return 0;
 }
