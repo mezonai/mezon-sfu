@@ -74,7 +74,6 @@
       <button id="connectBtn" onclick="connect()">Connect (mic)</button>
       <button id="hangupBtn" class="secondary" onclick="hangup()" disabled>Hang up</button>
     </div>
-    <div class="hint">Serve this file over <code>http://localhost</code> (e.g. <code>python3 -m http.server</code> from the <code>tools/</code> directory) rather than opening it directly as <code>file://</code> -- some browsers only allow microphone access from a secure context.</div>
   </div>
 
   <div class="panel">
@@ -120,7 +119,10 @@ async function connect() {
   document.getElementById('connectBtn').disabled = true;
 
   try {
-    pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
+    pc = new RTCPeerConnection({
+      bundlePolicy: 'max-bundle',
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
 
     pc.oniceconnectionstatechange = () => {
       const s = pc.iceConnectionState;
@@ -157,6 +159,21 @@ async function connect() {
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+
+      log('Gathering ICE candidates...');
+      // Wait for ICE gathering to complete before sending the offer
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') {
+          resolve();
+        } else {
+          pc.onicegatheringstatechange = () => {
+            if (pc.iceGatheringState === 'complete') {
+              resolve();
+            }
+          };
+        }
+      });
+
       log('Local offer created, sending to signaling server...');
       ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
     };

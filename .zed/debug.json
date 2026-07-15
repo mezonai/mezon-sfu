@@ -1,0 +1,16 @@
+[
+  {
+    "label": "Debug mezon-sfu (CMake)",
+    "adapter": "CodeLLDB",
+    "build": {
+      "command": "cmake",
+      "args": ["--build", "build"],
+      "cwd": "$ZED_WORKTREE_ROOT"
+    },
+    "program": "$ZED_WORKTREE_ROOT/build/mezon-sfu",
+    "request": "launch",
+    "env": {
+      "SFU_PUBLIC_HOST": "27.72.29.150"
+    }
+  }
+]
