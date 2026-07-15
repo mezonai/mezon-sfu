@@ -11,7 +11,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 <img width="2720" height="1320" alt="mezon_sfu_core_architecture" src="https://github.com/user-attachments/assets/67892729-529a-4bcf-9490-1598d6526a5a" />
 
 
- # Topology this wires up
+ # topology this wires up
  
     [NIC] -> [dispatcher core: multishot recvmsg, SSRC/4-tuple hash]
                    |  SPSC ring per worker
