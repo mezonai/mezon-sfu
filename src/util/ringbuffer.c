@@ -1,7 +1,6 @@
 #include "util/ringbuffer.h"
+#include "util/alloc.h"
 
-#include <mimalloc.h>
-#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -18,7 +17,7 @@ int sfu_spsc_ring_init(sfu_spsc_ring_t *ring, uint32_t capacity_pow2) {
   }
 
   memset(ring, 0, sizeof(*ring));
-  ring->slots = mi_calloc(capacity_pow2, sizeof(void *));
+  ring->slots = SFU_CALLOC(capacity_pow2, sizeof(void *));
   if (!ring->slots)
     return -1;
 
@@ -31,7 +30,7 @@ int sfu_spsc_ring_init(sfu_spsc_ring_t *ring, uint32_t capacity_pow2) {
 }
 
 void sfu_spsc_ring_destroy(sfu_spsc_ring_t *ring) {
-  mi_free(ring->slots);
+  SFU_FREE(ring->slots);
   ring->slots = NULL;
 }
 

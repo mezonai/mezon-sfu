@@ -2,9 +2,10 @@
 #include "memory/refcount.h"
 #include "net/batch.h"
 #include "sfu/config.h"
+#include "util/alloc.h"
 #include "util/log.h"
 
-#include <mimalloc.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -44,7 +45,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
   r->buf_count = buf_count;
   r->bgid = bgid;
   r->buf_ring_mem =
-      mi_zalloc_aligned((size_t)buf_count * buf_size, SFU_CACHELINE_SIZE);
+      SFU_ALIGNED_ALLOC(SFU_CACHELINE_SIZE, (size_t)buf_count * buf_size);
   if (!r->buf_ring_mem) {
     SFU_LOG_ERROR("failed to allocate provided-buffer backing store");
     io_uring_queue_exit(&r->ring);
@@ -56,7 +57,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
       io_uring_setup_buf_ring(&r->ring, buf_count, bgid, 0, &setup_ret);
   if (!r->buf_ring) {
     SFU_LOG_ERROR("io_uring_setup_buf_ring failed: %s", strerror(-setup_ret));
-    mi_free(r->buf_ring_mem);
+    SFU_FREE(r->buf_ring_mem);
     io_uring_queue_exit(&r->ring);
     return -1;
   }
@@ -86,7 +87,7 @@ void sfu_ring_destroy(sfu_ring_t *r) {
     io_uring_free_buf_ring(&r->ring, r->buf_ring, r->buf_count, r->bgid);
     r->buf_ring = NULL;
   }
-  mi_free(r->buf_ring_mem);
+  SFU_FREE(r->buf_ring_mem);
   r->buf_ring_mem = NULL;
   io_uring_queue_exit(&r->ring);
 }
