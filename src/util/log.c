@@ -18,7 +18,7 @@ static const char *level_name(sfu_log_level_t level) {
   case SFU_LOG_LEVEL_ERROR:
     return "ERROR";
   }
-  return "?????";
+  return "INVALID";
 }
 
 void sfu_log_set_level(sfu_log_level_t level) {

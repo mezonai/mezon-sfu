@@ -1,12 +1,6 @@
 #ifndef SFU_CONFIG_H
 #define SFU_CONFIG_H
 
-/*
- * Compile-time tunables for mezon-sfu.
- * Values here favor predictable, cache-friendly sizing over dynamic
- * flexibility -- this is a hot-path media server, not a general service.
- */
-
 #define SFU_MAX_WORKERS 16       /* hard cap on worker cores        */
 #define SFU_RING_SQ_ENTRIES 4096 /* submission queue depth per ring */
 #define SFU_RING_CQ_ENTRIES 8192 /* completion queue depth per ring */
