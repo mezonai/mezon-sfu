@@ -18,7 +18,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
                    v
     [worker core 0..N: pop inbox, forward via send_zc, reap completions]
 
- Core 0 is reserved for the dispatcher; cores 1..N-1 are workers. This is a placeholder policy -- production topology should account for NUMA nodes and leave a core free for the kernel's network softirq handling, but the mapping itself is what matters for now: one dispatcher, N workers, no shared mutable state between them beyond the SPSC rings.
+ Core 0 is reserved for the dispatcher; cores 1..N-1 are workers. This is a placeholder policy -- production topology should account for NUMA (Non-Uniform Memory Access) nodes and leave a core free for the kernel's network softirq handling, but the mapping itself is what matters for now: one dispatcher, N workers, no shared mutable state between them beyond the SPSC rings.
 
 # build
 `sudo apt install libmimalloc-dev`
