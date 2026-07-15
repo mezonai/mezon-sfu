@@ -105,10 +105,6 @@ int main(int argc, char **argv) {
   SFU_LOG_INFO("local ICE credentials: ufrag=%s pwd=%s", ice_creds.ufrag,
                ice_creds.pwd);
 
-  /* The host advertised in SDP answers (ICE candidate + c= line) --
-   * defaults to loopback for local testing. Override with
-   * SFU_PUBLIC_HOST for testing across machines; a real deployment
-   * would detect/configure its actual public IP here instead. */
   const char *public_host = getenv("SFU_PUBLIC_HOST");
   if (!public_host)
     public_host = "127.0.0.1";
