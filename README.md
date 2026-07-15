@@ -29,15 +29,6 @@ To compile the C backend binary, run the following commands from the root direct
 
 `sudo apt install libmimalloc-dev`
 
-```bash
-# Generate build files
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-
-# Compile the binary
-cmake --build build
-
-```
-
 build liburing
 ```
 git clone https://github.com/axboe/liburing.git
