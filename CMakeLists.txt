@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mezon-sfu C)
+project(mezon-sfu C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -29,39 +29,22 @@ if(SFU_ENABLE_TSAN)
   add_link_options(-fsanitize=thread -no-pie)
 endif()
 
+find_package(mimalloc REQUIRED)
+
 find_library(URING_LIB uring REQUIRED)
 find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SRTP2 REQUIRED libsrtp2)
 
-find_library(MIMALLOC_LIB mimalloc REQUIRED)
+# Explicitly target the paths provided to avoid picking up system OpenSSL
+set(BORINGSSL_INCLUDE_DIR "/usr/local/include/boringssl")
+find_library(BORINGSSL_SSL_LIB NAMES ssl PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
+find_library(BORINGSSL_CRYPTO_LIB NAMES crypto PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
 
-option(SFU_USE_BORINGSSL "Link against a local BoringSSL build instead of system OpenSSL" OFF)
-set(SFU_BORINGSSL_ROOT "" CACHE PATH
-    "Root of a built BoringSSL tree: <root>/include/openssl/*.h and <root>/build/lib{ssl,crypto}.a. See third_party/README.md.")
-
-if(SFU_USE_BORINGSSL)
-  if(NOT SFU_BORINGSSL_ROOT)
-    message(FATAL_ERROR "SFU_USE_BORINGSSL=ON requires -DSFU_BORINGSSL_ROOT=/path/to/boringssl (see third_party/README.md)")
-  endif()
-
-  add_library(boringssl_ssl STATIC IMPORTED)
-  set_target_properties(boringssl_ssl PROPERTIES
-    IMPORTED_LOCATION "${SFU_BORINGSSL_ROOT}/build/libssl.a")
-  add_library(boringssl_crypto STATIC IMPORTED)
-  set_target_properties(boringssl_crypto PROPERTIES
-    IMPORTED_LOCATION "${SFU_BORINGSSL_ROOT}/build/libcrypto.a")
-
-  set(SFU_SSL_INCLUDE_DIRS "${SFU_BORINGSSL_ROOT}/include")
-  # BoringSSL is compiled as C++ internally; the final link needs the
-  # C++ runtime even though every call site in this codebase is plain C.
-  set(SFU_SSL_LIBS boringssl_ssl boringssl_crypto stdc++)
-  message(STATUS "Using BoringSSL from ${SFU_BORINGSSL_ROOT}")
-else()
-  find_package(OpenSSL REQUIRED)
-  set(SFU_SSL_INCLUDE_DIRS "")
-  set(SFU_SSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
-endif()
+# Set libsrtp include path and locate the library
+set(SRTP_INCLUDE_DIR "/usr/local/include/srtp2")
+find_library(SRTP2_LIBRARY
+    NAMES srtp2 libsrtp2
+    PATHS /usr/local/lib /usr/lib /usr/lib/x86_64-linux-gnu
+)
 
 add_library(sfu_core STATIC
   src/memory/pool.c
@@ -95,22 +78,26 @@ target_include_directories(sfu_core PUBLIC
   include
   src
   ${URING_INCLUDE_DIR}
-  ${SRTP2_INCLUDE_DIRS}
-  ${SFU_SSL_INCLUDE_DIRS}
+  ${BORINGSSL_INCLUDE_DIR}
+  ${SRTP_INCLUDE_DIR}
 )
 
+# Link directly using resolved absolute library paths
 target_link_libraries(sfu_core PUBLIC
   ${URING_LIB}
-  ${SFU_SSL_LIBS}
-  ${SRTP2_LIBRARIES}
-  ${MIMALLOC_LIB}
+  ${BORINGSSL_SSL_LIB}
+  ${BORINGSSL_CRYPTO_LIB}
+  ${SRTP2_LIBRARY}
+  mimalloc
   pthread
   m
+  stdc++
 )
-target_link_directories(sfu_core PUBLIC ${SRTP2_LIBRARY_DIRS})
+set_target_properties(sfu_core PROPERTIES LINKER_LANGUAGE CXX)
 
 add_executable(mezon-sfu src/runtime/main.c)
-target_link_libraries(mezon-sfu PRIVATE sfu_core)
+target_link_libraries(mezon-sfu PRIVATE sfu_core mimalloc)
+set_target_properties(mezon-sfu PROPERTIES LINKER_LANGUAGE CXX)
 
 enable_testing()
 add_subdirectory(tests)

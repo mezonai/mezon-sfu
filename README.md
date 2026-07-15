@@ -45,7 +45,9 @@ sudo cp -rf build/lib* /usr/local/lib/boringssl/
 
 build  libsrtp
 ```
-https://github.com/cisco/libsrtp.git
+git clone https://github.com/cisco/libsrtp.git
+git checkout 24b3bf8
+
 cd libsrtp
 ./configure --enable-openssl \
   crypto_CFLAGS="-I/usr/local/include/boringssl/" \
