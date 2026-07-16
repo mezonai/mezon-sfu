@@ -1,10 +1,19 @@
 #include "room/room.h"
 #include "util/log.h"
 
+#include <inttypes.h> /* Required for PRIu64 */
 #include <string.h>
 
-int sfu_room_init(sfu_room_t *room) {
+int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name) {
   memset(room, 0, sizeof(*room));
+
+  room->room_id = room_id;
+
+  if (room_name) {
+    strncpy(room->room_name, room_name, sizeof(room->room_name) - 1);
+    room->room_name[sizeof(room->room_name) - 1] = '\0';
+  }
+
   if (pthread_mutex_init(&room->lock, NULL) != 0) {
     return -1;
   }
@@ -41,8 +50,8 @@ void sfu_room_touch_peer(sfu_room_t *room, const struct sockaddr_storage *addr,
     e->worker_id = worker_id;
     e->active = true;
   } else {
-    SFU_LOG_WARN("room peer table full (%u), dropping new peer",
-                 SFU_ROOM_MAX_PEERS);
+    SFU_LOG_WARN("room [%" PRIu64 "] peer table full (%u), dropping new peer",
+                 room->room_id, SFU_ROOM_MAX_PEERS);
   }
 
   pthread_mutex_unlock(&room->lock);

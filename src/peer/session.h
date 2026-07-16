@@ -1,13 +1,13 @@
 #ifndef SFU_PEER_SESSION_H
 #define SFU_PEER_SESSION_H
 
+#include "room/room.h"
+#include "transport/dtls/dtls.h"
+#include "transport/srtp/srtp.h"
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
-
-#include "transport/dtls/dtls.h"
-#include "transport/srtp/srtp.h"
 
 /*
  * One entry per peer address, tracking connection establishment state:
@@ -35,10 +35,11 @@ typedef enum {
 typedef struct sfu_peer_session {
   struct sockaddr_storage addr;
   socklen_t addr_len;
-  bool active;
   sfu_session_state_t state;
   sfu_dtls_conn_t dtls;
   sfu_srtp_ctx_t srtp; /* valid only once state == SFU_SESSION_ESTABLISHED */
+  sfu_room_t *room;
+  bool active;
 } sfu_peer_session_t;
 
 #define SFU_SESSION_TABLE_MAX 256

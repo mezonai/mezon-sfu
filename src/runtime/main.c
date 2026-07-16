@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (sfu_room_init(&room) != 0) {
+    if (sfu_room_init(&room, 0, DEFAULT_ROOM_NAME) != 0) {
       SFU_LOG_ERROR("failed to init room registry");
       return 1;
     }

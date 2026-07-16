@@ -18,7 +18,7 @@ static struct sockaddr_storage make_addr(uint16_t port) {
 
 int main(void) {
   sfu_room_t room;
-  assert(sfu_room_init(&room) == 0);
+  assert(sfu_room_init(&room, 0, DEFAULT_ROOM_NAME) == 0);
 
   struct sockaddr_storage a = make_addr(1000);
   struct sockaddr_storage b = make_addr(2000);

@@ -65,8 +65,8 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_peer_session_t *session = sfu_session_table_get_or_create(
       w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
   if (!session) {
-    return; /* table full; drop, same as any other admission-control rejection
-             */
+    // table full; drop, same as any other admission-control rejection
+    return;
   }
 
   sfu_dtls_feed_status_t status =
