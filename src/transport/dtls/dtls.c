@@ -179,14 +179,33 @@ sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn,
 
   int rc = SSL_do_handshake(conn->ssl);
   if (rc == 1) {
-    if (SSL_export_keying_material(
-            conn->ssl, conn->srtp_keying_material, SFU_SRTP_KEY_MATERIAL_LEN,
-            "EXTRACTOR-dtls_srtp", 20, NULL, 0, 0) != 1) {
+    const SRTP_PROTECTION_PROFILE *profile =
+        SSL_get_selected_srtp_profile(conn->ssl);
+    if (!profile) {
+      SFU_LOG_ERROR(
+          "DTLS: handshake succeeded, but no SRTP profile negotiated!");
+      return SFU_DTLS_FEED_ERROR;
+    }
+
+    conn->srtp_profile_id = profile->id;
+
+    size_t material_len = 60; // Default for SRTP_AES128_CM_SHA1_80 (0x0001)
+    if (profile->id == 0x0007) {
+      material_len = 56; // GCM-128 (16 * 2 + 12 * 2)
+    } else if (profile->id == 0x0008) {
+      material_len = 88; // GCM-256 (32 * 2 + 12 * 2)
+    }
+
+    if (SSL_export_keying_material(conn->ssl, conn->srtp_keying_material,
+                                   material_len, "EXTRACTOR-dtls_srtp", 19,
+                                   NULL, 0, 0) != 1) {
       SFU_LOG_ERROR("DTLS: handshake completed but SRTP key export failed");
       return SFU_DTLS_FEED_ERROR;
     }
+
     conn->established = true;
-    SFU_LOG_INFO("DTLS handshake established, SRTP keying material derived");
+    SFU_LOG_INFO("DTLS handshake established. Profile: %s (0x%04lx)",
+                 profile->name, profile->id);
     return SFU_DTLS_FEED_ESTABLISHED;
   }
 

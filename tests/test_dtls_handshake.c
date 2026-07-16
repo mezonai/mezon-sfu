@@ -89,7 +89,7 @@ int main(void) {
   uint8_t client_material[SFU_SRTP_KEY_MATERIAL_LEN];
   assert(SSL_export_keying_material(
              client_ssl, client_material, SFU_SRTP_KEY_MATERIAL_LEN,
-             "EXTRACTOR-dtls_srtp", 20, NULL, 0, 0) == 1);
+             "EXTRACTOR-dtls_srtp", 19, NULL, 0, 0) == 1);
   assert(memcmp(client_material, server_conn.srtp_keying_material,
                 SFU_SRTP_KEY_MATERIAL_LEN) == 0);
 

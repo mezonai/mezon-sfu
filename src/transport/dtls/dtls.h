@@ -44,6 +44,7 @@ typedef struct sfu_dtls_conn {
   BIO *rbio; /* received datagrams get written here before SSL_do_handshake */
   BIO *wbio; /* OpenSSL writes its desired output here for us to drain+send */
   bool established;
+  unsigned long srtp_profile_id;
   uint8_t srtp_keying_material[SFU_SRTP_KEY_MATERIAL_LEN];
 } sfu_dtls_conn_t;
 
