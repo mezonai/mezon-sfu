@@ -82,7 +82,8 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   case SFU_DTLS_FEED_ESTABLISHED:
     if (session->state != SFU_SESSION_ESTABLISHED) {
       if (sfu_srtp_ctx_init_from_dtls(
-              &session->srtp, session->dtls.srtp_keying_material) != 0) {
+              &session->srtp, session->dtls.srtp_keying_material,
+              session->dtls.srtp_profile_id, true) != 0) {
         SFU_LOG_ERROR(
             "worker %u: failed to derive SRTP keys after DTLS handshake",
             w->worker_index);

@@ -125,12 +125,12 @@ int main(int argc, char **argv) {
 
   sfu_ice_credentials_t ice_creds;
   sfu_ice_credentials_generate(&ice_creds);
-  SFU_LOG_INFO("local ICE credentials: ufrag=%s pwd=%s", ice_creds.ufrag,
-               ice_creds.pwd);
-
   const char *public_host = getenv("SFU_PUBLIC_HOST");
   if (!public_host)
     public_host = "127.0.0.1";
+
+  SFU_LOG_INFO("local ICE credentials: ufrag=%s pwd=%s public_host=%s",
+               ice_creds.ufrag, ice_creds.pwd, public_host);
 
   int fd = -1;
   sfu_packet_pool_t pp;
