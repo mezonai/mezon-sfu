@@ -1,5 +1,4 @@
 #include "runtime/worker.h"
-#include "memory/refcount.h"
 #include "pipeline/dispatch.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
@@ -14,7 +13,7 @@
 #define SFU_WORKER_IDLE_SLEEP_US 200
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
-                    sfu_packet_pool_t *pp, sfu_room_t *room,
+                    sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
                     sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions,
                     const sfu_ice_credentials_t *ice_creds,
                     uint32_t inbox_capacity, int send_bgid) {
@@ -23,7 +22,7 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
   w->worker_index = worker_index;
   w->fd = fd;
   w->pp = pp;
-  w->room = room;
+  w->room_registry = room_registry;
   w->mesh = mesh;
   w->sessions = sessions;
   w->ice_creds = ice_creds;
@@ -80,11 +79,10 @@ void sfu_worker_destroy(sfu_worker_t *w) {
  * dispatcher's transferred ownership) via the worker-safe release path.
  */
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
-  sfu_room_touch_peer(w->room, &pkt->peer_addr, pkt->peer_addr_len,
-                      w->worker_index);
-
+  // Find the sender's active session first
   sfu_peer_session_t *sender_session =
       sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
+
   if (!sender_session || sender_session->state != SFU_SESSION_ESTABLISHED) {
     /* No completed DTLS handshake means no keys -- can't decrypt,
      * so there's nothing safe to forward. Drop rather than pass
@@ -94,6 +92,20 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
+
+  // Validate that the session is bound to an active, initialized room
+  sfu_room_t *active_room = sender_session->room;
+  if (!active_room) {
+    SFU_LOG_WARN("worker %u: packet received from session with no assigned "
+                 "room, dropping",
+                 w->worker_index);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    return;
+  }
+
+  // Register peer presence inside their dynamic room
+  sfu_room_touch_peer(active_room, &pkt->peer_addr, pkt->peer_addr_len,
+                      w->worker_index);
 
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
   int plain_len = (int)pkt->len;
@@ -107,9 +119,11 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len; /* pkt->data now holds plaintext */
 
+  // Retrieve subscribers belonging exclusively to this session's room
   sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
-  uint32_t n = sfu_room_list_subscribers_excluding(
-      w->room, &pkt->peer_addr, pkt->peer_addr_len, subs, SFU_ROOM_MAX_PEERS);
+  uint32_t n = sfu_room_list_subscribers_excluding(active_room, &pkt->peer_addr,
+                                                   pkt->peer_addr_len, subs,
+                                                   SFU_ROOM_MAX_PEERS);
 
   for (uint32_t i = 0; i < n; i++) {
     sfu_peer_entry_t *sub = &subs[i];

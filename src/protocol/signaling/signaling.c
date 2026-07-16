@@ -1,10 +1,11 @@
 #include "protocol/signaling/signaling.h"
+#include "peer/session.h"
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
+#include "room/room_registry.h"
 #include "util/alloc.h"
 #include "util/log.h"
-
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stddef.h>
@@ -70,6 +71,16 @@ static void *conn_thread_main(void *arg) {
   }
   SFU_LOG_INFO("signaling: client connected");
 
+  // Get client socket address to associate signaling connection with the UDP
+  // session table
+  struct sockaddr_storage peer_addr;
+  socklen_t peer_addr_len = sizeof(peer_addr);
+  if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_addr_len) != 0) {
+    SFU_LOG_WARN("signaling: failed to get peer name from socket");
+    close(fd);
+    return NULL;
+  }
+
   char buf[SFU_SIGNALING_RECV_CAP];
   for (;;) {
     ssize_t n = sfu_ws_recv_text(fd, buf, sizeof(buf));
@@ -90,6 +101,36 @@ static void *conn_thread_main(void *arg) {
             "signaling: offer message with no \"sdp\" field, ignoring");
         continue;
       }
+
+      // EXTRACT room ID from incoming JSON (default to 101 if not present)
+      char room_str[64] = {0};
+      uint64_t room_id = 101;
+      if (sfu_json_extract_string(buf, "room", room_str, sizeof(room_str)) >=
+          0) {
+        room_id = (uint64_t)strtoull(room_str, NULL, 10);
+      }
+
+      // GET OR CREATE the session in the shared table[cite: 8]
+      sfu_peer_session_t *session = sfu_session_table_get_or_create(
+          s->sessions, &peer_addr, peer_addr_len);
+      if (session) {
+        // RETRIEVE OR CREATE room and bind it directly to the session in memory
+        sfu_room_t *room =
+            sfu_room_registry_get_or_create(s->room_registry, room_id);
+        if (room) {
+          session->room = room;
+          SFU_LOG_INFO(
+              "signaling: Associated peer session %p with Room ID %" PRIu64,
+              (void *)session, room_id);
+        } else {
+          SFU_LOG_ERROR(
+              "signaling: Failed to create or acquire Room ID %" PRIu64,
+              room_id);
+        }
+      } else {
+        SFU_LOG_ERROR("signaling: Failed to register session in shared table");
+      }
+
       handle_offer(fd, s, sdp, sdp_len);
     } else {
       SFU_LOG_WARN("signaling: unrecognized message type \"%s\", ignoring",
@@ -137,12 +178,18 @@ static void *accept_loop_main(void *arg) {
 int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port,
                                const char *media_host, uint16_t media_port,
                                const sfu_ice_credentials_t *ice_creds,
-                               const sfu_dtls_ctx_t *dtls_ctx) {
+                               const sfu_dtls_ctx_t *dtls_ctx,
+                               sfu_session_table_t *sessions,
+                               sfu_room_registry_t *room_registry) {
   memset(s, 0, sizeof(*s));
   strncpy(s->media_host, media_host, sizeof(s->media_host) - 1);
   s->media_port = media_port;
   s->ice_creds = ice_creds;
   s->dtls_ctx = dtls_ctx;
+
+  // Assign the shared memory state pointers
+  s->sessions = sessions;
+  s->room_registry = room_registry;
 
   s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (s->listen_fd < 0) {
