@@ -6,6 +6,7 @@
 #include "room/room_registry.h"
 #include "util/alloc.h"
 #include "util/log.h"
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stddef.h>
@@ -58,6 +59,18 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, const char *sdp,
                response_len, sdp_len);
 }
 
+static void publish_join_event_to_nats(sfu_signaling_server_t *s,
+                                       uint64_t room_id, const char *peer_ip) {
+  SFU_LOG_INFO("INTEGRATION: [NATS Publish] Topic: sfu.room.join | Payload: "
+               "{\"room\": %" PRIu64 ", \"ip\": \"%s\"}",
+               room_id, peer_ip);
+  /*
+     Integration Point:
+     If using libnats (C client for NATS):
+     natsConnection_PublishString(s->nats_conn, "sfu.room.join", json_payload);
+  */
+}
+
 static void *conn_thread_main(void *arg) {
   conn_ctx_t *ctx = (conn_ctx_t *)arg;
   int fd = ctx->fd;
@@ -69,76 +82,95 @@ static void *conn_thread_main(void *arg) {
     close(fd);
     return NULL;
   }
-  SFU_LOG_INFO("signaling: client connected");
 
-  // Get client socket address to associate signaling connection with the UDP
-  // session table
+  // Get client socket address to map signaling to UDP session
   struct sockaddr_storage peer_addr;
   socklen_t peer_addr_len = sizeof(peer_addr);
   if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_addr_len) != 0) {
-    SFU_LOG_WARN("signaling: failed to get peer name from socket");
     close(fd);
     return NULL;
+  }
+
+  // Convert IP to string for logging/NATS payload
+  char peer_ip[64] = "unknown";
+  if (peer_addr.ss_family == AF_INET) {
+    struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
+    inet_ntop(AF_INET, &s4->sin_addr, peer_ip, sizeof(peer_ip));
   }
 
   char buf[SFU_SIGNALING_RECV_CAP];
   for (;;) {
     ssize_t n = sfu_ws_recv_text(fd, buf, sizeof(buf));
     if (n <= 0)
-      break; /* clean close or error */
+      break;
 
     char type[32];
     if (sfu_json_extract_string(buf, "type", type, sizeof(type)) < 0) {
-      SFU_LOG_WARN("signaling: message with no \"type\" field, ignoring");
       continue;
     }
 
-    if (strcmp(type, "offer") == 0) {
-      char sdp[SFU_SIGNALING_SDP_CAP];
-      int sdp_len = sfu_json_extract_string(buf, "sdp", sdp, sizeof(sdp));
-      if (sdp_len < 0) {
-        SFU_LOG_WARN(
-            "signaling: offer message with no \"sdp\" field, ignoring");
-        continue;
-      }
-
-      // EXTRACT room ID from incoming JSON (default to 101 if not present)
+    if (strcmp(type, "join") == 0) {
       char room_str[64] = {0};
-      uint64_t room_id = 101;
+      uint64_t room_id = 0;
+
       if (sfu_json_extract_string(buf, "room", room_str, sizeof(room_str)) >=
           0) {
         room_id = (uint64_t)strtoull(room_str, NULL, 10);
       }
 
-      // GET OR CREATE the session in the shared table[cite: 8]
+      if (room_id == 0) {
+        sfu_ws_send_text(
+            fd, "{\"type\":\"error\",\"message\":\"invalid_room\"}", 41);
+        continue;
+      }
+
+      // Find or create the session in shared memory
       sfu_peer_session_t *session = sfu_session_table_get_or_create(
           s->sessions, &peer_addr, peer_addr_len);
       if (session) {
-        // RETRIEVE OR CREATE room and bind it directly to the session in memory
         sfu_room_t *room =
             sfu_room_registry_get_or_create(s->room_registry, room_id);
         if (room) {
-          session->room = room;
-          SFU_LOG_INFO(
-              "signaling: Associated peer session %p with Room ID %" PRIu64,
-              (void *)session, room_id);
+          session->room = room; // Bind session to room in shared memory!
+
+          // Trigger the integration hook (e.g., NATS)
+          publish_join_event_to_nats(s, room_id, peer_ip);
+
+          // Reply back to WebRTC client that they successfully joined the room
+          char response[128];
+          snprintf(response, sizeof(response),
+                   "{\"type\":\"joined\",\"room\":\"%lld\" PRIu64 \"\"}",
+                   (long long)room_id);
+          sfu_ws_send_text(fd, response, strlen(response));
         } else {
-          SFU_LOG_ERROR(
-              "signaling: Failed to create or acquire Room ID %" PRIu64,
-              room_id);
+          sfu_ws_send_text(
+              fd, "{\"type\":\"error\",\"message\":\"room_creation_failed\"}",
+              49);
         }
       } else {
-        SFU_LOG_ERROR("signaling: Failed to register session in shared table");
+        sfu_ws_send_text(
+            fd, "{\"type\":\"error\",\"message\":\"session_creation_failed\"}",
+            52);
+      }
+    } else if (strcmp(type, "offer") == 0) {
+      // Find the session (must exist if they called join first)[cite: 8]
+      sfu_peer_session_t *session =
+          sfu_session_table_find(s->sessions, &peer_addr, peer_addr_len);
+      if (!session || !session->room) {
+        sfu_ws_send_text(
+            fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}",
+            49);
+        continue;
       }
 
-      handle_offer(fd, s, sdp, sdp_len);
-    } else {
-      SFU_LOG_WARN("signaling: unrecognized message type \"%s\", ignoring",
-                   type);
+      char sdp[SFU_SIGNALING_SDP_CAP];
+      int sdp_len = sfu_json_extract_string(buf, "sdp", sdp, sizeof(sdp));
+      if (sdp_len >= 0) {
+        handle_offer(fd, s, sdp, sdp_len);
+      }
     }
   }
 
-  SFU_LOG_INFO("signaling: client disconnected");
   close(fd);
   return NULL;
 }
