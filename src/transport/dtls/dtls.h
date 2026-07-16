@@ -25,7 +25,7 @@
 #define SFU_SRTP_KEY_MATERIAL_LEN                                              \
   60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
 #define SFU_DTLS_FINGERPRINT_LEN                                               \
-  95 /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
+  96 /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
 
 typedef struct sfu_dtls_ctx {
   SSL_CTX *ssl_ctx;

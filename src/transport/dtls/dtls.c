@@ -111,9 +111,10 @@ int sfu_dtls_ctx_init(sfu_dtls_ctx_t *ctx) {
   X509_free(cert);
   EVP_PKEY_free(pkey);
 
-  if (SSL_CTX_set_tlsext_use_srtp(ctx->ssl_ctx, "SRTP_AES128_CM_SHA1_80") !=
-      0) {
-    SFU_LOG_ERROR("DTLS: failed to offer SRTP_AES128_CM_SHA1_80 profile");
+  if (SSL_CTX_set_tlsext_use_srtp(ctx->ssl_ctx,
+                                  "SRTP_AEAD_AES_128_GCM:SRTP_AEAD_AES_256_GCM:"
+                                  "SRTP_AES128_CM_SHA1_80") != 0) {
+    SFU_LOG_ERROR("DTLS: failed to offer SRTP profiles");
     SSL_CTX_free(ctx->ssl_ctx);
     ctx->ssl_ctx = NULL;
     return -1;

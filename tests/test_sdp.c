@@ -87,6 +87,7 @@ int main(void) {
                 "a=candidate:1 1 udp 2130706431 127.0.0.1 17030 typ host")},
       {"no browser candidates leaked",
        !contains(answer, "192.168.1.5") && !contains(answer, "203.0.113.9")},
+      {"no browser rtcp line leaked", !contains(answer, "a=rtcp:")},
       {"opus rtpmap preserved", contains(answer, "a=rtpmap:111 opus/48000/2")},
       {"fmtp preserved",
        contains(answer, "a=fmtp:111 minptime=10;useinbandfec=1")},

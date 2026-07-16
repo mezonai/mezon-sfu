@@ -10,7 +10,7 @@
     "program": "$ZED_WORKTREE_ROOT/build/mezon-sfu",
     "request": "launch",
     "env": {
-      "SFU_PUBLIC_HOST": "127.0.0.1"
+      "SFU_PUBLIC_HOST": "172.16.11.90"
     }
   }
 ]
