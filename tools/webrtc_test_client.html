@@ -52,7 +52,40 @@
   }
   .log-ok { color: var(--ok); } .log-warn { color: var(--warn); } .log-err { color: var(--err); }
   .log-sdp { color: var(--muted); }
-  audio { width: 100%; margin-top: 8px; }
+
+  /* Styling for video layouts */
+  .media-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .video-wrapper {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+    aspect-ratio: 16/9;
+    width: 100%;
+  }
+  video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #000;
+  }
+  .video-label {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: rgba(0, 0, 0, 0.6);
+    color: var(--text);
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    pointer-events: none;
+  }
   .hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 10px; }
   code { background: #010409; padding: 1px 5px; border-radius: 4px; }
 </style>
@@ -60,33 +93,42 @@
 <body>
 
 <h1>mezon-sfu WebRTC test client</h1>
-<p class="sub">Connects to the real signaling server over WebSocket, sends an SDP offer, and applies the server's answer directly -- no manual SDP construction needed anymore. Open this in two tabs to test the actual media relay between two peers.</p>
+<p class="sub">Connects to the signaling server, captures microphone and camera feeds, sends an SDP offer incorporating a targeted Room ID, and renders video and audio tracks dynamic from the room.</p>
 
 <div class="grid">
   <div class="panel">
-    <h2>Server</h2>
-    <p class="hint">Point this at mezon-sfu's signaling port (default 8080).</p>
+    <h2>Server & Room Configuration</h2>
+    <p class="hint">Point this at mezon-sfu's signaling port and choose a room.</p>
 
     <label>Signaling WebSocket URL</label>
     <input id="wsUrl" value="ws://127.0.0.1:8080">
 
+    <label>Room ID</label>
+    <input id="roomId" value="room1">
+
     <div class="row">
-      <button id="connectBtn" onclick="connect()">Connect (mic)</button>
+      <button id="connectBtn" onclick="connect()">Connect (AV + Join Room)</button>
       <button id="hangupBtn" class="secondary" onclick="hangup()" disabled>Hang up</button>
     </div>
   </div>
 
   <div class="panel">
-    <h2>Connection state</h2>
+    <h2>Connection State & Media</h2>
     <div class="status-line"><span id="dot-ws" class="dot"></span> Signaling: <span id="state-ws">idle</span></div>
     <div class="status-line"><span id="dot-ice" class="dot"></span> ICE: <span id="state-ice">idle</span></div>
     <div class="status-line"><span id="dot-conn" class="dot"></span> Connection: <span id="state-conn">idle</span></div>
     <div class="status-line"><span id="dot-track" class="dot"></span> Remote track: <span id="state-track">none yet</span></div>
 
-    <label>Local mic (muted playback)</label>
-    <audio id="localAudio" autoplay muted></audio>
-    <label>Remote audio (from another connected peer, via the SFU relay)</label>
-    <audio id="remoteAudio" autoplay></audio>
+    <div class="media-container">
+      <div class="video-wrapper">
+        <video id="localVideo" autoplay muted playsinline></video>
+        <span class="video-label">Local Camera (Muted)</span>
+      </div>
+      <div class="video-wrapper">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <span class="video-label">Remote Peer Feed</span>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -99,6 +141,7 @@
 let pc = null;
 let ws = null;
 let statsTimer = null;
+let localStream = null;
 
 function log(msg, cls) {
   const el = document.getElementById('log');
@@ -116,6 +159,7 @@ function setDot(id, level) {
 
 async function connect() {
   const wsUrl = document.getElementById('wsUrl').value.trim();
+  const roomId = document.getElementById('roomId').value.trim();
   document.getElementById('connectBtn').disabled = true;
 
   try {
@@ -130,24 +174,35 @@ async function connect() {
       setDot('ice', s === 'connected' || s === 'completed' ? 'ok' : s === 'failed' ? 'err' : 'warn');
       log('ICE state -> ' + s, s === 'failed' ? 'log-err' : null);
     };
+
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
       document.getElementById('state-conn').textContent = s;
       setDot('conn', s === 'connected' ? 'ok' : s === 'failed' ? 'err' : 'warn');
       log('Connection state -> ' + s, s === 'failed' ? 'log-err' : null);
     };
+
     pc.ontrack = (e) => {
       document.getElementById('state-track').textContent = e.track.kind + ' (' + e.track.id.slice(0, 8) + ')';
       setDot('track', 'ok');
       log('Remote track received: ' + e.track.kind, 'log-ok');
-      document.getElementById('remoteAudio').srcObject = e.streams[0];
+
+      const remoteVideo = document.getElementById('remoteVideo');
+      if (remoteVideo.srcObject !== e.streams[0]) {
+        remoteVideo.srcObject = e.streams[0];
+      }
     };
 
-    log('Requesting microphone...');
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    document.getElementById('localAudio').srcObject = stream;
-    stream.getTracks().forEach(t => pc.addTrack(t, stream));
-    log('Mic acquired, track added.', 'log-ok');
+    log('Requesting camera and microphone access...');
+    // Requested both audio AND video
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: { width: 640, height: 360, frameRate: 24 }
+    });
+
+    document.getElementById('localVideo').srcObject = localStream;
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    log('Microphone and Camera acquired, local tracks added.', 'log-ok');
 
     log('Connecting to signaling server: ' + wsUrl);
     ws = new WebSocket(wsUrl);
@@ -161,7 +216,6 @@ async function connect() {
       await pc.setLocalDescription(offer);
 
       log('Gathering ICE candidates...');
-      // Wait for ICE gathering to complete before sending the offer
       await new Promise((resolve) => {
         if (pc.iceGatheringState === 'complete') {
           resolve();
@@ -174,8 +228,13 @@ async function connect() {
         }
       });
 
-      log('Local offer created, sending to signaling server...');
-      ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
+      log(`Sending offer to join room [${roomId}]...`);
+      // We pass the roomId parameter so the signaling gateway knows which room to forward to
+      ws.send(JSON.stringify({
+        type: 'offer',
+        sdp: pc.localDescription.sdp,
+        room: roomId
+      }));
     };
 
     ws.onmessage = async (evt) => {
@@ -196,6 +255,7 @@ async function connect() {
       document.getElementById('state-ws').textContent = 'error';
       log('Signaling WebSocket error.', 'log-err');
     };
+
     ws.onclose = () => {
       setDot('ws', 'warn');
       document.getElementById('state-ws').textContent = 'closed';
@@ -227,6 +287,13 @@ function hangup() {
   if (pc) { pc.close(); pc = null; }
   if (ws) { ws.close(); ws = null; }
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+
+  document.getElementById('localVideo').srcObject = null;
+  document.getElementById('remoteVideo').srcObject = null;
   document.getElementById('connectBtn').disabled = false;
   document.getElementById('hangupBtn').disabled = true;
   document.getElementById('state-ws').textContent = 'idle';
@@ -234,13 +301,13 @@ function hangup() {
   document.getElementById('state-conn').textContent = 'idle';
   document.getElementById('state-track').textContent = 'none yet';
   setDot('ws', ''); setDot('ice', ''); setDot('conn', ''); setDot('track', '');
-  log('Hung up.');
+  log('Hung up and released device streams.');
 }
 
-// Prefill from URL query params for convenience, e.g. client.html?ws=ws://192.168.1.5:8080
 (function prefillFromQuery() {
   const q = new URLSearchParams(location.search);
   if (q.get('ws')) document.getElementById('wsUrl').value = q.get('ws');
+  if (q.get('room')) document.getElementById('roomId').value = q.get('room');
 })();
 </script>
 </body>
