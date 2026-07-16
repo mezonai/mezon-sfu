@@ -40,7 +40,8 @@ void sfu_srtp_global_deinit(void);
  * per-SSRC tracking yet (rtp/parser.c doesn't exist). Returns 0 on
  * success. */
 int sfu_srtp_ctx_init_from_dtls(sfu_srtp_ctx_t *ctx,
-                                const uint8_t keying_material[60]);
+                                const uint8_t *keying_material,
+                                unsigned long profile_id, bool is_server);
 void sfu_srtp_ctx_destroy(sfu_srtp_ctx_t *ctx);
 
 /*
