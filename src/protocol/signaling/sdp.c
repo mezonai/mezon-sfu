@@ -10,8 +10,8 @@ static int starts_with(const char *s, size_t len, const char *prefix) {
   return len >= plen && memcmp(s, prefix, plen) == 0;
 }
 
-static const char *SKIP_PREFIXES[] = {"a=ice-ufrag", "a=ice-pwd",     "a=fingerprint",       "a=setup", "a=candidate",
-                                      "c=IN",        "a=ice-options", "a=end-of-candidates", "a=rtcp:", NULL};
+static const char *SKIP_PREFIXES[] = {"a=ice-ufrag",   "a=ice-pwd",           "a=fingerprint", "a=setup", "a=candidate", "c=IN",
+                                      "a=ice-options", "a=end-of-candidates", "a=rtcp:",       "a=msid",  "a=ssrc",      NULL};
 
 static int should_skip_line(const char *line, size_t len) {
   for (int i = 0; SKIP_PREFIXES[i]; i++) {
