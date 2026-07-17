@@ -148,7 +148,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       }
 
       char m_line[256];
-      int m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s", (int)(sp1 - line), port, (int)(len - (size_t)(sp2 - line)), sp2);
+      int m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s", (int)(sp1 - line), line, port, (int)(len - (size_t)(sp2 - line)), sp2);
       if (m_len < 0 || (size_t)m_len >= sizeof(m_line) || append_line_n(out, out_cap, &off, m_line, (size_t)m_len) != 0) {
         return -1;
       }
