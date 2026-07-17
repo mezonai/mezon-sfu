@@ -2,7 +2,7 @@
 *.o
 *.out
 *.exe
-mezon-proto-server
+build
 
 # --- IDE & Editor Folders ---
 .vscode/
