@@ -1,14 +1,14 @@
 #include "pipeline/dispatch.h"
+#include <arpa/inet.h>
+#include <string.h>
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
+#include "runtime/global_registry.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
 #include "transport/stun/stun.h"
 #include "util/log.h"
-
-#include <arpa/inet.h>
-#include <string.h>
 
 /* Helper to convert socket storage to string for clean diagnostic logging */
 static void format_peer_endpoint(const struct sockaddr_storage *addr, char *out_ip, uint16_t *out_port) {
@@ -56,6 +56,23 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   char ip[64];
   uint16_t port;
   format_peer_endpoint(&pkt->peer_addr, ip, &port);
+
+  char client_ufrag[32];
+  if (sfu_stun_extract_client_ufrag(pkt->data, pkt->len, w->ice_creds->ufrag, client_ufrag, sizeof(client_ufrag))) {
+    // 2. Query your shared cross-worker registry
+    uint32_t active_worker_id;
+    if (sfu_global_registry_lookup(client_ufrag, &active_worker_id)) {
+      if (active_worker_id != w->worker_index) {
+        /*
+         * SYMMETRIC LOCK HIT: A different worker thread (e.g. Worker 3) is already
+         * mid-handshake or fully established with this client over another interface.
+         * Drop this packet to kill the alternative route early.
+         */
+        SFU_LOG_INFO("worker %u: Drop STUN from alt-path %s:%u. Session owned by worker %u", w->worker_index, ip, port, active_worker_id);
+        return;
+      }
+    }
+  }
 
   uint8_t response[512];
   size_t response_len = sfu_stun_handle_binding_request(pkt->data, pkt->len, w->ice_creds, &pkt->peer_addr, pkt->peer_addr_len, response, sizeof(response));

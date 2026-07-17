@@ -73,6 +73,7 @@ add_library(sfu_core STATIC
   src/runtime/worker.c
   src/runtime/scheduler.c
   src/runtime/signal.c
+  src/runtime/global_registry.c
 )
 
 target_include_directories(sfu_core PUBLIC
