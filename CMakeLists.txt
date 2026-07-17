@@ -61,6 +61,7 @@ add_library(sfu_core STATIC
   src/transport/srtp/srtp.c
   src/peer/session.c
   src/room/room.c
+  src/room/room_registry.c
   src/protocol/websocket/ws.c
   src/protocol/signaling/json_lite.c
   src/protocol/signaling/sdp.c

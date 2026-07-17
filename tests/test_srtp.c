@@ -6,11 +6,11 @@
 #include <string.h>
 
 /* Builds a plausible-looking minimal RTP header + payload for testing. */
-static int build_fake_rtp(uint8_t *buf, size_t cap, uint16_t seq,
-                          const char *payload) {
+static int build_fake_rtp(uint8_t *buf, size_t cap, uint16_t seq, const char *payload) {
   size_t plen = strlen(payload);
-  if (12 + plen > cap)
+  if (12 + plen > cap) {
     return -1;
+  }
   buf[0] = 0x80; /* version 2, no padding/extension/csrc */
   buf[1] = 111;  /* payload type (arbitrary, Opus-ish) */
   buf[2] = (uint8_t)(seq >> 8);
@@ -22,9 +22,7 @@ static int build_fake_rtp(uint8_t *buf, size_t cap, uint16_t seq,
 
 /* Directly builds a libsrtp session from raw key+salt dynamically based on the
  * profile. */
-static int build_raw_session_dynamic(srtp_t *session, const uint8_t *key,
-                                     size_t key_len, const uint8_t *salt,
-                                     size_t salt_len, unsigned long profile_id,
+static int build_raw_session_dynamic(srtp_t *session, const uint8_t *key, size_t key_len, const uint8_t *salt, size_t salt_len, unsigned long profile_id,
                                      srtp_ssrc_type_t type) {
   uint8_t master[64];
   memcpy(master, key, key_len);
@@ -33,13 +31,13 @@ static int build_raw_session_dynamic(srtp_t *session, const uint8_t *key,
   srtp_policy_t policy;
   memset(&policy, 0, sizeof(policy));
 
-  if (profile_id == 0x0007) { // SRTP_AEAD_AES_128_GCM
+  if (profile_id == 0x0007) {  // SRTP_AEAD_AES_128_GCM
     srtp_crypto_policy_set_aes_gcm_128_16_auth(&policy.rtp);
     srtp_crypto_policy_set_aes_gcm_128_16_auth(&policy.rtcp);
-  } else if (profile_id == 0x0008) { // SRTP_AEAD_AES_256_GCM
+  } else if (profile_id == 0x0008) {  // SRTP_AEAD_AES_256_GCM
     srtp_crypto_policy_set_aes_gcm_256_16_auth(&policy.rtp);
     srtp_crypto_policy_set_aes_gcm_256_16_auth(&policy.rtcp);
-  } else { // Fallback/Default AES-CM-128
+  } else {  // Fallback/Default AES-CM-128
     srtp_crypto_policy_set_rtp_default(&policy.rtp);
     srtp_crypto_policy_set_rtcp_default(&policy.rtcp);
   }
@@ -51,10 +49,9 @@ static int build_raw_session_dynamic(srtp_t *session, const uint8_t *key,
   return srtp_create(session, &policy) == srtp_err_status_ok ? 0 : -1;
 }
 
-static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len,
-                                      size_t salt_len, bool is_server) {
+static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len, size_t salt_len, bool is_server) {
   size_t total_material_len = (key_len * 2) + (salt_len * 2);
-  uint8_t keying_material[88]; // Adequate buffer for any tested key lengths
+  uint8_t keying_material[88];  // Adequate buffer for any tested key lengths
   assert(total_material_len <= sizeof(keying_material));
 
   RAND_bytes(keying_material, total_material_len);
@@ -66,8 +63,7 @@ static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len,
 
   /* Our SFU's session, using our dynamic init with role context */
   sfu_srtp_ctx_t sfu_ctx;
-  assert(sfu_srtp_ctx_init_from_dtls(&sfu_ctx, keying_material, profile_id,
-                                     is_server) == 0);
+  assert(sfu_srtp_ctx_init_from_dtls(&sfu_ctx, keying_material, profile_id, is_server) == 0);
 
   /* Independent "client" sessions mirroring the destination.
    * If the SFU is the server, the remote client's outbound must use the client
@@ -75,19 +71,11 @@ static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len,
    * server keys. */
   srtp_t client_outbound, client_inbound;
   if (is_server) {
-    assert(build_raw_session_dynamic(&client_outbound, client_key, key_len,
-                                     client_salt, salt_len, profile_id,
-                                     ssrc_any_outbound) == 0);
-    assert(build_raw_session_dynamic(&client_inbound, server_key, key_len,
-                                     server_salt, salt_len, profile_id,
-                                     ssrc_any_inbound) == 0);
+    assert(build_raw_session_dynamic(&client_outbound, client_key, key_len, client_salt, salt_len, profile_id, ssrc_any_outbound) == 0);
+    assert(build_raw_session_dynamic(&client_inbound, server_key, key_len, server_salt, salt_len, profile_id, ssrc_any_inbound) == 0);
   } else {
-    assert(build_raw_session_dynamic(&client_outbound, server_key, key_len,
-                                     server_salt, salt_len, profile_id,
-                                     ssrc_any_outbound) == 0);
-    assert(build_raw_session_dynamic(&client_inbound, client_key, key_len,
-                                     client_salt, salt_len, profile_id,
-                                     ssrc_any_inbound) == 0);
+    assert(build_raw_session_dynamic(&client_outbound, server_key, key_len, server_salt, salt_len, profile_id, ssrc_any_outbound) == 0);
+    assert(build_raw_session_dynamic(&client_inbound, client_key, key_len, client_salt, salt_len, profile_id, ssrc_any_inbound) == 0);
   }
 
   /* Direction 1: client encrypts -> SFU decrypts */
@@ -100,8 +88,7 @@ static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len,
     int plain_len = len;
     assert(sfu_srtp_unprotect_rtp(&sfu_ctx, buf, &plain_len));
     assert(plain_len == 12 + (int)strlen("hello-from-client"));
-    assert(memcmp(buf + 12, "hello-from-client", strlen("hello-from-client")) ==
-           0);
+    assert(memcmp(buf + 12, "hello-from-client", strlen("hello-from-client")) == 0);
   }
 
   /* Direction 2: SFU encrypts -> client decrypts */
@@ -113,8 +100,7 @@ static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len,
     assert(sfu_srtp_protect_rtp(&sfu_ctx, buf, &len, (size_t)cap));
 
     int plain_len = len;
-    assert(srtp_unprotect(client_inbound, buf, &plain_len) ==
-           srtp_err_status_ok);
+    assert(srtp_unprotect(client_inbound, buf, &plain_len) == srtp_err_status_ok);
     assert(plain_len == 12 + (int)strlen("hello-from-sfu"));
     assert(memcmp(buf + 12, "hello-from-sfu", strlen("hello-from-sfu")) == 0);
   }

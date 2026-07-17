@@ -48,10 +48,7 @@ bool sfu_stun_is_stun_packet(const uint8_t *data, size_t len);
  * 5389 error responses are optional here and skipped to keep the
  * responder simple; a malformed/unauthenticated request gets no reply).
  */
-size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len,
-                                       const sfu_ice_credentials_t *local,
-                                       const struct sockaddr_storage *src_addr,
-                                       socklen_t src_addr_len, uint8_t *out_buf,
-                                       size_t out_buf_cap);
+size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len, const sfu_ice_credentials_t *local, const struct sockaddr_storage *src_addr,
+                                       socklen_t src_addr_len, uint8_t *out_buf, size_t out_buf_cap);
 
 #endif /* SFU_TRANSPORT_STUN_H */

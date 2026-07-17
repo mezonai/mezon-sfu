@@ -28,8 +28,6 @@
  * with sfu_ring_submit() and retry the rest, or drop them (both are
  * legitimate under backpressure; dropping trades fairness for latency).
  */
-size_t sfu_fanout_send_zc(sfu_ring_t *ring, sfu_packet_t *pkt,
-                          const struct sockaddr_storage *dsts,
-                          const socklen_t *dst_lens, size_t count);
+size_t sfu_fanout_send_zc(sfu_ring_t *ring, sfu_packet_t *pkt, const struct sockaddr_storage *dsts, const socklen_t *dst_lens, size_t count);
 
 #endif /* SFU_NET_ZEROCOPY_H */

@@ -46,6 +46,8 @@
 
 #define SFU_CACHELINE_SIZE 64
 
+#define DEFAULT_ROOM_NAME "Default Room"
+
 #define SFU_LIKELY(x) __builtin_expect(!!(x), 1)
 #define SFU_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
