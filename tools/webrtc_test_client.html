@@ -1,314 +1,218 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>mezon-sfu WebRTC test client</title>
-<style>
-  :root {
-    --bg: #0d1117; --panel: #161b22; --border: #30363d;
-    --text: #c9d1d9; --muted: #8b949e; --accent: #58a6ff;
-    --ok: #3fb950; --warn: #d29922; --err: #f85149;
-    --mono: ui-monospace, "SF Mono", Consolas, Menlo, monospace;
-  }
-  * { box-sizing: border-box; }
-  body {
-    background: var(--bg); color: var(--text); margin: 0; padding: 24px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 14px;
-  }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1100px; }
-  .panel {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 16px;
-  }
-  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
-    color: var(--muted); margin: 0 0 12px; }
-  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
-  input {
-    width: 100%; background: #0d1117; border: 1px solid var(--border); color: var(--text);
-    padding: 7px 9px; border-radius: 6px; font-family: var(--mono); font-size: 13px;
-  }
-  input:focus { outline: 1px solid var(--accent); }
-  button {
-    margin-top: 14px; width: 100%; background: var(--accent); color: #0d1117; border: none;
-    padding: 9px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px;
-  }
-  button:hover { filter: brightness(1.1); }
-  button:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
-  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
-  .row { display: flex; gap: 8px; }
-  .row > button { margin-top: 8px; }
-  .status-line { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-family: var(--mono); font-size: 12px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-  .dot.ok { background: var(--ok); }
-  .dot.warn { background: var(--warn); }
-  .dot.err { background: var(--err); }
-  #log {
-    background: #010409; border: 1px solid var(--border); border-radius: 6px;
-    height: 260px; overflow-y: auto; padding: 10px; font-family: var(--mono);
-    font-size: 12px; white-space: pre-wrap; word-break: break-word;
-  }
-  .log-ok { color: var(--ok); } .log-warn { color: var(--warn); } .log-err { color: var(--err); }
-  .log-sdp { color: var(--muted); }
-
-  /* Styling for video layouts */
-  .media-container {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-top: 10px;
-  }
-  .video-wrapper {
-    background: #010409;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-    position: relative;
-    aspect-ratio: 16/9;
-    width: 100%;
-  }
-  video {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    background: #000;
-  }
-  .video-label {
-    position: absolute;
-    bottom: 8px;
-    left: 8px;
-    background: rgba(0, 0, 0, 0.6);
-    color: var(--text);
-    padding: 3px 6px;
-    border-radius: 4px;
-    font-size: 11px;
-    pointer-events: none;
-  }
-  .hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 10px; }
-  code { background: #010409; padding: 1px 5px; border-radius: 4px; }
-</style>
+    <meta charset="UTF-8">
+    <title>Mezon SFU Test Client</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        .container {
+            background: #313244;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            background: #181825;
+            border: 1px solid #45475a;
+            color: #cdd6f4;
+            border-radius: 6px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #89b4fa;
+            color: #11111b;
+            border: none;
+            padding: 12px 20px;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            width: 100%;
+        }
+        button:hover {
+            background: #b4befe;
+        }
+        #status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 6px;
+            background: #45475a;
+            font-family: monospace;
+        }
+        .video-container {
+            margin-top: 20px;
+        }
+        video {
+            width: 100%;
+            max-height: 400px;
+            background: #11111b;
+            border-radius: 8px;
+            transform: scaleX(-1); /* Mirror local video */
+        }
+    </style>
 </head>
 <body>
 
-<h1>mezon-sfu WebRTC test client</h1>
-<p class="sub">Connects to the signaling server, captures microphone and camera feeds, sends an SDP offer incorporating a targeted Room ID, and renders video and audio tracks dynamic from the room.</p>
+<div class="container">
+    <h2>Mezon SFU Client (Camera + Join)</h2>
 
-<div class="grid">
-  <div class="panel">
-    <h2>Server & Room Configuration</h2>
-    <p class="hint">Point this at mezon-sfu's signaling port and choose a room.</p>
-
-    <label>Signaling WebSocket URL</label>
-    <input id="wsUrl" value="ws://127.0.0.1:8080">
-
-    <label>Room ID</label>
-    <input id="roomId" value="room1">
-
-    <div class="row">
-      <button id="connectBtn" onclick="connect()">Connect (AV + Join Room)</button>
-      <button id="hangupBtn" class="secondary" onclick="hangup()" disabled>Hang up</button>
+    <div class="form-group">
+        <label for="wsUrl">Signaling WebSocket URL</label>
+        <input type="text" id="wsUrl" value="ws://127.0.0.1:8080">
     </div>
-  </div>
 
-  <div class="panel">
-    <h2>Connection State & Media</h2>
-    <div class="status-line"><span id="dot-ws" class="dot"></span> Signaling: <span id="state-ws">idle</span></div>
-    <div class="status-line"><span id="dot-ice" class="dot"></span> ICE: <span id="state-ice">idle</span></div>
-    <div class="status-line"><span id="dot-conn" class="dot"></span> Connection: <span id="state-conn">idle</span></div>
-    <div class="status-line"><span id="dot-track" class="dot"></span> Remote track: <span id="state-track">none yet</span></div>
-
-    <div class="media-container">
-      <div class="video-wrapper">
-        <video id="localVideo" autoplay muted playsinline></video>
-        <span class="video-label">Local Camera (Muted)</span>
-      </div>
-      <div class="video-wrapper">
-        <video id="remoteVideo" autoplay playsinline></video>
-        <span class="video-label">Remote Peer Feed</span>
-      </div>
+    <div class="form-group">
+        <label for="roomId">Room ID</label>
+        <input type="text" id="roomId" value="101">
     </div>
-  </div>
-</div>
 
-<div class="panel" style="max-width: 1100px; margin-top: 16px;">
-  <h2>Log</h2>
-  <div id="log"></div>
+    <button id="startBtn" onclick="connectAndJoin()">Connect & Join Room</button>
+
+    <div id="status">Status: Initializing Camera...</div>
+
+    <div class="video-container">
+        <label>Local Camera Feed</label>
+        <video id="localVideo" autoplay playsinline muted></video>
+    </div>
 </div>
 
 <script>
-let pc = null;
-let ws = null;
-let statsTimer = null;
-let localStream = null;
+    let ws = null;
+    let pc = null;
+    let localStream = null;
 
-function log(msg, cls) {
-  const el = document.getElementById('log');
-  const line = document.createElement('div');
-  if (cls) line.className = cls;
-  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-  el.appendChild(line);
-  el.scrollTop = el.scrollHeight;
-}
+    const statusDiv = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
 
-function setDot(id, level) {
-  const dot = document.getElementById('dot-' + id);
-  dot.className = 'dot' + (level ? ' ' + level : '');
-}
-
-async function connect() {
-  const wsUrl = document.getElementById('wsUrl').value.trim();
-  const roomId = document.getElementById('roomId').value.trim();
-  document.getElementById('connectBtn').disabled = true;
-
-  try {
-    pc = new RTCPeerConnection({
-      bundlePolicy: 'max-bundle',
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    // 1. Initialize the camera IMMEDIATELY on page load
+    window.addEventListener('DOMContentLoaded', async () => {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('localVideo').srcObject = localStream;
+            updateStatus("Camera active. Ready to connect and join room.");
+        } catch (e) {
+            console.error("Camera access denied:", e);
+            updateStatus("Error: Camera access denied. Please grant permissions and reload.", true);
+            startBtn.disabled = true;
+        }
     });
 
-    pc.oniceconnectionstatechange = () => {
-      const s = pc.iceConnectionState;
-      document.getElementById('state-ice').textContent = s;
-      setDot('ice', s === 'connected' || s === 'completed' ? 'ok' : s === 'failed' ? 'err' : 'warn');
-      log('ICE state -> ' + s, s === 'failed' ? 'log-err' : null);
-    };
+    function updateStatus(msg, isError = false) {
+        statusDiv.innerText = `Status: ${msg}`;
+        statusDiv.style.color = isError ? '#f38ba8' : '#a6e3a1';
+    }
 
-    pc.onconnectionstatechange = () => {
-      const s = pc.connectionState;
-      document.getElementById('state-conn').textContent = s;
-      setDot('conn', s === 'connected' ? 'ok' : s === 'failed' ? 'err' : 'warn');
-      log('Connection state -> ' + s, s === 'failed' ? 'log-err' : null);
-    };
+    // 2. Connect to the signaling socket and send the "join" message
+    function connectAndJoin() {
+        const wsUrl = document.getElementById('wsUrl').value;
+        const roomId = document.getElementById('roomId').value;
 
-    pc.ontrack = (e) => {
-      document.getElementById('state-track').textContent = e.track.kind + ' (' + e.track.id.slice(0, 8) + ')';
-      setDot('track', 'ok');
-      log('Remote track received: ' + e.track.kind, 'log-ok');
+        if (!localStream) {
+            updateStatus("Cannot join: Camera is not active.", true);
+            return;
+        }
 
-      const remoteVideo = document.getElementById('remoteVideo');
-      if (remoteVideo.srcObject !== e.streams[0]) {
-        remoteVideo.srcObject = e.streams[0];
-      }
-    };
+        if (!roomId) {
+            updateStatus("Please enter a Room ID", true);
+            return;
+        }
 
-    log('Requesting camera and microphone access...');
-    // Requested both audio AND video
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: { width: 640, height: 360, frameRate: 24 }
-    });
+        startBtn.disabled = true;
+        updateStatus("Connecting to signaling server...");
 
-    document.getElementById('localVideo').srcObject = localStream;
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-    log('Microphone and Camera acquired, local tracks added.', 'log-ok');
+        ws = new WebSocket(wsUrl);
 
-    log('Connecting to signaling server: ' + wsUrl);
-    ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+            updateStatus("Connected! Joining room...");
+            // Send the join request block
+            const joinMsg = {
+                type: "join",
+                room: roomId
+            };
+            ws.send(JSON.stringify(joinMsg));
+        };
 
-    ws.onopen = async () => {
-      setDot('ws', 'ok');
-      document.getElementById('state-ws').textContent = 'connected';
-      log('Signaling WebSocket open.', 'log-ok');
+        ws.onmessage = async (event) => {
+            const msg = JSON.parse(event.data);
+            console.log("Signaling received:", msg);
 
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      log('Gathering ICE candidates...');
-      await new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') {
-          resolve();
-        } else {
-          pc.onicegatheringstatechange = () => {
-            if (pc.iceGatheringState === 'complete') {
-              resolve();
+            if (msg.type === "error") {
+                updateStatus(`Error: ${msg.message}`, true);
+                startBtn.disabled = false;
+                return;
             }
-          };
+
+            // 3. Once joined, construct PeerConnection and push the existing camera tracks
+            if (msg.type === "joined") {
+                updateStatus(`Successfully joined Room ${msg.room}! Initiating WebRTC handshake...`);
+                await negotiateMedia();
+            }
+
+            else if (msg.type === "answer") {
+                updateStatus("SDP Answer received. Media routing established!");
+                await pc.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: msg.sdp
+                }));
+            }
+        };
+
+        ws.onclose = () => {
+            updateStatus("Signaling link disconnected.", true);
+            startBtn.disabled = false;
+            if (pc) pc.close();
+        };
+
+        ws.onerror = (err) => {
+            updateStatus("Signaling WebSocket error.", true);
+            startBtn.disabled = false;
+        };
+    }
+
+    // 4. Peer Connection configuration and SDP generation
+    async function negotiateMedia() {
+        try {
+            const config = { iceServers: [] }; // Insert STUN/TURN servers here if testing outside localhost
+            pc = new RTCPeerConnection(config);
+
+            // Add the pre-loaded camera and mic tracks directly to the PeerConnection
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+            // Generate Offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // Forward SDP Offer through the established signaling session
+            const offerMsg = {
+                type: "offer",
+                sdp: pc.localDescription.sdp
+            };
+
+            updateStatus("Sending media SDP offer to SFU...");
+            ws.send(JSON.stringify(offerMsg));
+
+        } catch (e) {
+            console.error("Negotiation failed:", e);
+            updateStatus(`WebRTC Negotiation failed: ${e.message}`, true);
+            startBtn.disabled = false;
         }
-      });
-
-      log(`Sending offer to join room [${roomId}]...`);
-      // We pass the roomId parameter so the signaling gateway knows which room to forward to
-      ws.send(JSON.stringify({
-        type: 'offer',
-        sdp: pc.localDescription.sdp,
-        room: roomId
-      }));
-    };
-
-    ws.onmessage = async (evt) => {
-      const msg = JSON.parse(evt.data);
-      if (msg.type === 'answer') {
-        log('--- received answer SDP ---\n' + msg.sdp, 'log-sdp');
-        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-        log('Remote description set. ICE connectivity checks and DTLS should begin now.', 'log-ok');
-        document.getElementById('hangupBtn').disabled = false;
-        startStatsPolling();
-      } else {
-        log('Unrecognized signaling message: ' + evt.data, 'log-warn');
-      }
-    };
-
-    ws.onerror = () => {
-      setDot('ws', 'err');
-      document.getElementById('state-ws').textContent = 'error';
-      log('Signaling WebSocket error.', 'log-err');
-    };
-
-    ws.onclose = () => {
-      setDot('ws', 'warn');
-      document.getElementById('state-ws').textContent = 'closed';
-      log('Signaling WebSocket closed.');
-    };
-  } catch (err) {
-    log('Connect failed: ' + err.message, 'log-err');
-    document.getElementById('connectBtn').disabled = false;
-  }
-}
-
-function startStatsPolling() {
-  statsTimer = setInterval(async () => {
-    if (!pc) return;
-    const stats = await pc.getStats();
-    stats.forEach(r => {
-      if (r.type === 'candidate-pair' && r.state === 'succeeded') {
-        const el = document.getElementById('log');
-        if (el.dataset.lastPair !== r.id) {
-          el.dataset.lastPair = r.id;
-          log(`Selected candidate pair succeeded (bytes sent=${r.bytesSent ?? '?'}, received=${r.bytesReceived ?? '?'})`, 'log-ok');
-        }
-      }
-    });
-  }, 2000);
-}
-
-function hangup() {
-  if (pc) { pc.close(); pc = null; }
-  if (ws) { ws.close(); ws = null; }
-  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
-  if (localStream) {
-    localStream.getTracks().forEach(track => track.stop());
-    localStream = null;
-  }
-
-  document.getElementById('localVideo').srcObject = null;
-  document.getElementById('remoteVideo').srcObject = null;
-  document.getElementById('connectBtn').disabled = false;
-  document.getElementById('hangupBtn').disabled = true;
-  document.getElementById('state-ws').textContent = 'idle';
-  document.getElementById('state-ice').textContent = 'idle';
-  document.getElementById('state-conn').textContent = 'idle';
-  document.getElementById('state-track').textContent = 'none yet';
-  setDot('ws', ''); setDot('ice', ''); setDot('conn', ''); setDot('track', '');
-  log('Hung up and released device streams.');
-}
-
-(function prefillFromQuery() {
-  const q = new URLSearchParams(location.search);
-  if (q.get('ws')) document.getElementById('wsUrl').value = q.get('ws');
-  if (q.get('room')) document.getElementById('roomId').value = q.get('room');
-})();
+    }
 </script>
 </body>
 </html>
