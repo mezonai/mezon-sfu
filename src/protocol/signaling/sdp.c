@@ -155,6 +155,20 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       continue;
     }
 
+    if (starts_with(line, len, "a=sendonly")) {
+      if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
+        return -1;
+      }
+      continue;
+    }
+
+    if (starts_with(line, len, "a=recvonly")) {
+      if (append_line(out, out_cap, &off, "a=sendonly") != 0) {
+        return -1;
+      }
+      continue;
+    }
+
     if (starts_with(line, len, "m=")) {
       // Before opening a new m-line, append the remote SSRCs for the completed section
       if (current_media == 1) {
