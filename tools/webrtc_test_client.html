@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Mezon SFU Test Client</title>
+    <title>Mezon SFU 2-Participant Test Client</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             background: #1e1e2e;
             color: #cdd6f4;
-            max-width: 800px;
+            max-width: 1000px;
             margin: 40px auto;
             padding: 20px;
         }
@@ -55,22 +55,34 @@
             background: #45475a;
             font-family: monospace;
         }
-        .video-container {
+        /* Video Grid Layout for 2 Participants */
+        .video-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
             margin-top: 20px;
+        }
+        .video-box {
+            background: #11111b;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
         }
         video {
             width: 100%;
-            max-height: 400px;
-            background: #11111b;
-            border-radius: 8px;
-            transform: scaleX(-1); /* Mirror local video */
+            max-height: 350px;
+            background: #000;
+            border-radius: 6px;
+        }
+        .local-video {
+            transform: scaleX(-1); /* Mirror local video only */
         }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h2>Mezon SFU Client (Camera + Join)</h2>
+    <h2>Mezon SFU Client (2 Participants)</h2>
 
     <div class="form-group">
         <label for="wsUrl">Signaling WebSocket URL</label>
@@ -86,9 +98,15 @@
 
     <div id="status">Status: Initializing Camera...</div>
 
-    <div class="video-container">
-        <label>Local Camera Feed</label>
-        <video id="localVideo" autoplay playsinline muted></video>
+    <div class="video-grid">
+        <div class="video-box">
+            <label>Local User (You)</label>
+            <video id="localVideo" class="local-video" autoplay playsinline muted></video>
+        </div>
+        <div class="video-box">
+            <label>Remote Participant</label>
+            <video id="remoteVideo" autoplay playsinline></video>
+        </div>
     </div>
 </div>
 
@@ -96,11 +114,12 @@
     let ws = null;
     let pc = null;
     let localStream = null;
+    let remoteStream = null;
 
     const statusDiv = document.getElementById('status');
     const startBtn = document.getElementById('startBtn');
 
-    // 1. Initialize the camera IMMEDIATELY on page load
+    // 1. Initialize camera on load
     window.addEventListener('DOMContentLoaded', async () => {
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -118,7 +137,7 @@
         statusDiv.style.color = isError ? '#f38ba8' : '#a6e3a1';
     }
 
-    // 2. Main connect action (Keeps your original media sequence intact)
+    // 2. Connect to server
     async function connectAndJoin() {
         const wsUrl = document.getElementById('wsUrl').value;
         const roomId = document.getElementById('roomId').value;
@@ -134,14 +153,30 @@
         }
 
         startBtn.disabled = true;
-        updateStatus("Preparing WebRTC local offer...");
+        updateStatus("Preparing WebRTC PeerConnection...");
 
         try {
-            // Setup WebRTC PeerConnection exactly like the old way
+            // Configure WebRTC Connection
             const config = { iceServers: [] };
             pc = new RTCPeerConnection(config);
+
+            // Create target stream for remote audio and video tracks
+            remoteStream = new MediaStream();
+            document.getElementById('remoteVideo').srcObject = remoteStream;
+
+            // NEW: Listen for incoming remote tracks from the SFU
+            pc.ontrack = (event) => {
+                console.log("Remote track received:", event.track.kind);
+                event.streams[0].getTracks().forEach(track => {
+                    remoteStream.addTrack(track);
+                });
+                updateStatus("Connected! Remote participant's video is rendering.");
+            };
+
+            // Push our local tracks into the peer connection
             localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
+            // Generate Local SDP Offer
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
@@ -149,15 +184,16 @@
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
-                updateStatus("Connected! Sending join and media offer...");
+                updateStatus("Connected! Joining room and publishing offer...");
 
-                // Send the JOIN message first
+                // A. Send the JOIN message first
                 const joinMsg = {
                     type: "join",
                     room: roomId
                 };
                 ws.send(JSON.stringify(joinMsg));
 
+                // B. Delay offering slightly so the room registration is secured in memory
                 setTimeout(() => {
                     const offerMsg = {
                         type: "offer",
@@ -177,9 +213,8 @@
                     return;
                 }
 
-                // Handle the SDP Answer from the server
                 if (msg.type === "answer") {
-                    updateStatus("SDP Answer received. Media routing established!");
+                    updateStatus("SDP Answer received. Media connection active. Waiting for peer...");
                     await pc.setRemoteDescription(new RTCSessionDescription({
                         type: 'answer',
                         sdp: msg.sdp
