@@ -1,7 +1,9 @@
+
 #include "room/room_registry.h"
-#include "util/log.h"
 #include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
+#include "util/log.h"
 
 int sfu_room_registry_init(sfu_room_registry_t *reg) {
   memset(reg, 0, sizeof(*reg));
@@ -20,8 +22,7 @@ void sfu_room_registry_destroy(sfu_room_registry_t *reg) {
   pthread_mutex_destroy(&reg->lock);
 }
 
-sfu_room_t *sfu_room_registry_get_or_create(sfu_room_registry_t *reg,
-                                            uint64_t room_id) {
+sfu_room_t *sfu_room_registry_get_or_create(sfu_room_registry_t *reg, uint64_t room_id) {
   pthread_mutex_lock(&reg->lock);
 
   // 1. Look for an existing room

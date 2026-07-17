@@ -40,22 +40,18 @@ typedef struct sfu_worker {
   sfu_spsc_ring_t release_to_dispatcher; /* this worker -> dispatcher, kernel
                                             buffer returns */
 
-  sfu_packet_pool_t *pp; /* shared with the dispatcher, not owned */
-  sfu_room_registry_t *room_registry; /* shared peer registry, not owned */
-  sfu_fanout_mesh_t *mesh; /* shared cross-worker fan-out mesh, not owned */
-  sfu_session_table_t *sessions; /* shared ICE/DTLS session table, not owned */
-  const sfu_ice_credentials_t
-      *ice_creds; /* shared local ICE ufrag/pwd, not owned */
+  sfu_packet_pool_t *pp;                  /* shared with the dispatcher, not owned */
+  sfu_room_registry_t *room_registry;     /* shared peer registry, not owned */
+  sfu_fanout_mesh_t *mesh;                /* shared cross-worker fan-out mesh, not owned */
+  sfu_session_table_t *sessions;          /* shared ICE/DTLS session table, not owned */
+  const sfu_ice_credentials_t *ice_creds; /* shared local ICE ufrag/pwd, not owned */
 
   pthread_t thread;
   int fd; /* same UDP socket the dispatcher recvs on */
 } sfu_worker_t;
 
-int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
-                    sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
-                    sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions,
-                    const sfu_ice_credentials_t *ice_creds,
-                    uint32_t inbox_capacity, int send_bgid);
+int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
+                    sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions, const sfu_ice_credentials_t *ice_creds, uint32_t inbox_capacity, int send_bgid);
 
 /*
  * Forwards one RTP/RTCP packet to every other room member per the

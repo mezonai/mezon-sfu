@@ -24,8 +24,7 @@ int main(void) {
   SSL_CTX_set_min_proto_version(client_ctx, DTLS1_2_VERSION);
   SSL_CTX_set_max_proto_version(client_ctx, DTLS1_2_VERSION);
   SSL_CTX_set_verify(client_ctx, SSL_VERIFY_NONE, NULL);
-  assert(SSL_CTX_set_tlsext_use_srtp(client_ctx, "SRTP_AES128_CM_SHA1_80") ==
-         0);
+  assert(SSL_CTX_set_tlsext_use_srtp(client_ctx, "SRTP_AES128_CM_SHA1_80") == 0);
 
   SSL *client_ssl = SSL_new(client_ctx);
   BIO *client_rbio = BIO_new(BIO_s_mem());
@@ -38,8 +37,9 @@ int main(void) {
   uint8_t buf[4096];
 
   int rc = SSL_do_handshake(client_ssl);
-  if (rc == 1)
+  if (rc == 1) {
     client_done = true;
+  }
 
   int iterations = 0;
   while (!(client_done && server_done) && iterations++ < 50) {
@@ -47,15 +47,14 @@ int main(void) {
     bool progressed = false;
     while ((n = BIO_read(client_wbio, buf, sizeof(buf))) > 0) {
       progressed = true;
-      sfu_dtls_feed_status_t st =
-          sfu_dtls_conn_feed(&server_conn, buf, (size_t)n);
+      sfu_dtls_feed_status_t st = sfu_dtls_conn_feed(&server_conn, buf, (size_t)n);
       assert(st != SFU_DTLS_FEED_ERROR);
-      if (st == SFU_DTLS_FEED_ESTABLISHED)
+      if (st == SFU_DTLS_FEED_ESTABLISHED) {
         server_done = true;
+      }
 
       uint8_t out[4096];
-      size_t out_len =
-          sfu_dtls_conn_drain_output(&server_conn, out, sizeof(out));
+      size_t out_len = sfu_dtls_conn_drain_output(&server_conn, out, sizeof(out));
       if (out_len > 0) {
         BIO_write(client_rbio, out, (int)out_len);
       }
@@ -87,15 +86,11 @@ int main(void) {
    * the same DTLS master secret -- this is the actual point of DTLS-
    * SRTP (RFC 5764), not just "the handshake completed". */
   uint8_t client_material[SFU_SRTP_KEY_MATERIAL_LEN];
-  assert(SSL_export_keying_material(
-             client_ssl, client_material, SFU_SRTP_KEY_MATERIAL_LEN,
-             "EXTRACTOR-dtls_srtp", 19, NULL, 0, 0) == 1);
-  assert(memcmp(client_material, server_conn.srtp_keying_material,
-                SFU_SRTP_KEY_MATERIAL_LEN) == 0);
+  assert(SSL_export_keying_material(client_ssl, client_material, SFU_SRTP_KEY_MATERIAL_LEN, "EXTRACTOR-dtls_srtp", 19, NULL, 0, 0) == 1);
+  assert(memcmp(client_material, server_conn.srtp_keying_material, SFU_SRTP_KEY_MATERIAL_LEN) == 0);
 
   /* Both sides must have agreed on the same SRTP protection profile. */
-  const SRTP_PROTECTION_PROFILE *client_profile =
-      SSL_get_selected_srtp_profile(client_ssl);
+  const SRTP_PROTECTION_PROFILE *client_profile = SSL_get_selected_srtp_profile(client_ssl);
   assert(client_profile != NULL);
   assert(strcmp(client_profile->name, "SRTP_AES128_CM_SHA1_80") == 0);
 

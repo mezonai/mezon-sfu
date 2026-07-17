@@ -17,19 +17,17 @@ int sfu_srtp_global_init(void) {
 
 void sfu_srtp_global_deinit(void) { srtp_shutdown(); }
 
-static int create_session_dynamic(srtp_t *session, const uint8_t *master_key,
-                                  unsigned long profile_id,
-                                  srtp_ssrc_type_t ssrc_type) {
+static int create_session_dynamic(srtp_t *session, const uint8_t *master_key, unsigned long profile_id, srtp_ssrc_type_t ssrc_type) {
   srtp_policy_t policy;
   memset(&policy, 0, sizeof(policy));
 
-  if (profile_id == 0x0007) { // SRTP_AEAD_AES_128_GCM
+  if (profile_id == 0x0007) {  // SRTP_AEAD_AES_128_GCM
     srtp_crypto_policy_set_aes_gcm_128_16_auth(&policy.rtp);
     srtp_crypto_policy_set_aes_gcm_128_16_auth(&policy.rtcp);
-  } else if (profile_id == 0x0008) { // SRTP_AEAD_AES_256_GCM
+  } else if (profile_id == 0x0008) {  // SRTP_AEAD_AES_256_GCM
     srtp_crypto_policy_set_aes_gcm_256_16_auth(&policy.rtp);
     srtp_crypto_policy_set_aes_gcm_256_16_auth(&policy.rtcp);
-  } else { // Fallback to SRTP_AES128_CM_SHA1_80 (0x0001)
+  } else {  // Fallback to SRTP_AES128_CM_SHA1_80 (0x0001)
     srtp_crypto_policy_set_rtp_default(&policy.rtp);
     srtp_crypto_policy_set_rtcp_default(&policy.rtcp);
   }
@@ -49,18 +47,16 @@ static int create_session_dynamic(srtp_t *session, const uint8_t *master_key,
   return 0;
 }
 
-int sfu_srtp_ctx_init_from_dtls(sfu_srtp_ctx_t *ctx,
-                                const uint8_t *keying_material,
-                                unsigned long profile_id, bool is_server) {
+int sfu_srtp_ctx_init_from_dtls(sfu_srtp_ctx_t *ctx, const uint8_t *keying_material, unsigned long profile_id, bool is_server) {
   memset(ctx, 0, sizeof(*ctx));
 
   int key_len = 16;
   int salt_len = 14;
 
-  if (profile_id == 0x0007) { // GCM-128
+  if (profile_id == 0x0007) {  // GCM-128
     key_len = 16;
     salt_len = 12;
-  } else if (profile_id == 0x0008) { // GCM-256
+  } else if (profile_id == 0x0008) {  // GCM-256
     key_len = 32;
     salt_len = 12;
   }
@@ -83,16 +79,12 @@ int sfu_srtp_ctx_init_from_dtls(sfu_srtp_ctx_t *ctx,
   int rc1, rc2;
   if (is_server) {
     // If we are Server: Inbound = Client, Outbound = Server
-    rc1 = create_session_dynamic(&ctx->inbound, client_master, profile_id,
-                                 ssrc_any_inbound);
-    rc2 = create_session_dynamic(&ctx->outbound, server_master, profile_id,
-                                 ssrc_any_outbound);
+    rc1 = create_session_dynamic(&ctx->inbound, client_master, profile_id, ssrc_any_inbound);
+    rc2 = create_session_dynamic(&ctx->outbound, server_master, profile_id, ssrc_any_outbound);
   } else {
     // If we are Client: Inbound = Server, Outbound = Client
-    rc1 = create_session_dynamic(&ctx->inbound, server_master, profile_id,
-                                 ssrc_any_inbound);
-    rc2 = create_session_dynamic(&ctx->outbound, client_master, profile_id,
-                                 ssrc_any_outbound);
+    rc1 = create_session_dynamic(&ctx->inbound, server_master, profile_id, ssrc_any_inbound);
+    rc2 = create_session_dynamic(&ctx->outbound, client_master, profile_id, ssrc_any_outbound);
   }
 
   if (rc1 != 0 || rc2 != 0) {
@@ -123,12 +115,9 @@ bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
   return true;
 }
 
-bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len,
-                          size_t cap) {
+bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
   if ((size_t)*len + SRTP_MAX_TRAILER_LEN > cap) {
-    SFU_LOG_WARN(
-        "SRTP protect (RTP): insufficient buffer headroom (%d + trailer > %zu)",
-        *len, cap);
+    SFU_LOG_WARN("SRTP protect (RTP): insufficient buffer headroom (%d + trailer > %zu)", *len, cap);
     return false;
   }
   srtp_err_status_t rc = srtp_protect(ctx->outbound, buf, len);
@@ -148,10 +137,8 @@ bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
   return true;
 }
 
-bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len,
-                           size_t cap) {
-  if ((size_t)*len + SRTP_MAX_TRAILER_LEN + 4 >
-      cap) { /* RTCP trailer also carries an E-flag+SRTCP index word */
+bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
+  if ((size_t)*len + SRTP_MAX_TRAILER_LEN + 4 > cap) { /* RTCP trailer also carries an E-flag+SRTCP index word */
     SFU_LOG_WARN("SRTP protect (RTCP): insufficient buffer headroom");
     return false;
   }
@@ -164,8 +151,9 @@ bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len,
 }
 
 bool sfu_rtp_is_rtcp(const uint8_t *data, size_t len) {
-  if (len < 2)
+  if (len < 2) {
     return false;
+  }
   uint8_t pt = data[1];
   return pt >= 192 && pt <= 223;
 }

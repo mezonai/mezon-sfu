@@ -24,31 +24,25 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
   pthread_mutex_destroy(&t->lock);
 }
 
-static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len,
-                       const struct sockaddr_storage *b, socklen_t b_len) {
-  if (a_len != b_len)
+static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const struct sockaddr_storage *b, socklen_t b_len) {
+  if (a_len != b_len) {
     return false;
+  }
   return memcmp(a, b, a_len) == 0;
 }
 
-sfu_peer_session_t *
-sfu_session_table_get_or_create(sfu_session_table_t *t,
-                                const struct sockaddr_storage *addr,
-                                socklen_t addr_len) {
+sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
   pthread_mutex_lock(&t->lock);
 
   for (uint32_t i = 0; i < t->count; i++) {
-    if (t->sessions[i].active &&
-        addr_equal(&t->sessions[i].addr, t->sessions[i].addr_len, addr,
-                   addr_len)) {
+    if (t->sessions[i].active && addr_equal(&t->sessions[i].addr, t->sessions[i].addr_len, addr, addr_len)) {
       pthread_mutex_unlock(&t->lock);
       return &t->sessions[i];
     }
   }
 
   if (t->count >= SFU_SESSION_TABLE_MAX) {
-    SFU_LOG_WARN("session table full (%u), rejecting new peer",
-                 SFU_SESSION_TABLE_MAX);
+    SFU_LOG_WARN("session table full (%u), rejecting new peer", SFU_SESSION_TABLE_MAX);
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
@@ -72,14 +66,10 @@ sfu_session_table_get_or_create(sfu_session_table_t *t,
   return s;
 }
 
-sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t,
-                                           const struct sockaddr_storage *addr,
-                                           socklen_t addr_len) {
+sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
   pthread_mutex_lock(&t->lock);
   for (uint32_t i = 0; i < t->count; i++) {
-    if (t->sessions[i].active &&
-        addr_equal(&t->sessions[i].addr, t->sessions[i].addr_len, addr,
-                   addr_len)) {
+    if (t->sessions[i].active && addr_equal(&t->sessions[i].addr, t->sessions[i].addr_len, addr, addr_len)) {
       pthread_mutex_unlock(&t->lock);
       return &t->sessions[i];
     }

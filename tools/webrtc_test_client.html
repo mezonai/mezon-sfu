@@ -118,8 +118,8 @@
         statusDiv.style.color = isError ? '#f38ba8' : '#a6e3a1';
     }
 
-    // 2. Connect to the signaling socket and send the "join" message
-    function connectAndJoin() {
+    // 2. Main connect action (Keeps your original media sequence intact)
+    async function connectAndJoin() {
         const wsUrl = document.getElementById('wsUrl').value;
         const roomId = document.getElementById('roomId').value;
 
@@ -134,82 +134,73 @@
         }
 
         startBtn.disabled = true;
-        updateStatus("Connecting to signaling server...");
+        updateStatus("Preparing WebRTC local offer...");
 
-        ws = new WebSocket(wsUrl);
-
-        ws.onopen = () => {
-            updateStatus("Connected! Joining room...");
-            // Send the join request block
-            const joinMsg = {
-                type: "join",
-                room: roomId
-            };
-            ws.send(JSON.stringify(joinMsg));
-        };
-
-        ws.onmessage = async (event) => {
-            const msg = JSON.parse(event.data);
-            console.log("Signaling received:", msg);
-
-            if (msg.type === "error") {
-                updateStatus(`Error: ${msg.message}`, true);
-                startBtn.disabled = false;
-                return;
-            }
-
-            // 3. Once joined, construct PeerConnection and push the existing camera tracks
-            if (msg.type === "joined") {
-                updateStatus(`Successfully joined Room ${msg.room}! Initiating WebRTC handshake...`);
-                await negotiateMedia();
-            }
-
-            else if (msg.type === "answer") {
-                updateStatus("SDP Answer received. Media routing established!");
-                await pc.setRemoteDescription(new RTCSessionDescription({
-                    type: 'answer',
-                    sdp: msg.sdp
-                }));
-            }
-        };
-
-        ws.onclose = () => {
-            updateStatus("Signaling link disconnected.", true);
-            startBtn.disabled = false;
-            if (pc) pc.close();
-        };
-
-        ws.onerror = (err) => {
-            updateStatus("Signaling WebSocket error.", true);
-            startBtn.disabled = false;
-        };
-    }
-
-    // 4. Peer Connection configuration and SDP generation
-    async function negotiateMedia() {
         try {
-            const config = { iceServers: [] }; // Insert STUN/TURN servers here if testing outside localhost
+            // Setup WebRTC PeerConnection exactly like the old way
+            const config = { iceServers: [] };
             pc = new RTCPeerConnection(config);
-
-            // Add the pre-loaded camera and mic tracks directly to the PeerConnection
             localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-            // Generate Offer
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
-            // Forward SDP Offer through the established signaling session
-            const offerMsg = {
-                type: "offer",
-                sdp: pc.localDescription.sdp
+            updateStatus("Connecting to signaling server...");
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                updateStatus("Connected! Sending join and media offer...");
+
+                // Send the JOIN message first
+                const joinMsg = {
+                    type: "join",
+                    room: roomId
+                };
+                ws.send(JSON.stringify(joinMsg));
+
+                setTimeout(() => {
+                    const offerMsg = {
+                        type: "offer",
+                        sdp: pc.localDescription.sdp
+                    };
+                    ws.send(JSON.stringify(offerMsg));
+                }, 100);
             };
 
-            updateStatus("Sending media SDP offer to SFU...");
-            ws.send(JSON.stringify(offerMsg));
+            ws.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+                console.log("Signaling received:", msg);
+
+                if (msg.type === "error") {
+                    updateStatus(`Error: ${msg.message}`, true);
+                    startBtn.disabled = false;
+                    return;
+                }
+
+                // Handle the SDP Answer from the server
+                if (msg.type === "answer") {
+                    updateStatus("SDP Answer received. Media routing established!");
+                    await pc.setRemoteDescription(new RTCSessionDescription({
+                        type: 'answer',
+                        sdp: msg.sdp
+                    }));
+                }
+            };
+
+            ws.onclose = () => {
+                updateStatus("Signaling link disconnected.", true);
+                startBtn.disabled = false;
+                if (pc) pc.close();
+            };
+
+            ws.onerror = (err) => {
+                updateStatus("Signaling WebSocket error.", true);
+                startBtn.disabled = false;
+            };
 
         } catch (e) {
-            console.error("Negotiation failed:", e);
-            updateStatus(`WebRTC Negotiation failed: ${e.message}`, true);
+            console.error("Connection failed:", e);
+            updateStatus(`WebRTC failed: ${e.message}`, true);
             startBtn.disabled = false;
         }
     }

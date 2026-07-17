@@ -43,9 +43,7 @@ static const char *SAMPLE_OFFER =
     "192.168.1.5 rport 54321 generation 0\r\n"
     "a=end-of-candidates\r\n";
 
-static int contains(const char *haystack, const char *needle) {
-  return strstr(haystack, needle) != NULL;
-}
+static int contains(const char *haystack, const char *needle) { return strstr(haystack, needle) != NULL; }
 
 static int count_occurrences(const char *haystack, const char *needle) {
   int n = 0;
@@ -60,12 +58,10 @@ static int count_occurrences(const char *haystack, const char *needle) {
 
 int main(void) {
   char answer[8192];
-  int len =
-      sfu_sdp_build_answer(SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1",
-                           17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
-                           "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:"
-                           "FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3",
-                           answer, sizeof(answer));
+  int len = sfu_sdp_build_answer(SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
+                                 "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:"
+                                 "FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3",
+                                 answer, sizeof(answer));
   assert(len > 0);
   answer[len] = '\0';
 
@@ -74,48 +70,39 @@ int main(void) {
     int ok;
   } checks[] = {
       {"contains our ufrag", contains(answer, "a=ice-ufrag:XKrsH3xm")},
-      {"contains our pwd",
-       contains(answer, "a=ice-pwd:dHkzP4aajGOJsWhquFzy3pxr")},
-      {"contains our fingerprint",
-       contains(answer, "a=fingerprint:sha-256 32:01:9A")},
+      {"contains our pwd", contains(answer, "a=ice-pwd:dHkzP4aajGOJsWhquFzy3pxr")},
+      {"contains our fingerprint", contains(answer, "a=fingerprint:sha-256 32:01:9A")},
       {"setup:passive present", contains(answer, "a=setup:passive")},
       {"no setup:actpass leaked", !contains(answer, "actpass")},
-      {"exactly one candidate line",
-       count_occurrences(answer, "a=candidate:") == 1},
-      {"our candidate uses our host:port",
-       contains(answer,
-                "a=candidate:1 1 udp 2130706431 127.0.0.1 17030 typ host")},
-      {"no browser candidates leaked",
-       !contains(answer, "192.168.1.5") && !contains(answer, "203.0.113.9")},
+      {"exactly one candidate line", count_occurrences(answer, "a=candidate:") == 1},
+      {"our candidate uses our host:port", contains(answer, "a=candidate:1 1 udp 2130706431 127.0.0.1 17030 typ host")},
+      {"no browser candidates leaked", !contains(answer, "192.168.1.5") && !contains(answer, "203.0.113.9")},
       {"no browser rtcp line leaked", !contains(answer, "a=rtcp:")},
       {"opus rtpmap preserved", contains(answer, "a=rtpmap:111 opus/48000/2")},
-      {"fmtp preserved",
-       contains(answer, "a=fmtp:111 minptime=10;useinbandfec=1")},
+      {"fmtp preserved", contains(answer, "a=fmtp:111 minptime=10;useinbandfec=1")},
       {"mid preserved", contains(answer, "a=mid:0")},
       {"sendrecv preserved", contains(answer, "a=sendrecv")},
       {"rtcp-mux preserved", contains(answer, "a=rtcp-mux")},
       {"BUNDLE group preserved", contains(answer, "a=group:BUNDLE 0")},
-      {"m=audio port replaced",
-       contains(answer, "m=audio 17030 UDP/TLS/RTP/SAVPF")},
+      {"m=audio port replaced", contains(answer, "m=audio 17030 UDP/TLS/RTP/SAVPF")},
       {"c= line uses our host", contains(answer, "c=IN IP4 127.0.0.1")},
       {"end-of-candidates present", contains(answer, "a=end-of-candidates")},
-      {"no browser ice-options:trickle leaked",
-       !contains(answer, "ice-options:trickle")},
+      {"no browser ice-options:trickle leaked", !contains(answer, "ice-options:trickle")},
   };
 
   int all_ok = 1;
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
     printf("%s - %s\n", checks[i].ok ? "PASS" : "FAIL", checks[i].desc);
-    if (!checks[i].ok)
+    if (!checks[i].ok) {
       all_ok = 0;
+    }
   }
   assert(all_ok);
 
   /* An offer with no m= line must fail cleanly, not crash or emit
    * a bogus answer. */
   const char *no_media = "v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n";
-  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030,
-                              "u", "p", "AA:BB", answer, sizeof(answer)) == -1);
+  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", answer, sizeof(answer)) == -1);
 
   printf("test_sdp: OK\n");
   return 0;

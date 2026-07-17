@@ -50,17 +50,14 @@ typedef struct sfu_fanout_mesh {
   uint32_t worker_count;
 } sfu_fanout_mesh_t;
 
-int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count,
-                         uint32_t ring_capacity, uint32_t job_pool_capacity);
+int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count, uint32_t ring_capacity, uint32_t job_pool_capacity);
 void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh);
 
 /* Producer side (any worker). Takes ownership of one reference on pkt.
  * Returns false on backpressure (job pool exhausted or the target ring
  * is full) -- caller must release its own reference on failure, since
  * ownership did not transfer. */
-bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker,
-                             uint32_t dst_worker, sfu_packet_t *pkt,
-                             const struct sockaddr_storage *dst_addr,
+bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, const struct sockaddr_storage *dst_addr,
                              socklen_t dst_len);
 
 /* Consumer side: pops up to max_count jobs addressed to dst_worker
@@ -68,9 +65,7 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker,
  * Returns the number of jobs drained. */
 typedef void (*sfu_fanout_job_fn)(void *user_data, sfu_fanout_job_t *job);
 
-unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker,
-                               unsigned max_count, sfu_fanout_job_fn on_job,
-                               void *user_data);
+unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data);
 
 /* Returns a drained job's struct back to the shared pool. Caller must
  * have already handled job->pkt's reference (queued a send and released

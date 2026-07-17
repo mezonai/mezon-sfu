@@ -34,10 +34,8 @@ typedef struct sfu_scheduler {
   int fd;
 } sfu_scheduler_t;
 
-int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd,
-                       sfu_packet_pool_t *pp, sfu_worker_t *workers,
-                       uint32_t worker_count, int recv_bgid, uint32_t buf_count,
-                       uint32_t buf_size);
+int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count, int recv_bgid,
+                       uint32_t buf_count, uint32_t buf_size);
 void sfu_scheduler_destroy(sfu_scheduler_t *s);
 
 int sfu_scheduler_start(sfu_scheduler_t *s);

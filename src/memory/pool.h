@@ -23,10 +23,9 @@
 #define SFU_POOL_EMPTY_INDEX 0xFFFFFFFFu
 
 typedef struct sfu_pool {
-  uint8_t *slab;  /* contiguous backing storage: capacity * slot_size */
-  uint32_t *next; /* intrusive free-list links, one per slot          */
-  _Atomic uint64_t
-      head; /* packed (tag << 32) | index, SFU_POOL_EMPTY_INDEX if empty */
+  uint8_t *slab;         /* contiguous backing storage: capacity * slot_size */
+  uint32_t *next;        /* intrusive free-list links, one per slot          */
+  _Atomic uint64_t head; /* packed (tag << 32) | index, SFU_POOL_EMPTY_INDEX if empty */
 
   uint32_t slot_size;
   uint32_t capacity;
@@ -48,8 +47,6 @@ void sfu_pool_free(sfu_pool_t *pool, uint32_t index);
 
 /* Raw pointer lookup for an already-known index (e.g. from a CQE's
  * buffer id) without going through alloc. */
-static inline void *sfu_pool_slot(sfu_pool_t *pool, uint32_t index) {
-  return pool->slab + (size_t)index * pool->slot_size;
-}
+static inline void *sfu_pool_slot(sfu_pool_t *pool, uint32_t index) { return pool->slab + (size_t)index * pool->slot_size; }
 
 #endif /* SFU_MEMORY_POOL_H */

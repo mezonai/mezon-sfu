@@ -1,13 +1,13 @@
 #ifndef SFU_PEER_SESSION_H
 #define SFU_PEER_SESSION_H
 
-#include "room/room.h"
-#include "transport/dtls/dtls.h"
-#include "transport/srtp/srtp.h"
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
+#include "room/room.h"
+#include "transport/dtls/dtls.h"
+#include "transport/srtp/srtp.h"
 
 /*
  * One entry per peer address, tracking connection establishment state:
@@ -58,18 +58,13 @@ void sfu_session_table_destroy(sfu_session_table_t *t);
  * initializing) one on first sight if it doesn't exist yet. Returns
  * NULL only if the table is full. The returned pointer is valid for
  * the table's lifetime (no eviction yet -- see KNOWN LIMITATION). */
-sfu_peer_session_t *
-sfu_session_table_get_or_create(sfu_session_table_t *t,
-                                const struct sockaddr_storage *addr,
-                                socklen_t addr_len);
+sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
 
 /* Read-only lookup: returns NULL if no session exists for this address
  * yet, rather than creating one. Used by the RTP/RTCP forward path,
  * which must never conjure a session (and therefore SRTP keys) out of
  * thin air for a peer that hasn't completed a DTLS handshake -- only
  * STUN/DTLS handling is allowed to create sessions. */
-sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t,
-                                           const struct sockaddr_storage *addr,
-                                           socklen_t addr_len);
+sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
 
 #endif /* SFU_PEER_SESSION_H */

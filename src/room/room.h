@@ -32,12 +32,10 @@ int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name);
 void sfu_room_destroy(sfu_room_t *room);
 
 /* Registers a peer's address + owning worker on first sight */
-void sfu_room_touch_peer(sfu_room_t *room, const struct sockaddr_storage *addr,
-                         socklen_t addr_len, uint32_t worker_id);
+void sfu_room_touch_peer(sfu_room_t *room, const struct sockaddr_storage *addr, socklen_t addr_len, uint32_t worker_id);
 
 /* Copies up to max_out peer entries, excluding the peer matching 'exclude' */
-uint32_t sfu_room_list_subscribers_excluding(
-    sfu_room_t *room, const struct sockaddr_storage *exclude,
-    socklen_t exclude_len, sfu_peer_entry_t *out, uint32_t max_out);
+uint32_t sfu_room_list_subscribers_excluding(sfu_room_t *room, const struct sockaddr_storage *exclude, socklen_t exclude_len, sfu_peer_entry_t *out,
+                                             uint32_t max_out);
 
 #endif /* SFU_ROOM_ROOM_H */

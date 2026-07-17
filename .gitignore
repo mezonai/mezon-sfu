@@ -1,1 +1,15 @@
-build/
+# --- Compiled Binaries (C/C++) ---
+*.o
+*.out
+*.exe
+mezon-proto-server
+
+# --- IDE & Editor Folders ---
+.vscode/
+.history/
+*.log
+
+
+# --- Operating System Files ---
+.DS_Store
+Thumbs.db

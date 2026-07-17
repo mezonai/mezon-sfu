@@ -44,12 +44,9 @@ int main(void) {
    * worker 3 -> worker 1 (dst s3). Mirrors a publisher on core 0
    * reaching subscribers on cores 1 and 2, plus another publisher on
    * core 3 reaching a subscriber on core 1. */
-  assert(sfu_fanout_mesh_enqueue(&mesh, 0, 1, &fake_pkt, &s1,
-                                 sizeof(struct sockaddr_in)));
-  assert(sfu_fanout_mesh_enqueue(&mesh, 0, 2, &fake_pkt, &s2,
-                                 sizeof(struct sockaddr_in)));
-  assert(sfu_fanout_mesh_enqueue(&mesh, 3, 1, &fake_pkt, &s3,
-                                 sizeof(struct sockaddr_in)));
+  assert(sfu_fanout_mesh_enqueue(&mesh, 0, 1, &fake_pkt, &s1, sizeof(struct sockaddr_in)));
+  assert(sfu_fanout_mesh_enqueue(&mesh, 0, 2, &fake_pkt, &s2, sizeof(struct sockaddr_in)));
+  assert(sfu_fanout_mesh_enqueue(&mesh, 3, 1, &fake_pkt, &s3, sizeof(struct sockaddr_in)));
 
   collector_t c = {.mesh = &mesh, .count = 0};
 
@@ -74,8 +71,7 @@ int main(void) {
    * above, we should be able to allocate the full pool capacity again
    * without exhaustion. */
   for (int i = 0; i < 64; i++) {
-    assert(sfu_fanout_mesh_enqueue(&mesh, 0, 1, &fake_pkt, &s1,
-                                   sizeof(struct sockaddr_in)));
+    assert(sfu_fanout_mesh_enqueue(&mesh, 0, 1, &fake_pkt, &s1, sizeof(struct sockaddr_in)));
   }
   c.count = 0;
   drained = sfu_fanout_mesh_drain(&mesh, 1, 100, collect, &c);
