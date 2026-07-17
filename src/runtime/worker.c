@@ -102,8 +102,11 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
     }
 
+    SFU_LOG_INFO("worker %u: Attempting lookup for incoming UDP packet from IP: %s", w->worker_index, peer_ip);
+
     active_room = sfu_lookup_ip_room(peer_ip);
     if (active_room) {
+      SFU_LOG_INFO("worker %u: Match found! IP %s mapped to Room ID: %" PRIu64, w->worker_index, peer_ip, active_room->room_id);
       // Permanently bind this UDP session to the resolved room to prevent future lookups
       sender_session->room = active_room;
     }
