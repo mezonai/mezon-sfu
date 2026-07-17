@@ -37,11 +37,59 @@ static int append_line_n(char *out, size_t out_cap, size_t *offset, const char *
 
 static int append_line(char *out, size_t out_cap, size_t *offset, const char *text) { return append_line_n(out, out_cap, offset, text, strlen(text)); }
 
+/* Helper to append ICE, DTLS, and connection parameters to a media block */
+static int append_media_transport_headers(char *out, size_t out_cap, size_t *offset, const char *host, uint16_t port, const char *ufrag, const char *pwd,
+                                          const char *fingerprint) {
+  char attr[512];
+  int n;
+
+  n = snprintf(attr, sizeof(attr), "c=IN IP4 %s", host);
+  if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+    return -1;
+  }
+
+  if (append_line(out, out_cap, offset, "a=ice-lite") != 0) {
+    return -1;
+  }
+
+  n = snprintf(attr, sizeof(attr), "a=ice-ufrag:%s", ufrag);
+  if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+    return -1;
+  }
+
+  n = snprintf(attr, sizeof(attr), "a=ice-pwd:%s", pwd);
+  if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+    return -1;
+  }
+
+  n = snprintf(attr, sizeof(attr), "a=fingerprint:sha-256 %s", fingerprint);
+  if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+    return -1;
+  }
+
+  if (append_line(out, out_cap, offset, "a=setup:passive") != 0) {
+    return -1;
+  }
+
+  n = snprintf(attr, sizeof(attr), "a=candidate:1 1 udp 2130706431 %s %u typ host", host, port);
+  if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+    return -1;
+  }
+
+  if (append_line(out, out_cap, offset, "a=end-of-candidates") != 0) {
+    return -1;
+  }
+
+  return 0;
+}
+
 int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                          char *out, size_t out_cap) {
   size_t off = 0;
   int in_media = 0;  // 0 = parsing session level, 1 = parsing media level
   int saw_media_line = 0;
+  int has_audio = 0;
+  int has_video = 0;
 
   size_t pos = 0;
   while (pos < offer_len) {
@@ -63,6 +111,14 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       continue;
     }
 
+    // Force bundle groups to expect 4 tracks (mids: 0 1 2 3) instead of just 0 and 1
+    if (starts_with(line, len, "a=group:BUNDLE")) {
+      if (append_line(out, out_cap, &off, "a=group:BUNDLE 0 1 2 3") != 0) {
+        return -1;
+      }
+      continue;
+    }
+
     if (starts_with(line, len, "o=")) {
       char o_line[128];
       int n = snprintf(o_line, sizeof(o_line), "o=- %ld 2 IN IP4 %s", (long)time(NULL), host);
@@ -76,6 +132,12 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       saw_media_line = 1;
       in_media = 1;
 
+      if (starts_with(line, len, "m=audio")) {
+        has_audio = 1;
+      } else if (starts_with(line, len, "m=video")) {
+        has_video = 1;
+      }
+
       const char *sp1 = memchr(line, ' ', len);
       if (!sp1) {
         return -1;
@@ -86,70 +148,29 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       }
 
       char m_line[256];
-      int m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s", (int)(sp1 - line), line, port, (int)(len - (size_t)(sp2 - line)), sp2);
+      int m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s", (int)(sp1 - line), port, (int)(len - (size_t)(sp2 - line)), sp2);
       if (m_len < 0 || (size_t)m_len >= sizeof(m_line) || append_line_n(out, out_cap, &off, m_line, (size_t)m_len) != 0) {
         return -1;
       }
 
-      // Inject our SFU media attributes right after the m= line
-      char attr[512];
-      int n;
-      n = snprintf(attr, sizeof(attr), "c=IN IP4 %s", host);
-      if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, &off, attr, (size_t)n) != 0) {
-        return -1;
-      }
-
-      if (append_line(out, out_cap, &off, "a=ice-lite") != 0) {
-        return -1;
-      }
-
-      n = snprintf(attr, sizeof(attr), "a=ice-ufrag:%s", ufrag);
-      if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, &off, attr, (size_t)n) != 0) {
-        return -1;
-      }
-
-      n = snprintf(attr, sizeof(attr), "a=ice-pwd:%s", pwd);
-      if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, &off, attr, (size_t)n) != 0) {
-        return -1;
-      }
-
-      n = snprintf(attr, sizeof(attr), "a=fingerprint:sha-256 %s", fingerprint);
-      if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, &off, attr, (size_t)n) != 0) {
-        return -1;
-      }
-
-      if (append_line(out, out_cap, &off, "a=setup:passive") != 0) {
-        return -1;
-      }
-
-      n = snprintf(attr, sizeof(attr), "a=candidate:1 1 udp 2130706431 %s %u typ host", host, port);
-      if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, &off, attr, (size_t)n) != 0) {
-        return -1;
-      }
-
-      if (append_line(out, out_cap, &off, "a=end-of-candidates") != 0) {
+      // Inject transport headers cleanly using the helper ONLY once
+      if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
         return -1;
       }
       continue;
     }
 
     if (!in_media) {
-      // Skip session-level setup/ice/fingerprint attributes so they don't
-      // conflict with our media level block
       if (should_skip_line(line, len)) {
         continue;
       }
-
       if (append_line_n(out, out_cap, &off, line, len) != 0) {
         return -1;
       }
     } else {
-      // Skip the offer's media-level setup/ice/fingerprints (we already
-      // appended our own above)
       if (should_skip_line(line, len)) {
         continue;
       }
-
       if (append_line_n(out, out_cap, &off, line, len) != 0) {
         return -1;
       }
@@ -159,6 +180,81 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
   if (!saw_media_line) {
     SFU_LOG_WARN("SDP offer had no m= line, cannot build an answer");
     return -1;
+  }
+
+  // ==========================================================
+  // INJECT DOWNLINK SECTIONS (SFU -> Client)
+  // ==========================================================
+
+  if (has_audio) {
+    // 2. Audio Downlink (mid: 2)
+    if (append_line(out, out_cap, &off, "m=audio 7000 UDP/TLS/RTP/SAVPF 109 101") != 0) {
+      return -1;
+    }
+    if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=mid:2") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=sendrecv") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtpmap:109 opus/48000/2") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtpmap:101 telephone-event/8000") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=ssrc:999999901 cname:remote-peer") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=msid:remote-stream remote-audio-track") != 0) {
+      return -1;
+    }
+  }
+
+  if (has_video) {
+    // 3. Video Downlink (mid: 3)
+    if (append_line(out, out_cap, &off, "m=video 7000 UDP/TLS/RTP/SAVPF 120 124") != 0) {
+      return -1;
+    }
+    if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=mid:3") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=sendrecv") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtpmap:120 VP8/90000") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtpmap:124 rtx/90000") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=fmtp:124 apt=120") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=ssrc:999999902 cname:remote-peer") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=ssrc:999999903 cname:remote-peer") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=ssrc-group:FID 999999902 999999903") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=msid:remote-stream remote-video-track") != 0) {
+      return -1;
+    }
   }
 
   return (int)off;
