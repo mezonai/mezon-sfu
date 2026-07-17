@@ -111,7 +111,7 @@
 </div>
 
 <script>
-    let ws = null;
+let ws = null;
     let pc = null;
     let localStream = null;
     let remoteStream = null;
@@ -119,16 +119,39 @@
     const statusDiv = document.getElementById('status');
     const startBtn = document.getElementById('startBtn');
 
-    // 1. Initialize camera on load
+    // 1. Initialize available hardware on load
     window.addEventListener('DOMContentLoaded', async () => {
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            document.getElementById('localVideo').srcObject = localStream;
-            updateStatus("Camera active. Ready to connect and join room.");
+            // Check what devices are actually connected to the system
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const hasVideo = devices.some(device => device.kind === 'videoinput');
+            const hasAudio = devices.some(device => device.kind === 'audioinput');
+
+            // Fallback cleanly if no media inputs exist anywhere
+            if (!hasVideo && !hasAudio) {
+                updateStatus("No camera or microphone found. You can still join to watch/listen.");
+                localStream = new MediaStream(); // Empty stream container
+                return;
+            }
+
+            // Build constraints dynamically based on physical hardware presence
+            const constraints = {
+                video: hasVideo,
+                audio: hasAudio
+            };
+
+            localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+            if (hasVideo) {
+                document.getElementById('localVideo').srcObject = localStream;
+            }
+
+            updateStatus("Media initialized. Ready to connect and join room.");
         } catch (e) {
-            console.error("Camera access denied:", e);
-            updateStatus("Error: Camera access denied. Please grant permissions and reload.", true);
-            startBtn.disabled = true;
+            console.error("Media initialization error:", e);
+            // Handle permission denials safely without breaking the client execution completely
+            updateStatus("Media access denied. Joining as receiver-only.", false);
+            localStream = new MediaStream(); // Clean fallback state
         }
     });
 
@@ -142,11 +165,6 @@
         const wsUrl = document.getElementById('wsUrl').value;
         const roomId = document.getElementById('roomId').value;
 
-        if (!localStream) {
-            updateStatus("Cannot join: Camera is not active.", true);
-            return;
-        }
-
         if (!roomId) {
             updateStatus("Please enter a Room ID", true);
             return;
@@ -156,15 +174,12 @@
         updateStatus("Preparing WebRTC PeerConnection...");
 
         try {
-            // Configure WebRTC Connection
             const config = { iceServers: [] };
             pc = new RTCPeerConnection(config);
 
-            // Create target stream for remote audio and video tracks
             remoteStream = new MediaStream();
             document.getElementById('remoteVideo').srcObject = remoteStream;
 
-            // NEW: Listen for incoming remote tracks from the SFU
             pc.ontrack = (event) => {
                 console.log("Remote track received:", event.track.kind);
                 event.streams[0].getTracks().forEach(track => {
@@ -173,10 +188,21 @@
                 updateStatus("Connected! Remote participant's video is rendering.");
             };
 
-            // Push our local tracks into the peer connection
-            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            // Push whatever local tracks we managed to initialize (could be 0, 1, or 2)
+            if (localStream) {
+                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            }
 
-            // Generate Local SDP Offer
+            // If local hardware was completely missing, force transceiver slots to match
+            // the SFU's expected structure so it still negotiates standard layouts cleanly.
+            const transceivers = pc.getTransceivers();
+            if (!transceivers.some(t => t.receiver.track.kind === 'audio')) {
+                pc.addTransceiver('audio', { direction: 'recvonly' });
+            }
+            if (!transceivers.some(t => t.receiver.track.kind === 'video')) {
+                pc.addTransceiver('video', { direction: 'recvonly' });
+            }
+
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
@@ -186,14 +212,12 @@
             ws.onopen = () => {
                 updateStatus("Connected! Joining room and publishing offer...");
 
-                // A. Send the JOIN message first
                 const joinMsg = {
                     type: "join",
                     room: roomId
                 };
                 ws.send(JSON.stringify(joinMsg));
 
-                // B. Delay offering slightly so the room registration is secured in memory
                 setTimeout(() => {
                     const offerMsg = {
                         type: "offer",
