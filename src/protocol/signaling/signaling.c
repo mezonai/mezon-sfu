@@ -108,11 +108,76 @@ static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_
   */
 }
 
+static int extract_header_val(const char *handshake, const char *header_name, char *out_val, size_t out_len) {
+  char search_str[128];
+  snprintf(search_str, sizeof(search_str), "\r\n%s:", header_name);
+
+  // Look for the header (case-insensitive check is ideal, but standard casing is fine here)
+  const char *pos = strcasestr(handshake, search_str);
+  if (!pos) {
+    // Also try without prepended CRLF just in case it's the very first header line
+    snprintf(search_str, sizeof(search_str), "%s:", header_name);
+    if (strncmp(handshake, search_str, strlen(search_str)) == 0) {
+      pos = handshake;
+    } else {
+      return -1;  // Header not found
+    }
+  } else {
+    pos += 2;  // Move past \r\n
+  }
+
+  // Move past header name and colon
+  pos += strlen(header_name) + 1;
+
+  // Skip leading whitespace spaces
+  while (*pos == ' ' || *pos == '\t') {
+    pos++;
+  }
+
+  // Find the end of the line
+  const char *end = strstr(pos, "\r\n");
+  if (!end) {
+    return -1;
+  }
+
+  size_t len = (size_t)(end - pos);
+  if (len >= out_len) {
+    len = out_len - 1;
+  }
+
+  strncpy(out_val, pos, len);
+  out_val[len] = '\0';
+
+  // If X-Forwarded-For contains a chain of IPs (e.g. "client, proxy1"), isolate the first one
+  char *comma = strchr(out_val, ',');
+  if (comma) {
+    *comma = '\0';
+  }
+
+  return 0;
+}
+
 static void *conn_thread_main(void *arg) {
   conn_ctx_t *ctx = (conn_ctx_t *)arg;
   int fd = ctx->fd;
   sfu_signaling_server_t *s = ctx->server;
   SFU_FREE(ctx);
+
+  char peer_ip[64] = "unknown";
+  int ip_detected_from_header = 0;
+
+  char peek_buf[2048];
+  ssize_t peek_len = recv(fd, peek_buf, sizeof(peek_buf) - 1, MSG_PEEK);
+  if (peek_len > 0) {
+    peek_buf[peek_len] = '\0';
+
+    // Try checking X-Real-IP first
+    if (extract_header_val(peek_buf, "X-Real-IP", peer_ip, sizeof(peer_ip)) == 0) {
+      ip_detected_from_header = 1;
+    } else if (extract_header_val(peek_buf, "X-Forwarded-For", peer_ip, sizeof(peer_ip)) == 0) {
+      ip_detected_from_header = 1;
+    }
+  }
 
   if (sfu_ws_handshake(fd) != 0) {
     SFU_LOG_WARN("signaling: WebSocket handshake failed");
@@ -120,7 +185,7 @@ static void *conn_thread_main(void *arg) {
     return NULL;
   }
 
-  // Get client socket address to map signaling to UDP session
+  // Get socket address mapping structs
   struct sockaddr_storage peer_addr;
   socklen_t peer_addr_len = sizeof(peer_addr);
   if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_addr_len) != 0) {
@@ -128,15 +193,31 @@ static void *conn_thread_main(void *arg) {
     return NULL;
   }
 
-  // Convert IP to string for logging/NATS payload
-  char peer_ip[64] = "unknown";
-  if (peer_addr.ss_family == AF_INET) {
-    struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
-    inet_ntop(AF_INET, &s4->sin_addr, peer_ip, sizeof(peer_ip));
-  } else if (peer_addr.ss_family == AF_INET6) {
-    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
-    inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
+  if (!ip_detected_from_header) {
+    if (peer_addr.ss_family == AF_INET) {
+      struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
+      inet_ntop(AF_INET, &s4->sin_addr, peer_ip, sizeof(peer_ip));
+    } else if (peer_addr.ss_family == AF_INET6) {
+      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
+      inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
+    }
+  } else {
+    // If the real IP was successfully parsed from the header, translate it back
+    // to the socket address structure so standard STUN mapping logic remains perfectly aligned!
+    if (strchr(peer_ip, ':')) {
+      // IPv6 Address Found
+      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
+      s6->sin6_family = AF_INET6;
+      inet_pton(AF_INET6, peer_ip, &s6->sin6_addr);
+    } else {
+      // IPv4 Address Found
+      struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
+      s4->sin_family = AF_INET;
+      inet_pton(AF_INET, peer_ip, &s4->sin_addr);
+    }
   }
+
+  SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", peer_ip, ip_detected_from_header ? "YES" : "NO");
 
   char buf[SFU_SIGNALING_RECV_CAP];
   for (;;) {
@@ -163,16 +244,14 @@ static void *conn_thread_main(void *arg) {
         continue;
       }
 
-      // Find or create the session in shared memory
+      // Find or create the session using the adjusted peer address containing the real IP
       sfu_peer_session_t *session = sfu_session_table_get_or_create(s->sessions, &peer_addr, peer_addr_len);
       if (session) {
         sfu_room_t *room = sfu_room_registry_get_or_create(s->room_registry, room_id);
         if (room) {
           session->room = room;
 
-          // Register the IP-to-Room mapping for the dynamic UDP media session!
           sfu_register_ip_room(peer_ip, room);
-
           publish_join_event_to_nats(s, room_id, peer_ip);
 
           char response[128];
@@ -185,7 +264,6 @@ static void *conn_thread_main(void *arg) {
         sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"session_creation_failed\"}", 52);
       }
     } else if (strcmp(type, "offer") == 0) {
-      // Find the session (must exist if they called join first)
       sfu_peer_session_t *session = sfu_session_table_find(s->sessions, &peer_addr, peer_addr_len);
       if (!session || !session->room) {
         SFU_LOG_WARN("signaling: offer received before join completed for peer");
