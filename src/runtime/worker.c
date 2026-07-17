@@ -59,32 +59,36 @@ void sfu_worker_destroy(sfu_worker_t *w) {
  * only its own DTLS session knows -- every subscriber negotiated
  * independent keys of their own -- so this is necessarily a decrypt-
  * once, re-encrypt-per-subscriber relay, not a byte-for-byte fan-out.
- * The zero-copy machinery still pays for itself on the *send* side
- * (send_zc avoids a syscall-side copy per subscriber); it just can't
- * avoid the crypto operation itself, which is unavoidably per-destination
- * once each peer has its own key.
- *
- * For each subscriber in the room (every other known peer, until real
- * publish/subscribe signaling narrows that down):
- *   - same worker as the sender -> queue send_zc directly on this
- *     worker's own send_ring.
- *   - different worker -> hand the freshly-encrypted, uniquely-owned
- *     buffer to the fan-out mesh, which queues it on the owning
- *     worker's send_ring on that worker's own next tick.
- *
- * Ends by dropping the reference this function was handed (the
- * dispatcher's transferred ownership) via the worker-safe release path.
  */
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
+  // Extract string representations of the source IP and port for tracking
+  char peer_ip[64] = "unknown";
+  uint16_t peer_port = 0;
+  if (pkt->peer_addr.ss_family == AF_INET) {
+    struct sockaddr_in *s4 = (struct sockaddr_in *)&pkt->peer_addr;
+    inet_ntop(AF_INET, &s4->sin_addr, peer_ip, sizeof(peer_ip));
+    peer_port = ntohs(s4->sin_port);
+  } else if (pkt->peer_addr.ss_family == AF_INET6) {
+    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&pkt->peer_addr;
+    inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
+    peer_port = ntohs(s6->sin6_port);
+  }
+
   // Find the sender's active session first
   sfu_peer_session_t *sender_session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
 
-  if (!sender_session || sender_session->state != SFU_SESSION_ESTABLISHED) {
-    /* No completed DTLS handshake means no keys -- can't decrypt,
-     * so there's nothing safe to forward. Drop rather than pass
-     * ciphertext through blindly (which would just be noise to
-     * every subscriber, since none of their keys would decrypt it
-     * either). */
+  // DIAGNOSTIC LOG 1: Track if the session registry table even knows this socket address
+  if (!sender_session) {
+    SFU_LOG_WARN("worker %u: UNKNOWN PACKET! Received UDP data from unregistered endpoint %s:%u (size=%u). Dropping.", w->worker_index, peer_ip, peer_port,
+                 pkt->len);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    return;
+  }
+
+  // DIAGNOSTIC LOG 2: Verify the exact DTLS state machine value if handshake is incomplete
+  if (sender_session->state != SFU_SESSION_ESTABLISHED) {
+    SFU_LOG_WARN("worker %u: HANDSHAKE NOT READY! Packet from %s:%u dropped because session state is %d (Expected ESTABLISHED=%d)", w->worker_index, peer_ip,
+                 peer_port, sender_session->state, SFU_SESSION_ESTABLISHED);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
@@ -92,16 +96,6 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   // Validate that the session is bound to an active, initialized room
   sfu_room_t *active_room = sender_session->room;
   if (!active_room) {
-    // Fallback: Since UDP port does not match TCP port, resolve room by client IP
-    char peer_ip[64] = "unknown";
-    if (pkt->peer_addr.ss_family == AF_INET) {
-      struct sockaddr_in *s4 = (struct sockaddr_in *)&pkt->peer_addr;
-      inet_ntop(AF_INET, &s4->sin_addr, peer_ip, sizeof(peer_ip));
-    } else if (pkt->peer_addr.ss_family == AF_INET6) {
-      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&pkt->peer_addr;
-      inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
-    }
-
     SFU_LOG_INFO("worker %u: Attempting lookup for incoming UDP packet from IP: %s", w->worker_index, peer_ip);
 
     active_room = sfu_lookup_ip_room(peer_ip);
@@ -109,14 +103,14 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       SFU_LOG_INFO("worker %u: Match found! IP %s mapped to Room ID: %" PRIu64, w->worker_index, peer_ip, active_room->room_id);
       // Permanently bind this UDP session to the resolved room to prevent future lookups
       sender_session->room = active_room;
+    } else {
+      // DIAGNOSTIC LOG 3: Explicit log for when IP routing lookup returns absolutely nothing
+      SFU_LOG_ERROR("worker %u: ROOM LOOKUP FAILED! No active room registry matches IP %s", w->worker_index, peer_ip);
     }
   }
 
   if (!active_room) {
-    SFU_LOG_WARN(
-        "worker %u: packet received from session with no assigned "
-        "room, dropping",
-        w->worker_index);
+    SFU_LOG_WARN("worker %u: packet received from session with no assigned room, dropping", w->worker_index);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
@@ -128,7 +122,10 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   int plain_len = (int)pkt->len;
   bool unprotected =
       is_rtcp ? sfu_srtp_unprotect_rtcp(&sender_session->srtp, pkt->data, &plain_len) : sfu_srtp_unprotect_rtp(&sender_session->srtp, pkt->data, &plain_len);
+
+  // DIAGNOSTIC LOG 4: Check if decrypt keys match the incoming SRTP auth tags
   if (!unprotected) {
+    SFU_LOG_ERROR("worker %u: SRTP DECRYPTION FAILED! Could not unprotect packet from %s:%u. Check DTLS keys.", w->worker_index, peer_ip, peer_port);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
@@ -187,10 +184,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 
-/* Consumes one job handed to this worker by another worker's fan-out
- * (runtime/fanout.h). Queues the actual send on this worker's own
- * send_ring, releases the reference the job carried, and returns the
- * job struct to the shared pool. */
+/* Consumes one job handed to this worker by another worker's fan-out */
 static void handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
@@ -211,8 +205,7 @@ static void *worker_thread_main(void *arg) {
   while (!sfu_shutdown_requested()) {
     bool did_work = false;
 
-    /* packets received directly from the dispatcher (this
-     *    worker's own inbox). */
+    /* packets received directly from the dispatcher (this worker's own inbox). */
     void *item;
     int drained = 0;
     while (drained < SFU_WORKER_REAP_BATCH && sfu_spsc_ring_pop(&w->inbox, &item)) {
@@ -221,10 +214,7 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    /* jobs handed to this worker by *other* workers' fan-out --
-     *    this is the cross-thread delivery path: a publisher's
-     *    packet whose sender happened to land on a different core
-     *    than one of its subscribers. */
+    /* jobs handed to this worker by *other* workers' fan-out */
     unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, handle_fanout_job, w);
     if (fanned > 0) {
       did_work = true;
@@ -234,11 +224,6 @@ static void *worker_thread_main(void *arg) {
       sfu_ring_submit(&w->send_ring);
     }
 
-    /* release_to_dispatcher is passed here (non-NULL) because this
-     * is a send-only ring with no buf_ring of its own -- NOTIF
-     * completions for kernel-sourced packets must route the buffer
-     * index back to the dispatcher rather than touch a buf_ring
-     * that doesn't exist on this ring. See sfu_ring_reap's doc. */
     unsigned reaped = sfu_ring_reap(&w->send_ring, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w);
     if (reaped > 0) {
       did_work = true;
