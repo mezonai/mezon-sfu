@@ -51,9 +51,7 @@ typedef struct sfu_ring {
 /* with_recv_bufs=false skips provided-buffer-ring setup entirely, for
  * send-only rings (workers) that never arm a multishot recv. buf_count/
  * buf_size/bgid are ignored in that case. */
-int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
-                  uint32_t cq_entries, uint32_t buf_count, uint32_t buf_size,
-                  int bgid, bool with_recv_bufs);
+int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entries, uint32_t buf_count, uint32_t buf_size, int bgid, bool with_recv_bufs);
 void sfu_ring_destroy(sfu_ring_t *r);
 
 /* Arms (or re-arms, if the kernel ever exhausts the multishot request --
@@ -65,8 +63,7 @@ int sfu_ring_arm_recv(sfu_ring_t *r);
  * queuing (the in-flight send is itself a reference); the corresponding
  * release happens in sfu_ring_reap() when the NOTIF completion arrives.
  * Does not submit; caller batches sends and calls sfu_ring_submit(). */
-int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt,
-                           const struct sockaddr *dst, socklen_t dst_len);
+int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len);
 
 /* Flushes all queued SQEs to the kernel in one syscall. */
 int sfu_ring_submit(sfu_ring_t *r);
@@ -96,11 +93,8 @@ int sfu_ring_submit(sfu_ring_t *r);
 typedef void (*sfu_on_recv_fn)(void *user_data, sfu_packet_t *pkt);
 typedef void (*sfu_on_send_complete_fn)(void *user_data, sfu_packet_t *pkt);
 
-unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
-                       sfu_spsc_ring_t *release_to_dispatcher,
-                       sfu_on_recv_fn on_recv,
-                       sfu_on_send_complete_fn on_send_complete,
-                       void *user_data);
+unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher, sfu_on_recv_fn on_recv,
+                       sfu_on_send_complete_fn on_send_complete, void *user_data);
 
 /* Releases a packet's reference; recycles it (kernel buf_ring_add for
  * SFU_BUF_SOURCE_KERNEL, or packet_pool free for SFU_BUF_SOURCE_POOL)
@@ -109,8 +103,7 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
  * any) came from -- i.e. the dispatcher, for kernel-sourced packets.
  * Workers must use sfu_worker_release_packet() instead; see its
  * comment for why. */
-void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp,
-                             sfu_packet_t *pkt);
+void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt);
 
 /*
  * Worker-safe packet release. A worker is very often the one dropping
@@ -133,16 +126,12 @@ void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp,
  * runtime/worker.h) -- one per worker, so this stays a proper SPSC
  * producer/consumer pair, no locking needed on either side.
  */
-void sfu_worker_release_packet(sfu_packet_pool_t *pp,
-                               sfu_spsc_ring_t *to_dispatcher,
-                               sfu_packet_t *pkt);
+void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt);
 
 /* Dispatcher-only: drains a worker's kernel-buffer-return ring and
  * hands each index back to the kernel provided-buffer ring in one
  * batched add+advance. Called once per dispatcher tick, once per
  * worker's release ring. */
-unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r,
-                                              sfu_spsc_ring_t *from_worker,
-                                              unsigned max_count);
+unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *from_worker, unsigned max_count);
 
 #endif /* SFU_NET_IO_URING_H */

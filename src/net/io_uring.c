@@ -10,9 +10,7 @@
 #include <string.h>
 #include <sys/socket.h>
 
-int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
-                  uint32_t cq_entries, uint32_t buf_count, uint32_t buf_size,
-                  int bgid, bool with_recv_bufs) {
+int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entries, uint32_t buf_count, uint32_t buf_size, int bgid, bool with_recv_bufs) {
   memset(r, 0, sizeof(*r));
   r->fd = fd;
 
@@ -28,8 +26,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
   }
 
   if (!with_recv_bufs) {
-    SFU_LOG_INFO("io_uring ring initialized (send-only): sq=%u cq=%u",
-                 sq_entries, cq_entries);
+    SFU_LOG_INFO("io_uring ring initialized (send-only): sq=%u cq=%u", sq_entries, cq_entries);
     return 0;
   }
 
@@ -44,8 +41,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
   r->buf_size = buf_size;
   r->buf_count = buf_count;
   r->bgid = bgid;
-  r->buf_ring_mem =
-      SFU_ALIGNED_ALLOC(SFU_CACHELINE_SIZE, (size_t)buf_count * buf_size);
+  r->buf_ring_mem = SFU_ALIGNED_ALLOC(SFU_CACHELINE_SIZE, (size_t)buf_count * buf_size);
   if (!r->buf_ring_mem) {
     SFU_LOG_ERROR("failed to allocate provided-buffer backing store");
     io_uring_queue_exit(&r->ring);
@@ -53,8 +49,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
   }
 
   int setup_ret = 0;
-  r->buf_ring =
-      io_uring_setup_buf_ring(&r->ring, buf_count, bgid, 0, &setup_ret);
+  r->buf_ring = io_uring_setup_buf_ring(&r->ring, buf_count, bgid, 0, &setup_ret);
   if (!r->buf_ring) {
     SFU_LOG_ERROR("io_uring_setup_buf_ring failed: %s", strerror(-setup_ret));
     SFU_FREE(r->buf_ring_mem);
@@ -65,8 +60,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
   int mask = io_uring_buf_ring_mask(buf_count);
   for (uint32_t i = 0; i < buf_count; i++) {
     void *addr = (uint8_t *)r->buf_ring_mem + (size_t)i * buf_size;
-    io_uring_buf_ring_add(r->buf_ring, addr, buf_size, (unsigned short)i, mask,
-                          (int)i);
+    io_uring_buf_ring_add(r->buf_ring, addr, buf_size, (unsigned short)i, mask, (int)i);
   }
   io_uring_buf_ring_advance(r->buf_ring, (int)buf_count);
 
@@ -77,8 +71,7 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries,
   memset(&r->recv_msg_template, 0, sizeof(r->recv_msg_template));
   r->recv_msg_template.msg_namelen = sizeof(struct sockaddr_storage);
 
-  SFU_LOG_INFO("io_uring ring initialized: sq=%u cq=%u bufs=%u x %uB bgid=%d",
-               sq_entries, cq_entries, buf_count, buf_size, bgid);
+  SFU_LOG_INFO("io_uring ring initialized: sq=%u cq=%u bufs=%u x %uB bgid=%d", sq_entries, cq_entries, buf_count, buf_size, bgid);
   return 0;
 }
 
@@ -107,8 +100,7 @@ int sfu_ring_arm_recv(sfu_ring_t *r) {
   return 0;
 }
 
-int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt,
-                           const struct sockaddr *dst, socklen_t dst_len) {
+int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
   struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
   if (!sqe) {
     return -1; /* SQ full: caller should submit() and retry, or drop */
@@ -136,18 +128,15 @@ int sfu_ring_submit(sfu_ring_t *r) {
   return rc;
 }
 
-void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp,
-                             sfu_packet_t *pkt) {
+void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
   if (!sfu_packet_release(pkt)) {
     return; /* other references still outstanding */
   }
 
   if (pkt->buf_source == SFU_BUF_SOURCE_KERNEL) {
     int mask = io_uring_buf_ring_mask(r->buf_count);
-    void *addr =
-        (uint8_t *)r->buf_ring_mem + (size_t)pkt->kbuf_index * r->buf_size;
-    io_uring_buf_ring_add(r->buf_ring, addr, r->buf_size, pkt->kbuf_index, mask,
-                          0);
+    void *addr = (uint8_t *)r->buf_ring_mem + (size_t)pkt->kbuf_index * r->buf_size;
+    io_uring_buf_ring_add(r->buf_ring, addr, r->buf_size, pkt->kbuf_index, mask, 0);
     io_uring_buf_ring_advance(r->buf_ring, 1);
     sfu_packet_pool_free_meta(pp, pkt);
   } else {
@@ -155,9 +144,7 @@ void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp,
   }
 }
 
-void sfu_worker_release_packet(sfu_packet_pool_t *pp,
-                               sfu_spsc_ring_t *to_dispatcher,
-                               sfu_packet_t *pkt) {
+void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt) {
   if (!sfu_packet_release(pkt)) {
     return;
   }
@@ -172,21 +159,19 @@ void sfu_worker_release_packet(sfu_packet_pool_t *pp,
      * dispatcher, which is the sole thread allowed to touch its
      * own buf_ring. Pack the index as a tagged pointer-sized value
      * so the SPSC ring's void* slots don't need a separate pool. */
-    void *item =
-        (void *)(uintptr_t)((uint64_t)kbuf_index + 1); /* +1: never push NULL */
+    void *item = (void *)(uintptr_t)((uint64_t)kbuf_index + 1); /* +1: never push NULL */
     if (!sfu_spsc_ring_push(to_dispatcher, item)) {
-      SFU_LOG_WARN("release queue to dispatcher full, kernel buffer %u "
-                   "temporarily leaked (transient under sustained overload)",
-                   kbuf_index);
+      SFU_LOG_WARN(
+          "release queue to dispatcher full, kernel buffer %u "
+          "temporarily leaked (transient under sustained overload)",
+          kbuf_index);
     }
   } else {
     sfu_packet_pool_free(pp, pkt);
   }
 }
 
-unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r,
-                                              sfu_spsc_ring_t *from_worker,
-                                              unsigned max_count) {
+unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *from_worker, unsigned max_count) {
   unsigned n = 0;
   int mask = io_uring_buf_ring_mask(r->buf_count);
   void *item;
@@ -194,8 +179,7 @@ unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r,
   while (n < max_count && sfu_spsc_ring_pop(from_worker, &item)) {
     uint16_t kbuf_index = (uint16_t)(((uint64_t)(uintptr_t)item) - 1);
     void *addr = (uint8_t *)r->buf_ring_mem + (size_t)kbuf_index * r->buf_size;
-    io_uring_buf_ring_add(r->buf_ring, addr, r->buf_size, kbuf_index, mask,
-                          (int)n);
+    io_uring_buf_ring_add(r->buf_ring, addr, r->buf_size, kbuf_index, mask, (int)n);
     n++;
   }
 
@@ -210,9 +194,7 @@ unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r,
  * sfu_packet_t (no copy), and re-arms the multishot request if the
  * kernel terminated it (IORING_CQE_F_MORE unset -- happens on error or
  * when it's been asked to stop, e.g. buffer ring temporarily exhausted). */
-static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe,
-                            sfu_packet_pool_t *pp, sfu_on_recv_fn on_recv,
-                            void *user_data) {
+static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_pool_t *pp, sfu_on_recv_fn on_recv, void *user_data) {
   if (cqe->res < 0) {
     if (cqe->res != -ENOBUFS) {
       SFU_LOG_WARN("recvmsg cqe error: %s", strerror(-cqe->res));
@@ -228,8 +210,7 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe,
   uint16_t bid = (uint16_t)(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
   void *buf = (uint8_t *)r->buf_ring_mem + (size_t)bid * r->buf_size;
 
-  struct io_uring_recvmsg_out *o =
-      io_uring_recvmsg_validate(buf, cqe->res, &r->recv_msg_template);
+  struct io_uring_recvmsg_out *o = io_uring_recvmsg_validate(buf, cqe->res, &r->recv_msg_template);
   if (!o) {
     SFU_LOG_WARN("malformed recvmsg_out, dropping (bid=%u)", bid);
     int mask = io_uring_buf_ring_mask(r->buf_count);
@@ -252,8 +233,7 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe,
   }
 
   void *payload = io_uring_recvmsg_payload(o, &r->recv_msg_template);
-  uint32_t payload_len =
-      io_uring_recvmsg_payload_length(o, cqe->res, &r->recv_msg_template);
+  uint32_t payload_len = io_uring_recvmsg_payload_length(o, cqe->res, &r->recv_msg_template);
 
   pkt->data = (uint8_t *)payload;
   pkt->len = payload_len;
@@ -263,8 +243,9 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe,
 
   void *name = io_uring_recvmsg_name(o);
   socklen_t namelen = o->namelen;
-  if (namelen > sizeof(pkt->peer_addr))
+  if (namelen > sizeof(pkt->peer_addr)) {
     namelen = sizeof(pkt->peer_addr);
+  }
   memcpy(&pkt->peer_addr, name, namelen);
   pkt->peer_addr_len = namelen;
 
@@ -278,14 +259,12 @@ maybe_rearm:
   }
 }
 
-unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
-                       sfu_spsc_ring_t *release_to_dispatcher,
-                       sfu_on_recv_fn on_recv,
-                       sfu_on_send_complete_fn on_send_complete,
-                       void *user_data) {
+unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher, sfu_on_recv_fn on_recv,
+                       sfu_on_send_complete_fn on_send_complete, void *user_data) {
   struct io_uring_cqe *cqes[256];
-  if (max_count > 256)
+  if (max_count > 256) {
     max_count = 256;
+  }
 
   unsigned n = sfu_batch_peek_cqe(&r->ring, cqes, max_count);
   bool needs_submit = false;
@@ -304,8 +283,9 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
        * the first completion just means "accepted for send". */
       sfu_packet_t *pkt = (sfu_packet_t *)(uintptr_t)data;
       if (cqe->flags & IORING_CQE_F_NOTIF) {
-        if (on_send_complete)
+        if (on_send_complete) {
           on_send_complete(user_data, pkt);
+        }
 
         /* r may be a send-only worker ring with no buf_ring of
          * its own -- if so, release_to_dispatcher routes

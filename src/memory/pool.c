@@ -3,20 +3,17 @@
 
 #include <string.h>
 
-static inline uint64_t pack(uint32_t tag, uint32_t index) {
-  return ((uint64_t)tag << 32) | (uint64_t)index;
-}
+static inline uint64_t pack(uint32_t tag, uint32_t index) { return ((uint64_t)tag << 32) | (uint64_t)index; }
 static inline uint32_t unpack_tag(uint64_t v) { return (uint32_t)(v >> 32); }
-static inline uint32_t unpack_index(uint64_t v) {
-  return (uint32_t)(v & 0xFFFFFFFFu);
-}
+static inline uint32_t unpack_index(uint64_t v) { return (uint32_t)(v & 0xFFFFFFFFu); }
 
 int sfu_pool_init(sfu_pool_t *pool, uint32_t capacity, uint32_t slot_size) {
   memset(pool, 0, sizeof(*pool));
 
   pool->slab = SFU_ALIGNED_ALLOC(64, (size_t)capacity * slot_size);
-  if (!pool->slab)
+  if (!pool->slab) {
     return -1;
+  }
 
   pool->next = SFU_MALLOC(sizeof(uint32_t) * capacity);
   if (!pool->next) {
@@ -58,12 +55,11 @@ void *sfu_pool_alloc(sfu_pool_t *pool, uint32_t *out_index) {
     uint32_t tag = unpack_tag(old_head);
     uint64_t new_head = pack(tag + 1, next_idx);
 
-    if (atomic_compare_exchange_weak_explicit(&pool->head, &old_head, new_head,
-                                              memory_order_acq_rel,
-                                              memory_order_acquire)) {
+    if (atomic_compare_exchange_weak_explicit(&pool->head, &old_head, new_head, memory_order_acq_rel, memory_order_acquire)) {
       atomic_fetch_add_explicit(&pool->in_use, 1, memory_order_relaxed);
-      if (out_index)
+      if (out_index) {
         *out_index = idx;
+      }
       return sfu_pool_slot(pool, idx);
     }
     /* CAS failed: old_head was refreshed by the intrinsic, retry. */
@@ -80,9 +76,7 @@ void sfu_pool_free(sfu_pool_t *pool, uint32_t index) {
     pool->next[index] = old_idx;
     uint64_t new_head = pack(tag + 1, index);
 
-    if (atomic_compare_exchange_weak_explicit(&pool->head, &old_head, new_head,
-                                              memory_order_acq_rel,
-                                              memory_order_acquire)) {
+    if (atomic_compare_exchange_weak_explicit(&pool->head, &old_head, new_head, memory_order_acq_rel, memory_order_acquire)) {
       atomic_fetch_sub_explicit(&pool->in_use, 1, memory_order_relaxed);
       return;
     }

@@ -15,12 +15,13 @@ int main(void) {
     int fds[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
-    const char *request = "GET /chat HTTP/1.1\r\n"
-                          "Host: server.example.com\r\n"
-                          "Upgrade: websocket\r\n"
-                          "Connection: Upgrade\r\n"
-                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-                          "Sec-WebSocket-Version: 13\r\n\r\n";
+    const char *request =
+        "GET /chat HTTP/1.1\r\n"
+        "Host: server.example.com\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n\r\n";
     assert(write(fds[1], request, strlen(request)) == (ssize_t)strlen(request));
 
     assert(sfu_ws_handshake(fds[0]) == 0);
@@ -31,9 +32,7 @@ int main(void) {
     response[n] = '\0';
 
     assert(strstr(response, "101") != NULL);
-    assert(strstr(response,
-                  "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") !=
-           NULL);
+    assert(strstr(response, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != NULL);
 
     close(fds[0]);
     close(fds[1]);
@@ -52,10 +51,9 @@ int main(void) {
 
     uint8_t raw[64];
     ssize_t n = read(fds[1], raw, sizeof(raw));
-    assert(n ==
-           (ssize_t)(2 + strlen(msg))); /* 2-byte header, no mask, len < 126 */
-    assert(raw[0] == 0x81);             /* FIN=1, opcode=text */
-    assert(raw[1] == (uint8_t)strlen(msg)); /* no mask bit */
+    assert(n == (ssize_t)(2 + strlen(msg))); /* 2-byte header, no mask, len < 126 */
+    assert(raw[0] == 0x81);                  /* FIN=1, opcode=text */
+    assert(raw[1] == (uint8_t)strlen(msg));  /* no mask bit */
     assert(memcmp(raw + 2, msg, strlen(msg)) == 0);
 
     /* Now the reverse: hand-construct a masked client frame and
@@ -70,8 +68,9 @@ int main(void) {
     frame[off++] = 0x80 | (uint8_t)plen; /* MASK bit + length */
     memcpy(frame + off, mask_key, 4);
     off += 4;
-    for (size_t i = 0; i < plen; i++)
+    for (size_t i = 0; i < plen; i++) {
       frame[off++] = (uint8_t)payload[i] ^ mask_key[i % 4];
+    }
 
     assert(write(fds[1], frame, off) == (ssize_t)off);
 

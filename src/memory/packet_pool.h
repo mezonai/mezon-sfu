@@ -17,8 +17,7 @@ typedef struct sfu_packet_pool {
   sfu_pool_t data; /* slots of SFU_PACKET_BUF_SIZE  */
 } sfu_packet_pool_t;
 
-int sfu_packet_pool_init(sfu_packet_pool_t *pp, uint32_t capacity,
-                         uint32_t buf_size);
+int sfu_packet_pool_init(sfu_packet_pool_t *pp, uint32_t capacity, uint32_t buf_size);
 void sfu_packet_pool_destroy(sfu_packet_pool_t *pp);
 
 /* Allocates a packet slot; data buffer is uninitialized. Refcount starts

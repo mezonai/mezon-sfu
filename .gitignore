@@ -1,1 +1,15 @@
-build/
+# --- Compiled Binaries (C/C++) ---
+*.o
+*.out
+*.exe
+build
+
+# --- IDE & Editor Folders ---
+.vscode/
+.history/
+*.log
+
+
+# --- Operating System Files ---
+.DS_Store
+Thumbs.db
