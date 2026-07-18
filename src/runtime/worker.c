@@ -1,5 +1,5 @@
 #include "runtime/worker.h"
-#include <arpa/inet.h>
+#include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
 #include "pipeline/dispatch.h"
@@ -11,8 +11,6 @@
 #define SFU_WORKER_SEND_CQ_ENTRIES 2048
 #define SFU_WORKER_REAP_BATCH 128
 #define SFU_WORKER_IDLE_SLEEP_US 200
-
-extern sfu_room_t *sfu_lookup_ip_room(const char *ip);
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
                     sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions, const sfu_ice_credentials_t *ice_creds, uint32_t inbox_capacity, int send_bgid) {
@@ -54,86 +52,58 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   sfu_spsc_ring_destroy(&w->inbox);
 }
 
-/*
- * Real forward step. A publisher's ciphertext was encrypted with keys
- * only its own DTLS session knows -- every subscriber negotiated
- * independent keys of their own -- so this is necessarily a decrypt-
- * once, re-encrypt-per-subscriber relay, not a byte-for-byte fan-out.
- */
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
-  // Extract string representations of the source IP and port for tracking
-  char peer_ip[64] = "unknown";
-  uint16_t peer_port = 0;
-  if (pkt->peer_addr.ss_family == AF_INET) {
-    struct sockaddr_in *s4 = (struct sockaddr_in *)&pkt->peer_addr;
-    inet_ntop(AF_INET, &s4->sin_addr, peer_ip, sizeof(peer_ip));
-    peer_port = ntohs(s4->sin_port);
-  } else if (pkt->peer_addr.ss_family == AF_INET6) {
-    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&pkt->peer_addr;
-    inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
-    peer_port = ntohs(s6->sin6_port);
-  }
-
-  // Find the sender's active session first
   sfu_peer_session_t *sender_session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
 
-  // DIAGNOSTIC LOG 1: Track if the session registry table even knows this socket address
-  if (!sender_session) {
-    SFU_LOG_WARN("worker %u: UNKNOWN PACKET! Received UDP data from unregistered endpoint %s:%u (size=%u). Dropping.", w->worker_index, peer_ip, peer_port,
-                 pkt->len);
+  if (!sender_session || sender_session->state != SFU_SESSION_ESTABLISHED) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
 
-  // DIAGNOSTIC LOG 2: Verify the exact DTLS state machine value if handshake is incomplete
-  if (sender_session->state != SFU_SESSION_ESTABLISHED) {
-    SFU_LOG_WARN("worker %u: HANDSHAKE NOT READY! Packet from %s:%u dropped because session state is %d (Expected ESTABLISHED=%d)", w->worker_index, peer_ip,
-                 peer_port, sender_session->state, SFU_SESSION_ESTABLISHED);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-    return;
-  }
-
-  // Validate that the session is bound to an active, initialized room
   sfu_room_t *active_room = sender_session->room;
   if (!active_room) {
-    SFU_LOG_INFO("worker %u: Attempting lookup for incoming UDP packet from IP: %s", w->worker_index, peer_ip);
-
-    active_room = sfu_lookup_ip_room(peer_ip);
-    if (active_room) {
-      SFU_LOG_INFO("worker %u: Match found! IP %s mapped to Room ID: %" PRIu64, w->worker_index, peer_ip, active_room->room_id);
-      // Permanently bind this UDP session to the resolved room to prevent future lookups
-      sender_session->room = active_room;
-    } else {
-      // DIAGNOSTIC LOG 3: Explicit log for when IP routing lookup returns absolutely nothing
-      SFU_LOG_ERROR("worker %u: ROOM LOOKUP FAILED! No active room registry matches IP %s", w->worker_index, peer_ip);
+    static _Thread_local uint32_t no_room_warn_counter = 0;
+    if ((no_room_warn_counter++ % 200) == 0) {
+      SFU_LOG_WARN(
+          "worker %u: packet from established session with NO room bound yet "
+          "(seen %u times on this worker so far) -- check the signaling log for "
+          "this peer's \"registered client ufrag\" line, and the STUN log for "
+          "\"bound session ... to room_id\"; dropping",
+          w->worker_index, no_room_warn_counter);
     }
-  }
-
-  if (!active_room) {
-    SFU_LOG_WARN("worker %u: packet received from session with no assigned room, dropping", w->worker_index);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
 
-  // Register peer presence inside their dynamic room
   sfu_room_touch_peer(active_room, &pkt->peer_addr, pkt->peer_addr_len, w->worker_index);
 
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
   int plain_len = (int)pkt->len;
   bool unprotected =
       is_rtcp ? sfu_srtp_unprotect_rtcp(&sender_session->srtp, pkt->data, &plain_len) : sfu_srtp_unprotect_rtp(&sender_session->srtp, pkt->data, &plain_len);
-
-  // DIAGNOSTIC LOG 4: Check if decrypt keys match the incoming SRTP auth tags
   if (!unprotected) {
-    SFU_LOG_ERROR("worker %u: SRTP DECRYPTION FAILED! Could not unprotect packet from %s:%u. Check DTLS keys.", w->worker_index, peer_ip, peer_port);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
   pkt->len = (uint32_t)plain_len; /* pkt->data now holds plaintext */
 
-  // Retrieve subscribers belonging exclusively to this session's room
   sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
   uint32_t n = sfu_room_list_subscribers_excluding(active_room, &pkt->peer_addr, pkt->peer_addr_len, subs, SFU_ROOM_MAX_PEERS);
+
+  static _Thread_local uint32_t trace_counter = 0;
+  if ((trace_counter++ % 2000) == 0) {
+    SFU_LOG_INFO("worker %u: forwarding room_id=%" PRIu64 " (rtcp=%d) -> %u subscriber(s)", w->worker_index, active_room->room_id, (int)is_rtcp, n);
+  }
+
+  if (n == 0) {
+    static _Thread_local uint32_t zero_subs_counter = 0;
+    if ((zero_subs_counter++ % 500) == 0) {
+      SFU_LOG_INFO("worker %u: room_id=%" PRIu64
+                   " has 0 other subscribers for this sender "
+                   "(seen %u times) -- expected if this is the only peer connected so far",
+                   w->worker_index, active_room->room_id, zero_subs_counter);
+    }
+  }
 
   for (uint32_t i = 0; i < n; i++) {
     sfu_peer_entry_t *sub = &subs[i];
@@ -184,7 +154,6 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 
-/* Consumes one job handed to this worker by another worker's fan-out */
 static void handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
@@ -205,7 +174,6 @@ static void *worker_thread_main(void *arg) {
   while (!sfu_shutdown_requested()) {
     bool did_work = false;
 
-    /* packets received directly from the dispatcher (this worker's own inbox). */
     void *item;
     int drained = 0;
     while (drained < SFU_WORKER_REAP_BATCH && sfu_spsc_ring_pop(&w->inbox, &item)) {
@@ -214,7 +182,6 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    /* jobs handed to this worker by *other* workers' fan-out */
     unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, handle_fanout_job, w);
     if (fanned > 0) {
       did_work = true;
