@@ -55,7 +55,6 @@
             background: #45475a;
             font-family: monospace;
         }
-        /* Video Grid Layout for 2 Participants */
         .video-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -75,7 +74,7 @@
             border-radius: 6px;
         }
         .local-video {
-            transform: scaleX(-1); /* Mirror local video only */
+            transform: scaleX(-1);
         }
     </style>
 </head>
@@ -105,13 +104,14 @@
         </div>
         <div class="video-box">
             <label>Remote Participant</label>
+            <!-- Unmuted to allow audio playback -->
             <video id="remoteVideo" autoplay playsinline></video>
         </div>
     </div>
 </div>
 
 <script>
-let ws = null;
+    let ws = null;
     let pc = null;
     let localStream = null;
     let remoteStream = null;
@@ -119,28 +119,22 @@ let ws = null;
     const statusDiv = document.getElementById('status');
     const startBtn = document.getElementById('startBtn');
 
-    // 1. Initialize available hardware on load
     window.addEventListener('DOMContentLoaded', async () => {
         try {
-            // Check what devices are actually connected to the system
             const devices = await navigator.mediaDevices.enumerateDevices();
             const hasVideo = devices.some(device => device.kind === 'videoinput');
             const hasAudio = devices.some(device => device.kind === 'audioinput');
 
-            // Fallback cleanly if no media inputs exist anywhere
             if (!hasVideo && !hasAudio) {
-                updateStatus("No camera or microphone found. You can still join to watch/listen.");
-                localStream = new MediaStream(); // Empty stream container
+                updateStatus("No camera or microphone found. Joining as receiver-only.");
+                localStream = new MediaStream();
                 return;
             }
 
-            // Build constraints dynamically based on physical hardware presence
-            const constraints = {
+            localStream = await navigator.mediaDevices.getUserMedia({
                 video: hasVideo,
                 audio: hasAudio
-            };
-
-            localStream = await navigator.mediaDevices.getUserMedia(constraints);
+            });
 
             if (hasVideo) {
                 document.getElementById('localVideo').srcObject = localStream;
@@ -149,9 +143,8 @@ let ws = null;
             updateStatus("Media initialized. Ready to connect and join room.");
         } catch (e) {
             console.error("Media initialization error:", e);
-            // Handle permission denials safely without breaking the client execution completely
             updateStatus("Media access denied. Joining as receiver-only.", false);
-            localStream = new MediaStream(); // Clean fallback state
+            localStream = new MediaStream();
         }
     });
 
@@ -160,7 +153,6 @@ let ws = null;
         statusDiv.style.color = isError ? '#f38ba8' : '#a6e3a1';
     }
 
-    // 2. Connect to server
     async function connectAndJoin() {
         const wsUrl = document.getElementById('wsUrl').value;
         const roomId = document.getElementById('roomId').value;
@@ -174,32 +166,35 @@ let ws = null;
         updateStatus("Preparing WebRTC PeerConnection...");
 
         try {
-            const config = { iceServers: [] };
-            pc = new RTCPeerConnection(config);
-
+            pc = new RTCPeerConnection({ iceServers: [] });
             remoteStream = new MediaStream();
-            document.getElementById('remoteVideo').srcObject = remoteStream;
 
+            const remoteVideoEl = document.getElementById('remoteVideo');
+            remoteVideoEl.srcObject = remoteStream;
+
+            // FIX 1: Attach tracks directly without relying on event.streams[0]
             pc.ontrack = (event) => {
-                console.log("Remote track received:", event.track.kind);
-                event.streams[0].getTracks().forEach(track => {
-                    remoteStream.addTrack(track);
-                });
-                updateStatus("Connected! Remote participant's video is rendering.");
+                console.log("Remote track received:", event.track.kind, event.track);
+                remoteStream.addTrack(event.track);
+
+                // Explicitly call play() to bypass browser auto-play policies when tracks arrive asynchronously
+                remoteVideoEl.play().catch(e => console.warn("Playout auto-play notice:", e));
+                updateStatus(`Connected! Remote ${event.track.kind} track active.`);
             };
 
-            // Push whatever local tracks we managed to initialize (could be 0, 1, or 2)
-            if (localStream) {
-                localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-            }
+            // FIX 2: Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
+            const audioTrack = localStream ? localStream.getAudioTracks()[0] : null;
+            const videoTrack = localStream ? localStream.getVideoTracks()[0] : null;
 
-            // If local hardware was completely missing, force transceiver slots to match
-            // the SFU's expected structure so it still negotiates standard layouts cleanly.
-            const transceivers = pc.getTransceivers();
-            if (!transceivers.some(t => t.receiver.track.kind === 'audio')) {
+            if (audioTrack) {
+                pc.addTransceiver(audioTrack, { direction: 'sendrecv', streams: [localStream] });
+            } else {
                 pc.addTransceiver('audio', { direction: 'recvonly' });
             }
-            if (!transceivers.some(t => t.receiver.track.kind === 'video')) {
+
+            if (videoTrack) {
+                pc.addTransceiver(videoTrack, { direction: 'sendrecv', streams: [localStream] });
+            } else {
                 pc.addTransceiver('video', { direction: 'recvonly' });
             }
 
@@ -211,19 +206,10 @@ let ws = null;
 
             ws.onopen = () => {
                 updateStatus("Connected! Joining room and publishing offer...");
-
-                const joinMsg = {
-                    type: "join",
-                    room: roomId
-                };
-                ws.send(JSON.stringify(joinMsg));
+                ws.send(JSON.stringify({ type: "join", room: roomId }));
 
                 setTimeout(() => {
-                    const offerMsg = {
-                        type: "offer",
-                        sdp: pc.localDescription.sdp
-                    };
-                    ws.send(JSON.stringify(offerMsg));
+                    ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
                 }, 100);
             };
 
@@ -238,10 +224,38 @@ let ws = null;
                 }
 
                 if (msg.type === "answer") {
-                    updateStatus("SDP Answer received. Media connection active. Waiting for peer...");
+                    updateStatus("SDP Answer received. Media connection active!");
                     await pc.setRemoteDescription(new RTCSessionDescription({
                         type: 'answer',
                         sdp: msg.sdp
+                    }));
+                }
+
+                // FIX 3A: Handle server-initiated offers (when a new participant joins the room)
+                if (msg.type === "offer") {
+                    console.log("Server initiated renegotiation offer for new peer");
+                    updateStatus("New participant joined! Establishing media bridge...");
+                    await pc.setRemoteDescription(new RTCSessionDescription({
+                        type: 'offer',
+                        sdp: msg.sdp
+                    }));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    ws.send(JSON.stringify({
+                        type: "answer",
+                        sdp: pc.localDescription.sdp
+                    }));
+                }
+
+                // FIX 3B: Handle SFUs that trigger renegotiation via an event rather than a direct SDP offer
+                if (msg.type === "renegotiate" || msg.type === "peer-joined") {
+                    console.log("Server requested renegotiation");
+                    updateStatus("Renegotiating session for new participant...");
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    ws.send(JSON.stringify({
+                        type: "offer",
+                        sdp: pc.localDescription.sdp
                     }));
                 }
             };
@@ -252,7 +266,7 @@ let ws = null;
                 if (pc) pc.close();
             };
 
-            ws.onerror = (err) => {
+            ws.onerror = () => {
                 updateStatus("Signaling WebSocket error.", true);
                 startBtn.disabled = false;
             };

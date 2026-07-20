@@ -129,7 +129,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
     enc->len = (uint32_t)enc_len;
 
-    SFU_LOG_INFO("worker fwd from %u to %u (len=%u)", w->worker_index, sub->worker_id, enc->len);
+    SFU_LOG_DEBUG("worker fwd from %u to %u (len=%u)", w->worker_index, sub->worker_id, enc->len);
 
     if (sub->worker_id == w->worker_index) {
       if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub->addr, sub->addr_len) != 0) {
@@ -150,7 +150,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 static void handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
-  SFU_LOG_INFO("worker %u: [FANOUT DEQUEUE] Sending %u bytes to peer socket via io_uring", w->worker_index, job->pkt->len);
+  SFU_LOG_DEBUG("worker %u: [FANOUT DEQUEUE] Sending %u bytes to peer socket via io_uring", w->worker_index, job->pkt->len);
 
   if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
     SFU_LOG_WARN("worker %u: [EGRESS DROP] remote-fanout send SQ full, dropping packet", w->worker_index);
