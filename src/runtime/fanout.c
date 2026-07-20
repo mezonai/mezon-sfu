@@ -80,8 +80,6 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data) {
   unsigned drained = 0;
 
-  SFU_LOG_INFO("DEQ mesh=%p dst worker=%d user_data=%p", mesh, dst_worker, user_data);
-
   for (uint32_t src = 0; src < mesh->worker_count && drained < max_count; src++) {
     if (src == dst_worker) {
       continue; /* diagonal unused */
