@@ -185,6 +185,8 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
+  SFU_LOG_INFO("worker %u RTP from %s:%u len=%u", w->worker_index, ip, port, pkt->len);
+
   /* Media traffic */
   sfu_room_forward_packet(w, pkt);
 }

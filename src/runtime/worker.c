@@ -68,6 +68,8 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   sfu_room_touch_peer(active_room, &pkt->peer_addr, pkt->peer_addr_len, w->worker_index);
 
+  SFU_LOG_INFO("room %" PRIu64 " peer_count=%u", active_room->room_id, active_room->peer_count);
+
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
   int plain_len = (int)pkt->len;
   bool unprotected =
@@ -80,6 +82,8 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
   uint32_t n = sfu_room_list_subscribers_excluding(active_room, &pkt->peer_addr, pkt->peer_addr_len, subs, SFU_ROOM_MAX_PEERS);
+
+  SFU_LOG_INFO("worker %u subscribers=%u", w->worker_index, n);
 
   for (uint32_t i = 0; i < n; i++) {
     sfu_peer_entry_t *sub = &subs[i];
