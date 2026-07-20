@@ -47,6 +47,8 @@ static void send_raw(sfu_worker_t *w, const uint8_t *data, size_t len, const str
   memcpy(out->data, data, len);
   out->len = (uint32_t)len;
 
+  SFU_LOG_INFO("SEND_ZC worker=%u pkt=%p len=%lu", w->worker_index, data, len);
+
   if (sfu_ring_queue_send_zc(&w->send_ring, out, (const struct sockaddr *)dst, dst_len) != 0) {
     SFU_LOG_WARN("worker %u: send SQ full, dropping handshake response", w->worker_index);
   }
@@ -96,7 +98,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  SFU_LOG_INFO("worker %u: Responding to STUN Binding Request from %s:%u", w->worker_index, ip, port);
+  SFU_LOG_DEBUG("worker %u: Responding to STUN Binding Request from %s:%u", w->worker_index, ip, port);
+
   send_raw(w, response, response_len, &pkt->peer_addr, pkt->peer_addr_len);
 
   if (have_ufrag) {
