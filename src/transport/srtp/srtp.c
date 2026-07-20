@@ -36,8 +36,9 @@ static int create_session_dynamic(srtp_t *session, const uint8_t *master_key, un
   policy.ssrc.value = 0;
   policy.key = (uint8_t *)master_key;
   policy.next = NULL;
-  policy.window_size = 128;
-  policy.allow_repeat_tx = 0;
+  policy.window_size = 1024;
+  // Allow duplicate/reordered packet processing without throwing fatal crypto errors
+  policy.allow_repeat_tx = 1;
 
   srtp_err_status_t rc = srtp_create(session, &policy);
   if (rc != srtp_err_status_ok) {
