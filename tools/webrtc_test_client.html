@@ -204,21 +204,20 @@
                     let isRenegotiating = false;
 
                     pc.onnegotiationneeded = async () => {
-                        if (isRenegotiating) return;
+                        // Critical Fix: Ignore automated triggers until our initial handshakes are fully completed
+                        if (!isInitialOfferSent || isRenegotiating || pc.signalingState !== "stable") {
+                            return;
+                        }
                         try {
                             isRenegotiating = true;
+                            console.log("Browser triggered onnegotiationneeded. Sending updated offer...");
                             const offer = await pc.createOffer();
                             await pc.setLocalDescription(offer);
-                            ws.send(
-                                JSON.stringify({
-                                    type: "offer",
-                                    sdp: pc.localDescription.sdp,
-                                }),
-                            );
+                            ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
                         } catch (err) {
-                            console.error(err);
+                            console.error("Renegotiation offer generation failed:", err);
                         } finally {
-                            isRenegotiating = false; // Reset only after the signaling state is stable
+                            isRenegotiating = false;
                         }
                     };
 
