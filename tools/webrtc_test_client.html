@@ -268,7 +268,7 @@
 
                 // FIX 3B: Handle SFUs that trigger renegotiation via an event rather than a direct SDP offer
                 if (msg.type === "renegotiate" || msg.type === "peer-joined") {
-                    if (isRenegotiating || peerConnection.signalingState !== "stable") {
+                    if (isRenegotiating || pc.signalingState !== "stable") {
                         console.log("Renegotiation requested but already negotiating or unstable. Skipping.");
                         return;
                     }
