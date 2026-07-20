@@ -172,36 +172,38 @@ static bool room_has_this_publisher(sfu_room_t *room, const char *client_ufrag) 
   return found;
 }
 
-static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio, uint32_t ans_video,
-                                  uint32_t ans_rtx) {
+static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *client_ufrag, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio,
+                                  uint32_t ans_video, uint32_t ans_rtx) {
   char answer[SFU_SIGNALING_SDP_CAP];
   int answer_len = sfu_sdp_build_answer(offer_sdp, offer_sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd,
                                         s->dtls_ctx->fingerprint, ans_audio, ans_video, ans_rtx, answer, sizeof(answer));
   if (answer_len < 0) {
-    SFU_LOG_WARN("signaling: failed to build SDP answer");
+    SFU_LOG_WARN("signaling: failed to build SDP answer (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
+  SFU_LOG_INFO("signaling: raw answer built: %d bytes (fd=%d, ufrag=%s, audio_ssrc=%u, video_ssrc=%u, rtx_ssrc=%u)", answer_len, fd, client_ufrag, ans_audio,
+               ans_video, ans_rtx);
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(answer, (size_t)answer_len, escaped, sizeof(escaped));
   if (escaped_len < 0) {
-    SFU_LOG_WARN("signaling: answer too large to escape into JSON response");
+    SFU_LOG_WARN("signaling: answer too large to escape into JSON response (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
 
   char response[SFU_SIGNALING_JSON_CAP + 64];
   int response_len = snprintf(response, sizeof(response), "{\"type\":\"answer\",\"sdp\":\"%s\"}", escaped);
   if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
-    SFU_LOG_WARN("signaling: response too large to send");
+    SFU_LOG_WARN("signaling: response too large to send (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
 
   if (sfu_ws_send_text(fd, response, (size_t)response_len) != 0) {
-    SFU_LOG_WARN("signaling: failed to send answer over WebSocket (fd=%d)", fd);
+    SFU_LOG_WARN("signaling: failed to send answer over WebSocket (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
 
-  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %zu-byte offer (fd=%d)", response_len, offer_sdp_len, fd);
+  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %zu-byte offer (fd=%d, ufrag=%s)", response_len, offer_sdp_len, fd, client_ufrag);
   return true;
 }
 
@@ -243,7 +245,7 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
     sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
   }
 
-  build_and_send_answer(fd, s, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
+  build_and_send_answer(fd, s, client_ufrag, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
 
   if (room && client_ufrag[0] != '\0' && (off_audio != 0 || off_video != 0)) {
     if (!was_already_publishing) {
