@@ -5,7 +5,7 @@
     let remoteStream = null;
     let isInitialOfferSent = false; // Prevents race condition between manual offer and automated handler
 
-    const statusDiv = document.getElementById('status');
+    let statusDiv;
     const startBtn = document.getElementById('startBtn');
 
     window.addEventListener('DOMContentLoaded', async () => {
@@ -38,8 +38,18 @@
     });
 
     function updateStatus(msg, isError = false) {
-        statusDiv.innerText = `Status: ${msg}`;
-        statusDiv.style.color = isError ? '#f38ba8' : '#a6e3a1';
+        // Lazily fetch the element if we haven't already
+        if (!statusDiv) {
+            statusDiv = document.getElementById('status');
+        }
+
+        // Safety check in case the DOM really hasn't built it yet
+        if (statusDiv) {
+            statusDiv.innerText = `Status: ${msg}`;
+            statusDiv.style.color = isError ? '#f38ba8' : '#a6e3a1';
+        } else {
+            console.log(`Status Drop: ${msg}`); // Fallback so you don't lose logs
+        }
     }
 
     async function connectAndJoin() {
