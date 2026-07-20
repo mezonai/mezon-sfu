@@ -12,10 +12,8 @@
 #define SFU_DISPATCH_REAP_BATCH 256
 #define SFU_DISPATCH_IDLE_SLEEP_US 100
 
-int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd,
-                       sfu_packet_pool_t *pp, sfu_worker_t *workers,
-                       uint32_t worker_count, int recv_bgid, uint32_t buf_count,
-                       uint32_t buf_size) {
+int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count, int recv_bgid,
+                       uint32_t buf_count, uint32_t buf_size) {
   memset(s, 0, sizeof(*s));
   s->core_id = core_id;
   s->fd = fd;
@@ -23,9 +21,7 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd,
   s->workers = workers;
   s->worker_count = worker_count;
 
-  if (sfu_ring_init(&s->recv_ring, fd, SFU_DISPATCH_SQ_ENTRIES,
-                    SFU_DISPATCH_CQ_ENTRIES, buf_count, buf_size, recv_bgid,
-                    true) != 0) {
+  if (sfu_ring_init(&s->recv_ring, fd, SFU_DISPATCH_SQ_ENTRIES, SFU_DISPATCH_CQ_ENTRIES, buf_count, buf_size, recv_bgid, true) != 0) {
     SFU_LOG_ERROR("scheduler: failed to init recv ring");
     return -1;
   }
@@ -33,14 +29,11 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd,
   return 0;
 }
 
-void sfu_scheduler_destroy(sfu_scheduler_t *s) {
-  sfu_ring_destroy(&s->recv_ring);
-}
+void sfu_scheduler_destroy(sfu_scheduler_t *s) { sfu_ring_destroy(&s->recv_ring); }
 
 /* FNV-1a over the sender's address bytes -- cheap, decent distribution
  * for the placeholder 4-tuple routing key described in scheduler.h. */
-static uint32_t hash_peer_addr(const struct sockaddr_storage *addr,
-                               socklen_t len) {
+static uint32_t hash_peer_addr(const struct sockaddr_storage *addr, socklen_t len) {
   const uint8_t *bytes = (const uint8_t *)addr;
   uint32_t h = 2166136261u;
   for (socklen_t i = 0; i < len; i++) {
@@ -84,8 +77,7 @@ static void *scheduler_thread_main(void *arg) {
   SFU_LOG_INFO("scheduler (dispatcher) started on core %d", s->core_id);
 
   while (!sfu_shutdown_requested()) {
-    unsigned reaped = sfu_ring_reap(&s->recv_ring, SFU_DISPATCH_REAP_BATCH,
-                                    s->pp, NULL, on_recv, NULL, &ctx);
+    unsigned reaped = sfu_ring_reap(&s->recv_ring, SFU_DISPATCH_REAP_BATCH, s->pp, NULL, on_recv, NULL, &ctx);
 
     /* Only this thread may touch its own buf_ring -- drain every
      * worker's release queue here and hand kernel buffer indices
@@ -94,9 +86,7 @@ static void *scheduler_thread_main(void *arg) {
      * this themselves. */
     unsigned returned = 0;
     for (uint32_t i = 0; i < s->worker_count; i++) {
-      returned += sfu_ring_drain_kernel_buffer_returns(
-          &s->recv_ring, &s->workers[i].release_to_dispatcher,
-          SFU_DISPATCH_REAP_BATCH);
+      returned += sfu_ring_drain_kernel_buffer_returns(&s->recv_ring, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
     }
 
     if (reaped == 0 && returned == 0) {

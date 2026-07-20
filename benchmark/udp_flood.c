@@ -27,9 +27,7 @@ static uint64_t now_ns(void) {
 
 int main(int argc, char **argv) {
   if (argc < 4) {
-    fprintf(stderr,
-            "usage: %s <host> <port> <duration_sec> [packet_size=200]\n",
-            argv[0]);
+    fprintf(stderr, "usage: %s <host> <port> <duration_sec> [packet_size=200]\n", argv[0]);
     return 1;
   }
 
@@ -61,10 +59,10 @@ int main(int argc, char **argv) {
   uint64_t sent = 0;
 
   while (now_ns() < deadline) {
-    ssize_t rc =
-        sendto(fd, buf, pkt_size, 0, (struct sockaddr *)&dst, sizeof(dst));
-    if (rc < 0)
+    ssize_t rc = sendto(fd, buf, pkt_size, 0, (struct sockaddr *)&dst, sizeof(dst));
+    if (rc < 0) {
       continue; /* backpressure/EAGAIN on a busy loop: skip */
+    }
     sent++;
   }
 
@@ -72,8 +70,7 @@ int main(int argc, char **argv) {
   double secs = (double)elapsed_ns / 1e9;
   double pps = (double)sent / secs;
 
-  printf("sent=%lu duration=%.2fs pps=%.0f throughput=%.2f Mbps\n",
-         (unsigned long)sent, secs, pps, (pps * pkt_size * 8) / 1e6);
+  printf("sent=%lu duration=%.2fs pps=%.0f throughput=%.2f Mbps\n", (unsigned long)sent, secs, pps, (pps * pkt_size * 8) / 1e6);
 
   mi_free(buf);
   close(fd);

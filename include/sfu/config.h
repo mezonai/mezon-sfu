@@ -41,9 +41,12 @@
  * mezon-proto-server's handshake rate limiter). */
 #define SFU_ROOM_MAX_PEERS 256
 
-#define SFU_DEFAULT_MEDIA_PORT 7000 /* shared RTP/RTCP/STUN UDP port   */
+#define SFU_DEFAULT_MEDIA_PORT 7000     /* shared RTP/RTCP/STUN UDP port   */
+#define SFU_DEFAULT_SIGNALING_PORT 8000 /* WebSocket signaling TCP port    */
 
 #define SFU_CACHELINE_SIZE 64
+
+#define DEFAULT_ROOM_NAME "Default Room"
 
 #define SFU_LIKELY(x) __builtin_expect(!!(x), 1)
 #define SFU_UNLIKELY(x) __builtin_expect(!!(x), 0)

@@ -4,8 +4,7 @@
 #include <stdatomic.h>
 #include <string.h>
 
-int sfu_packet_pool_init(sfu_packet_pool_t *pp, uint32_t capacity,
-                         uint32_t buf_size) {
+int sfu_packet_pool_init(sfu_packet_pool_t *pp, uint32_t capacity, uint32_t buf_size) {
   if (sfu_pool_init(&pp->meta, capacity, sizeof(sfu_packet_t)) != 0) {
     return -1;
   }
@@ -25,8 +24,9 @@ sfu_packet_t *sfu_packet_pool_alloc(sfu_packet_pool_t *pp) {
   uint32_t meta_idx, data_idx;
 
   sfu_packet_t *pkt = sfu_pool_alloc(&pp->meta, &meta_idx);
-  if (!pkt)
+  if (!pkt) {
     return NULL;
+  }
 
   void *buf = sfu_pool_alloc(&pp->data, &data_idx);
   if (!buf) {
@@ -37,8 +37,7 @@ sfu_packet_t *sfu_packet_pool_alloc(sfu_packet_pool_t *pp) {
   /* meta and data pools are sized identically 1:1, but indices can
    * diverge under concurrent alloc/free churn -- store data's own
    * index rather than assuming meta_idx == data_idx. */
-  uint32_t prior_gen =
-      atomic_load_explicit(&pkt->generation, memory_order_relaxed);
+  uint32_t prior_gen = atomic_load_explicit(&pkt->generation, memory_order_relaxed);
   memset(pkt, 0, sizeof(*pkt));
   atomic_store_explicit(&pkt->generation, prior_gen, memory_order_relaxed);
   pkt->data = buf;
@@ -65,11 +64,11 @@ void sfu_packet_pool_free(sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
 sfu_packet_t *sfu_packet_pool_alloc_meta(sfu_packet_pool_t *pp) {
   uint32_t meta_idx;
   sfu_packet_t *pkt = sfu_pool_alloc(&pp->meta, &meta_idx);
-  if (!pkt)
+  if (!pkt) {
     return NULL;
+  }
 
-  uint32_t prior_gen =
-      atomic_load_explicit(&pkt->generation, memory_order_relaxed);
+  uint32_t prior_gen = atomic_load_explicit(&pkt->generation, memory_order_relaxed);
   memset(pkt, 0, sizeof(*pkt));
   atomic_store_explicit(&pkt->generation, prior_gen, memory_order_relaxed);
   pkt->pool_index = (uint16_t)meta_idx;

@@ -22,10 +22,8 @@
  * until SDP generation lands.
  */
 
-#define SFU_SRTP_KEY_MATERIAL_LEN                                              \
-  60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
-#define SFU_DTLS_FINGERPRINT_LEN                                               \
-  95 /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
+#define SFU_SRTP_KEY_MATERIAL_LEN 60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
+#define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
 
 typedef struct sfu_dtls_ctx {
   SSL_CTX *ssl_ctx;
@@ -44,6 +42,7 @@ typedef struct sfu_dtls_conn {
   BIO *rbio; /* received datagrams get written here before SSL_do_handshake */
   BIO *wbio; /* OpenSSL writes its desired output here for us to drain+send */
   bool established;
+  unsigned long srtp_profile_id;
   uint8_t srtp_keying_material[SFU_SRTP_KEY_MATERIAL_LEN];
 } sfu_dtls_conn_t;
 
@@ -53,24 +52,20 @@ int sfu_dtls_conn_init(sfu_dtls_conn_t *conn, sfu_dtls_ctx_t *ctx);
 void sfu_dtls_conn_destroy(sfu_dtls_conn_t *conn);
 
 typedef enum {
-  SFU_DTLS_FEED_ERROR = -1, /* fatal: drop this connection/session */
-  SFU_DTLS_FEED_IN_PROGRESS =
-      0, /* handshake continuing; drain output and send it */
-  SFU_DTLS_FEED_ESTABLISHED =
-      1, /* handshake complete; srtp_keying_material is valid */
+  SFU_DTLS_FEED_ERROR = -1,      /* fatal: drop this connection/session */
+  SFU_DTLS_FEED_IN_PROGRESS = 0, /* handshake continuing; drain output and send it */
+  SFU_DTLS_FEED_ESTABLISHED = 1, /* handshake complete; srtp_keying_material is valid */
 } sfu_dtls_feed_status_t;
 
 /* Feeds one received datagram into the handshake state machine. */
-sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn,
-                                          const uint8_t *data, size_t len);
+sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *data, size_t len);
 
 /* Drains any handshake bytes OpenSSL wants sent back to the peer after
  * a feed call (or after conn_init, for the very first flight if we were
  * the ones to initiate -- not the case here, we're always the DTLS
  * server and wait for the client's ClientHello first). Returns the
  * number of bytes written into out (0 if nothing pending). */
-size_t sfu_dtls_conn_drain_output(sfu_dtls_conn_t *conn, uint8_t *out,
-                                  size_t cap);
+size_t sfu_dtls_conn_drain_output(sfu_dtls_conn_t *conn, uint8_t *out, size_t cap);
 
 /* RFC 7983 demux helper: bytes 20-63 in the first octet identify DTLS,
  * distinct from STUN (top 2 bits 00) and RTP/RTCP (top 2 bits 1x). */
