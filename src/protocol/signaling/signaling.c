@@ -141,37 +141,21 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
   }
 }
 
-static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *sdp, int sdp_len) {
+static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *client_ufrag, const char *sdp, int sdp_len) {
   uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
 
+  /* Record what THIS peer is publishing, keyed by their own ufrag. */
+  if (room && (off_audio != 0 || off_video != 0)) {
+    sfu_room_set_publisher_ssrcs(room, client_ufrag, off_audio, off_video, off_rtx);
+    SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " ufrag=%s (audio=%u, video=%u, rtx=%u)", room->room_id, client_ufrag, off_audio,
+                 off_video, off_rtx);
+  }
+
+  /* Build THIS peer's answer from a DIFFERENT publisher's SSRCs, not its own. */
   uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
-
   if (room) {
-    pthread_mutex_lock(&room->lock);
-
-    /* Only overwrite the fields this offer actually supplied SSRCs for.
-     * Absent-in-this-offer must not mean reset-to-zero. */
-    if (off_audio != 0) {
-      room->audio_ssrc = off_audio;
-    }
-    if (off_video != 0) {
-      room->video_ssrc = off_video;
-      room->rtx_ssrc = off_rtx; /* rtx is only meaningful alongside a video ssrc */
-    }
-
-    if (off_audio != 0 || off_video != 0) {
-      SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " (audio=%u, video=%u, rtx=%u)", room->room_id, room->audio_ssrc, room->video_ssrc,
-                   room->rtx_ssrc);
-    }
-
-    /* Snapshot under the same lock so the answer is built from a
-     * consistent, non-torn triple. */
-    ans_audio = room->audio_ssrc;
-    ans_video = room->video_ssrc;
-    ans_rtx = room->rtx_ssrc;
-
-    pthread_mutex_unlock(&room->lock);
+    sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
   }
 
   char answer[SFU_SIGNALING_SDP_CAP];
@@ -368,7 +352,8 @@ static void *conn_thread_main(void *arg) {
       }
 
       char client_ufrag[32];
-      if (extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, client_ufrag, sizeof(client_ufrag))) {
+      bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, client_ufrag, sizeof(client_ufrag));
+      if (have_ufrag) {
         sfu_register_ufrag_room(client_ufrag, joined_room);
         SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64
                      " for peer %s "
@@ -380,9 +365,10 @@ static void *conn_thread_main(void *arg) {
             "this peer's media session will NOT be bound to a room automatically. "
             "Check that the offer actually contains an m= line with ICE credentials.",
             peer_ip);
+        client_ufrag[0] = '\0';
       }
 
-      handle_offer(fd, s, joined_room, sdp, sdp_len);
+      handle_offer(fd, s, joined_room, client_ufrag, sdp, sdp_len);
     } else {
       SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, peer_ip);
     }

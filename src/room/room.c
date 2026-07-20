@@ -1,7 +1,7 @@
 #include "room/room.h"
 #include "util/log.h"
 
-#include <inttypes.h> /* Required for PRIu64 */
+#include <inttypes.h>
 #include <string.h>
 
 int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name) {
@@ -70,4 +70,60 @@ uint32_t sfu_room_list_subscribers_excluding(sfu_room_t *room, const struct sock
   pthread_mutex_unlock(&room->lock);
 
   return n;
+}
+
+void sfu_room_set_publisher_ssrcs(sfu_room_t *room, const char *ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc) {
+  pthread_mutex_lock(&room->lock);
+
+  sfu_publisher_ssrc_t *slot = NULL;
+  for (uint32_t i = 0; i < room->publisher_count; i++) {
+    if (room->publishers[i].active && strcmp(room->publishers[i].ufrag, ufrag) == 0) {
+      slot = &room->publishers[i];
+      break;
+    }
+  }
+
+  if (!slot) {
+    if (room->publisher_count >= SFU_ROOM_MAX_PEERS) {
+      SFU_LOG_WARN("room [%" PRIu64 "] publisher table full (%u), dropping ufrag=%s", room->room_id, SFU_ROOM_MAX_PEERS, ufrag);
+      pthread_mutex_unlock(&room->lock);
+      return;
+    }
+    slot = &room->publishers[room->publisher_count++];
+    memset(slot, 0, sizeof(*slot));
+    strncpy(slot->ufrag, ufrag, sizeof(slot->ufrag) - 1);
+    slot->ufrag[sizeof(slot->ufrag) - 1] = '\0';
+    slot->active = true;
+  }
+
+  /* Only overwrite fields this offer actually supplied SSRCs for. */
+  if (audio_ssrc != 0) {
+    slot->audio_ssrc = audio_ssrc;
+  }
+  if (video_ssrc != 0) {
+    slot->video_ssrc = video_ssrc;
+    slot->rtx_ssrc = rtx_ssrc;
+  }
+
+  pthread_mutex_unlock(&room->lock);
+}
+
+bool sfu_room_get_other_publisher_ssrcs(sfu_room_t *room, const char *self_ufrag, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc) {
+  *audio_ssrc = 0;
+  *video_ssrc = 0;
+  *rtx_ssrc = 0;
+
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->publisher_count; i++) {
+    sfu_publisher_ssrc_t *p = &room->publishers[i];
+    if (p->active && strcmp(p->ufrag, self_ufrag) != 0) {
+      *audio_ssrc = p->audio_ssrc;
+      *video_ssrc = p->video_ssrc;
+      *rtx_ssrc = p->rtx_ssrc;
+      pthread_mutex_unlock(&room->lock);
+      return true;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+  return false;
 }
