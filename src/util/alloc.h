@@ -16,6 +16,7 @@
  */
 #define SFU_MALLOC(size) mi_malloc(size)
 #define SFU_CALLOC(count, size) mi_calloc(count, size)
+#define SFU_REALLOC(ptr, size) mi_realloc(ptr, size)
 #define SFU_ALIGNED_ALLOC(align, size) mi_malloc_aligned(size, align)
 #define SFU_FREE(ptr) mi_free(ptr)
 

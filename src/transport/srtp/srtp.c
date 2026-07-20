@@ -36,8 +36,9 @@ static int create_session_dynamic(srtp_t *session, const uint8_t *master_key, un
   policy.ssrc.value = 0;
   policy.key = (uint8_t *)master_key;
   policy.next = NULL;
-  policy.window_size = 128;
-  policy.allow_repeat_tx = 0;
+  policy.window_size = 1024;
+  // Allow duplicate/reordered packet processing without throwing fatal crypto errors
+  policy.allow_repeat_tx = 1;
 
   srtp_err_status_t rc = srtp_create(session, &policy);
   if (rc != srtp_err_status_ok) {
@@ -138,6 +139,10 @@ bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
 }
 
 bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
+  if (buf[1] == 206) {
+    SFU_LOG_INFO("Received RTCP PLI (Keyframe Request) from pc2! Routing to pc1...");
+  }
+
   if ((size_t)*len + SRTP_MAX_TRAILER_LEN + 4 > cap) { /* RTCP trailer also carries an E-flag+SRTCP index word */
     SFU_LOG_WARN("SRTP protect (RTCP): insufficient buffer headroom");
     return false;

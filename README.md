@@ -27,7 +27,15 @@ Before building, ensure you have the following installed on your system:
 
 To compile the C backend binary, run the following commands from the root directory:
 
-`sudo apt install libmimalloc-dev`
+build mimalloc
+```
+git clone https://github.com/microsoft/mimalloc.git
+cd mimalloc
+mkdir -p build && cd build
+cmake ..
+make -j$(nproc)
+sudo make install
+```
 
 build liburing
 ```
@@ -66,14 +74,14 @@ git checkout 24b3bf8
 cd libsrtp
 ./configure --enable-openssl \
   crypto_CFLAGS="-I/usr/local/include/boringssl/" \
-  crypto_LIBS="-L/usr/local/lib/boringssl/ -lcrypto"
+  crypto_LIBS="-L/usr/local/lib/boringssl/ -lcrypto -lstdc++"
 make
 ```
 
 build mezon sfu
 ```
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug
+cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Debug
 make -j$(nproc)
 ctest --output-on-failure
 ```

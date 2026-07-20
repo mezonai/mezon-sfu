@@ -11,6 +11,7 @@
 #include "room/room_registry.h"
 #include "runtime/cpu.h"
 #include "runtime/fanout.h"
+#include "runtime/global_registry.h"
 #include "runtime/scheduler.h"
 #include "runtime/signal.h"
 #include "runtime/worker.h"
@@ -117,6 +118,8 @@ int main(int argc, char **argv) {
   }
 
   // Initialize the Room Registry in main memory
+  sfu_global_registry_init();
+
   if (sfu_room_registry_init(&room_registry) != 0) {
     SFU_LOG_ERROR("failed to init room registry");
     return 1;
@@ -132,8 +135,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Initialize workers with reference to the root room registry fallback if
-  // needed
+  // Initialize workers with reference to the root room registry fallback if needed
   for (uint32_t i = 0; i < worker_count; i++) {
     int core_id = (int)(i + 1) % (online > 1 ? online : 1);
     int send_bgid = SFU_PROVIDED_BUF_GROUP_ID + 1 + (int)i;
