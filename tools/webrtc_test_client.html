@@ -270,7 +270,7 @@
                 if (msg.type === "renegotiate" || msg.type === "peer-joined") {
                     if (isRenegotiating || peerConnection.signalingState !== "stable") {
                         console.log("Renegotiation requested but already negotiating or unstable. Skipping.");
-                        break;
+                        return;
                     }
                     console.log("Server requested renegotiation");
                     updateStatus("Renegotiating session for new participant...");
