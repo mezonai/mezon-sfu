@@ -141,51 +141,82 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
   }
 }
 
-static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *client_ufrag, const char *sdp, int sdp_len) {
-  uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
-  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
-
-  /* Record what THIS peer is publishing, keyed by their own ufrag. */
-  if (room && (off_audio != 0 || off_video != 0)) {
-    sfu_room_set_publisher_ssrcs(room, client_ufrag, off_audio, off_video, off_rtx);
-    SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " ufrag=%s (audio=%u, video=%u, rtx=%u)", room->room_id, client_ufrag, off_audio,
-                 off_video, off_rtx);
-  }
-
-  /* Build THIS peer's answer from a DIFFERENT publisher's SSRCs, not its own. */
-  uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
-  if (room) {
-    sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
-  }
-
+static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio, uint32_t ans_video,
+                                  uint32_t ans_rtx) {
   char answer[SFU_SIGNALING_SDP_CAP];
-  int answer_len = sfu_sdp_build_answer(sdp, (size_t)sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint,
-                                        ans_audio, ans_video, ans_rtx, answer, sizeof(answer));
+  int answer_len = sfu_sdp_build_answer(offer_sdp, offer_sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd,
+                                        s->dtls_ctx->fingerprint, ans_audio, ans_video, ans_rtx, answer, sizeof(answer));
   if (answer_len < 0) {
-    SFU_LOG_WARN("signaling: failed to build SDP answer, dropping offer");
-    return;
+    SFU_LOG_WARN("signaling: failed to build SDP answer");
+    return false;
   }
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(answer, (size_t)answer_len, escaped, sizeof(escaped));
   if (escaped_len < 0) {
     SFU_LOG_WARN("signaling: answer too large to escape into JSON response");
-    return;
+    return false;
   }
 
   char response[SFU_SIGNALING_JSON_CAP + 64];
   int response_len = snprintf(response, sizeof(response), "{\"type\":\"answer\",\"sdp\":\"%s\"}", escaped);
   if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
     SFU_LOG_WARN("signaling: response too large to send");
-    return;
+    return false;
   }
 
   if (sfu_ws_send_text(fd, response, (size_t)response_len) != 0) {
-    SFU_LOG_WARN("signaling: failed to send answer over WebSocket");
-    return;
+    SFU_LOG_WARN("signaling: failed to send answer over WebSocket (fd=%d)", fd);
+    return false;
   }
 
-  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %d-byte offer", response_len, sdp_len);
+  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %zu-byte offer (fd=%d)", response_len, offer_sdp_len, fd);
+  return true;
+}
+
+/* After a peer's publish state changes, re-push a fresh answer to every
+ * OTHER already-connected peer in the room, so they learn about this
+ * peer's SSRCs without having to send a new offer themselves. */
+static void push_updated_answers_to_others(sfu_signaling_server_t *s, sfu_room_t *room, const char *exclude_ufrag) {
+  sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
+  uint32_t n = sfu_room_snapshot_other_publishers(room, exclude_ufrag, snaps, SFU_ROOM_MAX_PEERS);
+
+  for (uint32_t i = 0; i < n; i++) {
+    uint32_t their_audio = 0, their_video = 0, their_rtx = 0;
+    if (!sfu_room_get_other_publisher_ssrcs(room, snaps[i].ufrag, &their_audio, &their_video, &their_rtx)) {
+      continue;
+    }
+    if (build_and_send_answer(snaps[i].fd, s, snaps[i].offer_sdp, snaps[i].offer_sdp_len, their_audio, their_video, their_rtx)) {
+      SFU_LOG_INFO("signaling: pushed updated answer to ufrag=%s (fd=%d) after ufrag=%s published", snaps[i].ufrag, snaps[i].fd, exclude_ufrag);
+    }
+  }
+}
+
+static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *client_ufrag, const char *sdp, int sdp_len) {
+  uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
+  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
+
+  if (room && client_ufrag[0] != '\0') {
+    sfu_room_publish(room, client_ufrag, fd, sdp, (size_t)sdp_len, off_audio, off_video, off_rtx);
+    if (off_audio != 0 || off_video != 0) {
+      SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " ufrag=%s (audio=%u, video=%u, rtx=%u)", room->room_id, client_ufrag, off_audio,
+                   off_video, off_rtx);
+    }
+  }
+
+  uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
+  if (room && client_ufrag[0] != '\0') {
+    sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
+  }
+
+  build_and_send_answer(fd, s, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
+
+  /* Tell everyone ELSE already in the room about what THIS peer just
+   * published, so peers who joined earlier (like PC1 in your log) get a
+   * corrected answer instead of staying stuck on ssrc=0. */
+  if (room && client_ufrag[0] != '\0' && (off_audio != 0 || off_video != 0)) {
+    push_updated_answers_to_others(s, room, client_ufrag);
+  }
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
@@ -292,6 +323,7 @@ static void *conn_thread_main(void *arg) {
 
   sfu_room_t *joined_room = NULL;
   uint64_t joined_room_id = 0;
+  char client_ufrag[32] = {0};
 
   char buf[SFU_SIGNALING_RECV_CAP];
   for (;;) {
@@ -351,7 +383,6 @@ static void *conn_thread_main(void *arg) {
         continue;
       }
 
-      char client_ufrag[32];
       bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, client_ufrag, sizeof(client_ufrag));
       if (have_ufrag) {
         sfu_register_ufrag_room(client_ufrag, joined_room);
@@ -372,6 +403,10 @@ static void *conn_thread_main(void *arg) {
     } else {
       SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, peer_ip);
     }
+  }
+
+  if (joined_room && client_ufrag[0] != '\0') {
+    sfu_room_unpublish(joined_room, client_ufrag);
   }
 
   close(fd);
