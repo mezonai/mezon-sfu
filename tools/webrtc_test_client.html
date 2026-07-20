@@ -192,12 +192,15 @@
 
             // Attach tracks directly without relying on event.streams[0]
             pc.ontrack = (event) => {
-                console.log("Remote track received:", event.track.kind, event.track);
-                remoteStream.addTrack(event.track);
+              console.log("Remote track received:", event.track.kind, event.track);
+              remoteStream.addTrack(event.track);
 
-                // Explicitly call play() to bypass browser auto-play policies when tracks arrive asynchronously
-                remoteVideoEl.play().catch(e => console.warn("Playout auto-play notice:", e));
-                updateStatus(`Connected! Remote ${event.track.kind} track active.`);
+              if (remoteVideoEl.srcObject !== remoteStream) {
+                  remoteVideoEl.srcObject = remoteStream;
+              }
+
+              remoteVideoEl.play().catch(e => console.warn("Playout auto-play notice:", e));
+              updateStatus(`Connected! Remote ${event.track.kind} track active.`);
             };
 
             // Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
