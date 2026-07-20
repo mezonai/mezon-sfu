@@ -172,7 +172,7 @@
             const remoteVideoEl = document.getElementById('remoteVideo');
             remoteVideoEl.srcObject = remoteStream;
 
-            // FIX 1: Attach tracks directly without relying on event.streams[0]
+            // Attach tracks directly without relying on event.streams[0]
             pc.ontrack = (event) => {
                 console.log("Remote track received:", event.track.kind, event.track);
                 remoteStream.addTrack(event.track);
@@ -182,7 +182,7 @@
                 updateStatus(`Connected! Remote ${event.track.kind} track active.`);
             };
 
-            // FIX 2: Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
+            // Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
             const audioTrack = localStream ? localStream.getAudioTracks()[0] : null;
             const videoTrack = localStream ? localStream.getVideoTracks()[0] : null;
 
