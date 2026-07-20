@@ -1,120 +1,9 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Mezon SFU 2-Participant Test Client</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #1e1e2e;
-            color: #cdd6f4;
-            max-width: 1000px;
-            margin: 40px auto;
-            padding: 20px;
-        }
-        .container {
-            background: #313244;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-        }
-        .form-group {
-            margin-bottom: 15px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-        }
-        input {
-            width: 100%;
-            padding: 10px;
-            background: #181825;
-            border: 1px solid #45475a;
-            color: #cdd6f4;
-            border-radius: 6px;
-            box-sizing: border-box;
-        }
-        button {
-            background: #89b4fa;
-            color: #11111b;
-            border: none;
-            padding: 12px 20px;
-            font-weight: bold;
-            border-radius: 6px;
-            cursor: pointer;
-            width: 100%;
-        }
-        button:hover {
-            background: #b4befe;
-        }
-        #status {
-            margin-top: 15px;
-            padding: 10px;
-            border-radius: 6px;
-            background: #45475a;
-            font-family: monospace;
-        }
-        .video-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-top: 20px;
-        }
-        .video-box {
-            background: #11111b;
-            border-radius: 8px;
-            padding: 10px;
-            text-align: center;
-        }
-        video {
-            width: 100%;
-            max-height: 350px;
-            background: #000;
-            border-radius: 6px;
-        }
-        .local-video {
-            transform: scaleX(-1);
-        }
-    </style>
-</head>
-<body>
-
-<div class="container">
-    <h2>Mezon SFU Client (2 Participants)</h2>
-
-    <div class="form-group">
-        <label for="wsUrl">Signaling WebSocket URL</label>
-        <input type="text" id="wsUrl" value="wss://test-sfu.nccsoft.vn/ws">
-    </div>
-
-    <div class="form-group">
-        <label for="roomId">Room ID</label>
-        <input type="text" id="roomId" value="101">
-    </div>
-
-    <button id="startBtn" onclick="connectAndJoin()">Connect & Join Room</button>
-
-    <div id="status">Status: Initializing Camera...</div>
-
-    <div class="video-grid">
-        <div class="video-box">
-            <label>Local User (You)</label>
-            <video id="localVideo" class="local-video" autoplay playsinline muted></video>
-        </div>
-        <div class="video-box">
-            <label>Remote Participant</label>
-            <!-- Unmuted to allow audio playback -->
-            <video id="remoteVideo" autoplay playsinline></video>
-        </div>
-    </div>
-</div>
-
 <script>
     let ws = null;
     let pc = null;
     let localStream = null;
     let remoteStream = null;
+    let isInitialOfferSent = false; // Prevents race condition between manual offer and automated handler
 
     const statusDiv = document.getElementById('status');
     const startBtn = document.getElementById('startBtn');
@@ -177,33 +66,36 @@
             let isRenegotiating = false;
 
             pc.onnegotiationneeded = async () => {
-                if (isRenegotiating) return;
+                // Critical Fix: Ignore automated triggers until our initial handshakes are fully completed
+                if (!isInitialOfferSent || isRenegotiating || pc.signalingState !== "stable") {
+                    return;
+                }
                 try {
                     isRenegotiating = true;
+                    console.log("Browser triggered onnegotiationneeded. Sending updated offer...");
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
                     ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
                 } catch (err) {
-                    console.error(err);
+                    console.error("Renegotiation offer generation failed:", err);
                 } finally {
-                    isRenegotiating = false; // Reset only after the signaling state is stable
+                    isRenegotiating = false;
                 }
             };
 
-            // Attach tracks directly without relying on event.streams[0]
             pc.ontrack = (event) => {
-              console.log("Remote track received:", event.track.kind, event.track);
-              remoteStream.addTrack(event.track);
+                console.log("Remote track received:", event.track.kind, event.track);
+                remoteStream.addTrack(event.track);
 
-              if (remoteVideoEl.srcObject !== remoteStream) {
-                  remoteVideoEl.srcObject = remoteStream;
-              }
+                if (remoteVideoEl.srcObject !== remoteStream) {
+                    remoteVideoEl.srcObject = remoteStream;
+                }
 
-              remoteVideoEl.play().catch(e => console.warn("Playout auto-play notice:", e));
-              updateStatus(`Connected! Remote ${event.track.kind} track active.`);
+                remoteVideoEl.play().catch(e => console.warn("Playout auto-play notice:", e));
+                updateStatus(`Connected! Remote ${event.track.kind} track active.`);
             };
 
-            // Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
+            // Setup transceivers in a strict order (Audio first, Video second)
             const audioTrack = localStream ? localStream.getAudioTracks()[0] : null;
             const videoTrack = localStream ? localStream.getVideoTracks()[0] : null;
 
@@ -219,6 +111,7 @@
                 pc.addTransceiver('video', { direction: 'recvonly' });
             }
 
+            // Create initial local description before opening the websocket connection
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
@@ -231,6 +124,7 @@
 
                 setTimeout(() => {
                     ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
+                    isInitialOfferSent = true; // Safely unlock future renegotiations now
                 }, 100);
             };
 
@@ -252,7 +146,6 @@
                     }));
                 }
 
-                // FIX 3A: Handle server-initiated offers (when a new participant joins the room)
                 if (msg.type === "offer") {
                     console.log("Server initiated renegotiation offer for new peer");
                     updateStatus("New participant joined! Establishing media bridge...");
@@ -268,26 +161,33 @@
                     }));
                 }
 
-                // FIX 3B: Handle SFUs that trigger renegotiation via an event rather than a direct SDP offer
                 if (msg.type === "renegotiate" || msg.type === "peer-joined") {
                     if (isRenegotiating || pc.signalingState !== "stable") {
-                        console.log("Renegotiation requested but already negotiating or unstable. Skipping.");
+                        console.log("Server requested renegotiation, but context is busy/unstable. Skipping.");
                         return;
                     }
-                    console.log("Server requested renegotiation");
+                    console.log("Server explicitly requested a session renegotiation.");
                     updateStatus("Renegotiating session for new participant...");
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    ws.send(JSON.stringify({
-                        type: "offer",
-                        sdp: pc.localDescription.sdp
-                    }));
+                    try {
+                        isRenegotiating = true;
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        ws.send(JSON.stringify({
+                            type: "offer",
+                            sdp: pc.localDescription.sdp
+                        }));
+                    } catch (err) {
+                        console.error("Explicit renegotiation failed:", err);
+                    } finally {
+                        isRenegotiating = false;
+                    }
                 }
             };
 
             ws.onclose = () => {
                 updateStatus("Signaling link disconnected.", true);
                 startBtn.disabled = false;
+                isInitialOfferSent = false;
                 if (pc) pc.close();
             };
 
@@ -300,8 +200,7 @@
             console.error("Connection failed:", e);
             updateStatus(`WebRTC failed: ${e.message}`, true);
             startBtn.disabled = false;
+            isInitialOfferSent = false;
         }
     }
 </script>
-</body>
-</html>
