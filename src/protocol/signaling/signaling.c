@@ -209,10 +209,14 @@ static void push_updated_answers_to_others(sfu_signaling_server_t *s, sfu_room_t
     SFU_FREE(snaps[i].offer_sdp);
   }
 }
-
 static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *client_ufrag, const char *sdp, int sdp_len) {
   uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
+
+  int was_already_publishing = 0;
+  if (room && client_ufrag[0] != '\0') {
+    was_already_publishing = room_has_this_publisher(room, client_ufrag);
+  }
 
   if (room && client_ufrag[0] != '\0') {
     sfu_room_publish(room, client_ufrag, fd, sdp, (size_t)sdp_len, off_audio, off_video, off_rtx);
@@ -229,7 +233,6 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
 
   build_and_send_answer(fd, s, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
 
-  int was_already_publishing = room_has_this_publisher(room, client_ufrag);
   if (room && client_ufrag[0] != '\0' && (off_audio != 0 || off_video != 0)) {
     if (!was_already_publishing) {
       push_updated_answers_to_others(s, room, client_ufrag);
