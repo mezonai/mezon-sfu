@@ -145,14 +145,18 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
   uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
 
-  /* If the incoming offer contains media SSRCs, this peer is publishing.
-   * Save their transmitting SSRCs to the room so subscribers can inherit them. */
-  if (room && (off_audio != 0 || off_video != 0)) {
-    room->audio_ssrc = off_audio;
-    room->video_ssrc = off_video;
-    room->rtx_ssrc = off_rtx;
-    SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " (audio=%u, video=%u, rtx=%u)", room->room_id, room->audio_ssrc, room->video_ssrc,
-                 room->rtx_ssrc);
+  if (room) {
+    if (off_audio != 0) {
+      room->audio_ssrc = off_audio;
+    }
+    if (off_video != 0) {
+      room->video_ssrc = off_video;
+      room->rtx_ssrc = off_rtx;
+    }
+    if (off_audio != 0 || off_video != 0) {
+      SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " (audio=%u, video=%u, rtx=%u)", room->room_id, room->audio_ssrc, room->video_ssrc,
+                   room->rtx_ssrc);
+    }
   }
 
   uint32_t ans_audio = room ? room->audio_ssrc : 0;
