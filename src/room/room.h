@@ -8,8 +8,6 @@
 
 #include "sfu/config.h"
 
-#define SFU_ROOM_OFFER_SDP_CAP 16384
-
 /*
  * Minimal peer registry standing in for real room/publish/subscribe
  * signaling.
@@ -26,26 +24,27 @@ typedef struct sfu_peer_entry {
  * room. Distinct from sfu_peer_entry_t, which tracks UDP media-path
  * addresses, not signaling identity. */
 typedef struct sfu_publisher_ssrc {
+  int fd;
   char ufrag[32];
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
   uint32_t rtx_ssrc;
-  int fd;                                 /* signaling websocket fd, for pushing updated answers later */
-  char offer_sdp[SFU_ROOM_OFFER_SDP_CAP]; /* cached offer, needed to rebuild an answer on demand */
+  char *offer_sdp;
   size_t offer_sdp_len;
+  size_t offer_sdp_cap;
   bool active;
 } sfu_publisher_ssrc_t;
 
 typedef struct sfu_publisher_snapshot {
-  char ufrag[32];
   int fd;
-  char offer_sdp[SFU_ROOM_OFFER_SDP_CAP];
+  char ufrag[32];
+  char *offer_sdp;
   size_t offer_sdp_len;
 } sfu_publisher_snapshot_t;
 
 typedef struct sfu_room {
-  uint64_t room_id;    /* Unique numeric room identifier */
-  char room_name[128]; /* User-friendly room name */
+  uint64_t room_id;
+  char room_name[32];
   sfu_peer_entry_t peers[SFU_ROOM_MAX_PEERS];
   uint32_t peer_count;
   sfu_publisher_ssrc_t publishers[SFU_ROOM_MAX_PEERS];

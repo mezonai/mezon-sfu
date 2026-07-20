@@ -174,21 +174,18 @@ static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char 
   return true;
 }
 
-/* After a peer's publish state changes, re-push a fresh answer to every
- * OTHER already-connected peer in the room, so they learn about this
- * peer's SSRCs without having to send a new offer themselves. */
 static void push_updated_answers_to_others(sfu_signaling_server_t *s, sfu_room_t *room, const char *exclude_ufrag) {
   sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
   uint32_t n = sfu_room_snapshot_other_publishers(room, exclude_ufrag, snaps, SFU_ROOM_MAX_PEERS);
 
   for (uint32_t i = 0; i < n; i++) {
     uint32_t their_audio = 0, their_video = 0, their_rtx = 0;
-    if (!sfu_room_get_other_publisher_ssrcs(room, snaps[i].ufrag, &their_audio, &their_video, &their_rtx)) {
-      continue;
+    if (sfu_room_get_other_publisher_ssrcs(room, snaps[i].ufrag, &their_audio, &their_video, &their_rtx)) {
+      if (build_and_send_answer(snaps[i].fd, s, snaps[i].offer_sdp, snaps[i].offer_sdp_len, their_audio, their_video, their_rtx)) {
+        SFU_LOG_INFO("signaling: pushed updated answer to ufrag=%s (fd=%d) after ufrag=%s published", snaps[i].ufrag, snaps[i].fd, exclude_ufrag);
+      }
     }
-    if (build_and_send_answer(snaps[i].fd, s, snaps[i].offer_sdp, snaps[i].offer_sdp_len, their_audio, their_video, their_rtx)) {
-      SFU_LOG_INFO("signaling: pushed updated answer to ufrag=%s (fd=%d) after ufrag=%s published", snaps[i].ufrag, snaps[i].fd, exclude_ufrag);
-    }
+    SFU_FREE(snaps[i].offer_sdp);
   }
 }
 
