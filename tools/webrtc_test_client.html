@@ -128,6 +128,7 @@
             let pc = null;
             let localStream = null;
             let remoteStream = null;
+            let isInitialOfferSent = false;
 
             const statusDiv = document.getElementById("status");
             const startBtn = document.getElementById("startBtn");
@@ -289,6 +290,7 @@
                                     sdp: pc.localDescription.sdp,
                                 }),
                             );
+                            isInitialOfferSent = true;
                         }, 100);
                     };
 
@@ -370,6 +372,7 @@
                     ws.onclose = () => {
                         updateStatus("Signaling link disconnected.", true);
                         startBtn.disabled = false;
+                        isInitialOfferSent = false;
                         if (pc) pc.close();
                     };
 
@@ -381,6 +384,7 @@
                     console.error("Connection failed:", e);
                     updateStatus(`WebRTC failed: ${e.message}`, true);
                     startBtn.disabled = false;
+                    isInitialOfferSent = false;
                 }
             }
         </script>
