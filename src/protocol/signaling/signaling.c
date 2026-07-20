@@ -179,12 +179,14 @@ static void push_updated_answers_to_others(sfu_signaling_server_t *s, sfu_room_t
   uint32_t n = sfu_room_snapshot_other_publishers(room, exclude_ufrag, snaps, SFU_ROOM_MAX_PEERS);
 
   for (uint32_t i = 0; i < n; i++) {
-    uint32_t their_audio = 0, their_video = 0, their_rtx = 0;
-    if (sfu_room_get_other_publisher_ssrcs(room, snaps[i].ufrag, &their_audio, &their_video, &their_rtx)) {
-      if (build_and_send_answer(snaps[i].fd, s, snaps[i].offer_sdp, snaps[i].offer_sdp_len, their_audio, their_video, their_rtx)) {
-        SFU_LOG_INFO("signaling: pushed updated answer to ufrag=%s (fd=%d) after ufrag=%s published", snaps[i].ufrag, snaps[i].fd, exclude_ufrag);
-      }
+    const char *reneg_msg = "{\"type\":\"renegotiate\"}";
+
+    if (sfu_ws_send_text(snaps[i].fd, reneg_msg, strlen(reneg_msg)) == 0) {
+      SFU_LOG_INFO("signaling: requested renegotiation from ufrag=%s (fd=%d) because ufrag=%s published new media", snaps[i].ufrag, snaps[i].fd, exclude_ufrag);
+    } else {
+      SFU_LOG_WARN("signaling: failed to send renegotiate request to fd=%d", snaps[i].fd);
     }
+
     SFU_FREE(snaps[i].offer_sdp);
   }
 }
