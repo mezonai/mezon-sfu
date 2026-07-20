@@ -170,6 +170,8 @@
             remoteStream = new MediaStream();
 
             const remoteVideoEl = document.getElementById('remoteVideo');
+            remoteVideoEl.muted = false;
+            remoteVideoEl.volume = 1.0;
             remoteVideoEl.srcObject = remoteStream;
 
             // Attach tracks directly without relying on event.streams[0]
