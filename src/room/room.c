@@ -1,7 +1,7 @@
 #include "room/room.h"
 #include "util/log.h"
 
-#include <inttypes.h> /* Required for PRIu64 */
+#include <inttypes.h>
 #include <string.h>
 
 int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name) {
@@ -69,5 +69,134 @@ uint32_t sfu_room_list_subscribers_excluding(sfu_room_t *room, const struct sock
   }
   pthread_mutex_unlock(&room->lock);
 
+  return n;
+}
+
+void sfu_room_set_publisher_ssrcs(sfu_room_t *room, const char *ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc) {
+  pthread_mutex_lock(&room->lock);
+
+  sfu_publisher_ssrc_t *slot = NULL;
+  for (uint32_t i = 0; i < room->publisher_count; i++) {
+    if (room->publishers[i].active && strcmp(room->publishers[i].ufrag, ufrag) == 0) {
+      slot = &room->publishers[i];
+      break;
+    }
+  }
+
+  if (!slot) {
+    if (room->publisher_count >= SFU_ROOM_MAX_PEERS) {
+      SFU_LOG_WARN("room [%" PRIu64 "] publisher table full (%u), dropping ufrag=%s", room->room_id, SFU_ROOM_MAX_PEERS, ufrag);
+      pthread_mutex_unlock(&room->lock);
+      return;
+    }
+    slot = &room->publishers[room->publisher_count++];
+    memset(slot, 0, sizeof(*slot));
+    strncpy(slot->ufrag, ufrag, sizeof(slot->ufrag) - 1);
+    slot->ufrag[sizeof(slot->ufrag) - 1] = '\0';
+    slot->active = true;
+  }
+
+  /* Only overwrite fields this offer actually supplied SSRCs for. */
+  if (audio_ssrc != 0) {
+    slot->audio_ssrc = audio_ssrc;
+  }
+  if (video_ssrc != 0) {
+    slot->video_ssrc = video_ssrc;
+    slot->rtx_ssrc = rtx_ssrc;
+  }
+
+  pthread_mutex_unlock(&room->lock);
+}
+
+bool sfu_room_get_other_publisher_ssrcs(sfu_room_t *room, const char *self_ufrag, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc) {
+  *audio_ssrc = 0;
+  *video_ssrc = 0;
+  *rtx_ssrc = 0;
+
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->publisher_count; i++) {
+    sfu_publisher_ssrc_t *p = &room->publishers[i];
+    if (p->active && strcmp(p->ufrag, self_ufrag) != 0) {
+      *audio_ssrc = p->audio_ssrc;
+      *video_ssrc = p->video_ssrc;
+      *rtx_ssrc = p->rtx_ssrc;
+      pthread_mutex_unlock(&room->lock);
+      return true;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+  return false;
+}
+
+void sfu_room_publish(sfu_room_t *room, const char *ufrag, int fd, const char *offer_sdp, size_t offer_sdp_len, uint32_t audio_ssrc, uint32_t video_ssrc,
+                      uint32_t rtx_ssrc) {
+  pthread_mutex_lock(&room->lock);
+
+  sfu_publisher_ssrc_t *slot = NULL;
+  for (uint32_t i = 0; i < room->publisher_count; i++) {
+    if (room->publishers[i].active && strcmp(room->publishers[i].ufrag, ufrag) == 0) {
+      slot = &room->publishers[i];
+      break;
+    }
+  }
+  if (!slot) {
+    if (room->publisher_count >= SFU_ROOM_MAX_PEERS) {
+      SFU_LOG_WARN("room [%" PRIu64 "] publisher table full (%u), dropping ufrag=%s", room->room_id, SFU_ROOM_MAX_PEERS, ufrag);
+      pthread_mutex_unlock(&room->lock);
+      return;
+    }
+    slot = &room->publishers[room->publisher_count++];
+    memset(slot, 0, sizeof(*slot));
+    strncpy(slot->ufrag, ufrag, sizeof(slot->ufrag) - 1);
+    slot->active = true;
+  }
+
+  slot->fd = fd;
+  slot->active = true;
+
+  size_t copy_len = offer_sdp_len < sizeof(slot->offer_sdp) ? offer_sdp_len : sizeof(slot->offer_sdp) - 1;
+  memcpy(slot->offer_sdp, offer_sdp, copy_len);
+  slot->offer_sdp[copy_len] = '\0';
+  slot->offer_sdp_len = copy_len;
+
+  if (audio_ssrc != 0) {
+    slot->audio_ssrc = audio_ssrc;
+  }
+  if (video_ssrc != 0) {
+    slot->video_ssrc = video_ssrc;
+    slot->rtx_ssrc = rtx_ssrc;
+  }
+
+  pthread_mutex_unlock(&room->lock);
+}
+
+void sfu_room_unpublish(sfu_room_t *room, const char *ufrag) {
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->publisher_count; i++) {
+    if (room->publishers[i].active && strcmp(room->publishers[i].ufrag, ufrag) == 0) {
+      room->publishers[i].active = false;
+      room->publishers[i].fd = -1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+}
+
+uint32_t sfu_room_snapshot_other_publishers(sfu_room_t *room, const char *exclude_ufrag, sfu_publisher_snapshot_t *out, uint32_t max_out) {
+  uint32_t n = 0;
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->publisher_count && n < max_out; i++) {
+    sfu_publisher_ssrc_t *p = &room->publishers[i];
+    if (!p->active || strcmp(p->ufrag, exclude_ufrag) == 0) {
+      continue;
+    }
+    strncpy(out[n].ufrag, p->ufrag, sizeof(out[n].ufrag) - 1);
+    out[n].ufrag[sizeof(out[n].ufrag) - 1] = '\0';
+    out[n].fd = p->fd;
+    memcpy(out[n].offer_sdp, p->offer_sdp, p->offer_sdp_len);
+    out[n].offer_sdp_len = p->offer_sdp_len;
+    n++;
+  }
+  pthread_mutex_unlock(&room->lock);
   return n;
 }

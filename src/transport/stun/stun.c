@@ -222,3 +222,39 @@ size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len, const sf
 
   return off;
 }
+
+bool sfu_stun_extract_client_ufrag(const uint8_t *data, size_t len, const char *local_ufrag, char *out_client_ufrag, size_t max_len) {
+  if (!sfu_stun_is_stun_packet(data, len)) {
+    return false;
+  }
+
+  uint16_t msg_type = read_be16(data);
+  if (msg_type != STUN_TYPE_BINDING_REQ) {
+    return false; /* Only look at binding requests */
+  }
+
+  uint16_t username_len = 0;
+  const uint8_t *username = find_username(data, len, &username_len);
+  if (!username) {
+    return false;
+  }
+
+  /* Verify compound username format matches our server's prefix: "{our-ufrag}:{their-ufrag}" */
+  size_t local_ufrag_len = strlen(local_ufrag);
+  if (username_len <= local_ufrag_len || username[local_ufrag_len] != ':' || memcmp(username, local_ufrag, local_ufrag_len) != 0) {
+    return false;
+  }
+
+  /* Pinpoint the client ufrag location right after the colon separator */
+  const uint8_t *client_ufrag_ptr = username + local_ufrag_len + 1;
+  size_t client_ufrag_len = username_len - local_ufrag_len - 1;
+
+  /* Prevent buffer overflows on out_client_ufrag destination */
+  if (client_ufrag_len >= max_len || client_ufrag_len == 0) {
+    return false;
+  }
+
+  memcpy(out_client_ufrag, client_ufrag_ptr, client_ufrag_len);
+  out_client_ufrag[client_ufrag_len] = '\0';
+  return true;
+}

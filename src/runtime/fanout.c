@@ -62,6 +62,8 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
     return false;
   }
 
+  SFU_LOG_DEBUG("FANOUT ENQUEUE pkt=%p src=%u dst=%u len=%u", pkt, src_worker, dst_worker, pkt->len);
+
   job->pkt = pkt;
   memcpy(&job->dst, dst_addr, dst_len);
   job->dst_len = dst_len;

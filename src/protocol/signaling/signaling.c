@@ -1,5 +1,6 @@
 #include "protocol/signaling/signaling.h"
 #include <arpa/inet.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -19,84 +20,207 @@
 #define SFU_SIGNALING_SDP_CAP 16384
 #define SFU_SIGNALING_JSON_CAP 32768
 
-#define SFU_MAX_IP_ROOM_MAPPINGS 512
+#define SFU_MAX_UFRAG_ROOM_MAPPINGS 2048
 
 typedef struct {
-  char ip[64];
+  char ufrag[32];
   sfu_room_t *room;
-} sfu_ip_room_map_entry_t;
+} sfu_ufrag_room_map_entry_t;
+
+static sfu_ufrag_room_map_entry_t g_ufrag_room_maps[SFU_MAX_UFRAG_ROOM_MAPPINGS];
+static int g_ufrag_room_map_count = 0;
+static pthread_mutex_t g_ufrag_room_map_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void sfu_register_ufrag_room(const char *client_ufrag, sfu_room_t *room) {
+  pthread_mutex_lock(&g_ufrag_room_map_mutex);
+
+  for (int i = 0; i < g_ufrag_room_map_count; i++) {
+    if (strcmp(g_ufrag_room_maps[i].ufrag, client_ufrag) == 0) {
+      g_ufrag_room_maps[i].room = room;
+      pthread_mutex_unlock(&g_ufrag_room_map_mutex);
+      return;
+    }
+  }
+
+  if (g_ufrag_room_map_count < SFU_MAX_UFRAG_ROOM_MAPPINGS) {
+    strncpy(g_ufrag_room_maps[g_ufrag_room_map_count].ufrag, client_ufrag, sizeof(g_ufrag_room_maps[0].ufrag) - 1);
+    g_ufrag_room_maps[g_ufrag_room_map_count].ufrag[sizeof(g_ufrag_room_maps[0].ufrag) - 1] = '\0';
+    g_ufrag_room_maps[g_ufrag_room_map_count].room = room;
+    g_ufrag_room_map_count++;
+  } else {
+    SFU_LOG_ERROR(
+        "ufrag->room table FULL (%d entries) -- cannot register ufrag=%s, "
+        "this peer's media will NOT bind to a room. See KNOWN LIMITATION "
+        "in signaling.c: table has no eviction policy yet.",
+        SFU_MAX_UFRAG_ROOM_MAPPINGS, client_ufrag);
+  }
+
+  pthread_mutex_unlock(&g_ufrag_room_map_mutex);
+}
+
+bool sfu_lookup_ufrag_room(const char *client_ufrag, sfu_room_t **out_room) {
+  pthread_mutex_lock(&g_ufrag_room_map_mutex);
+  for (int i = 0; i < g_ufrag_room_map_count; i++) {
+    if (strcmp(g_ufrag_room_maps[i].ufrag, client_ufrag) == 0) {
+      *out_room = g_ufrag_room_maps[i].room;
+      pthread_mutex_unlock(&g_ufrag_room_map_mutex);
+      return true;
+    }
+  }
+  pthread_mutex_unlock(&g_ufrag_room_map_mutex);
+  return false;
+}
+
+static bool extract_sdp_ice_ufrag(const char *sdp, size_t sdp_len, char *out, size_t out_cap) {
+  static const char needle[] = "a=ice-ufrag:";
+  const size_t needle_len = sizeof(needle) - 1;
+
+  for (size_t i = 0; i + needle_len <= sdp_len; i++) {
+    if (memcmp(sdp + i, needle, needle_len) == 0) {
+      size_t start = i + needle_len;
+      size_t end = start;
+      while (end < sdp_len && sdp[end] != '\r' && sdp[end] != '\n') {
+        end++;
+      }
+      size_t len = end - start;
+      if (len == 0 || len >= out_cap) {
+        return false;
+      }
+      memcpy(out, sdp + start, len);
+      out[len] = '\0';
+      return true;
+    }
+  }
+  return false;
+}
 
 typedef struct {
   int fd;
   sfu_signaling_server_t *server;
 } conn_ctx_t;
 
-static sfu_ip_room_map_entry_t g_ip_room_maps[SFU_MAX_IP_ROOM_MAPPINGS];
-static int g_ip_room_map_count = 0;
-static pthread_mutex_t g_ip_room_map_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc) {
+  *audio_ssrc = 0;
+  *video_ssrc = 0;
+  *rtx_ssrc = 0;
+  int current_media = 0; /* 0 = none, 1 = audio, 2 = video */
 
-void sfu_register_ip_room(const char *ip, sfu_room_t *room) {
-  pthread_mutex_lock(&g_ip_room_map_mutex);
-  for (int i = 0; i < g_ip_room_map_count; i++) {
-    if (strcmp(g_ip_room_maps[i].ip, ip) == 0) {
-      g_ip_room_maps[i].room = room;
-      pthread_mutex_unlock(&g_ip_room_map_mutex);
-      return;
+  size_t pos = 0;
+  while (pos < sdp_len) {
+    size_t line_start = pos;
+    while (pos < sdp_len && sdp[pos] != '\n') {
+      pos++;
+    }
+    size_t line_end = pos;
+    if (line_end > line_start && sdp[line_end - 1] == '\r') {
+      line_end--;
+    }
+    if (pos < sdp_len) {
+      pos++;
+    }
+
+    size_t len = line_end - line_start;
+    const char *line = sdp + line_start;
+
+    if (len >= 7 && memcmp(line, "m=audio", 7) == 0) {
+      current_media = 1;
+    } else if (len >= 7 && memcmp(line, "m=video", 7) == 0) {
+      current_media = 2;
+    } else if (len >= 7 && memcmp(line, "a=ssrc:", 7) == 0) {
+      uint32_t ssrc = (uint32_t)strtoul(line + 7, NULL, 10);
+      if (current_media == 1 && *audio_ssrc == 0) {
+        *audio_ssrc = ssrc;
+      } else if (current_media == 2) {
+        if (*video_ssrc == 0) {
+          *video_ssrc = ssrc;
+        } else if (*rtx_ssrc == 0 && ssrc != *video_ssrc) {
+          *rtx_ssrc = ssrc;
+        }
+      }
     }
   }
-  if (g_ip_room_map_count < SFU_MAX_IP_ROOM_MAPPINGS) {
-    strncpy(g_ip_room_maps[g_ip_room_map_count].ip, ip, 63);
-    g_ip_room_maps[g_ip_room_map_count].room = room;
-    g_ip_room_map_count++;
-  }
-  pthread_mutex_unlock(&g_ip_room_map_mutex);
 }
 
-sfu_room_t *sfu_lookup_ip_room(const char *ip) {
-  pthread_mutex_lock(&g_ip_room_map_mutex);
-  for (int i = 0; i < g_ip_room_map_count; i++) {
-    if (strcmp(g_ip_room_maps[i].ip, ip) == 0) {
-      sfu_room_t *r = g_ip_room_maps[i].room;
-      pthread_mutex_unlock(&g_ip_room_map_mutex);
-      return r;
-    }
-  }
-  pthread_mutex_unlock(&g_ip_room_map_mutex);
-  return NULL;
-}
-
-static void handle_offer(int fd, sfu_signaling_server_t *s, const char *sdp, int sdp_len) {
+static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio, uint32_t ans_video,
+                                  uint32_t ans_rtx) {
   char answer[SFU_SIGNALING_SDP_CAP];
-  int answer_len = sfu_sdp_build_answer(sdp, (size_t)sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint,
-                                        answer, sizeof(answer));
+  int answer_len = sfu_sdp_build_answer(offer_sdp, offer_sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd,
+                                        s->dtls_ctx->fingerprint, ans_audio, ans_video, ans_rtx, answer, sizeof(answer));
   if (answer_len < 0) {
-    SFU_LOG_WARN("signaling: failed to build SDP answer, dropping offer");
-    return;
+    SFU_LOG_WARN("signaling: failed to build SDP answer");
+    return false;
   }
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(answer, (size_t)answer_len, escaped, sizeof(escaped));
   if (escaped_len < 0) {
     SFU_LOG_WARN("signaling: answer too large to escape into JSON response");
-    return;
+    return false;
   }
 
   char response[SFU_SIGNALING_JSON_CAP + 64];
   int response_len = snprintf(response, sizeof(response), "{\"type\":\"answer\",\"sdp\":\"%s\"}", escaped);
   if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
     SFU_LOG_WARN("signaling: response too large to send");
-    return;
+    return false;
   }
 
   if (sfu_ws_send_text(fd, response, (size_t)response_len) != 0) {
-    SFU_LOG_WARN("signaling: failed to send answer over WebSocket");
-    return;
+    SFU_LOG_WARN("signaling: failed to send answer over WebSocket (fd=%d)", fd);
+    return false;
   }
 
-  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %d-byte offer", response_len, sdp_len);
+  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %zu-byte offer (fd=%d)", response_len, offer_sdp_len, fd);
+  return true;
+}
+
+/* After a peer's publish state changes, re-push a fresh answer to every
+ * OTHER already-connected peer in the room, so they learn about this
+ * peer's SSRCs without having to send a new offer themselves. */
+static void push_updated_answers_to_others(sfu_signaling_server_t *s, sfu_room_t *room, const char *exclude_ufrag) {
+  sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
+  uint32_t n = sfu_room_snapshot_other_publishers(room, exclude_ufrag, snaps, SFU_ROOM_MAX_PEERS);
+
+  for (uint32_t i = 0; i < n; i++) {
+    uint32_t their_audio = 0, their_video = 0, their_rtx = 0;
+    if (!sfu_room_get_other_publisher_ssrcs(room, snaps[i].ufrag, &their_audio, &their_video, &their_rtx)) {
+      continue;
+    }
+    if (build_and_send_answer(snaps[i].fd, s, snaps[i].offer_sdp, snaps[i].offer_sdp_len, their_audio, their_video, their_rtx)) {
+      SFU_LOG_INFO("signaling: pushed updated answer to ufrag=%s (fd=%d) after ufrag=%s published", snaps[i].ufrag, snaps[i].fd, exclude_ufrag);
+    }
+  }
+}
+
+static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *client_ufrag, const char *sdp, int sdp_len) {
+  uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
+  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
+
+  if (room && client_ufrag[0] != '\0') {
+    sfu_room_publish(room, client_ufrag, fd, sdp, (size_t)sdp_len, off_audio, off_video, off_rtx);
+    if (off_audio != 0 || off_video != 0) {
+      SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " ufrag=%s (audio=%u, video=%u, rtx=%u)", room->room_id, client_ufrag, off_audio,
+                   off_video, off_rtx);
+    }
+  }
+
+  uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
+  if (room && client_ufrag[0] != '\0') {
+    sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
+  }
+
+  build_and_send_answer(fd, s, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
+
+  /* Tell everyone ELSE already in the room about what THIS peer just
+   * published, so peers who joined earlier (like PC1 in your log) get a
+   * corrected answer instead of staying stuck on ssrc=0. */
+  if (room && client_ufrag[0] != '\0' && (off_audio != 0 || off_video != 0)) {
+    push_updated_answers_to_others(s, room, client_ufrag);
+  }
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
+  (void)s;
   SFU_LOG_INFO(
       "INTEGRATION: [NATS Publish] Topic: sfu.room.join | Payload: "
       "{\"room\": %" PRIu64 ", \"ip\": \"%s\"}",
@@ -112,29 +236,24 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
   char search_str[128];
   snprintf(search_str, sizeof(search_str), "\r\n%s:", header_name);
 
-  // Look for the header (case-insensitive check is ideal, but standard casing is fine here)
   const char *pos = strcasestr(handshake, search_str);
   if (!pos) {
-    // Also try without prepended CRLF just in case it's the very first header line
     snprintf(search_str, sizeof(search_str), "%s:", header_name);
     if (strncmp(handshake, search_str, strlen(search_str)) == 0) {
       pos = handshake;
     } else {
-      return -1;  // Header not found
+      return -1;
     }
   } else {
-    pos += 2;  // Move past \r\n
+    pos += 2;
   }
 
-  // Move past header name and colon
   pos += strlen(header_name) + 1;
 
-  // Skip leading whitespace spaces
   while (*pos == ' ' || *pos == '\t') {
     pos++;
   }
 
-  // Find the end of the line
   const char *end = strstr(pos, "\r\n");
   if (!end) {
     return -1;
@@ -148,7 +267,6 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
   strncpy(out_val, pos, len);
   out_val[len] = '\0';
 
-  // If X-Forwarded-For contains a chain of IPs (e.g. "client, proxy1"), isolate the first one
   char *comma = strchr(out_val, ',');
   if (comma) {
     *comma = '\0';
@@ -171,7 +289,6 @@ static void *conn_thread_main(void *arg) {
   if (peek_len > 0) {
     peek_buf[peek_len] = '\0';
 
-    // Try checking X-Real-IP first
     if (extract_header_val(peek_buf, "X-Real-IP", peer_ip, sizeof(peer_ip)) == 0) {
       ip_detected_from_header = 1;
     } else if (extract_header_val(peek_buf, "X-Forwarded-For", peer_ip, sizeof(peer_ip)) == 0) {
@@ -185,7 +302,6 @@ static void *conn_thread_main(void *arg) {
     return NULL;
   }
 
-  // Get socket address mapping structs
   struct sockaddr_storage peer_addr;
   socklen_t peer_addr_len = sizeof(peer_addr);
   if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_addr_len) != 0) {
@@ -201,23 +317,13 @@ static void *conn_thread_main(void *arg) {
       struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
       inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
     }
-  } else {
-    // If the real IP was successfully parsed from the header, translate it back
-    // to the socket address structure so standard STUN mapping logic remains perfectly aligned!
-    if (strchr(peer_ip, ':')) {
-      // IPv6 Address Found
-      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
-      s6->sin6_family = AF_INET6;
-      inet_pton(AF_INET6, peer_ip, &s6->sin6_addr);
-    } else {
-      // IPv4 Address Found
-      struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
-      s4->sin_family = AF_INET;
-      inet_pton(AF_INET, peer_ip, &s4->sin_addr);
-    }
   }
 
   SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", peer_ip, ip_detected_from_header ? "YES" : "NO");
+
+  sfu_room_t *joined_room = NULL;
+  uint64_t joined_room_id = 0;
+  char client_ufrag[32] = {0};
 
   char buf[SFU_SIGNALING_RECV_CAP];
   for (;;) {
@@ -244,39 +350,63 @@ static void *conn_thread_main(void *arg) {
         continue;
       }
 
-      // Find or create the session using the adjusted peer address containing the real IP
-      sfu_peer_session_t *session = sfu_session_table_get_or_create(s->sessions, &peer_addr, peer_addr_len);
-      if (session) {
-        sfu_room_t *room = sfu_room_registry_get_or_create(s->room_registry, room_id);
-        if (room) {
-          session->room = room;
-
-          sfu_register_ip_room(peer_ip, room);
-          publish_join_event_to_nats(s, room_id, peer_ip);
-
-          char response[128];
-          snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
-          sfu_ws_send_text(fd, response, strlen(response));
-        } else {
-          sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"room_creation_failed\"}", 49);
-        }
-      } else {
-        sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"session_creation_failed\"}", 52);
+      sfu_room_t *room = sfu_room_registry_get_or_create(s->room_registry, room_id);
+      if (!room) {
+        sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"room_creation_failed\"}", 49);
+        continue;
       }
+
+      joined_room = room;
+      joined_room_id = room_id;
+      publish_join_event_to_nats(s, room_id, peer_ip);
+
+      SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64
+                   " (will bind to a specific "
+                   "media session once its offer's client ufrag is seen)",
+                   peer_ip, room_id);
+
+      char response[128];
+      snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
+      sfu_ws_send_text(fd, response, strlen(response));
+
     } else if (strcmp(type, "offer") == 0) {
-      sfu_peer_session_t *session = sfu_session_table_find(s->sessions, &peer_addr, peer_addr_len);
-      if (!session || !session->room) {
-        SFU_LOG_WARN("signaling: offer received before join completed for peer");
+      if (!joined_room) {
+        SFU_LOG_WARN("signaling: offer received before join completed for peer %s", peer_ip);
         sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}", 49);
         continue;
       }
 
       char sdp[SFU_SIGNALING_SDP_CAP];
       int sdp_len = sfu_json_extract_string(buf, "sdp", sdp, sizeof(sdp));
-      if (sdp_len >= 0) {
-        handle_offer(fd, s, sdp, sdp_len);
+      if (sdp_len < 0) {
+        SFU_LOG_WARN("signaling: offer message with no sdp field from peer %s", peer_ip);
+        continue;
       }
+
+      bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, client_ufrag, sizeof(client_ufrag));
+      if (have_ufrag) {
+        sfu_register_ufrag_room(client_ufrag, joined_room);
+        SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64
+                     " for peer %s "
+                     "(media path will bind this at first authenticated STUN request)",
+                     client_ufrag, joined_room_id, peer_ip);
+      } else {
+        SFU_LOG_WARN(
+            "signaling: could not find a=ice-ufrag in offer SDP from peer %s -- "
+            "this peer's media session will NOT be bound to a room automatically. "
+            "Check that the offer actually contains an m= line with ICE credentials.",
+            peer_ip);
+        client_ufrag[0] = '\0';
+      }
+
+      handle_offer(fd, s, joined_room, client_ufrag, sdp, sdp_len);
+    } else {
+      SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, peer_ip);
     }
+  }
+
+  if (joined_room && client_ufrag[0] != '\0') {
+    sfu_room_unpublish(joined_room, client_ufrag);
   }
 
   close(fd);
@@ -292,7 +422,7 @@ static void *accept_loop_main(void *arg) {
       if (s->running) {
         SFU_LOG_WARN("signaling: accept() failed");
       }
-      continue; /* if !running, loop condition will exit next check */
+      continue;
     }
 
     int one = 1;
@@ -323,8 +453,6 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
   s->media_port = media_port;
   s->ice_creds = ice_creds;
   s->dtls_ctx = dtls_ctx;
-
-  // Assign the shared memory state pointers
   s->sessions = sessions;
   s->room_registry = room_registry;
 
