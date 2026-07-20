@@ -145,23 +145,34 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
   uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
 
+  uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
+
   if (room) {
+    pthread_mutex_lock(&room->lock);
+
+    /* Only overwrite the fields this offer actually supplied SSRCs for.
+     * Absent-in-this-offer must not mean reset-to-zero. */
     if (off_audio != 0) {
       room->audio_ssrc = off_audio;
     }
     if (off_video != 0) {
       room->video_ssrc = off_video;
-      room->rtx_ssrc = off_rtx;
+      room->rtx_ssrc = off_rtx; /* rtx is only meaningful alongside a video ssrc */
     }
+
     if (off_audio != 0 || off_video != 0) {
       SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " (audio=%u, video=%u, rtx=%u)", room->room_id, room->audio_ssrc, room->video_ssrc,
                    room->rtx_ssrc);
     }
-  }
 
-  uint32_t ans_audio = room ? room->audio_ssrc : 0;
-  uint32_t ans_video = room ? room->video_ssrc : 0;
-  uint32_t ans_rtx = room ? room->rtx_ssrc : 0;
+    /* Snapshot under the same lock so the answer is built from a
+     * consistent, non-torn triple. */
+    ans_audio = room->audio_ssrc;
+    ans_video = room->video_ssrc;
+    ans_rtx = room->rtx_ssrc;
+
+    pthread_mutex_unlock(&room->lock);
+  }
 
   char answer[SFU_SIGNALING_SDP_CAP];
   int answer_len = sfu_sdp_build_answer(sdp, (size_t)sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint,
