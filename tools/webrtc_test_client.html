@@ -176,14 +176,13 @@
 
             let isRenegotiating = false;
 
-            // If you use the native event listener, guard it:
             pc.onnegotiationneeded = async () => {
                 if (isRenegotiating) return;
                 try {
                     isRenegotiating = true;
-                    const offer = await peerConnection.createOffer();
-                    await peerConnection.setLocalDescription(offer);
-                    ws.send(JSON.stringify({ type: "offer", sdp: peerConnection.localDescription.sdp }));
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
                 } catch (err) {
                     console.error(err);
                 } finally {
