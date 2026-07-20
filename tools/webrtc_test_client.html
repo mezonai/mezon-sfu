@@ -174,6 +174,23 @@
             remoteVideoEl.volume = 1.0;
             remoteVideoEl.srcObject = remoteStream;
 
+            let isRenegotiating = false;
+
+            // If you use the native event listener, guard it:
+            pc.onnegotiationneeded = async () => {
+                if (isRenegotiating) return;
+                try {
+                    isRenegotiating = true;
+                    const offer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(offer);
+                    ws.send(JSON.stringify({ type: "offer", sdp: peerConnection.localDescription.sdp }));
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    isRenegotiating = false; // Reset only after the signaling state is stable
+                }
+            };
+
             // Attach tracks directly without relying on event.streams[0]
             pc.ontrack = (event) => {
                 console.log("Remote track received:", event.track.kind, event.track);
@@ -251,6 +268,10 @@
 
                 // FIX 3B: Handle SFUs that trigger renegotiation via an event rather than a direct SDP offer
                 if (msg.type === "renegotiate" || msg.type === "peer-joined") {
+                    if (isRenegotiating || peerConnection.signalingState !== "stable") {
+                        console.log("Renegotiation requested but already negotiating or unstable. Skipping.");
+                        break;
+                    }
                     console.log("Server requested renegotiation");
                     updateStatus("Renegotiating session for new participant...");
                     const offer = await pc.createOffer();

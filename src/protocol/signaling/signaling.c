@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -141,6 +142,24 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
   }
 }
 
+static bool room_has_this_publisher(sfu_room_t *room, const char *client_ufrag) {
+  sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
+  // Passing NULL or empty string to snapshot matches EVERYONE in the room
+  uint32_t n = sfu_room_snapshot_other_publishers(room, "", snaps, SFU_ROOM_MAX_PEERS);
+
+  bool found = false;
+  for (uint32_t i = 0; i < n; i++) {
+    if ((snaps[i].ufrag[0] != 0) && strcmp(snaps[i].ufrag, client_ufrag) == 0) {
+      found = true;
+    }
+    // Remember to free the memory allocated for the snapshot SDPs!
+    if (snaps[i].offer_sdp) {
+      SFU_FREE(snaps[i].offer_sdp);
+    }
+  }
+  return found;
+}
+
 static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio, uint32_t ans_video,
                                   uint32_t ans_rtx) {
   char answer[SFU_SIGNALING_SDP_CAP];
@@ -210,11 +229,11 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
 
   build_and_send_answer(fd, s, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
 
-  /* Tell everyone ELSE already in the room about what THIS peer just
-   * published, so peers who joined earlier (like PC1 in your log) get a
-   * corrected answer instead of staying stuck on ssrc=0. */
+  int was_already_publishing = room_has_this_publisher(room, client_ufrag);
   if (room && client_ufrag[0] != '\0' && (off_audio != 0 || off_video != 0)) {
-    push_updated_answers_to_others(s, room, client_ufrag);
+    if (!was_already_publishing) {
+      push_updated_answers_to_others(s, room, client_ufrag);
+    }
   }
 }
 
