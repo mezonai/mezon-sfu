@@ -20,6 +20,9 @@ typedef struct sfu_peer_entry {
 } sfu_peer_entry_t;
 
 typedef struct sfu_room {
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t rtx_ssrc;
   uint64_t room_id;    /* Unique numeric room identifier */
   char room_name[128]; /* User-friendly room name */
   sfu_peer_entry_t peers[SFU_ROOM_MAX_PEERS];

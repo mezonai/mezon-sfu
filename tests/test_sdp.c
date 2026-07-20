@@ -58,10 +58,11 @@ static int count_occurrences(const char *haystack, const char *needle) {
 
 int main(void) {
   char answer[8192];
+  /* Updated: Added 1234567890, 0, 0 for audio_ssrc, video_ssrc, rtx_ssrc */
   int len = sfu_sdp_build_answer(SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:"
                                  "FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3",
-                                 answer, sizeof(answer));
+                                 1234567890, 0, 0, answer, sizeof(answer));
   assert(len > 0);
   answer[len] = '\0';
 
@@ -102,7 +103,8 @@ int main(void) {
   /* An offer with no m= line must fail cleanly, not crash or emit
    * a bogus answer. */
   const char *no_media = "v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n";
-  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", answer, sizeof(answer)) == -1);
+  /* Updated: Added 0, 0, 0 for audio_ssrc, video_ssrc, rtx_ssrc */
+  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", 0, 0, 0, answer, sizeof(answer)) == -1);
 
   printf("test_sdp: OK\n");
   return 0;

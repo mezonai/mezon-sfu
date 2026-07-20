@@ -139,6 +139,10 @@ bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
 }
 
 bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
+  if (buf[1] == 206) {
+    SFU_LOG_INFO("Received RTCP PLI (Keyframe Request) from pc2! Routing to pc1...");
+  }
+
   if ((size_t)*len + SRTP_MAX_TRAILER_LEN + 4 > cap) { /* RTCP trailer also carries an E-flag+SRTCP index word */
     SFU_LOG_WARN("SRTP protect (RTCP): insufficient buffer headroom");
     return false;

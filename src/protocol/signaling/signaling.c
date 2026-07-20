@@ -99,10 +99,69 @@ typedef struct {
   sfu_signaling_server_t *server;
 } conn_ctx_t;
 
-static void handle_offer(int fd, sfu_signaling_server_t *s, const char *sdp, int sdp_len) {
+static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc) {
+  *audio_ssrc = 0;
+  *video_ssrc = 0;
+  *rtx_ssrc = 0;
+  int current_media = 0; /* 0 = none, 1 = audio, 2 = video */
+
+  size_t pos = 0;
+  while (pos < sdp_len) {
+    size_t line_start = pos;
+    while (pos < sdp_len && sdp[pos] != '\n') {
+      pos++;
+    }
+    size_t line_end = pos;
+    if (line_end > line_start && sdp[line_end - 1] == '\r') {
+      line_end--;
+    }
+    if (pos < sdp_len) {
+      pos++;
+    }
+
+    size_t len = line_end - line_start;
+    const char *line = sdp + line_start;
+
+    if (len >= 7 && memcmp(line, "m=audio", 7) == 0) {
+      current_media = 1;
+    } else if (len >= 7 && memcmp(line, "m=video", 7) == 0) {
+      current_media = 2;
+    } else if (len >= 7 && memcmp(line, "a=ssrc:", 7) == 0) {
+      uint32_t ssrc = (uint32_t)strtoul(line + 7, NULL, 10);
+      if (current_media == 1 && *audio_ssrc == 0) {
+        *audio_ssrc = ssrc;
+      } else if (current_media == 2) {
+        if (*video_ssrc == 0) {
+          *video_ssrc = ssrc;
+        } else if (*rtx_ssrc == 0 && ssrc != *video_ssrc) {
+          *rtx_ssrc = ssrc;
+        }
+      }
+    }
+  }
+}
+
+static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *sdp, int sdp_len) {
+  uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
+  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
+
+  /* If the incoming offer contains media SSRCs, this peer is publishing.
+   * Save their transmitting SSRCs to the room so subscribers can inherit them. */
+  if (room && (off_audio != 0 || off_video != 0)) {
+    room->audio_ssrc = off_audio;
+    room->video_ssrc = off_video;
+    room->rtx_ssrc = off_rtx;
+    SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " (audio=%u, video=%u, rtx=%u)", room->room_id, room->audio_ssrc, room->video_ssrc,
+                 room->rtx_ssrc);
+  }
+
+  uint32_t ans_audio = room ? room->audio_ssrc : 0;
+  uint32_t ans_video = room ? room->video_ssrc : 0;
+  uint32_t ans_rtx = room ? room->rtx_ssrc : 0;
+
   char answer[SFU_SIGNALING_SDP_CAP];
   int answer_len = sfu_sdp_build_answer(sdp, (size_t)sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint,
-                                        answer, sizeof(answer));
+                                        ans_audio, ans_video, ans_rtx, answer, sizeof(answer));
   if (answer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build SDP answer, dropping offer");
     return;
@@ -308,7 +367,7 @@ static void *conn_thread_main(void *arg) {
             peer_ip);
       }
 
-      handle_offer(fd, s, sdp, sdp_len);
+      handle_offer(fd, s, joined_room, sdp, sdp_len);
     } else {
       SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, peer_ip);
     }
