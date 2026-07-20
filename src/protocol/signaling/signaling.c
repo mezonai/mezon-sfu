@@ -128,7 +128,19 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
     } else if (len >= 7 && memcmp(line, "m=video", 7) == 0) {
       current_media = 2;
     } else if (len >= 7 && memcmp(line, "a=ssrc:", 7) == 0) {
-      uint32_t ssrc = (uint32_t)strtoul(line + 7, NULL, 10);
+      if (len >= 12 && memcmp(line, "a=ssrc-group", 12) == 0) {
+        continue;
+      }
+
+      /* Extract SSRC value safely */
+      char *endptr;
+      uint32_t ssrc = (uint32_t)strtoul(line + 7, &endptr, 10);
+
+      /* If strtoul didn't consume any digits, skip this line entirely */
+      if (endptr == line + 7 || ssrc == 0) {
+        continue;
+      }
+
       if (current_media == 1 && *audio_ssrc == 0) {
         *audio_ssrc = ssrc;
       } else if (current_media == 2) {

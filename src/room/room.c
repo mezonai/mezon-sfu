@@ -115,18 +115,19 @@ bool sfu_room_get_other_publisher_ssrcs(sfu_room_t *room, const char *self_ufrag
   for (uint32_t i = 0; i < room->publisher_count; i++) {
     sfu_publisher_ssrc_t *p = &room->publishers[i];
     if (p->active && strcmp(p->ufrag, self_ufrag) != 0) {
-      *audio_ssrc = p->audio_ssrc;
-      *video_ssrc = p->video_ssrc;
-      *rtx_ssrc = p->rtx_ssrc;
-      pthread_mutex_unlock(&room->lock);
-      return true;
+      if (p->audio_ssrc != 0 || p->video_ssrc != 0) {
+        *audio_ssrc = p->audio_ssrc;
+        *video_ssrc = p->video_ssrc;
+        *rtx_ssrc = p->rtx_ssrc;
+        pthread_mutex_unlock(&room->lock);
+        return true;
+      }
     }
   }
   pthread_mutex_unlock(&room->lock);
   return false;
 }
 
-/* room.c */
 void sfu_room_publish(sfu_room_t *room, const char *ufrag, int fd, const char *offer_sdp, size_t offer_sdp_len, uint32_t audio_ssrc, uint32_t video_ssrc,
                       uint32_t rtx_ssrc) {
   pthread_mutex_lock(&room->lock);
