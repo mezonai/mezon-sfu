@@ -40,8 +40,8 @@ find_library(BORINGSSL_SSL_LIB NAMES ssl PATHS "/usr/local/lib/boringssl" NO_DEF
 find_library(BORINGSSL_CRYPTO_LIB NAMES crypto PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
 
 # Set libsrtp include path and locate the library
-set(SRTP_INCLUDE_DIR "/usr/local/include/srtp3")
-find_library(SRTP_LIB NAMES srtp2 srtp REQUIRED)
+set(SRTP_INCLUDE_DIR "/usr/local/include/srtp2")
+find_library(SRTP_LIB NAMES srtp2 PATHS "/usr/local/lib" NO_DEFAULT_PAT REQUIRED)
 
 add_library(sfu_core STATIC
   src/memory/pool.c
