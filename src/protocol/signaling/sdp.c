@@ -101,26 +101,30 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
   char line[128];
   int n;
 
-  n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", video_ssrc);
-  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-    return -1;
-  }
-
-  /* Only generate the RTX SSRC line and FID grouping if an RTX SSRC was actually negotiated */
-  if (rtx_ssrc != 0) {
-    n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", rtx_ssrc);
+  /* Only generate video SSRC lines if a valid video SSRC is present */
+  if (video_ssrc != 0) {
+    n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", video_ssrc);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
-    n = snprintf(line, sizeof(line), "a=ssrc-group:FID %u %u", video_ssrc, rtx_ssrc);
-    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+
+    /* Only generate the RTX SSRC line and FID grouping if an RTX SSRC was actually negotiated */
+    if (rtx_ssrc != 0) {
+      n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", rtx_ssrc);
+      if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+        return -1;
+      }
+      n = snprintf(line, sizeof(line), "a=ssrc-group:FID %u %u", video_ssrc, rtx_ssrc);
+      if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+        return -1;
+      }
+    }
+
+    if (append_line(out, out_cap, offset, "a=msid:remote-stream remote-video-track") != 0) {
       return -1;
     }
   }
 
-  if (append_line(out, out_cap, offset, "a=msid:remote-stream remote-video-track") != 0) {
-    return -1;
-  }
   return 0;
 }
 
