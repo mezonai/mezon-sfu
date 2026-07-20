@@ -219,7 +219,8 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
   char peer_ip[64];
   uint16_t peer_port;
   format_ring_peer_addr((const struct sockaddr *)name, peer_ip, &peer_port);
-  SFU_LOG_DEBUG("LOW-LEVEL RECV: io_uring read %d bytes from %s:%u on fd=%d (bid=%u)", cqe->res, peer_ip, peer_port, r->fd, bid);
+
+  SFU_LOG_INFO("LOW-LEVEL RECV: io_uring read %d bytes from %s:%u on fd=%d (bid=%u)", cqe->res, peer_ip, peer_port, r->fd, bid);
 
   if (o->flags & MSG_TRUNC) {
     SFU_LOG_WARN("datagram truncated from %s:%u (bid=%u), dropping", peer_ip, peer_port, bid);
@@ -291,6 +292,9 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
         }
       } else if (cqe->res < 0) {
         SFU_LOG_WARN("send_zc error on fd=%d: %s", r->fd, strerror(-cqe->res));
+        if (!(cqe->flags & IORING_CQE_F_NOTIF)) {
+          SFU_LOG_INFO("SEND_ZC completed res=%d", cqe->res);
+        }
       }
     }
   }
