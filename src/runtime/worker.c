@@ -62,15 +62,6 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   sfu_room_t *active_room = sender_session->room;
   if (!active_room) {
-    static _Thread_local uint32_t no_room_warn_counter = 0;
-    if ((no_room_warn_counter++ % 200) == 0) {
-      SFU_LOG_WARN(
-          "worker %u: packet from established session with NO room bound yet "
-          "(seen %u times on this worker so far) -- check the signaling log for "
-          "this peer's \"registered client ufrag\" line, and the STUN log for "
-          "\"bound session ... to room_id\"; dropping",
-          w->worker_index, no_room_warn_counter);
-    }
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
@@ -89,21 +80,6 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
   uint32_t n = sfu_room_list_subscribers_excluding(active_room, &pkt->peer_addr, pkt->peer_addr_len, subs, SFU_ROOM_MAX_PEERS);
-
-  static _Thread_local uint32_t trace_counter = 0;
-  if ((trace_counter++ % 2000) == 0) {
-    SFU_LOG_INFO("worker %u: forwarding room_id=%" PRIu64 " (rtcp=%d) -> %u subscriber(s)", w->worker_index, active_room->room_id, (int)is_rtcp, n);
-  }
-
-  if (n == 0) {
-    static _Thread_local uint32_t zero_subs_counter = 0;
-    if ((zero_subs_counter++ % 500) == 0) {
-      SFU_LOG_INFO("worker %u: room_id=%" PRIu64
-                   " has 0 other subscribers for this sender "
-                   "(seen %u times) -- expected if this is the only peer connected so far",
-                   w->worker_index, active_room->room_id, zero_subs_counter);
-    }
-  }
 
   for (uint32_t i = 0; i < n; i++) {
     sfu_peer_entry_t *sub = &subs[i];
@@ -132,6 +108,8 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
     enc->len = (uint32_t)enc_len;
+
+    SFU_LOG_INFO("worker fwd from %u to %u", w->worker_index, sub->worker_id);
 
     if (sub->worker_id == w->worker_index) {
       if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub->addr, sub->addr_len) != 0) {
