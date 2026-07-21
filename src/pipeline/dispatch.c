@@ -80,11 +80,10 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 
     if (match) {
-      /* Cross-worker routing path ownership check */
+      /* Migrate path ownership if NAT/ICE shifts traffic to a new worker core */
       if (match->has_owner && match->worker_index != w->worker_index) {
-        SFU_LOG_INFO("worker %u: Drop STUN from alt-path %s:%u. Owned by worker %u", w->worker_index, ip, port, match->worker_index);
-        pthread_mutex_unlock(&w->routing_table->mutex);
-        return;
+        SFU_LOG_INFO("worker %u: Migrating ufrag=%s from worker %u (NAT path changed to %s:%u)", w->worker_index, client_ufrag, match->worker_index, ip, port);
+        match->worker_index = w->worker_index;
       }
 
       /* Claim path ownership if first time seeing this peer's network traffic */
