@@ -83,37 +83,63 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
   return 0;
 }
 
-/* Appends the remote audio SSRCs directly into the client's audio m-line (mid:0) */
+/* Appends the remote audio SSRCs directly into the client's audio m-line (mid:0)
+ * Includes explicit SSRC-level msid mappings required by Firefox compatibility rules. */
 static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc) {
   char line[128];
-  int n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", audio_ssrc);
-  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-    return -1;
-  }
-  if (append_line(out, out_cap, offset, "a=msid:remote-stream remote-audio-track") != 0) {
-    return -1;
+  int n;
+
+  if (audio_ssrc != 0) {
+    n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", audio_ssrc);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+
+    /* FIX 1: Explicit SSRC-level msid mapping for Firefox */
+    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-audio-track", audio_ssrc);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+
+    if (append_line(out, out_cap, offset, "a=msid:remote-stream remote-audio-track") != 0) {
+      return -1;
+    }
   }
   return 0;
 }
 
-/* Appends the remote video SSRCs directly into the client's video m-line (mid:1) */
+/* Appends the remote video SSRCs directly into the client's video m-line (mid:1)
+ * Includes explicit SSRC-level msid mappings required by Firefox compatibility rules. */
 static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc) {
   char line[128];
   int n;
 
-  /* Only generate video SSRC lines if a valid video SSRC is present */
+  /* Only generate video SSRC lines if a valid video SSRC is present[cite: 3] */
   if (video_ssrc != 0) {
     n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", video_ssrc);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
 
-    /* Only generate the RTX SSRC line and FID grouping if an RTX SSRC was actually negotiated */
+    /* FIX 1: Explicit primary video SSRC-level msid mapping for Firefox */
+    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-video-track", video_ssrc);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+
+    /* Only generate the RTX SSRC line and FID grouping if an RTX SSRC was actually negotiated[cite: 3] */
     if (rtx_ssrc != 0) {
       n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", rtx_ssrc);
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
         return -1;
       }
+
+      /* FIX 1: Explicit RTX SSRC-level msid mapping for Firefox */
+      n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-video-track", rtx_ssrc);
+      if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+        return -1;
+      }
+
       n = snprintf(line, sizeof(line), "a=ssrc-group:FID %u %u", video_ssrc, rtx_ssrc);
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
         return -1;
@@ -131,9 +157,9 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
 int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                          uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc, char *out, size_t out_cap) {
   size_t off = 0;
-  int in_media = 0;  // 0 = parsing session level, 1 = parsing media level
+  int in_media = 0;  // 0 = parsing session level, 1 = parsing media level[cite: 3]
   int saw_media_line = 0;
-  int current_media = 0;  // 0 = none, 1 = audio, 2 = video
+  int current_media = 0;  // 0 = none, 1 = audio, 2 = video[cite: 3]
 
   size_t pos = 0;
   while (pos < offer_len) {
@@ -155,7 +181,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       continue;
     }
 
-    // Keep the bundle group exactly as offered (e.g., "a=group:BUNDLE 0 1")
+    // Keep the bundle group exactly as offered (e.g., "a=group:BUNDLE 0 1")[cite: 3]
     if (starts_with(line, len, "a=group:BUNDLE")) {
       if (append_line_n(out, out_cap, &off, line, len) != 0) {
         return -1;
@@ -179,15 +205,17 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       continue;
     }
 
+    /* FIX 2: When a peer offers sendrecv (publishing media), answer with sendrecv.
+     * Answering sendonly forces Firefox to shut down its outbound RTP sender! */
     if (starts_with(line, len, "a=sendrecv")) {
-      if (append_line(out, out_cap, &off, "a=sendonly") != 0) {
+      if (append_line(out, out_cap, &off, "a=sendrecv") != 0) {
         return -1;
       }
       continue;
     }
 
     if (starts_with(line, len, "m=")) {
-      // Before opening a new m-line, append the remote SSRCs for the completed section
+      // Before opening a new m-line, append the remote SSRCs for the completed section[cite: 3]
       if (current_media == 1) {
         if (append_remote_audio_ssrcs(out, out_cap, &off, audio_ssrc) != 0) {
           return -1;
@@ -224,7 +252,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
         return -1;
       }
 
-      // Inject connection and transport configurations
+      // Inject connection and transport configurations[cite: 3]
       if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
         return -1;
       }
@@ -253,7 +281,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
     return -1;
   }
 
-  // Append remote SSRCs for the final media section at the end of parsing
+  // Append remote SSRCs for the final media section at the end of parsing[cite: 3]
   if (current_media == 1) {
     if (append_remote_audio_ssrcs(out, out_cap, &off, audio_ssrc) != 0) {
       return -1;
