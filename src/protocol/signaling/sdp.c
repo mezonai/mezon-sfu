@@ -95,7 +95,6 @@ static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, 
       return -1;
     }
 
-    /* FIX 1: Explicit SSRC-level msid mapping for Firefox */
     n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-audio-track", audio_ssrc);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
@@ -121,7 +120,6 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
       return -1;
     }
 
-    /* FIX 1: Explicit primary video SSRC-level msid mapping for Firefox */
     n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-video-track", video_ssrc);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
@@ -134,7 +132,6 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
         return -1;
       }
 
-      /* FIX 1: Explicit RTX SSRC-level msid mapping for Firefox */
       n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-video-track", rtx_ssrc);
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
         return -1;
@@ -205,8 +202,6 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       continue;
     }
 
-    /* FIX 2: When a peer offers sendrecv (publishing media), answer with sendrecv.
-     * Answering sendonly forces Firefox to shut down its outbound RTP sender! */
     if (starts_with(line, len, "a=sendrecv")) {
       if (append_line(out, out_cap, &off, "a=sendrecv") != 0) {
         return -1;
