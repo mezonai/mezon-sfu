@@ -172,8 +172,6 @@ int main(int argc, char **argv) {
   // Block cleanly until shutdown is triggered
   sfu_scheduler_join(&scheduler);
 
-  SFU_LOG_INFO("shutting down mezon-sfu...");
-
   sfu_signaling_server_stop(&signaling);
 
   // Cleanup routines
