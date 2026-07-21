@@ -113,7 +113,7 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
   char line[128];
   int n;
 
-  /* Only generate video SSRC lines if a valid video SSRC is present[cite: 3] */
+  /* Only generate video SSRC lines if a valid video SSRC is present */
   if (video_ssrc != 0) {
     n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", video_ssrc);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
@@ -125,7 +125,7 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
       return -1;
     }
 
-    /* Only generate the RTX SSRC line and FID grouping if an RTX SSRC was actually negotiated[cite: 3] */
+    /* Only generate the RTX SSRC line and FID grouping if an RTX SSRC was actually negotiated */
     if (rtx_ssrc != 0) {
       n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", rtx_ssrc);
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
@@ -154,9 +154,9 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
 int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                          uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc, char *out, size_t out_cap) {
   size_t off = 0;
-  int in_media = 0;  // 0 = parsing session level, 1 = parsing media level[cite: 3]
+  int in_media = 0;  // 0 = parsing session level, 1 = parsing media level
   int saw_media_line = 0;
-  int current_media = 0;  // 0 = none, 1 = audio, 2 = video[cite: 3]
+  int current_media = 0;  // 0 = none, 1 = audio, 2 = video
 
   size_t pos = 0;
   while (pos < offer_len) {
@@ -178,7 +178,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       continue;
     }
 
-    // Keep the bundle group exactly as offered (e.g., "a=group:BUNDLE 0 1")[cite: 3]
+    // Keep the bundle group exactly as offered (e.g., "a=group:BUNDLE 0 1")
     if (starts_with(line, len, "a=group:BUNDLE")) {
       if (append_line_n(out, out_cap, &off, line, len) != 0) {
         return -1;
@@ -210,7 +210,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
     }
 
     if (starts_with(line, len, "m=")) {
-      // Before opening a new m-line, append the remote SSRCs for the completed section[cite: 3]
+      // Before opening a new m-line, append the remote SSRCs for the completed section
       if (current_media == 1) {
         if (append_remote_audio_ssrcs(out, out_cap, &off, audio_ssrc) != 0) {
           return -1;
@@ -247,7 +247,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
         return -1;
       }
 
-      // Inject connection and transport configurations[cite: 3]
+      // Inject connection and transport configurations
       if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
         return -1;
       }
@@ -276,7 +276,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
     return -1;
   }
 
-  // Append remote SSRCs for the final media section at the end of parsing[cite: 3]
+  // Append remote SSRCs for the final media section at the end of parsing
   if (current_media == 1) {
     if (append_remote_audio_ssrcs(out, out_cap, &off, audio_ssrc) != 0) {
       return -1;
