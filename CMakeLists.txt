@@ -43,6 +43,14 @@ find_library(BORINGSSL_CRYPTO_LIB NAMES crypto PATHS "/usr/local/lib/boringssl" 
 set(SRTP_INCLUDE_DIR "/usr/local/include/srtp2")
 find_library(SRTP2_LIBRARY NAMES srtp2 PATHS "/usr/local/lib" NO_DEFAULT_PAT REQUIRED)
 
+# Set libuv headers and library installed by libuv1-dev
+find_path(LIBUV_INCLUDE_DIR NAMES uv.h)
+find_library(LIBUV_LIBRARY NAMES uv)
+
+if(NOT LIBUV_INCLUDE_DIR OR NOT LIBUV_LIBRARY)
+  message(FATAL_ERROR "libuv1-dev not found! Install it using 'sudo apt install libuv1-dev'")
+endif()
+
 add_library(sfu_core STATIC
   src/memory/pool.c
   src/memory/packet_pool.c
@@ -70,7 +78,7 @@ add_library(sfu_core STATIC
   src/runtime/worker.c
   src/runtime/scheduler.c
   src/runtime/signal.c
-  src/runtime/global_registry.c
+  src/runtime/routing_context.c
 )
 
 target_include_directories(sfu_core PUBLIC
@@ -79,6 +87,7 @@ target_include_directories(sfu_core PUBLIC
   ${URING_INCLUDE_DIR}
   ${BORINGSSL_INCLUDE_DIR}
   ${SRTP_INCLUDE_DIR}
+  ${LIBUV_INCLUDE_DIR}
 )
 
 # Link directly using resolved absolute library paths
@@ -87,6 +96,7 @@ target_link_libraries(sfu_core PUBLIC
   ${BORINGSSL_SSL_LIB}
   ${BORINGSSL_CRYPTO_LIB}
   ${SRTP2_LIBRARY}
+  ${LIBUV_LIBRARY}
   mimalloc
   pthread
   m

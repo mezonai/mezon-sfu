@@ -168,10 +168,9 @@ void sfu_dtls_conn_destroy(sfu_dtls_conn_t *conn) {
   }
 }
 
-sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *data, size_t len) {
+sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *data, size_t len, void (*on_established_cb)(void *userdata), void *userdata) {
   if (conn->established) {
-    return SFU_DTLS_FEED_ESTABLISHED; /* stray post-handshake DTLS record
-                                         (rekey, alert) */
+    return SFU_DTLS_FEED_ESTABLISHED; /* stray post-handshake DTLS record (rekey, alert) */
   }
 
   BIO_write(conn->rbio, data, (int)len);
@@ -200,6 +199,12 @@ sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *
 
     conn->established = true;
     SFU_LOG_INFO("DTLS handshake established. Profile: %s (0x%04lx)", profile->name, profile->id);
+
+    // Fire the signaling renegotiation event ONLY now that media pathways are secure
+    if (on_established_cb) {
+      on_established_cb(userdata);
+    }
+
     return SFU_DTLS_FEED_ESTABLISHED;
   }
 

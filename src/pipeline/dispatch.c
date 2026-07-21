@@ -5,7 +5,8 @@
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
-#include "runtime/global_registry.h"
+#include "protocol/signaling/signaling.h"
+#include "runtime/routing_context.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
 #include "transport/stun/stun.h"
@@ -64,23 +65,38 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   char client_ufrag[32];
   bool have_ufrag = sfu_stun_extract_client_ufrag(pkt->data, pkt->len, w->ice_creds->ufrag, client_ufrag, sizeof(client_ufrag));
+  sfu_room_t *room = NULL; /* FIX: Declare room at top of function scope */
 
   if (have_ufrag) {
-    uint32_t active_worker_id;
-    if (sfu_global_registry_lookup(client_ufrag, &active_worker_id)) {
-      if (active_worker_id != w->worker_index) {
-        /*
-         * A different worker thread is already mid-handshake or fully
-         * established with this client over another interface/path.
-         * Drop this packet to kill the alternative route early.
-         */
-        SFU_LOG_INFO("worker %u: Drop STUN from alt-path %s:%u. Session owned by worker %u", w->worker_index, ip, port, active_worker_id);
+    pthread_mutex_lock(&w->routing_table->mutex);
+
+    /* Search the injected structure for this client's allocation context */
+    sfu_routing_entry_t *match = NULL;
+    for (int i = 0; i < w->routing_table->count; i++) {
+      if (strcmp(w->routing_table->entries[i].ufrag, client_ufrag) == 0) {
+        match = &w->routing_table->entries[i];
+        break;
+      }
+    }
+
+    if (match) {
+      /* Cross-worker routing path ownership check */
+      if (match->has_owner && match->worker_index != w->worker_index) {
+        SFU_LOG_INFO("worker %u: Drop STUN from alt-path %s:%u. Owned by worker %u", w->worker_index, ip, port, match->worker_index);
+        pthread_mutex_unlock(&w->routing_table->mutex);
         return;
       }
-    } else {
-      sfu_global_registry_register_owner(client_ufrag, w->worker_index);
-      SFU_LOG_INFO("worker %u: Claimed ownership of ufrag=%s (first STUN seen from %s:%u)", w->worker_index, client_ufrag, ip, port);
+
+      /* Claim path ownership if first time seeing this peer's network traffic */
+      if (!match->has_owner) {
+        match->worker_index = w->worker_index;
+        match->has_owner = true;
+        SFU_LOG_INFO("worker %u: Claimed ownership of ufrag=%s", w->worker_index, client_ufrag);
+      }
+
+      room = (sfu_room_t *)match->room;
     }
+    pthread_mutex_unlock(&w->routing_table->mutex);
   } else {
     SFU_LOG_WARN(
         "worker %u: STUN request from %s:%u has no parseable client ufrag "
@@ -102,15 +118,23 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   send_raw(w, response, response_len, &pkt->peer_addr, pkt->peer_addr_len);
 
+  /* Bind room directly to peer session if retrieved from routing_table */
   if (have_ufrag) {
-    sfu_room_t *room = NULL;
-    if (sfu_lookup_ufrag_room(client_ufrag, &room) && room) {
+    if (room) {
       sfu_peer_session_t *session = sfu_session_table_get_or_create(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
       if (!session) {
         SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
-      } else if (!session->room) {
-        session->room = room;
-        SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
+      } else {
+        /* ALWAYS update ufrag when authenticated STUN traffic is seen */
+        if (session->ufrag[0] == '\0') {
+          strncpy(session->ufrag, client_ufrag, sizeof(session->ufrag) - 1);
+          session->ufrag[sizeof(session->ufrag) - 1] = '\0';
+        }
+
+        if (!session->room) {
+          session->room = room;
+          SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
+        }
       }
     } else {
       SFU_LOG_DEBUG(
@@ -135,7 +159,9 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   SFU_LOG_INFO("worker %u: Feeding %u bytes of DTLS data from %s:%u (current state: %d, room %s)", w->worker_index, pkt->len, ip, port, session->state,
                session->room ? "BOUND" : "unbound");
 
-  sfu_dtls_feed_status_t status = sfu_dtls_conn_feed(&session->dtls, pkt->data, pkt->len);
+  // Since we implemented the callback option in dtls.c, we pass NULL here if we handle it locally inside the worker switch block,
+  // OR we pass your event hook. Let's keep it clean by driving the logic right when the state officially switches below.
+  sfu_dtls_feed_status_t status = sfu_dtls_conn_feed(&session->dtls, pkt->data, pkt->len, NULL, NULL);
 
   uint8_t out[4096];
   size_t out_len = sfu_dtls_conn_drain_output(&session->dtls, out, sizeof(out));
@@ -151,9 +177,15 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
           session->state = SFU_SESSION_FAILED;
           break;
         }
+
         session->state = SFU_SESSION_ESTABLISHED;
         SFU_LOG_INFO("worker %u: DTLS established, SRTP sessions ready for %s:%u (room %s)", w->worker_index, ip, port,
                      session->room ? "BOUND" : "STILL UNBOUND -- media will be dropped until it binds");
+
+        if (session->room) {
+          SFU_LOG_INFO("worker %u: SRTP secure pipeline verified. Dispatching room renegotiation for room context.", w->worker_index);
+          sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room, session->ufrag);
+        }
       }
       break;
     case SFU_DTLS_FEED_IN_PROGRESS:

@@ -58,7 +58,7 @@ typedef enum {
 } sfu_dtls_feed_status_t;
 
 /* Feeds one received datagram into the handshake state machine. */
-sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *data, size_t len);
+sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *data, size_t len, void (*on_established_cb)(void *userdata), void *userdata);
 
 /* Drains any handshake bytes OpenSSL wants sent back to the peer after
  * a feed call (or after conn_init, for the very first flight if we were
