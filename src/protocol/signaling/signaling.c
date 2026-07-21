@@ -342,7 +342,12 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
     } else {
       char buf[SFU_SIGNALING_RECV_CAP];
       ssize_t n = sfu_ws_recv_text(c->fd, buf, sizeof(buf));
-      if (n <= 0) {
+      if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          return;
+        }
+        disconnect_client(c);
+      } else if (n == 0) {
         disconnect_client(c);
       } else {
         char type[32];
