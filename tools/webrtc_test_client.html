@@ -134,44 +134,39 @@
             const startBtn = document.getElementById("startBtn");
 
             window.addEventListener("DOMContentLoaded", async () => {
+                // Avoid calling enumerateDevices() prior to permission grant, as Chrome
+                // hides device IDs/labels before permission is granted.
                 try {
-                    const devices =
-                        await navigator.mediaDevices.enumerateDevices();
-                    const hasVideo = devices.some(
-                        (device) => device.kind === "videoinput",
-                    );
-                    const hasAudio = devices.some(
-                        (device) => device.kind === "audioinput",
-                    );
-
-                    if (!hasVideo && !hasAudio) {
-                        updateStatus(
-                            "No camera or microphone found. Joining as receiver-only.",
-                        );
-                        localStream = new MediaStream();
-                        return;
-                    }
-
                     localStream = await navigator.mediaDevices.getUserMedia({
-                        video: hasVideo,
-                        audio: hasAudio,
+                        video: true,
+                        audio: true,
                     });
-
-                    if (hasVideo) {
-                        document.getElementById("localVideo").srcObject =
-                            localStream;
-                    }
-
-                    updateStatus(
-                        "Media initialized. Ready to connect and join room.",
-                    );
                 } catch (e) {
-                    console.error("Media initialization error:", e);
-                    updateStatus(
-                        "Media access denied. Joining as receiver-only.",
-                        false,
-                    );
-                    localStream = new MediaStream();
+                    console.warn("Audio/Video access failed, trying audio-only fallback:", e);
+                    try {
+                        localStream = await navigator.mediaDevices.getUserMedia({
+                            video: false,
+                            audio: true,
+                        });
+                    } catch (err) {
+                        console.warn("Audio access failed. Joining as receiver-only:", err);
+                        localStream = new MediaStream();
+                    }
+                }
+
+                const videoTrack = localStream.getVideoTracks()[0];
+                const audioTrack = localStream.getAudioTracks()[0];
+
+                if (videoTrack) {
+                    document.getElementById("localVideo").srcObject = localStream;
+                }
+
+                if (videoTrack && audioTrack) {
+                    updateStatus("Media initialized (Audio + Video). Ready to connect.");
+                } else if (audioTrack) {
+                    updateStatus("Media initialized (Audio Only). Ready to connect.");
+                } else {
+                    updateStatus("No media input found. Joining as receiver-only.");
                 }
             });
 
@@ -205,8 +200,7 @@
                     });
                     remoteStream = new MediaStream();
 
-                    const remoteVideoEl =
-                        document.getElementById("remoteVideo");
+                    const remoteVideoEl = document.getElementById("remoteVideo");
                     remoteVideoEl.muted = false;
                     remoteVideoEl.volume = 1.0;
                     remoteVideoEl.srcObject = remoteStream;
@@ -214,7 +208,6 @@
                     let isRenegotiating = false;
 
                     pc.onnegotiationneeded = async () => {
-                        // Critical Fix: Ignore automated triggers until our initial handshakes are fully completed
                         if (!isInitialOfferSent || isRenegotiating || pc.signalingState !== "stable") {
                             return;
                         }
@@ -231,7 +224,6 @@
                         }
                     };
 
-                    // Attach tracks directly without relying on event.streams[0]
                     pc.ontrack = (event) => {
                         console.log(
                             "Remote track received:",
@@ -254,28 +246,18 @@
                         );
                     };
 
-                    // Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
-                    const audioTrack = localStream
-                        ? localStream.getAudioTracks()[0]
-                        : null;
-                    const videoTrack = localStream
-                        ? localStream.getVideoTracks()[0]
-                        : null;
+                    // addTrack creates sendrecv transceivers and assigns SSRCs reliably across browsers.
+                    const audioTrack = localStream ? localStream.getAudioTracks()[0] : null;
+                    const videoTrack = localStream ? localStream.getVideoTracks()[0] : null;
 
                     if (audioTrack) {
-                        pc.addTransceiver(audioTrack, {
-                            direction: "sendrecv",
-                            streams: [localStream],
-                        });
+                        pc.addTrack(audioTrack, localStream);
                     } else {
                         pc.addTransceiver("audio", { direction: "recvonly" });
                     }
 
                     if (videoTrack) {
-                        pc.addTransceiver(videoTrack, {
-                            direction: "sendrecv",
-                            streams: [localStream],
-                        });
+                        pc.addTrack(videoTrack, localStream);
                     } else {
                         pc.addTransceiver("video", { direction: "recvonly" });
                     }
@@ -325,7 +307,6 @@
                             );
                         }
 
-                        // FIX 3A: Handle server-initiated offers (when a new participant joins the room)
                         if (msg.type === "offer") {
                             console.log(
                                 "Server initiated renegotiation offer for new peer",
@@ -349,7 +330,6 @@
                             );
                         }
 
-                        // FIX 3B: Handle SFUs that trigger renegotiation via an event rather than a direct SDP offer
                         if (
                             msg.type === "renegotiate" ||
                             msg.type === "peer-joined"
