@@ -400,7 +400,6 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
   }
 }
 
-/* Callback executed when the server listening socket accepts a new connection */
 static void on_server_readable(uv_poll_t *handle, int status, int events) {
   sfu_signaling_server_t *s = (sfu_signaling_server_t *)handle->data;
 
@@ -412,7 +411,6 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
   if (events & UV_READABLE) {
     int fd = accept(s->listen_fd, NULL, NULL);
     if (fd >= 0) {
-      /* Set non-blocking and TCP_NODELAY for optimal WebSocket latency */
       int flags = fcntl(fd, F_GETFL, 0);
       fcntl(fd, F_SETFL, flags | O_NONBLOCK);
       int one = 1;
@@ -425,7 +423,6 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
       c->handshake_done = false;
       strcpy(c->peer_ip, "unknown");
 
-      /* Initialize a new poll handle for this client's socket */
       uv_poll_init_socket(handle->loop, &c->poll_handle, fd);
       c->poll_handle.data = c;
       uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
@@ -433,16 +430,21 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
   }
 }
 
-/* Helper callback to cleanly shut down open handles on server exit */
+static void on_async_wake(uv_async_t *handle) { uv_stop(handle->loop); }
+
 static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
-  if (!uv_is_closing(handle)) {
+  if (uv_is_closing(handle)) {
+    return;
+  }
+
+  sfu_signaling_server_t *s = (sfu_signaling_server_t *)arg;
+
+  if (handle->type == UV_POLL && handle->data != NULL && handle->data != s) {
+    uv_poll_stop((uv_poll_t *)handle);
+    uv_close(handle, on_client_close);
+  } else {
     uv_close(handle, NULL);
   }
-}
-
-static void on_async_wake(uv_async_t *handle) {
-  /* Wakes the loop instantly and stops execution */
-  uv_stop(handle->loop);
 }
 
 static void *signaling_loop_main(void *arg) {
@@ -451,27 +453,23 @@ static void *signaling_loop_main(void *arg) {
   uv_loop_t loop;
   uv_loop_init(&loop);
 
-  /* Initialize async waker so another thread can break uv_run */
   uv_async_init(&loop, &s->async_waker, on_async_wake);
+  s->async_waker.data = NULL;
 
   uv_poll_t listen_poll;
   uv_poll_init_socket(&loop, &listen_poll, s->listen_fd);
   listen_poll.data = s;
   uv_poll_start(&listen_poll, UV_READABLE, on_server_readable);
 
-  /* Run libuv loop until uv_stop() or s->running == 0 */
   while (s->running) {
     uv_run(&loop, UV_RUN_DEFAULT);
   }
 
-  /* Clean up all active client connections during server shutdown */
-  uv_walk(&loop, on_shutdown_walk, NULL);
+  uv_walk(&loop, on_shutdown_walk, s);
+
   uv_run(&loop, UV_RUN_DEFAULT);
 
-  uv_close((uv_handle_t *)&s->async_waker, NULL);
-  uv_run(&loop, UV_RUN_DEFAULT);
   uv_loop_close(&loop);
-
   return NULL;
 }
 
@@ -530,10 +528,8 @@ void sfu_signaling_server_stop(sfu_signaling_server_t *s) {
   }
 
   s->running = 0;
-  /* Send signal to libuv loop to wake up immediately */
   uv_async_send(&s->async_waker);
 
-  /* Join thread safely */
   pthread_join(s->thread, NULL);
   close(s->listen_fd);
 }
