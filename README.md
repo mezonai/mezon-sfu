@@ -27,6 +27,9 @@ Before building, ensure you have the following installed on your system:
 
 To compile the C backend binary, run the following commands from the root directory:
 
+install libuv
+`sudo apt install libuv1-dev`
+
 build mimalloc
 ```
 git clone https://github.com/microsoft/mimalloc.git

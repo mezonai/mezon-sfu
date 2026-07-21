@@ -47,7 +47,8 @@ int main(void) {
     bool progressed = false;
     while ((n = BIO_read(client_wbio, buf, sizeof(buf))) > 0) {
       progressed = true;
-      sfu_dtls_feed_status_t st = sfu_dtls_conn_feed(&server_conn, buf, (size_t)n);
+
+      sfu_dtls_feed_status_t st = sfu_dtls_conn_feed(&server_conn, buf, (size_t)n, NULL, NULL);
       assert(st != SFU_DTLS_FEED_ERROR);
       if (st == SFU_DTLS_FEED_ESTABLISHED) {
         server_done = true;

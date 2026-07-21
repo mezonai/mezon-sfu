@@ -1,307 +1,392 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Mezon SFU 2-Participant Test Client</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #1e1e2e;
-            color: #cdd6f4;
-            max-width: 1000px;
-            margin: 40px auto;
-            padding: 20px;
-        }
-        .container {
-            background: #313244;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-        }
-        .form-group {
-            margin-bottom: 15px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-        }
-        input {
-            width: 100%;
-            padding: 10px;
-            background: #181825;
-            border: 1px solid #45475a;
-            color: #cdd6f4;
-            border-radius: 6px;
-            box-sizing: border-box;
-        }
-        button {
-            background: #89b4fa;
-            color: #11111b;
-            border: none;
-            padding: 12px 20px;
-            font-weight: bold;
-            border-radius: 6px;
-            cursor: pointer;
-            width: 100%;
-        }
-        button:hover {
-            background: #b4befe;
-        }
-        #status {
-            margin-top: 15px;
-            padding: 10px;
-            border-radius: 6px;
-            background: #45475a;
-            font-family: monospace;
-        }
-        .video-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-top: 20px;
-        }
-        .video-box {
-            background: #11111b;
-            border-radius: 8px;
-            padding: 10px;
-            text-align: center;
-        }
-        video {
-            width: 100%;
-            max-height: 350px;
-            background: #000;
-            border-radius: 6px;
-        }
-        .local-video {
-            transform: scaleX(-1);
-        }
-    </style>
-</head>
-<body>
-
-<div class="container">
-    <h2>Mezon SFU Client (2 Participants)</h2>
-
-    <div class="form-group">
-        <label for="wsUrl">Signaling WebSocket URL</label>
-        <input type="text" id="wsUrl" value="wss://test-sfu.nccsoft.vn/ws">
-    </div>
-
-    <div class="form-group">
-        <label for="roomId">Room ID</label>
-        <input type="text" id="roomId" value="101">
-    </div>
-
-    <button id="startBtn" onclick="connectAndJoin()">Connect & Join Room</button>
-
-    <div id="status">Status: Initializing Camera...</div>
-
-    <div class="video-grid">
-        <div class="video-box">
-            <label>Local User (You)</label>
-            <video id="localVideo" class="local-video" autoplay playsinline muted></video>
-        </div>
-        <div class="video-box">
-            <label>Remote Participant</label>
-            <!-- Unmuted to allow audio playback -->
-            <video id="remoteVideo" autoplay playsinline></video>
-        </div>
-    </div>
-</div>
-
-<script>
-    let ws = null;
-    let pc = null;
-    let localStream = null;
-    let remoteStream = null;
-
-    const statusDiv = document.getElementById('status');
-    const startBtn = document.getElementById('startBtn');
-
-    window.addEventListener('DOMContentLoaded', async () => {
-        try {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const hasVideo = devices.some(device => device.kind === 'videoinput');
-            const hasAudio = devices.some(device => device.kind === 'audioinput');
-
-            if (!hasVideo && !hasAudio) {
-                updateStatus("No camera or microphone found. Joining as receiver-only.");
-                localStream = new MediaStream();
-                return;
+    <head>
+        <meta charset="UTF-8" />
+        <title>Mezon SFU 2-Participant Test Client</title>
+        <style>
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    sans-serif;
+                background: #1e1e2e;
+                color: #cdd6f4;
+                max-width: 1000px;
+                margin: 40px auto;
+                padding: 20px;
             }
+            .container {
+                background: #313244;
+                padding: 25px;
+                border-radius: 12px;
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            }
+            .form-group {
+                margin-bottom: 15px;
+            }
+            label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: bold;
+            }
+            input {
+                width: 100%;
+                padding: 10px;
+                background: #181825;
+                border: 1px solid #45475a;
+                color: #cdd6f4;
+                border-radius: 6px;
+                box-sizing: border-box;
+            }
+            button {
+                background: #89b4fa;
+                color: #11111b;
+                border: none;
+                padding: 12px 20px;
+                font-weight: bold;
+                border-radius: 6px;
+                cursor: pointer;
+                width: 100%;
+            }
+            button:hover {
+                background: #b4befe;
+            }
+            #status {
+                margin-top: 15px;
+                padding: 10px;
+                border-radius: 6px;
+                background: #45475a;
+                font-family: monospace;
+            }
+            .video-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 20px;
+                margin-top: 20px;
+            }
+            .video-box {
+                background: #11111b;
+                border-radius: 8px;
+                padding: 10px;
+                text-align: center;
+            }
+            video {
+                width: 100%;
+                max-height: 350px;
+                background: #000;
+                border-radius: 6px;
+            }
+            .local-video {
+                transform: scaleX(-1);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>Mezon SFU Client (2 Participants)</h2>
 
-            localStream = await navigator.mediaDevices.getUserMedia({
-                video: hasVideo,
-                audio: hasAudio
+            <div class="form-group">
+                <label for="wsUrl">Signaling WebSocket URL</label>
+                <input
+                    type="text"
+                    id="wsUrl"
+                    value="wss://test-sfu.nccsoft.vn/ws"
+                />
+            </div>
+
+            <div class="form-group">
+                <label for="roomId">Room ID</label>
+                <input type="text" id="roomId" value="101" />
+            </div>
+
+            <button id="startBtn" onclick="connectAndJoin()">
+                Connect & Join Room
+            </button>
+
+            <div id="status">Status: Initializing Camera...</div>
+
+            <div class="video-grid">
+                <div class="video-box">
+                    <label>Local User (You)</label>
+                    <video
+                        id="localVideo"
+                        class="local-video"
+                        autoplay
+                        playsinline
+                        muted
+                    ></video>
+                </div>
+                <div class="video-box">
+                    <label>Remote Participant</label>
+                    <!-- Unmuted to allow audio playback -->
+                    <video id="remoteVideo" autoplay playsinline></video>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            let ws = null;
+            let pc = null;
+            let localStream = null;
+            let remoteStream = null;
+            let isInitialOfferSent = false;
+
+            const statusDiv = document.getElementById("status");
+            const startBtn = document.getElementById("startBtn");
+
+            window.addEventListener("DOMContentLoaded", async () => {
+                try {
+                    const devices =
+                        await navigator.mediaDevices.enumerateDevices();
+                    const hasVideo = devices.some(
+                        (device) => device.kind === "videoinput",
+                    );
+                    const hasAudio = devices.some(
+                        (device) => device.kind === "audioinput",
+                    );
+
+                    if (!hasVideo && !hasAudio) {
+                        updateStatus(
+                            "No camera or microphone found. Joining as receiver-only.",
+                        );
+                        localStream = new MediaStream();
+                        return;
+                    }
+
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        video: hasVideo,
+                        audio: hasAudio,
+                    });
+
+                    if (hasVideo) {
+                        document.getElementById("localVideo").srcObject =
+                            localStream;
+                    }
+
+                    updateStatus(
+                        "Media initialized. Ready to connect and join room.",
+                    );
+                } catch (e) {
+                    console.error("Media initialization error:", e);
+                    updateStatus(
+                        "Media access denied. Joining as receiver-only.",
+                        false,
+                    );
+                    localStream = new MediaStream();
+                }
             });
 
-            if (hasVideo) {
-                document.getElementById('localVideo').srcObject = localStream;
+            function updateStatus(msg, isError = false) {
+                statusDiv.innerText = `Status: ${msg}`;
+                statusDiv.style.color = isError ? "#f38ba8" : "#a6e3a1";
             }
 
-            updateStatus("Media initialized. Ready to connect and join room.");
-        } catch (e) {
-            console.error("Media initialization error:", e);
-            updateStatus("Media access denied. Joining as receiver-only.", false);
-            localStream = new MediaStream();
-        }
-    });
+            async function connectAndJoin() {
+                const wsUrl = document.getElementById("wsUrl").value;
+                const roomId = document.getElementById("roomId").value;
 
-    function updateStatus(msg, isError = false) {
-        statusDiv.innerText = `Status: ${msg}`;
-        statusDiv.style.color = isError ? '#f38ba8' : '#a6e3a1';
-    }
-
-    async function connectAndJoin() {
-        const wsUrl = document.getElementById('wsUrl').value;
-        const roomId = document.getElementById('roomId').value;
-
-        if (!roomId) {
-            updateStatus("Please enter a Room ID", true);
-            return;
-        }
-
-        startBtn.disabled = true;
-        updateStatus("Preparing WebRTC PeerConnection...");
-
-        try {
-            pc = new RTCPeerConnection({ iceServers: [] });
-            remoteStream = new MediaStream();
-
-            const remoteVideoEl = document.getElementById('remoteVideo');
-            remoteVideoEl.muted = false;
-            remoteVideoEl.volume = 1.0;
-            remoteVideoEl.srcObject = remoteStream;
-
-            let isRenegotiating = false;
-
-            pc.onnegotiationneeded = async () => {
-                if (isRenegotiating) return;
-                try {
-                    isRenegotiating = true;
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
-                } catch (err) {
-                    console.error(err);
-                } finally {
-                    isRenegotiating = false; // Reset only after the signaling state is stable
-                }
-            };
-
-            // Attach tracks directly without relying on event.streams[0]
-            pc.ontrack = (event) => {
-              console.log("Remote track received:", event.track.kind, event.track);
-              remoteStream.addTrack(event.track);
-
-              if (remoteVideoEl.srcObject !== remoteStream) {
-                  remoteVideoEl.srcObject = remoteStream;
-              }
-
-              remoteVideoEl.play().catch(e => console.warn("Playout auto-play notice:", e));
-              updateStatus(`Connected! Remote ${event.track.kind} track active.`);
-            };
-
-            // Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
-            const audioTrack = localStream ? localStream.getAudioTracks()[0] : null;
-            const videoTrack = localStream ? localStream.getVideoTracks()[0] : null;
-
-            if (audioTrack) {
-                pc.addTransceiver(audioTrack, { direction: 'sendrecv', streams: [localStream] });
-            } else {
-                pc.addTransceiver('audio', { direction: 'recvonly' });
-            }
-
-            if (videoTrack) {
-                pc.addTransceiver(videoTrack, { direction: 'sendrecv', streams: [localStream] });
-            } else {
-                pc.addTransceiver('video', { direction: 'recvonly' });
-            }
-
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            updateStatus("Connecting to signaling server...");
-            ws = new WebSocket(wsUrl);
-
-            ws.onopen = () => {
-                updateStatus("Connected! Joining room and publishing offer...");
-                ws.send(JSON.stringify({ type: "join", room: roomId }));
-
-                setTimeout(() => {
-                    ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
-                }, 100);
-            };
-
-            ws.onmessage = async (event) => {
-                const msg = JSON.parse(event.data);
-                console.log("Signaling received:", msg);
-
-                if (msg.type === "error") {
-                    updateStatus(`Error: ${msg.message}`, true);
-                    startBtn.disabled = false;
+                if (!roomId) {
+                    updateStatus("Please enter a Room ID", true);
                     return;
                 }
 
-                if (msg.type === "answer") {
-                    updateStatus("SDP Answer received. Media connection active!");
-                    await pc.setRemoteDescription(new RTCSessionDescription({
-                        type: 'answer',
-                        sdp: msg.sdp
-                    }));
-                }
+                startBtn.disabled = true;
+                updateStatus("Preparing WebRTC PeerConnection...");
 
-                // FIX 3A: Handle server-initiated offers (when a new participant joins the room)
-                if (msg.type === "offer") {
-                    console.log("Server initiated renegotiation offer for new peer");
-                    updateStatus("New participant joined! Establishing media bridge...");
-                    await pc.setRemoteDescription(new RTCSessionDescription({
-                        type: 'offer',
-                        sdp: msg.sdp
-                    }));
-                    const answer = await pc.createAnswer();
-                    await pc.setLocalDescription(answer);
-                    ws.send(JSON.stringify({
-                        type: "answer",
-                        sdp: pc.localDescription.sdp
-                    }));
-                }
+                try {
+                    pc = new RTCPeerConnection({ iceServers: [] });
+                    remoteStream = new MediaStream();
 
-                // FIX 3B: Handle SFUs that trigger renegotiation via an event rather than a direct SDP offer
-                if (msg.type === "renegotiate" || msg.type === "peer-joined") {
-                    if (isRenegotiating || pc.signalingState !== "stable") {
-                        console.log("Renegotiation requested but already negotiating or unstable. Skipping.");
-                        return;
+                    const remoteVideoEl =
+                        document.getElementById("remoteVideo");
+                    remoteVideoEl.muted = false;
+                    remoteVideoEl.volume = 1.0;
+                    remoteVideoEl.srcObject = remoteStream;
+
+                    let isRenegotiating = false;
+
+                    pc.onnegotiationneeded = async () => {
+                        // Critical Fix: Ignore automated triggers until our initial handshakes are fully completed
+                        if (!isInitialOfferSent || isRenegotiating || pc.signalingState !== "stable") {
+                            return;
+                        }
+                        try {
+                            isRenegotiating = true;
+                            console.log("Browser triggered onnegotiationneeded. Sending updated offer...");
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
+                        } catch (err) {
+                            console.error("Renegotiation offer generation failed:", err);
+                        } finally {
+                            isRenegotiating = false;
+                        }
+                    };
+
+                    // Attach tracks directly without relying on event.streams[0]
+                    pc.ontrack = (event) => {
+                        console.log(
+                            "Remote track received:",
+                            event.track.kind,
+                            event.track,
+                        );
+                        remoteStream.addTrack(event.track);
+
+                        if (remoteVideoEl.srcObject !== remoteStream) {
+                            remoteVideoEl.srcObject = remoteStream;
+                        }
+
+                        remoteVideoEl
+                            .play()
+                            .catch((e) =>
+                                console.warn("Playout auto-play notice:", e),
+                            );
+                        updateStatus(
+                            `Connected! Remote ${event.track.kind} track active.`,
+                        );
+                    };
+
+                    // Explicitly set up transceivers for both audio and video to guarantee bidirectional flow
+                    const audioTrack = localStream
+                        ? localStream.getAudioTracks()[0]
+                        : null;
+                    const videoTrack = localStream
+                        ? localStream.getVideoTracks()[0]
+                        : null;
+
+                    if (audioTrack) {
+                        pc.addTransceiver(audioTrack, {
+                            direction: "sendrecv",
+                            streams: [localStream],
+                        });
+                    } else {
+                        pc.addTransceiver("audio", { direction: "recvonly" });
                     }
-                    console.log("Server requested renegotiation");
-                    updateStatus("Renegotiating session for new participant...");
+
+                    if (videoTrack) {
+                        pc.addTransceiver(videoTrack, {
+                            direction: "sendrecv",
+                            streams: [localStream],
+                        });
+                    } else {
+                        pc.addTransceiver("video", { direction: "recvonly" });
+                    }
+
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
-                    ws.send(JSON.stringify({
-                        type: "offer",
-                        sdp: pc.localDescription.sdp
-                    }));
+
+                    updateStatus("Connecting to signaling server...");
+                    ws = new WebSocket(wsUrl);
+
+                    ws.onopen = () => {
+                        updateStatus(
+                            "Connected! Joining room and publishing offer...",
+                        );
+                        ws.send(JSON.stringify({ type: "join", room: roomId }));
+
+                        setTimeout(() => {
+                            ws.send(
+                                JSON.stringify({
+                                    type: "offer",
+                                    sdp: pc.localDescription.sdp,
+                                }),
+                            );
+                            isInitialOfferSent = true;
+                        }, 100);
+                    };
+
+                    ws.onmessage = async (event) => {
+                        const msg = JSON.parse(event.data);
+                        console.log("Signaling received:", msg);
+
+                        if (msg.type === "error") {
+                            updateStatus(`Error: ${msg.message}`, true);
+                            startBtn.disabled = false;
+                            return;
+                        }
+
+                        if (msg.type === "answer") {
+                            updateStatus(
+                                "SDP Answer received. Media connection active!",
+                            );
+                            await pc.setRemoteDescription(
+                                new RTCSessionDescription({
+                                    type: "answer",
+                                    sdp: msg.sdp,
+                                }),
+                            );
+                        }
+
+                        // FIX 3A: Handle server-initiated offers (when a new participant joins the room)
+                        if (msg.type === "offer") {
+                            console.log(
+                                "Server initiated renegotiation offer for new peer",
+                            );
+                            updateStatus(
+                                "New participant joined! Establishing media bridge...",
+                            );
+                            await pc.setRemoteDescription(
+                                new RTCSessionDescription({
+                                    type: "offer",
+                                    sdp: msg.sdp,
+                                }),
+                            );
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+                            ws.send(
+                                JSON.stringify({
+                                    type: "answer",
+                                    sdp: pc.localDescription.sdp,
+                                }),
+                            );
+                        }
+
+                        // FIX 3B: Handle SFUs that trigger renegotiation via an event rather than a direct SDP offer
+                        if (
+                            msg.type === "renegotiate" ||
+                            msg.type === "peer-joined"
+                        ) {
+                            if (
+                                isRenegotiating ||
+                                pc.signalingState !== "stable"
+                            ) {
+                                console.log(
+                                    "Renegotiation requested but already negotiating or unstable. Skipping.",
+                                );
+                                return;
+                            }
+                            console.log("Server requested renegotiation");
+                            updateStatus(
+                                "Renegotiating session for new participant...",
+                            );
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            ws.send(
+                                JSON.stringify({
+                                    type: "offer",
+                                    sdp: pc.localDescription.sdp,
+                                }),
+                            );
+                        }
+                    };
+
+                    ws.onclose = () => {
+                        updateStatus("Signaling link disconnected.", true);
+                        startBtn.disabled = false;
+                        isInitialOfferSent = false;
+                        if (pc) pc.close();
+                    };
+
+                    ws.onerror = () => {
+                        updateStatus("Signaling WebSocket error.", true);
+                        startBtn.disabled = false;
+                    };
+                } catch (e) {
+                    console.error("Connection failed:", e);
+                    updateStatus(`WebRTC failed: ${e.message}`, true);
+                    startBtn.disabled = false;
+                    isInitialOfferSent = false;
                 }
-            };
-
-            ws.onclose = () => {
-                updateStatus("Signaling link disconnected.", true);
-                startBtn.disabled = false;
-                if (pc) pc.close();
-            };
-
-            ws.onerror = () => {
-                updateStatus("Signaling WebSocket error.", true);
-                startBtn.disabled = false;
-            };
-
-        } catch (e) {
-            console.error("Connection failed:", e);
-            updateStatus(`WebRTC failed: ${e.message}`, true);
-            startBtn.disabled = false;
-        }
-    }
-</script>
-</body>
+            }
+        </script>
+    </body>
 </html>

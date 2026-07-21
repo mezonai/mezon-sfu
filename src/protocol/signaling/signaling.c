@@ -1,5 +1,6 @@
 #include "protocol/signaling/signaling.h"
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -9,11 +10,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <uv.h>
 #include "peer/session.h"
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
 #include "room/room_registry.h"
+#include "runtime/routing_context.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -21,55 +24,33 @@
 #define SFU_SIGNALING_SDP_CAP 16384
 #define SFU_SIGNALING_JSON_CAP 32768
 
-#define SFU_MAX_UFRAG_ROOM_MAPPINGS 2048
+void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room) {
+  pthread_mutex_lock(&table->mutex);
 
-typedef struct {
-  char ufrag[32];
-  sfu_room_t *room;
-} sfu_ufrag_room_map_entry_t;
-
-static sfu_ufrag_room_map_entry_t g_ufrag_room_maps[SFU_MAX_UFRAG_ROOM_MAPPINGS];
-static int g_ufrag_room_map_count = 0;
-static pthread_mutex_t g_ufrag_room_map_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-void sfu_register_ufrag_room(const char *client_ufrag, sfu_room_t *room) {
-  pthread_mutex_lock(&g_ufrag_room_map_mutex);
-
-  for (int i = 0; i < g_ufrag_room_map_count; i++) {
-    if (strcmp(g_ufrag_room_maps[i].ufrag, client_ufrag) == 0) {
-      g_ufrag_room_maps[i].room = room;
-      pthread_mutex_unlock(&g_ufrag_room_map_mutex);
+  for (int i = 0; i < table->count; i++) {
+    if (strcmp(table->entries[i].ufrag, client_ufrag) == 0) {
+      table->entries[i].room = room;
+      pthread_mutex_unlock(&table->mutex);
       return;
     }
   }
 
-  if (g_ufrag_room_map_count < SFU_MAX_UFRAG_ROOM_MAPPINGS) {
-    strncpy(g_ufrag_room_maps[g_ufrag_room_map_count].ufrag, client_ufrag, sizeof(g_ufrag_room_maps[0].ufrag) - 1);
-    g_ufrag_room_maps[g_ufrag_room_map_count].ufrag[sizeof(g_ufrag_room_maps[0].ufrag) - 1] = '\0';
-    g_ufrag_room_maps[g_ufrag_room_map_count].room = room;
-    g_ufrag_room_map_count++;
+  if (table->count < SFU_MAX_UFRAG_MAPPINGS) {
+    sfu_routing_entry_t *entry = &table->entries[table->count];
+    strncpy(entry->ufrag, client_ufrag, sizeof(entry->ufrag) - 1);
+    entry->ufrag[sizeof(entry->ufrag) - 1] = '\0';
+    entry->room = room;
+
+    /* Explicitly reset worker ownership so the first worker to see STUN claims it */
+    entry->has_owner = false;
+    entry->worker_index = 0;
+
+    table->count++;
   } else {
-    SFU_LOG_ERROR(
-        "ufrag->room table FULL (%d entries) -- cannot register ufrag=%s, "
-        "this peer's media will NOT bind to a room. See KNOWN LIMITATION "
-        "in signaling.c: table has no eviction policy yet.",
-        SFU_MAX_UFRAG_ROOM_MAPPINGS, client_ufrag);
+    SFU_LOG_ERROR("ufrag->room table FULL. Cannot register ufrag=%s", client_ufrag);
   }
 
-  pthread_mutex_unlock(&g_ufrag_room_map_mutex);
-}
-
-bool sfu_lookup_ufrag_room(const char *client_ufrag, sfu_room_t **out_room) {
-  pthread_mutex_lock(&g_ufrag_room_map_mutex);
-  for (int i = 0; i < g_ufrag_room_map_count; i++) {
-    if (strcmp(g_ufrag_room_maps[i].ufrag, client_ufrag) == 0) {
-      *out_room = g_ufrag_room_maps[i].room;
-      pthread_mutex_unlock(&g_ufrag_room_map_mutex);
-      return true;
-    }
-  }
-  pthread_mutex_unlock(&g_ufrag_room_map_mutex);
-  return false;
+  pthread_mutex_unlock(&table->mutex);
 }
 
 static bool extract_sdp_ice_ufrag(const char *sdp, size_t sdp_len, char *out, size_t out_cap) {
@@ -154,58 +135,50 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
   }
 }
 
-static bool room_has_this_publisher(sfu_room_t *room, const char *client_ufrag) {
-  sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
-  // Passing NULL or empty string to snapshot matches EVERYONE in the room
-  uint32_t n = sfu_room_snapshot_other_publishers(room, "", snaps, SFU_ROOM_MAX_PEERS);
-
-  bool found = false;
-  for (uint32_t i = 0; i < n; i++) {
-    if ((snaps[i].ufrag[0] != 0) && strcmp(snaps[i].ufrag, client_ufrag) == 0) {
-      found = true;
-    }
-    // Remember to free the memory allocated for the snapshot SDPs!
-    if (snaps[i].offer_sdp) {
-      SFU_FREE(snaps[i].offer_sdp);
-    }
-  }
-  return found;
-}
-
-static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio, uint32_t ans_video,
-                                  uint32_t ans_rtx) {
+static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *client_ufrag, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio,
+                                  uint32_t ans_video, uint32_t ans_rtx) {
   char answer[SFU_SIGNALING_SDP_CAP];
   int answer_len = sfu_sdp_build_answer(offer_sdp, offer_sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd,
                                         s->dtls_ctx->fingerprint, ans_audio, ans_video, ans_rtx, answer, sizeof(answer));
   if (answer_len < 0) {
-    SFU_LOG_WARN("signaling: failed to build SDP answer");
+    SFU_LOG_WARN("signaling: failed to build SDP answer (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
+  SFU_LOG_INFO("signaling: raw answer built: %d bytes (fd=%d, ufrag=%s, audio_ssrc=%u, video_ssrc=%u, rtx_ssrc=%u)", answer_len, fd, client_ufrag, ans_audio,
+               ans_video, ans_rtx);
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(answer, (size_t)answer_len, escaped, sizeof(escaped));
   if (escaped_len < 0) {
-    SFU_LOG_WARN("signaling: answer too large to escape into JSON response");
+    SFU_LOG_WARN("signaling: answer too large to escape into JSON response (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
 
   char response[SFU_SIGNALING_JSON_CAP + 64];
   int response_len = snprintf(response, sizeof(response), "{\"type\":\"answer\",\"sdp\":\"%s\"}", escaped);
   if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
-    SFU_LOG_WARN("signaling: response too large to send");
+    SFU_LOG_WARN("signaling: response too large to send (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
 
   if (sfu_ws_send_text(fd, response, (size_t)response_len) != 0) {
-    SFU_LOG_WARN("signaling: failed to send answer over WebSocket (fd=%d)", fd);
+    SFU_LOG_WARN("signaling: failed to send answer over WebSocket (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
 
-  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %zu-byte offer (fd=%d)", response_len, offer_sdp_len, fd);
+  SFU_LOG_INFO("signaling: sent SDP answer (%d bytes) for a %zu-byte offer (fd=%d, ufrag=%s)", response_len, offer_sdp_len, fd, client_ufrag);
   return true;
 }
 
-static void push_updated_answers_to_others(sfu_signaling_server_t *s, sfu_room_t *room, const char *exclude_ufrag) {
+/**
+ * @brief Thread-safe public trigger to invoke room-wide renegotiation.
+ *        Called directly by workers once a peer finishes DTLS handshake steps.
+ */
+void sfu_signaling_trigger_renegotiation(sfu_room_t *room, const char *exclude_ufrag) {
+  if (!room || !exclude_ufrag || exclude_ufrag[0] == '\0') {
+    return;
+  }
+
   sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
   uint32_t n = sfu_room_snapshot_other_publishers(room, exclude_ufrag, snaps, SFU_ROOM_MAX_PEERS);
 
@@ -213,22 +186,19 @@ static void push_updated_answers_to_others(sfu_signaling_server_t *s, sfu_room_t
     const char *reneg_msg = "{\"type\":\"renegotiate\"}";
 
     if (sfu_ws_send_text(snaps[i].fd, reneg_msg, strlen(reneg_msg)) == 0) {
-      SFU_LOG_INFO("signaling: requested renegotiation from ufrag=%s (fd=%d) because ufrag=%s published new media", snaps[i].ufrag, snaps[i].fd, exclude_ufrag);
+      SFU_LOG_INFO("signaling: safely requested renegotiation from ufrag=%s (fd=%d) now that ufrag=%s DTLS keys are hot", snaps[i].ufrag, snaps[i].fd,
+                   exclude_ufrag);
     } else {
-      SFU_LOG_WARN("signaling: failed to send renegotiate request to fd=%d", snaps[i].fd);
+      SFU_LOG_WARN("signaling: failed to send secure renegotiate request to fd=%d", snaps[i].fd);
     }
 
     SFU_FREE(snaps[i].offer_sdp);
   }
 }
+
 static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *client_ufrag, const char *sdp, int sdp_len) {
   uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
-
-  int was_already_publishing = 0;
-  if (room && client_ufrag[0] != '\0') {
-    was_already_publishing = room_has_this_publisher(room, client_ufrag);
-  }
 
   if (room && client_ufrag[0] != '\0') {
     sfu_room_publish(room, client_ufrag, fd, sdp, (size_t)sdp_len, off_audio, off_video, off_rtx);
@@ -243,13 +213,7 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
     sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
   }
 
-  build_and_send_answer(fd, s, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
-
-  if (room && client_ufrag[0] != '\0' && (off_audio != 0 || off_video != 0)) {
-    if (!was_already_publishing) {
-      push_updated_answers_to_others(s, room, client_ufrag);
-    }
-  }
+  build_and_send_answer(fd, s, client_ufrag, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
@@ -258,13 +222,7 @@ static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_
       "INTEGRATION: [NATS Publish] Topic: sfu.room.join | Payload: "
       "{\"room\": %" PRIu64 ", \"ip\": \"%s\"}",
       room_id, peer_ip);
-  /*
-     Integration Point:
-     If using libnats (C client for NATS):
-     natsConnection_PublishString(s->nats_conn, "sfu.room.join", json_payload);
-  */
 }
-
 static int extract_header_val(const char *handshake, const char *header_name, char *out_val, size_t out_len) {
   char search_str[128];
   snprintf(search_str, sizeof(search_str), "\r\n%s:", header_name);
@@ -308,179 +266,221 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
   return 0;
 }
 
-static void *conn_thread_main(void *arg) {
-  conn_ctx_t *ctx = (conn_ctx_t *)arg;
-  int fd = ctx->fd;
-  sfu_signaling_server_t *s = ctx->server;
-  SFU_FREE(ctx);
+typedef struct {
+  uv_poll_t poll_handle;
+  int fd;
+  bool handshake_done;
+  char peer_ip[64];
+  int ip_detected_from_header;
+  sfu_room_t *joined_room;
+  uint64_t joined_room_id;
+  char client_ufrag[32];
+  sfu_signaling_server_t *server;
+} sfu_client_conn_t;
 
-  char peer_ip[64] = "unknown";
-  int ip_detected_from_header = 0;
-
-  char peek_buf[2048];
-  ssize_t peek_len = recv(fd, peek_buf, sizeof(peek_buf) - 1, MSG_PEEK);
-  if (peek_len > 0) {
-    peek_buf[peek_len] = '\0';
-
-    if (extract_header_val(peek_buf, "X-Real-IP", peer_ip, sizeof(peer_ip)) == 0) {
-      ip_detected_from_header = 1;
-    } else if (extract_header_val(peek_buf, "X-Forwarded-For", peer_ip, sizeof(peer_ip)) == 0) {
-      ip_detected_from_header = 1;
-    }
+/* Callback executed when a client handle is fully closed */
+static void on_client_close(uv_handle_t *handle) {
+  sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
+  if (c->joined_room && c->client_ufrag[0] != '\0') {
+    sfu_room_unpublish(c->joined_room, c->client_ufrag);
   }
-
-  if (sfu_ws_handshake(fd) != 0) {
-    SFU_LOG_WARN("signaling: WebSocket handshake failed");
-    close(fd);
-    return NULL;
-  }
-
-  struct sockaddr_storage peer_addr;
-  socklen_t peer_addr_len = sizeof(peer_addr);
-  if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_addr_len) != 0) {
-    close(fd);
-    return NULL;
-  }
-
-  if (!ip_detected_from_header) {
-    if (peer_addr.ss_family == AF_INET) {
-      struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
-      inet_ntop(AF_INET, &s4->sin_addr, peer_ip, sizeof(peer_ip));
-    } else if (peer_addr.ss_family == AF_INET6) {
-      struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
-      inet_ntop(AF_INET6, &s6->sin6_addr, peer_ip, sizeof(peer_ip));
-    }
-  }
-
-  SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", peer_ip, ip_detected_from_header ? "YES" : "NO");
-
-  sfu_room_t *joined_room = NULL;
-  uint64_t joined_room_id = 0;
-  char client_ufrag[32] = {0};
-
-  char buf[SFU_SIGNALING_RECV_CAP];
-  for (;;) {
-    ssize_t n = sfu_ws_recv_text(fd, buf, sizeof(buf));
-    if (n <= 0) {
-      break;
-    }
-
-    char type[32];
-    if (sfu_json_extract_string(buf, "type", type, sizeof(type)) < 0) {
-      continue;
-    }
-
-    if (strcmp(type, "join") == 0) {
-      char room_str[64] = {0};
-      uint64_t room_id = 0;
-
-      if (sfu_json_extract_string(buf, "room", room_str, sizeof(room_str)) >= 0) {
-        room_id = (uint64_t)strtoull(room_str, NULL, 10);
-      }
-
-      if (room_id == 0) {
-        sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"invalid_room\"}", 41);
-        continue;
-      }
-
-      sfu_room_t *room = sfu_room_registry_get_or_create(s->room_registry, room_id);
-      if (!room) {
-        sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"room_creation_failed\"}", 49);
-        continue;
-      }
-
-      joined_room = room;
-      joined_room_id = room_id;
-      publish_join_event_to_nats(s, room_id, peer_ip);
-
-      SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64
-                   " (will bind to a specific "
-                   "media session once its offer's client ufrag is seen)",
-                   peer_ip, room_id);
-
-      char response[128];
-      snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
-      sfu_ws_send_text(fd, response, strlen(response));
-
-    } else if (strcmp(type, "offer") == 0) {
-      if (!joined_room) {
-        SFU_LOG_WARN("signaling: offer received before join completed for peer %s", peer_ip);
-        sfu_ws_send_text(fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}", 49);
-        continue;
-      }
-
-      char sdp[SFU_SIGNALING_SDP_CAP];
-      int sdp_len = sfu_json_extract_string(buf, "sdp", sdp, sizeof(sdp));
-      if (sdp_len < 0) {
-        SFU_LOG_WARN("signaling: offer message with no sdp field from peer %s", peer_ip);
-        continue;
-      }
-
-      bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, client_ufrag, sizeof(client_ufrag));
-      if (have_ufrag) {
-        sfu_register_ufrag_room(client_ufrag, joined_room);
-        SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64
-                     " for peer %s "
-                     "(media path will bind this at first authenticated STUN request)",
-                     client_ufrag, joined_room_id, peer_ip);
-      } else {
-        SFU_LOG_WARN(
-            "signaling: could not find a=ice-ufrag in offer SDP from peer %s -- "
-            "this peer's media session will NOT be bound to a room automatically. "
-            "Check that the offer actually contains an m= line with ICE credentials.",
-            peer_ip);
-        client_ufrag[0] = '\0';
-      }
-
-      handle_offer(fd, s, joined_room, client_ufrag, sdp, sdp_len);
-    } else {
-      SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, peer_ip);
-    }
-  }
-
-  if (joined_room && client_ufrag[0] != '\0') {
-    sfu_room_unpublish(joined_room, client_ufrag);
-  }
-
-  close(fd);
-  return NULL;
+  close(c->fd);
+  SFU_FREE(c);
 }
 
-static void *accept_loop_main(void *arg) {
-  sfu_signaling_server_t *s = (sfu_signaling_server_t *)arg;
+/* Helper to initiate closing a client connection */
+static void disconnect_client(sfu_client_conn_t *c) {
+  if (!uv_is_closing((uv_handle_t *)&c->poll_handle)) {
+    uv_poll_stop(&c->poll_handle);
+    uv_close((uv_handle_t *)&c->poll_handle, on_client_close);
+  }
+}
 
-  while (s->running) {
-    int fd = accept(s->listen_fd, NULL, NULL);
-    if (fd < 0) {
-      if (s->running) {
-        SFU_LOG_WARN("signaling: accept() failed");
-      }
-      continue;
-    }
+/* Main I/O callback for active client WebSocket connections */
+static void on_client_readable(uv_poll_t *handle, int status, int events) {
+  sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
+  sfu_signaling_server_t *s = c->server;
 
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-    conn_ctx_t *ctx = SFU_MALLOC(sizeof(conn_ctx_t));
-    ctx->fd = fd;
-    ctx->server = s;
-
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, conn_thread_main, ctx) != 0) {
-      SFU_LOG_ERROR("signaling: failed to spawn connection thread");
-      close(fd);
-      SFU_FREE(ctx);
-      continue;
-    }
-    pthread_detach(tid);
+  if (status < 0 || (events & UV_DISCONNECT)) {
+    disconnect_client(c);
+    return;
   }
 
+  if (events & UV_READABLE) {
+    if (!c->handshake_done) {
+      char peek_buf[2048];
+      ssize_t peek_len = recv(c->fd, peek_buf, sizeof(peek_buf) - 1, MSG_PEEK);
+      if (peek_len > 0) {
+        peek_buf[peek_len] = '\0';
+        if (extract_header_val(peek_buf, "X-Real-IP", c->peer_ip, sizeof(c->peer_ip)) == 0) {
+          c->ip_detected_from_header = 1;
+        } else if (extract_header_val(peek_buf, "X-Forwarded-For", c->peer_ip, sizeof(c->peer_ip)) == 0) {
+          c->ip_detected_from_header = 1;
+        }
+      }
+
+      if (sfu_ws_handshake(c->fd) != 0) {
+        SFU_LOG_WARN("signaling: WebSocket handshake failed");
+        disconnect_client(c);
+      } else {
+        struct sockaddr_storage peer_addr;
+        socklen_t peer_addr_len = sizeof(peer_addr);
+        if (getpeername(c->fd, (struct sockaddr *)&peer_addr, &peer_addr_len) == 0) {
+          if (!c->ip_detected_from_header) {
+            if (peer_addr.ss_family == AF_INET) {
+              struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
+              inet_ntop(AF_INET, &s4->sin_addr, c->peer_ip, sizeof(c->peer_ip));
+            } else if (peer_addr.ss_family == AF_INET6) {
+              struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
+              inet_ntop(AF_INET6, &s6->sin6_addr, c->peer_ip, sizeof(c->peer_ip));
+            }
+          }
+        }
+        c->handshake_done = true;
+        SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", c->peer_ip, c->ip_detected_from_header ? "YES" : "NO");
+      }
+    } else {
+      char buf[SFU_SIGNALING_RECV_CAP];
+      ssize_t n = sfu_ws_recv_text(c->fd, buf, sizeof(buf));
+      if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          return;
+        }
+        disconnect_client(c);
+      } else if (n == 0) {
+        disconnect_client(c);
+      } else {
+        char type[32];
+        if (sfu_json_extract_string(buf, "type", type, sizeof(type)) >= 0) {
+          if (strcmp(type, "join") == 0) {
+            char room_str[64] = {0};
+            uint64_t room_id = 0;
+
+            if (sfu_json_extract_string(buf, "room", room_str, sizeof(room_str)) >= 0) {
+              room_id = (uint64_t)strtoull(room_str, NULL, 10);
+            }
+
+            if (room_id == 0) {
+              sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_room\"}", 41);
+            } else {
+              sfu_room_t *room = sfu_room_registry_get_or_create(s->room_registry, room_id);
+              if (!room) {
+                sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"room_creation_failed\"}", 49);
+              } else {
+                c->joined_room = room;
+                c->joined_room_id = room_id;
+                publish_join_event_to_nats(s, room_id, c->peer_ip);
+
+                SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64, c->peer_ip, room_id);
+
+                char response[128];
+                snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
+                sfu_ws_send_text(c->fd, response, strlen(response));
+              }
+            }
+          } else if (strcmp(type, "offer") == 0) {
+            if (!c->joined_room) {
+              SFU_LOG_WARN("signaling: offer received before join completed for peer %s", c->peer_ip);
+              sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}", 49);
+            } else {
+              char sdp[SFU_SIGNALING_SDP_CAP];
+              int sdp_len = sfu_json_extract_string(buf, "sdp", sdp, sizeof(sdp));
+              if (sdp_len >= 0) {
+                bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, c->client_ufrag, sizeof(c->client_ufrag));
+                if (have_ufrag) {
+                  sfu_register_ufrag_room(s->routing_table, c->client_ufrag, c->joined_room);
+                  SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64, c->client_ufrag, c->joined_room_id);
+                } else {
+                  c->client_ufrag[0] = '\0';
+                }
+                handle_offer(c->fd, s, c->joined_room, c->client_ufrag, sdp, sdp_len);
+              }
+            }
+          } else {
+            SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, c->peer_ip);
+          }
+        }
+      }
+    }
+  }
+}
+
+static void on_server_readable(uv_poll_t *handle, int status, int events) {
+  sfu_signaling_server_t *s = (sfu_signaling_server_t *)handle->data;
+
+  if (status < 0) {
+    SFU_LOG_ERROR("signaling: listen socket error: %s", uv_strerror(status));
+    return;
+  }
+
+  if (events & UV_READABLE) {
+    int fd = accept(s->listen_fd, NULL, NULL);
+    if (fd >= 0) {
+      int flags = fcntl(fd, F_GETFL, 0);
+      fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+      int one = 1;
+      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+      sfu_client_conn_t *c = (sfu_client_conn_t *)SFU_MALLOC(sizeof(sfu_client_conn_t));
+      memset(c, 0, sizeof(sfu_client_conn_t));
+      c->fd = fd;
+      c->server = s;
+      c->handshake_done = false;
+      strcpy(c->peer_ip, "unknown");
+
+      uv_poll_init_socket(handle->loop, &c->poll_handle, fd);
+      c->poll_handle.data = c;
+      uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
+    }
+  }
+}
+
+static void on_async_wake(uv_async_t *handle) { uv_stop(handle->loop); }
+
+static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
+  if (uv_is_closing(handle)) {
+    return;
+  }
+
+  sfu_signaling_server_t *s = (sfu_signaling_server_t *)arg;
+
+  if (handle->type == UV_POLL && handle->data != NULL && handle->data != s) {
+    uv_poll_stop((uv_poll_t *)handle);
+    uv_close(handle, on_client_close);
+  } else {
+    uv_close(handle, NULL);
+  }
+}
+
+static void *signaling_loop_main(void *arg) {
+  sfu_signaling_server_t *s = (sfu_signaling_server_t *)arg;
+
+  uv_loop_t loop;
+  uv_loop_init(&loop);
+
+  uv_async_init(&loop, &s->async_waker, on_async_wake);
+  s->async_waker.data = NULL;
+
+  uv_poll_t listen_poll;
+  uv_poll_init_socket(&loop, &listen_poll, s->listen_fd);
+  listen_poll.data = s;
+  uv_poll_start(&listen_poll, UV_READABLE, on_server_readable);
+
+  while (s->running) {
+    uv_run(&loop, UV_RUN_DEFAULT);
+  }
+
+  uv_walk(&loop, on_shutdown_walk, s);
+
+  uv_run(&loop, UV_RUN_DEFAULT);
+
+  uv_loop_close(&loop);
   return NULL;
 }
 
 int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, const char *media_host, uint16_t media_port,
                                const sfu_ice_credentials_t *ice_creds, const sfu_dtls_ctx_t *dtls_ctx, sfu_session_table_t *sessions,
-                               sfu_room_registry_t *room_registry) {
+                               sfu_room_registry_t *room_registry, sfu_routing_table_t *routing_table) {
   memset(s, 0, sizeof(*s));
   strncpy(s->media_host, media_host, sizeof(s->media_host) - 1);
   s->media_port = media_port;
@@ -488,6 +488,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
   s->dtls_ctx = dtls_ctx;
   s->sessions = sessions;
   s->room_registry = room_registry;
+  s->routing_table = routing_table;
 
   s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (s->listen_fd < 0) {
@@ -516,7 +517,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
   }
 
   s->running = 1;
-  if (pthread_create(&s->thread, NULL, accept_loop_main, s) != 0) {
+  if (pthread_create(&s->thread, NULL, signaling_loop_main, s) != 0) {
     SFU_LOG_ERROR("signaling: failed to spawn accept loop thread");
     close(s->listen_fd);
     return -1;
@@ -527,8 +528,13 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
 }
 
 void sfu_signaling_server_stop(sfu_signaling_server_t *s) {
+  if (!s || !s->running) {
+    return;
+  }
+
   s->running = 0;
-  shutdown(s->listen_fd, SHUT_RDWR);
-  close(s->listen_fd);
+  uv_async_send(&s->async_waker);
+
   pthread_join(s->thread, NULL);
+  close(s->listen_fd);
 }

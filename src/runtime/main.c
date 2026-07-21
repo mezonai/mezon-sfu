@@ -11,7 +11,7 @@
 #include "room/room_registry.h"
 #include "runtime/cpu.h"
 #include "runtime/fanout.h"
-#include "runtime/global_registry.h"
+#include "runtime/routing_context.h"
 #include "runtime/scheduler.h"
 #include "runtime/signal.h"
 #include "runtime/worker.h"
@@ -91,6 +91,7 @@ int main(int argc, char **argv) {
   sfu_room_registry_t room_registry;
   sfu_fanout_mesh_t mesh;
   sfu_session_table_t sessions;
+  sfu_routing_table_t routing_table;
   sfu_scheduler_t scheduler;
 
   fd = sfu_udp_socket_create(port);
@@ -117,8 +118,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Initialize the Room Registry in main memory
-  sfu_global_registry_init();
+  /* Initialize the shared non-global routing table */
+  sfu_routing_table_init(&routing_table);
 
   if (sfu_room_registry_init(&room_registry) != 0) {
     SFU_LOG_ERROR("failed to init room registry");
@@ -135,11 +136,12 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Initialize workers with reference to the root room registry fallback if needed
+  // Initialize workers with reference to room registry, sessions, and shared routing table
   for (uint32_t i = 0; i < worker_count; i++) {
     int core_id = (int)(i + 1) % (online > 1 ? online : 1);
     int send_bgid = SFU_PROVIDED_BUF_GROUP_ID + 1 + (int)i;
-    if (sfu_worker_init(&workers[i], core_id, i, fd, &pp, &room_registry, &mesh, &sessions, &ice_creds, SFU_WORKER_QUEUE_CAPACITY, send_bgid) != 0) {
+    if (sfu_worker_init(&workers[i], core_id, i, fd, &pp, &room_registry, &mesh, &sessions, &routing_table, &ice_creds, SFU_WORKER_QUEUE_CAPACITY, send_bgid) !=
+        0) {
       SFU_LOG_ERROR("failed to init worker %u", i);
       return 1;
     }
@@ -158,9 +160,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Start unified signaling server passing shared room registry & session table
+  // Start unified signaling server passing shared room registry, session table, and routing table
   sfu_signaling_server_t signaling;
-  if (sfu_signaling_server_start(&signaling, signaling_port, public_host, port, &ice_creds, &dtls_ctx, &sessions, &room_registry) != 0) {
+  if (sfu_signaling_server_start(&signaling, signaling_port, public_host, port, &ice_creds, &dtls_ctx, &sessions, &room_registry, &routing_table) != 0) {
     SFU_LOG_ERROR("failed to start signaling server");
     return 1;
   }
@@ -169,6 +171,8 @@ int main(int argc, char **argv) {
 
   // Block cleanly until shutdown is triggered
   sfu_scheduler_join(&scheduler);
+
+  sfu_signaling_server_stop(&signaling);
 
   // Cleanup routines
   for (uint32_t i = 0; i < worker_count; i++) {
@@ -185,7 +189,6 @@ int main(int argc, char **argv) {
   sfu_packet_pool_destroy(&pp);
   close(fd);
 
-  sfu_signaling_server_stop(&signaling);
   sfu_dtls_ctx_destroy(&dtls_ctx);
   sfu_srtp_global_deinit();
 

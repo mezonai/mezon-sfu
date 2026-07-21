@@ -1,9 +1,10 @@
 #include "protocol/websocket/ws.h"
 #include "util/log.h"
 
-#include <ctype.h>
+#include <errno.h>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +18,19 @@ static ssize_t read_full_available(int fd, char *buf, size_t cap, const char *te
   size_t total = 0;
   while (total < cap - 1) {
     ssize_t n = read(fd, buf + total, cap - 1 - total);
-    if (n <= 0) {
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        /* If we already read partial HTTP headers, wait briefly for the remaining TCP segment */
+        if (total > 0) {
+          struct pollfd pfd = {.fd = fd, .events = POLLIN};
+          if (poll(&pfd, 1, 100) > 0) {
+            continue;
+          }
+        }
+        return -1;
+      }
+      return -1;
+    } else if (n == 0) {
       return -1;
     }
     total += (size_t)n;
@@ -62,6 +75,26 @@ static int extract_header(const char *req, const char *header_name, char *out, s
 
 static void base64_encode(const uint8_t *data, int len, char *out) { EVP_EncodeBlock((unsigned char *)out, data, len); }
 
+static int write_exact(int fd, const uint8_t *buf, size_t len) {
+  size_t total = 0;
+  while (total < len) {
+    ssize_t n = write(fd, buf + total, len - total);
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+        if (poll(&pfd, 1, 100) > 0) {
+          continue;
+        }
+      }
+      return -1;
+    } else if (n == 0) {
+      return -1;
+    }
+    total += (size_t)n;
+  }
+  return 0;
+}
+
 int sfu_ws_handshake(int fd) {
   char req[WS_HANDSHAKE_BUF_CAP];
   if (read_full_available(fd, req, sizeof(req), "\r\n\r\n") < 0) {
@@ -96,7 +129,7 @@ int sfu_ws_handshake(int fd) {
                           "\r\n",
                           accept);
 
-  if (write(fd, response, (size_t)resp_len) != resp_len) {
+  if (write_exact(fd, (const uint8_t *)response, (size_t)resp_len) < 0) {
     SFU_LOG_WARN("WS handshake: failed to write 101 response");
     return -1;
   }
@@ -108,7 +141,20 @@ static ssize_t read_exact(int fd, uint8_t *buf, size_t len) {
   size_t total = 0;
   while (total < len) {
     ssize_t n = read(fd, buf + total, len - total);
-    if (n <= 0) {
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        /* On non-blocking sockets, if a multi-kilobyte WebSocket frame (like an SDP Offer)
+         * spans multiple TCP packets, wait briefly for the next segment to arrive in the
+         * kernel buffer instead of failing and dropping the WebRTC peer. */
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int res = poll(&pfd, 1, 100); /* Wait up to 100ms for packet continuation */
+        if (res <= 0) {
+          return -1;
+        }
+        continue;
+      }
+      return -1;
+    } else if (n == 0) {
       return -1;
     }
     total += (size_t)n;
@@ -137,10 +183,10 @@ static int send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t len
     header_len = 10;
   }
 
-  if (write(fd, header, header_len) != (ssize_t)header_len) {
+  if (write_exact(fd, header, header_len) < 0) {
     return -1;
   }
-  if (len > 0 && write(fd, payload, len) != (ssize_t)len) {
+  if (len > 0 && write_exact(fd, payload, len) < 0) {
     return -1;
   }
   return 0;

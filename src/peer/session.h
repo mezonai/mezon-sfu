@@ -37,9 +37,11 @@ typedef struct sfu_peer_session {
   socklen_t addr_len;
   sfu_session_state_t state;
   sfu_dtls_conn_t dtls;
-  sfu_srtp_ctx_t srtp; /* valid only once state == SFU_SESSION_ESTABLISHED */
+  // valid only once state == SFU_SESSION_ESTABLISHED
+  sfu_srtp_ctx_t srtp;
   sfu_room_t *room;
   bool active;
+  char ufrag[32];
 } sfu_peer_session_t;
 
 #define SFU_SESSION_TABLE_MAX 256

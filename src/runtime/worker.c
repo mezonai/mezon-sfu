@@ -13,7 +13,8 @@
 #define SFU_WORKER_IDLE_SLEEP_US 200
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
-                    sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions, const sfu_ice_credentials_t *ice_creds, uint32_t inbox_capacity, int send_bgid) {
+                    sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions, sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds,
+                    uint32_t inbox_capacity, int send_bgid) {
   memset(w, 0, sizeof(*w));
   w->core_id = core_id;
   w->worker_index = worker_index;
@@ -23,6 +24,7 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
   w->mesh = mesh;
   w->sessions = sessions;
   w->ice_creds = ice_creds;
+  w->routing_table = routing_table;
 
   if (sfu_spsc_ring_init(&w->inbox, inbox_capacity) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init inbox ring", worker_index);
