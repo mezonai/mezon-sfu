@@ -135,17 +135,63 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
   }
 }
 
+/* Extracts VP8 and RTX dynamic payload type numbers from an SDP offer */
+static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *video_pt, uint8_t *rtx_pt) {
+  *video_pt = 0;
+  *rtx_pt = 0;
+  if (!sdp || sdp_len == 0) {
+    return;
+  }
+
+  int current_media = 0;
+  size_t pos = 0;
+  while (pos < sdp_len) {
+    size_t line_start = pos;
+    while (pos < sdp_len && sdp[pos] != '\n') {
+      pos++;
+    }
+    size_t line_end = pos;
+    if (line_end > line_start && sdp[line_end - 1] == '\r') {
+      line_end--;
+    }
+    if (pos < sdp_len) {
+      pos++;
+    }
+
+    size_t len = line_end - line_start;
+    const char *line = sdp + line_start;
+
+    if (len >= 7 && memcmp(line, "m=audio", 7) == 0) {
+      current_media = 1;
+    } else if (len >= 7 && memcmp(line, "m=video", 7) == 0) {
+      current_media = 2;
+    } else if (current_media == 2 && len >= 9 && memcmp(line, "a=rtpmap:", 9) == 0) {
+      char *endptr;
+      unsigned long pt = strtoul(line + 9, &endptr, 10);
+      if (endptr > line + 9 && *endptr == ' ' && pt < 128) {
+        const char *codec = endptr + 1;
+        size_t codec_len = len - (size_t)(codec - line);
+        if (codec_len >= 3 && (memcmp(codec, "VP8", 3) == 0 || memcmp(codec, "vp8", 3) == 0)) {
+          *video_pt = (uint8_t)pt;
+        } else if (codec_len >= 3 && (memcmp(codec, "rtx", 3) == 0 || memcmp(codec, "RTX", 3) == 0)) {
+          *rtx_pt = (uint8_t)pt;
+        }
+      }
+    }
+  }
+}
+
 static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *client_ufrag, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio,
-                                  uint32_t ans_video, uint32_t ans_rtx) {
+                                  uint32_t ans_video, uint32_t ans_rtx, uint8_t ans_video_pt, uint8_t ans_rtx_pt) {
   char answer[SFU_SIGNALING_SDP_CAP];
   int answer_len = sfu_sdp_build_answer(offer_sdp, offer_sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd,
-                                        s->dtls_ctx->fingerprint, ans_audio, ans_video, ans_rtx, answer, sizeof(answer));
+                                        s->dtls_ctx->fingerprint, ans_audio, ans_video, ans_rtx, ans_video_pt, ans_rtx_pt, answer, sizeof(answer));
   if (answer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build SDP answer (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
-  SFU_LOG_INFO("signaling: raw answer built: %d bytes (fd=%d, ufrag=%s, audio_ssrc=%u, video_ssrc=%u, rtx_ssrc=%u)", answer_len, fd, client_ufrag, ans_audio,
-               ans_video, ans_rtx);
+  SFU_LOG_INFO("signaling: raw answer built: %d bytes (fd=%d, ufrag=%s, audio_ssrc=%u, video_ssrc=%u, rtx_ssrc=%u, video_pt=%u, rtx_pt=%u)", answer_len, fd,
+               client_ufrag, ans_audio, ans_video, ans_rtx, ans_video_pt, ans_rtx_pt);
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(answer, (size_t)answer_len, escaped, sizeof(escaped));
@@ -209,11 +255,22 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
   }
 
   uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
+  uint8_t ans_video_pt = 0, ans_rtx_pt = 0;
   if (room && client_ufrag[0] != '\0') {
     sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
+    if (ans_video != 0) {
+      sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
+      uint32_t n = sfu_room_snapshot_other_publishers(room, client_ufrag, snaps, SFU_ROOM_MAX_PEERS);
+      for (uint32_t i = 0; i < n; i++) {
+        if (ans_video_pt == 0 && snaps[i].offer_sdp) {
+          extract_sdp_video_pts(snaps[i].offer_sdp, strlen(snaps[i].offer_sdp), &ans_video_pt, &ans_rtx_pt);
+        }
+        SFU_FREE(snaps[i].offer_sdp);
+      }
+    }
   }
 
-  build_and_send_answer(fd, s, client_ufrag, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
+  build_and_send_answer(fd, s, client_ufrag, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx, ans_video_pt, ans_rtx_pt);
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {

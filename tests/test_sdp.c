@@ -43,6 +43,29 @@ static const char *SAMPLE_OFFER =
     "192.168.1.5 rport 54321 generation 0\r\n"
     "a=end-of-candidates\r\n";
 
+/* Sample video offer simulating a Chrome client offering VP8 (PT 96) and RTX (PT 97) */
+static const char *SAMPLE_VIDEO_OFFER =
+    "v=0\r\n"
+    "o=- 4611731400430051336 2 IN IP4 127.0.0.1\r\n"
+    "s=-\r\n"
+    "t=0 0\r\n"
+    "a=group:BUNDLE 1\r\n"
+    "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n"
+    "c=IN IP4 0.0.0.0\r\n"
+    "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+    "a=ice-ufrag:browserUfrag1\r\n"
+    "a=ice-pwd:browserPasswordValueGoesHereXXXX\r\n"
+    "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\n"
+    "a=setup:actpass\r\n"
+    "a=mid:1\r\n"
+    "a=sendrecv\r\n"
+    "a=rtcp-mux\r\n"
+    "a=rtpmap:96 VP8/90000\r\n"
+    "a=rtcp-fb:96 nack\r\n"
+    "a=rtcp-fb:96 nack pli\r\n"
+    "a=rtpmap:97 rtx/90000\r\n"
+    "a=fmtp:97 apt=96\r\n";
+
 static int contains(const char *haystack, const char *needle) { return strstr(haystack, needle) != NULL; }
 
 static int count_occurrences(const char *haystack, const char *needle) {
@@ -58,11 +81,11 @@ static int count_occurrences(const char *haystack, const char *needle) {
 
 int main(void) {
   char answer[8192];
-  /* Updated: Added 1234567890, 0, 0 for audio_ssrc, video_ssrc, rtx_ssrc */
+  /* Updated: Added 0, 0 for video_pt, rtx_pt since this is an audio-only test */
   int len = sfu_sdp_build_answer(SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:"
                                  "FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3",
-                                 1234567890, 0, 0, answer, sizeof(answer));
+                                 1234567890, 0, 0, 0, 0, answer, sizeof(answer));
   assert(len > 0);
   answer[len] = '\0';
 
@@ -100,11 +123,43 @@ int main(void) {
   }
   assert(all_ok);
 
+  /* New Test: Verify asymmetric video payload type negotiation (e.g., Firefox PT 120/121 overriding Chrome PT 96/97) */
+  len = sfu_sdp_build_answer(SAMPLE_VIDEO_OFFER, strlen(SAMPLE_VIDEO_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
+                             "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", 0, 987654321, 987654322, 120, 121,
+                             answer, sizeof(answer));
+  assert(len > 0);
+  answer[len] = '\0';
+
+  struct {
+    const char *desc;
+    int ok;
+  } video_checks[] = {
+      {"m=video payload types overridden to 120 121", contains(answer, "m=video 17030 UDP/TLS/RTP/SAVPF 120 121")},
+      {"publisher VP8 rtpmap injected (120)", contains(answer, "a=rtpmap:120 VP8/90000")},
+      {"publisher VP8 nack injected (120)", contains(answer, "a=rtcp-fb:120 nack")},
+      {"publisher VP8 pli injected (120)", contains(answer, "a=rtcp-fb:120 nack pli")},
+      {"publisher RTX rtpmap injected (121)", contains(answer, "a=rtpmap:121 rtx/90000")},
+      {"publisher RTX fmtp apt injected (121 -> 120)", contains(answer, "a=fmtp:121 apt=120")},
+      {"offered Chrome PT 96 removed", !contains(answer, "a=rtpmap:96 VP8/90000")},
+      {"offered Chrome PT 97 removed", !contains(answer, "a=rtpmap:97 rtx/90000")},
+      {"remote video SSRC injected", contains(answer, "a=ssrc:987654321 cname:remote-peer")},
+      {"remote rtx SSRC FID group injected", contains(answer, "a=ssrc-group:FID 987654321 987654322")},
+  };
+
+  all_ok = 1;
+  for (size_t i = 0; i < sizeof(video_checks) / sizeof(video_checks[0]); i++) {
+    printf("%s - %s\n", video_checks[i].ok ? "PASS" : "FAIL", video_checks[i].desc);
+    if (!video_checks[i].ok) {
+      all_ok = 0;
+    }
+  }
+  assert(all_ok);
+
   /* An offer with no m= line must fail cleanly, not crash or emit
    * a bogus answer. */
   const char *no_media = "v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n";
-  /* Updated: Added 0, 0, 0 for audio_ssrc, video_ssrc, rtx_ssrc */
-  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", 0, 0, 0, answer, sizeof(answer)) == -1);
+  /* Updated: Added 0, 0 for video_pt, rtx_pt */
+  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", 0, 0, 0, 0, 0, answer, sizeof(answer)) == -1);
 
   printf("test_sdp: OK\n");
   return 0;

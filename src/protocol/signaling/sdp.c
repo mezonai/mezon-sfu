@@ -83,6 +83,41 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
   return 0;
 }
 
+/* Appends clean VP8 and RTX codec definitions using the publisher's dynamic payload numbers */
+static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, uint8_t video_pt, uint8_t rtx_pt) {
+  char line[128];
+  int n;
+
+  n = snprintf(line, sizeof(line), "a=rtpmap:%u VP8/90000", video_pt);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+
+  n = snprintf(line, sizeof(line), "a=rtcp-fb:%u nack", video_pt);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+
+  n = snprintf(line, sizeof(line), "a=rtcp-fb:%u nack pli", video_pt);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+
+  if (rtx_pt != 0) {
+    n = snprintf(line, sizeof(line), "a=rtpmap:%u rtx/90000", rtx_pt);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+
+    n = snprintf(line, sizeof(line), "a=fmtp:%u apt=%u", rtx_pt, video_pt);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
 /* Appends the remote audio SSRCs directly into the client's audio m-line (mid:0)
  * Includes explicit SSRC-level msid mappings required by Firefox compatibility rules. */
 static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc) {
@@ -152,7 +187,7 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
 }
 
 int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
-                         uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc, char *out, size_t out_cap) {
+                         uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc, uint8_t video_pt, uint8_t rtx_pt, char *out, size_t out_cap) {
   size_t off = 0;
   int in_media = 0;  // 0 = parsing session level, 1 = parsing media level
   int saw_media_line = 0;
@@ -256,7 +291,20 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       }
 
       char m_line[256];
-      int m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s", (int)(sp1 - line), line, port, (int)(len - (size_t)(sp2 - line)), sp2);
+      int m_len;
+
+      /* When routing a remote video track with a known payload type, rewrite the m= line protocol list */
+      const char *sp3 = memchr(sp2 + 1, ' ', len - (size_t)(sp2 + 1 - line));
+      if (current_media == 2 && video_pt != 0 && sp3 != NULL) {
+        if (rtx_pt != 0) {
+          m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s %u %u", (int)(sp1 - line), line, port, (int)(sp3 - sp2), sp2, video_pt, rtx_pt);
+        } else {
+          m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s %u", (int)(sp1 - line), line, port, (int)(sp3 - sp2), sp2, video_pt);
+        }
+      } else {
+        m_len = snprintf(m_line, sizeof(m_line), "%.*s %u%.*s", (int)(sp1 - line), line, port, (int)(len - (size_t)(sp2 - line)), sp2);
+      }
+
       if (m_len < 0 || (size_t)m_len >= sizeof(m_line) || append_line_n(out, out_cap, &off, m_line, (size_t)m_len) != 0) {
         return -1;
       }
@@ -264,6 +312,13 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       // Inject connection and transport configurations
       if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
         return -1;
+      }
+
+      /* Explicitly declare publisher VP8 and RTX mappings right after the transport headers */
+      if (current_media == 2 && video_pt != 0) {
+        if (append_video_codec_attributes(out, out_cap, &off, video_pt, rtx_pt) != 0) {
+          return -1;
+        }
       }
       continue;
     }
@@ -279,6 +334,14 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       if (should_skip_line(line, len)) {
         continue;
       }
+
+      /* When overriding video payload types, skip incoming rtpmap/rtcp-fb/fmtp lines from the offerer */
+      if (current_media == 2 && video_pt != 0) {
+        if (starts_with(line, len, "a=rtpmap:") || starts_with(line, len, "a=rtcp-fb:") || starts_with(line, len, "a=fmtp:")) {
+          continue;
+        }
+      }
+
       if (append_line_n(out, out_cap, &off, line, len) != 0) {
         return -1;
       }
