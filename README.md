@@ -22,8 +22,7 @@ Before building, ensure you have the following installed on your system:
 
 * **CMake** (3.15 or higher)
 * **C Compiler** (GCC or Clang)
-* **OpenSSL & libsrtp2** development libraries
-* **Node.js** (optional, for serving the test client) or **Python3**
+* **BoringSSL & libsrtp2** development libraries
 
 To compile the C backend binary, run the following commands from the root directory:
 
