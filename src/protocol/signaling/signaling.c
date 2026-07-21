@@ -440,26 +440,35 @@ static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
   }
 }
 
-/* The primary thread entry point for the libuv event loop */
+static void on_async_wake(uv_async_t *handle) {
+  /* Wakes the loop instantly and stops execution */
+  uv_stop(handle->loop);
+}
+
 static void *signaling_loop_main(void *arg) {
   sfu_signaling_server_t *s = (sfu_signaling_server_t *)arg;
 
   uv_loop_t loop;
   uv_loop_init(&loop);
 
+  /* Initialize async waker so another thread can break uv_run */
+  uv_async_init(&loop, &s->async_waker, on_async_wake);
+
   uv_poll_t listen_poll;
   uv_poll_init_socket(&loop, &listen_poll, s->listen_fd);
   listen_poll.data = s;
   uv_poll_start(&listen_poll, UV_READABLE, on_server_readable);
 
-  /* Run the event loop while the server is active */
+  /* Run libuv loop until uv_stop() or s->running == 0 */
   while (s->running) {
-    /* uv_run with UV_RUN_ONCE allows periodic checking of s->running */
-    uv_run(&loop, UV_RUN_ONCE);
+    uv_run(&loop, UV_RUN_DEFAULT);
   }
 
   /* Clean up all active client connections during server shutdown */
   uv_walk(&loop, on_shutdown_walk, NULL);
+  uv_run(&loop, UV_RUN_DEFAULT);
+
+  uv_close((uv_handle_t *)&s->async_waker, NULL);
   uv_run(&loop, UV_RUN_DEFAULT);
   uv_loop_close(&loop);
 
@@ -516,8 +525,15 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
 }
 
 void sfu_signaling_server_stop(sfu_signaling_server_t *s) {
+  if (!s || !s->running) {
+    return;
+  }
+
   s->running = 0;
-  shutdown(s->listen_fd, SHUT_RDWR);
-  close(s->listen_fd);
+  /* Send signal to libuv loop to wake up immediately */
+  uv_async_send(&s->async_waker);
+
+  /* Join thread safely */
   pthread_join(s->thread, NULL);
+  close(s->listen_fd);
 }

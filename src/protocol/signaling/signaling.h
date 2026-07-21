@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <uv.h>
 #include "peer/session.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
@@ -13,7 +14,7 @@ typedef struct sfu_signaling_server {
   int listen_fd;
   pthread_t thread;
   volatile int running;
-
+  uv_async_t async_waker;
   char media_host[64];
   uint16_t media_port;
   const sfu_ice_credentials_t *ice_creds; /* shared, not owned */

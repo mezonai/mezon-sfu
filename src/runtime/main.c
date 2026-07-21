@@ -172,6 +172,10 @@ int main(int argc, char **argv) {
   // Block cleanly until shutdown is triggered
   sfu_scheduler_join(&scheduler);
 
+  SFU_LOG_INFO("shutting down mezon-sfu...");
+
+  sfu_signaling_server_stop(&signaling);
+
   // Cleanup routines
   for (uint32_t i = 0; i < worker_count; i++) {
     sfu_worker_join(&workers[i]);
@@ -187,7 +191,6 @@ int main(int argc, char **argv) {
   sfu_packet_pool_destroy(&pp);
   close(fd);
 
-  sfu_signaling_server_stop(&signaling);
   sfu_dtls_ctx_destroy(&dtls_ctx);
   sfu_srtp_global_deinit();
 
