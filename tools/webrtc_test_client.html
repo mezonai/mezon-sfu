@@ -668,6 +668,11 @@
                     pc.ontrack = (event) => {
                         const track = event.track;
 
+                        console.log('--- ontrack event fired ---');
+                        console.log('Track kind:', track.kind);
+                        console.log('Track ID:', track.id);
+                        console.log('Transceiver MID:', event.transceiver ? event.transceiver.mid : 'none');
+
                         if (track.kind === "video") {
                             // Use the stream's unique ID (which the backend set to the remote peer's ufrag)
                             // instead of track.id (which is hardcoded to "remote-video-track" for everyone)
