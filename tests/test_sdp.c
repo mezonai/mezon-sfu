@@ -123,7 +123,7 @@ int main(void) {
   }
   assert(all_ok);
 
-  /* New Test: Verify asymmetric video payload type negotiation (e.g., Firefox PT 120/121 overriding Chrome PT 96/97) */
+  /* Verify asymmetric video payload type negotiation (e.g., Firefox PT 120/121 overriding Chrome PT 96/97) */
   len = sfu_sdp_build_answer(SAMPLE_VIDEO_OFFER, strlen(SAMPLE_VIDEO_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
                              "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", 0, 987654321, 987654322, 120, 121,
                              answer, sizeof(answer));
