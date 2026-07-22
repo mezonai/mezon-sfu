@@ -53,6 +53,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->addr_len = addr_len;
   s->active = true;
   s->state = SFU_SESSION_NEW;
+  s->worker_id = UINT16_MAX;
   for (int i = 0; i < 128; i++) {
     s->pt_map[i] = (uint8_t)i;
   }

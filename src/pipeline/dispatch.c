@@ -65,7 +65,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   char client_ufrag[32];
   bool have_ufrag = sfu_stun_extract_client_ufrag(pkt->data, pkt->len, w->ice_creds->ufrag, client_ufrag, sizeof(client_ufrag));
-  sfu_room_t *room = NULL; /* FIX: Declare room at top of function scope */
+  sfu_room_t *room = NULL;
 
   if (have_ufrag) {
     pthread_mutex_lock(&w->routing_table->mutex);
@@ -133,6 +133,16 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         if (!session->room) {
           session->room = room;
           SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
+        }
+
+        if (session->worker_id == UINT16_MAX) {
+          session->worker_id = w->worker_index;
+
+          SFU_LOG_INFO("worker %u: session ufrag=%s assigned to worker %u", w->worker_index, session->ufrag, session->worker_id);
+        } else {
+          SFU_LOG_ERROR("worker ownership mismatch: ufrag=%s owner=%u current=%u", session->ufrag, session->worker_id, w->worker_index);
+
+          return;
         }
       }
     } else {

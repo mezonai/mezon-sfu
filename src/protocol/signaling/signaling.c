@@ -76,11 +76,6 @@ static bool extract_sdp_ice_ufrag(const char *sdp, size_t sdp_len, char *out, si
   return false;
 }
 
-typedef struct {
-  int fd;
-  sfu_signaling_server_t *server;
-} conn_ctx_t;
-
 /* Server-offerer architecture: the SFU is always the one running one signaling
    server instance per process (see main.c), so a module-level pointer lets
    sfu_signaling_trigger_renegotiation() -- invoked from worker/dispatch.c with
@@ -210,22 +205,55 @@ static void sfu_session_set_pt_translation(sfu_session_table_t *sessions, const 
   SFU_LOG_DEBUG("signaling: session ufrag=%s not found in table during PT mapping (STUN pending)", ufrag);
 }
 
+static bool build_and_send_initial_offer(int fd, sfu_signaling_server_t *s) {
+  char offer[SFU_SIGNALING_SDP_CAP];
+
+  int offer_len =
+      sfu_sdp_build_initial_offer(s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, offer, sizeof(offer));
+
+  if (offer_len < 0) {
+    SFU_LOG_WARN("signaling: failed to build initial SDP offer (fd=%d)", fd);
+    return false;
+  }
+
+  char escaped[SFU_SIGNALING_JSON_CAP];
+  int escaped_len = sfu_json_escape(offer, (size_t)offer_len, escaped, sizeof(escaped));
+
+  if (escaped_len < 0) {
+    SFU_LOG_WARN("signaling: offer too large (fd=%d)", fd);
+    return false;
+  }
+
+  char response[SFU_SIGNALING_JSON_CAP + 64];
+  int response_len = snprintf(response, sizeof(response), "{\"type\":\"offer\",\"sdp\":\"%s\"}", escaped);
+
+  if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
+    return false;
+  }
+
+  if (sfu_ws_send_text(fd, response, (size_t)response_len) != 0) {
+    SFU_LOG_WARN("signaling: failed to send initial offer (fd=%d)", fd);
+    return false;
+  }
+
+  SFU_LOG_INFO("signaling: sent initial server offer (fd=%d)", fd);
+
+  return true;
+}
+
 /**
  * @brief Builds a fresh server-initiated SDP offer and pushes it to fd as
  *        {"type":"offer","sdp":...}. Used both for a peer's initial offer
  *        right after "join" and for re-offers during renegotiation.
  */
-static bool build_and_send_offer(int fd, sfu_signaling_server_t *s, sfu_publisher_snapshot_t *snaps, uint32_t snaps_count, uint8_t offer_video_pt,
-                                 uint8_t offer_rtx_pt) {
+static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s) {
   char offer[SFU_SIGNALING_SDP_CAP];
-  int offer_len = sfu_sdp_build_offer(s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, snaps, snaps_count,
-                                      offer_video_pt, offer_rtx_pt, offer, sizeof(offer));
+  int offer_len =
+      sfu_sdp_build_offer(session, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, offer, sizeof(offer));
   if (offer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build server-initiated SDP offer (fd=%d)", fd);
     return false;
   }
-  SFU_LOG_DEBUG("signaling: raw offer built: %d bytes (fd=%d, video_pt=%u, rtx_pt=%u, remote_publishers=%u)", offer_len, fd, offer_video_pt, offer_rtx_pt,
-                snaps_count);
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(offer, (size_t)offer_len, escaped, sizeof(escaped));
@@ -246,7 +274,6 @@ static bool build_and_send_offer(int fd, sfu_signaling_server_t *s, sfu_publishe
     return false;
   }
 
-  SFU_LOG_INFO("signaling: sent server-initiated SDP offer (%d bytes, %u remote publishers) (fd=%d)", response_len, snaps_count, fd);
   return true;
 }
 
@@ -262,83 +289,74 @@ static bool build_and_send_offer(int fd, sfu_signaling_server_t *s, sfu_publishe
  *        offer (no glare, no rollback needed).
  */
 void sfu_signaling_trigger_renegotiation(sfu_room_t *room, const char *exclude_ufrag) {
-  if (!room || !exclude_ufrag || exclude_ufrag[0] == '\0' || !g_signaling_server) {
+  if (!room || !exclude_ufrag || !g_signaling_server) {
     return;
   }
 
-  sfu_publisher_snapshot_t peers[SFU_ROOM_MAX_PEERS];
-  uint32_t peer_count = sfu_room_snapshot_other_publishers(room, exclude_ufrag, peers, SFU_ROOM_MAX_PEERS);
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *session = room->peers[i];
 
-  for (uint32_t i = 0; i < peer_count; i++) {
-    /* Re-derive that peer's own remote-publisher view (everyone but themselves)
-       so the new offer includes every currently active publisher, not just
-       the one that just came up. */
-    sfu_publisher_snapshot_t peer_view[SFU_ROOM_MAX_PEERS];
-    uint32_t peer_view_count = sfu_room_snapshot_other_publishers(room, peers[i].ufrag, peer_view, SFU_ROOM_MAX_PEERS);
-
-    uint8_t reneg_video_pt = 0, reneg_rtx_pt = 0;
-    for (uint32_t j = 0; j < peer_view_count; j++) {
-      if (reneg_video_pt == 0 && peer_view[j].offer_sdp) {
-        extract_sdp_video_pts(peer_view[j].offer_sdp, strlen(peer_view[j].offer_sdp), &reneg_video_pt, &reneg_rtx_pt);
-      }
+    if (!session) {
+      continue;
     }
 
-    if (build_and_send_offer(peers[i].fd, g_signaling_server, peer_view, peer_view_count, reneg_video_pt, reneg_rtx_pt)) {
-      SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d) now that ufrag=%s DTLS keys are hot", peers[i].ufrag, peers[i].fd, exclude_ufrag);
+    if (strcmp(session->ufrag, exclude_ufrag) == 0) {
+      continue;
+    }
+
+    if (build_and_send_offer(g_signaling_server->listen_fd, session, g_signaling_server)) {
+      SFU_LOG_INFO(
+          "signaling: sent renegotiation offer "
+          "to ufrag=%s (fd=%d)",
+          session->ufrag, g_signaling_server->listen_fd);
+
     } else {
-      SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", peers[i].fd);
+      SFU_LOG_WARN(
+          "signaling: failed to send renegotiation "
+          "offer to fd=%d",
+          g_signaling_server->listen_fd);
     }
-
-    for (uint32_t j = 0; j < peer_view_count; j++) {
-      SFU_FREE(peer_view[j].offer_sdp);
-    }
-    SFU_FREE(peers[i].offer_sdp);
   }
 }
 
-static void handle_answer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, const char *client_ufrag, const char *sdp, int sdp_len) {
-  uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
-  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &ans_audio, &ans_video, &ans_rtx);
-
-  uint8_t client_video_pt = 0, client_rtx_pt = 0;
-  extract_sdp_video_pts(sdp, (size_t)sdp_len, &client_video_pt, &client_rtx_pt);
-
-  /* The server already sent the offer at join time; this answer is the
-     client's final negotiated description, so store it directly as the
-     publisher's SDP for future re-offers to other room members. */
-  if (room && client_ufrag[0] != '\0') {
-    sfu_room_publish(room, client_ufrag, fd, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx);
+static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
+  if (!session) {
+    return;
   }
 
-  /* Translate this peer's own negotiated video PT against whatever PT the
-     server offered other publishers with, so RTP re-encoded for forwarding
-     to this peer carries the payload type it actually agreed to. */
-  uint8_t offered_video_pt = 0, offered_rtx_pt = 0;
-  if (room && client_ufrag[0] != '\0') {
-    sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
-    uint32_t snaps_count = sfu_room_snapshot_other_publishers(room, client_ufrag, snaps, SFU_ROOM_MAX_PEERS);
-    for (uint32_t i = 0; i < snaps_count; i++) {
-      if (offered_video_pt == 0 && snaps[i].offer_sdp) {
-        extract_sdp_video_pts(snaps[i].offer_sdp, strlen(snaps[i].offer_sdp), &offered_video_pt, &offered_rtx_pt);
-      }
-      SFU_FREE(snaps[i].offer_sdp);
-    }
-  }
-  if (offered_video_pt == 0) {
-    /* No other publisher yet to compare against -- nothing to translate. */
-    offered_video_pt = client_video_pt;
-    offered_rtx_pt = client_rtx_pt;
+  uint32_t audio_ssrc = 0;
+  uint32_t video_ssrc = 0;
+  uint32_t rtx_ssrc = 0;
+
+  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &audio_ssrc, &video_ssrc, &rtx_ssrc);
+
+  uint8_t video_pt = 0;
+  uint8_t rtx_pt = 0;
+
+  extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
+
+  session->uplink_audio.ssrc = audio_ssrc;
+
+  session->uplink_video.ssrc = video_ssrc;
+  session->uplink_video.rtx_ssrc = rtx_ssrc;
+
+  session->uplink_video.payload_type = video_pt;
+  session->uplink_video.rtx_payload_type = rtx_pt;
+
+  for (int i = 0; i < 128; i++) {
+    session->pt_map[i] = (uint8_t)i;
   }
 
-  if (offered_video_pt != 0 && client_video_pt != 0 && offered_video_pt != client_video_pt) {
-    sfu_session_set_pt_translation(s->sessions, client_ufrag, offered_video_pt, client_video_pt);
-  }
-  if (offered_rtx_pt != 0 && client_rtx_pt != 0 && offered_rtx_pt != client_rtx_pt) {
-    sfu_session_set_pt_translation(s->sessions, client_ufrag, offered_rtx_pt, client_rtx_pt);
+  if (video_pt != 0) {
+    session->pt_map[96] = video_pt;
   }
 
-  SFU_LOG_INFO("signaling: processed SDP answer from fd=%d ufrag=%s (audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u)", fd, client_ufrag, ans_audio, ans_video,
-               ans_rtx);
+  if (rtx_pt != 0) {
+    session->pt_map[97] = rtx_pt;
+  }
+
+  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt,
+               rtx_pt);
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
@@ -401,6 +419,7 @@ typedef struct {
   uint64_t joined_room_id;
   char client_ufrag[32];
   sfu_signaling_server_t *server;
+  sfu_peer_session_t *session;
 } sfu_client_conn_t;
 
 /* Callback executed when a client handle is fully closed */
@@ -502,24 +521,8 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
                 sfu_ws_send_text(c->fd, response, strlen(response));
 
-                /* Server-offerer: push the initial offer right away. It contains a
-                   recv section for this peer's own upload plus a sendonly section
-                   for every publisher already active in the room. This peer has no
-                   ufrag yet, so nothing in the room can match/exclude on it. */
-                sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
-                uint32_t snaps_count = sfu_room_snapshot_other_publishers(room, "", snaps, SFU_ROOM_MAX_PEERS);
-
-                uint8_t offer_video_pt = 0, offer_rtx_pt = 0;
-                for (uint32_t i = 0; i < snaps_count; i++) {
-                  if (offer_video_pt == 0 && snaps[i].offer_sdp) {
-                    extract_sdp_video_pts(snaps[i].offer_sdp, strlen(snaps[i].offer_sdp), &offer_video_pt, &offer_rtx_pt);
-                  }
-                }
-
-                build_and_send_offer(c->fd, s, snaps, snaps_count, offer_video_pt, offer_rtx_pt);
-
-                for (uint32_t i = 0; i < snaps_count; i++) {
-                  SFU_FREE(snaps[i].offer_sdp);
+                if (!build_and_send_initial_offer(c->fd, s)) {
+                  SFU_LOG_WARN("signaling: failed to send initial offer (fd=%d)", c->fd);
                 }
               }
             }
@@ -538,7 +541,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 } else {
                   c->client_ufrag[0] = '\0';
                 }
-                handle_answer(c->fd, s, c->joined_room, c->client_ufrag, sdp, sdp_len);
+                handle_answer(c->session, sdp, sdp_len);
               }
             }
           } else {

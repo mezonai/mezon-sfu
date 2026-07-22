@@ -5,26 +5,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
+#include "media/transceiver.h"
 #include "room/room.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
 
-/*
- * One entry per peer address, tracking connection establishment state:
- * has it passed an authenticated STUN Binding Request, and has DTLS
- * finished handshaking (at which point SRTP keying material exists).
- * This is separate from room/room.h's subscriber list -- session state
- * answers "is this peer's transport ready", room membership answers
- * "who should receive this peer's media".
- *
- * KNOWN LIMITATION: same shape as room.h's registry -- fixed-capacity,
- * mutex-guarded, no timeout/eviction. Every worker touches this table
- * once per STUN/DTLS packet (not per RTP/RTCP packet, since those skip
- * straight to the room-forward path once a session is established), so
- * the lock contention is much lighter than room.h's per-packet lookup,
- * but the same "replace with a proper structure before real load"
- * caveat applies.
- */
 typedef enum {
   SFU_SESSION_NEW = 0,
   SFU_SESSION_DTLS_HANDSHAKING,
@@ -32,16 +17,33 @@ typedef enum {
   SFU_SESSION_FAILED,
 } sfu_session_state_t;
 
+typedef struct sfu_receiver_slot {
+  sfu_transceiver_t *video;
+  sfu_transceiver_t *audio;
+  sfu_peer_session_t *session;
+} sfu_receiver_slot_t;
+
 typedef struct sfu_peer_session {
   struct sockaddr_storage addr;
   socklen_t addr_len;
+
+  uint16_t worker_id;
+
   sfu_session_state_t state;
   sfu_dtls_conn_t dtls;
-  sfu_srtp_ctx_t srtp;  // valid only once state == SFU_SESSION_ESTABLISHED
+  sfu_srtp_ctx_t srtp;
   sfu_room_t *room;
   bool active;
   char ufrag[32];
   uint8_t pt_map[128];
+
+  sfu_transceiver_t uplink_audio;
+  sfu_transceiver_t uplink_video;
+  sfu_transceiver_t screen;
+
+  sfu_receiver_slot_t receivers[SFU_MAX_REMOTE_SLOTS];
+
+  bool negotiation_needed;
 } sfu_peer_session_t;
 
 #define SFU_SESSION_TABLE_MAX 256

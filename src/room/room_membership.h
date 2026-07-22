@@ -1,0 +1,6 @@
+#ifndef SFU_ROOM_MEMBERSHIP_H
+#define SFU_ROOM_MEMBERSHIP_H
+
+
+
+#endif  // SFU_ROOM_MEMBERSHIP_H

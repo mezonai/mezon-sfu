@@ -1,6 +1,7 @@
 #include "room/room.h"
 #include <inttypes.h>
 #include <string.h>
+#include "media/graph.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -17,6 +18,9 @@ int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name) {
   if (pthread_mutex_init(&room->lock, NULL) != 0) {
     return -1;
   }
+
+  sfu_media_graph_init(&room->graph);
+
   return 0;
 }
 
@@ -25,49 +29,6 @@ static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const 
     return false;
   }
   return memcmp(a, b, a_len) == 0;
-}
-
-void sfu_room_touch_peer(sfu_room_t *room, const struct sockaddr_storage *addr, socklen_t addr_len, uint32_t worker_id) {
-  pthread_mutex_lock(&room->lock);
-
-  for (uint32_t i = 0; i < room->peer_count; i++) {
-    if (room->peers[i].active && addr_equal(&room->peers[i].addr, room->peers[i].addr_len, addr, addr_len)) {
-      room->peers[i].worker_id = worker_id; /* refresh in case it moved */
-      pthread_mutex_unlock(&room->lock);
-      return;
-    }
-  }
-
-  if (room->peer_count < SFU_ROOM_MAX_PEERS) {
-    sfu_peer_entry_t *e = &room->peers[room->peer_count++];
-    memcpy(&e->addr, addr, addr_len);
-    e->addr_len = addr_len;
-    e->worker_id = worker_id;
-    e->active = true;
-  } else {
-    SFU_LOG_WARN("room [%" PRIu64 "] peer table full (%u), dropping new peer", room->room_id, SFU_ROOM_MAX_PEERS);
-  }
-
-  pthread_mutex_unlock(&room->lock);
-}
-
-uint32_t sfu_room_list_subscribers_excluding(sfu_room_t *room, const struct sockaddr_storage *exclude, socklen_t exclude_len, sfu_peer_entry_t *out,
-                                             uint32_t max_out) {
-  uint32_t n = 0;
-
-  pthread_mutex_lock(&room->lock);
-  for (uint32_t i = 0; i < room->peer_count && n < max_out; i++) {
-    if (!room->peers[i].active) {
-      continue;
-    }
-    if (addr_equal(&room->peers[i].addr, room->peers[i].addr_len, exclude, exclude_len)) {
-      continue; /* don't echo a publisher's own packet back to it */
-    }
-    out[n++] = room->peers[i];
-  }
-  pthread_mutex_unlock(&room->lock);
-
-  return n;
 }
 
 void sfu_room_set_publisher_ssrcs(sfu_room_t *room, const char *ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc) {
@@ -192,32 +153,6 @@ void sfu_room_unpublish(sfu_room_t *room, const char *ufrag) {
     }
   }
   pthread_mutex_unlock(&room->lock);
-}
-
-uint32_t sfu_room_snapshot_other_publishers(sfu_room_t *room, const char *exclude_ufrag, sfu_publisher_snapshot_t *out, uint32_t max_out) {
-  uint32_t n = 0;
-  pthread_mutex_lock(&room->lock);
-  for (uint32_t i = 0; i < room->publisher_count && n < max_out; i++) {
-    sfu_publisher_ssrc_t *p = &room->publishers[i];
-    if (!p->active || strcmp(p->ufrag, exclude_ufrag) == 0) {
-      continue;
-    }
-    strncpy(out[n].ufrag, p->ufrag, sizeof(out[n].ufrag) - 1);
-    out[n].ufrag[sizeof(out[n].ufrag) - 1] = '\0';
-    out[n].fd = p->fd;
-    out[n].audio_ssrc = p->audio_ssrc;
-    out[n].video_ssrc = p->video_ssrc;
-    out[n].rtx_ssrc = p->rtx_ssrc;
-    out[n].offer_sdp = SFU_MALLOC(p->offer_sdp_len + 1);
-    if (!out[n].offer_sdp) {
-      continue; /* skip this one on OOM rather than corrupt/crash */
-    }
-    memcpy(out[n].offer_sdp, p->offer_sdp, p->offer_sdp_len + 1);
-    out[n].offer_sdp_len = p->offer_sdp_len;
-    n++;
-  }
-  pthread_mutex_unlock(&room->lock);
-  return n;
 }
 
 void sfu_room_destroy(sfu_room_t *room) {

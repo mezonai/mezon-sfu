@@ -68,15 +68,6 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  sfu_room_t *active_room = sender_session->room;
-  if (!active_room) {
-    SFU_LOG_WARN("worker %u: [INGRESS DROP] Session not bound to any room! pkt_len=%u", w->worker_index, pkt->len);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-    return;
-  }
-
-  sfu_room_touch_peer(active_room, &pkt->peer_addr, pkt->peer_addr_len, w->worker_index);
-
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
   int plain_len = (int)pkt->len;
   bool unprotected =
@@ -87,26 +78,18 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
-  pkt->len = (uint32_t)plain_len; /* pkt->data now holds plaintext */
+  pkt->len = (uint32_t)plain_len;
 
-  sfu_peer_entry_t subs[SFU_ROOM_MAX_PEERS];
-  uint32_t n = sfu_room_list_subscribers_excluding(active_room, &pkt->peer_addr, pkt->peer_addr_len, subs, SFU_ROOM_MAX_PEERS);
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_receiver_slot_t *slot = &sender_session->receivers[i];
 
-  if (n == 0) {
-    SFU_LOG_DEBUG("worker %u: [ROUTING] No subscribers in room %" PRIu64 " to receive %u bytes", w->worker_index, active_room->room_id, pkt->len);
-  }
-
-  for (uint32_t i = 0; i < n; i++) {
-    sfu_peer_entry_t *sub = &subs[i];
-
-    sfu_peer_session_t *sub_session = sfu_session_table_find(w->sessions, &sub->addr, sub->addr_len);
+    sfu_peer_session_t *sub_session = slot->session;
     if (!sub_session) {
       SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] Subscriber session not found in table!", w->worker_index, i);
       continue;
     }
     if (sub_session->state != SFU_SESSION_ESTABLISHED) {
-      SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] Subscriber session NOT ESTABLISHED (state=%d, target_worker=%u)!", w->worker_index, i, sub_session->state,
-                   sub->worker_id);
+      SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] Subscriber session NOT ESTABLISHED (state=%d)!", w->worker_index, i, sub_session->state);
       continue;
     }
 
@@ -140,22 +123,22 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
                               : sfu_srtp_protect_rtp(&sub_session->srtp, enc->data, &enc_len, enc->cap);
 
     if (!protected_) {
-      SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] SRTP protect FAILED for target worker %u!", w->worker_index, i, sub->worker_id);
+      SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] SRTP protect FAILED for target worker %u!", w->worker_index, i, sub_session->worker_id);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       continue;
     }
     enc->len = (uint32_t)enc_len;
 
-    SFU_LOG_DEBUG("worker fwd from %u to %u (len=%u)", w->worker_index, sub->worker_id, enc->len);
+    SFU_LOG_DEBUG("worker fwd from %u to %u (len=%u)", w->worker_index, sub_session->worker_id, enc->len);
 
-    if (sub->worker_id == w->worker_index) {
-      if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub->addr, sub->addr_len) != 0) {
+    if (sub_session->worker_id == w->worker_index) {
+      if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub_session->addr, sub_session->addr_len) != 0) {
         SFU_LOG_WARN("worker %u: local send SQ full, dropping to subscriber", w->worker_index);
       }
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
-      if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub->worker_id, enc, &sub->addr, sub->addr_len)) {
-        SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] fanout_mesh_enqueue failed (queue full?) to worker %u", w->worker_index, i, sub->worker_id);
+      if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub_session->worker_id, enc, &sub_session->addr, sub_session->addr_len)) {
+        SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] fanout_mesh_enqueue failed (queue full?) to worker %u", w->worker_index, i, sub_session->worker_id);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       }
     }

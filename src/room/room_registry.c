@@ -25,7 +25,6 @@ void sfu_room_registry_destroy(sfu_room_registry_t *reg) {
 sfu_room_t *sfu_room_registry_get_or_create(sfu_room_registry_t *reg, uint64_t room_id) {
   pthread_mutex_lock(&reg->lock);
 
-  // 1. Look for an existing room
   for (uint32_t i = 0; i < reg->room_count; i++) {
     if (reg->rooms[i].room_id == room_id) {
       pthread_mutex_unlock(&reg->lock);
@@ -33,7 +32,6 @@ sfu_room_t *sfu_room_registry_get_or_create(sfu_room_registry_t *reg, uint64_t r
     }
   }
 
-  // 2. Create a new room if space permits
   if (reg->room_count >= SFU_MAX_ROOMS) {
     SFU_LOG_ERROR("Room registry full! Cannot create room %" PRIu64, room_id);
     pthread_mutex_unlock(&reg->lock);
