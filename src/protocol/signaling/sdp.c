@@ -118,9 +118,7 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
   return 0;
 }
 
-/* Appends the remote audio SSRCs directly into the client's audio m-line (mid:0)
- * Includes explicit SSRC-level msid mappings required by Firefox compatibility rules. */
-static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc) {
+static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc, const char *ufrag) {
   char line[128];
   int n;
 
@@ -130,44 +128,41 @@ static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, 
       return -1;
     }
 
-    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-audio-track", audio_ssrc);
+    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s remote-audio-track", audio_ssrc, ufrag);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
 
-    if (append_line(out, out_cap, offset, "a=msid:remote-stream remote-audio-track") != 0) {
+    n = snprintf(line, sizeof(line), "a=msid:%s remote-audio-track", ufrag);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
   }
   return 0;
 }
 
-/* Appends the remote video SSRCs directly into the client's video m-line (mid:1)
- * Includes explicit SSRC-level msid mappings required by Firefox compatibility rules. */
-static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc) {
+static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc, const char *ufrag) {
   char line[128];
   int n;
 
-  /* Only generate video SSRC lines if a valid video SSRC is present */
   if (video_ssrc != 0) {
     n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", video_ssrc);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
 
-    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-video-track", video_ssrc);
+    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s remote-video-track", video_ssrc, ufrag);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
 
-    /* Only generate the RTX SSRC line and FID grouping if an RTX SSRC was actually negotiated */
     if (rtx_ssrc != 0) {
       n = snprintf(line, sizeof(line), "a=ssrc:%u cname:remote-peer", rtx_ssrc);
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
         return -1;
       }
 
-      n = snprintf(line, sizeof(line), "a=ssrc:%u msid:remote-stream remote-video-track", rtx_ssrc);
+      n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s remote-video-track", rtx_ssrc, ufrag);
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
         return -1;
       }
@@ -178,16 +173,16 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
       }
     }
 
-    if (append_line(out, out_cap, offset, "a=msid:remote-stream remote-video-track") != 0) {
+    n = snprintf(line, sizeof(line), "a=msid:%s remote-video-track", ufrag);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
   }
-
   return 0;
 }
 
 int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
-                         uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc, uint8_t video_pt, uint8_t rtx_pt, char *out, size_t out_cap) {
+                         sfu_publisher_snapshot_t *snaps, uint32_t snaps_count, uint8_t video_pt, uint8_t rtx_pt, char *out, size_t out_cap) {
   size_t off = 0;
   int in_media = 0;  // 0 = parsing session level, 1 = parsing media level
   int saw_media_line = 0;
@@ -261,12 +256,16 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
     if (starts_with(line, len, "m=")) {
       // Before opening a new m-line, append the remote SSRCs for the completed section
       if (current_media == 1) {
-        if (append_remote_audio_ssrcs(out, out_cap, &off, audio_ssrc) != 0) {
-          return -1;
+        for (uint32_t i = 0; i < snaps_count; i++) {
+          if (append_remote_audio_ssrcs(out, out_cap, &off, snaps[i].audio_ssrc, snaps[i].ufrag) != 0) {
+            return -1;
+          }
         }
       } else if (current_media == 2) {
-        if (append_remote_video_ssrcs(out, out_cap, &off, video_ssrc, rtx_ssrc) != 0) {
-          return -1;
+        for (uint32_t i = 0; i < snaps_count; i++) {
+          if (append_remote_video_ssrcs(out, out_cap, &off, snaps[i].video_ssrc, snaps[i].rtx_ssrc, snaps[i].ufrag) != 0) {
+            return -1;
+          }
         }
       }
 
@@ -355,12 +354,16 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
 
   // Append remote SSRCs for the final media section at the end of parsing
   if (current_media == 1) {
-    if (append_remote_audio_ssrcs(out, out_cap, &off, audio_ssrc) != 0) {
-      return -1;
+    for (uint32_t i = 0; i < snaps_count; i++) {
+      if (append_remote_audio_ssrcs(out, out_cap, &off, snaps[i].audio_ssrc, snaps[i].ufrag) != 0) {
+        return -1;
+      }
     }
   } else if (current_media == 2) {
-    if (append_remote_video_ssrcs(out, out_cap, &off, video_ssrc, rtx_ssrc) != 0) {
-      return -1;
+    for (uint32_t i = 0; i < snaps_count; i++) {
+      if (append_remote_video_ssrcs(out, out_cap, &off, snaps[i].video_ssrc, snaps[i].rtx_ssrc, snaps[i].ufrag) != 0) {
+        return -1;
+      }
     }
   }
 

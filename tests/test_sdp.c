@@ -1,4 +1,5 @@
 #include "protocol/signaling/sdp.h"
+#include "room/room.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -81,11 +82,17 @@ static int count_occurrences(const char *haystack, const char *needle) {
 
 int main(void) {
   char answer[8192];
-  /* Updated: Added 0, 0 for video_pt, rtx_pt since this is an audio-only test */
+
+  /* Mock publisher snapshot for audio test */
+  sfu_publisher_snapshot_t audio_snaps[1];
+  memset(&audio_snaps[0], 0, sizeof(sfu_publisher_snapshot_t));
+  audio_snaps[0].audio_ssrc = 1234567890;
+  strncpy(audio_snaps[0].ufrag, "remoteUfrag1", sizeof(audio_snaps[0].ufrag) - 1);
+
   int len = sfu_sdp_build_answer(SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:"
                                  "FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3",
-                                 1234567890, 0, 0, 0, 0, answer, sizeof(answer));
+                                 audio_snaps, 1, 0, 0, answer, sizeof(answer));
   assert(len > 0);
   answer[len] = '\0';
 
@@ -123,10 +130,17 @@ int main(void) {
   }
   assert(all_ok);
 
+  /* Mock publisher snapshot for video test */
+  sfu_publisher_snapshot_t video_snaps[1];
+  memset(&video_snaps[0], 0, sizeof(sfu_publisher_snapshot_t));
+  video_snaps[0].video_ssrc = 987654321;
+  video_snaps[0].rtx_ssrc = 987654322;
+  strncpy(video_snaps[0].ufrag, "remoteUfrag2", sizeof(video_snaps[0].ufrag) - 1);
+
   /* Verify asymmetric video payload type negotiation (e.g., Firefox PT 120/121 overriding Chrome PT 96/97) */
   len = sfu_sdp_build_answer(SAMPLE_VIDEO_OFFER, strlen(SAMPLE_VIDEO_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
-                             "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", 0, 987654321, 987654322, 120, 121,
-                             answer, sizeof(answer));
+                             "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", video_snaps, 1, 120, 121, answer,
+                             sizeof(answer));
   assert(len > 0);
   answer[len] = '\0';
 
@@ -158,8 +172,7 @@ int main(void) {
   /* An offer with no m= line must fail cleanly, not crash or emit
    * a bogus answer. */
   const char *no_media = "v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n";
-  /* Updated: Added 0, 0 for video_pt, rtx_pt */
-  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", 0, 0, 0, 0, 0, answer, sizeof(answer)) == -1);
+  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", NULL, 0, 0, 0, answer, sizeof(answer)) == -1);
 
   printf("test_sdp: OK\n");
   return 0;

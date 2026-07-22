@@ -203,17 +203,16 @@ static void sfu_session_set_pt_translation(sfu_session_table_t *sessions, const 
   SFU_LOG_DEBUG("signaling: session ufrag=%s not found in table during PT mapping (STUN pending)", ufrag);
 }
 
-static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *client_ufrag, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio,
-                                  uint32_t ans_video, uint32_t ans_rtx, uint8_t ans_video_pt, uint8_t ans_rtx_pt) {
+static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *client_ufrag, const char *offer_sdp, size_t offer_sdp_len,
+                                  sfu_publisher_snapshot_t *snaps, uint32_t snaps_count, uint8_t ans_video_pt, uint8_t ans_rtx_pt) {
   char answer[SFU_SIGNALING_SDP_CAP];
   int answer_len = sfu_sdp_build_answer(offer_sdp, offer_sdp_len, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd,
-                                        s->dtls_ctx->fingerprint, ans_audio, ans_video, ans_rtx, ans_video_pt, ans_rtx_pt, answer, sizeof(answer));
+                                        s->dtls_ctx->fingerprint, snaps, snaps_count, ans_video_pt, ans_rtx_pt, answer, sizeof(answer));
   if (answer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build SDP answer (fd=%d, ufrag=%s)", fd, client_ufrag);
     return false;
   }
-  SFU_LOG_INFO("signaling: raw answer built: %d bytes (fd=%d, ufrag=%s, audio_ssrc=%u, video_ssrc=%u, rtx_ssrc=%u, video_pt=%u, rtx_pt=%u)", answer_len, fd,
-               client_ufrag, ans_audio, ans_video, ans_rtx, ans_video_pt, ans_rtx_pt);
+  SFU_LOG_INFO("signaling: raw answer built: %d bytes (fd=%d, ufrag=%s, video_pt=%u, rtx_pt=%u)", answer_len, fd, client_ufrag, ans_video_pt, ans_rtx_pt);
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(answer, (size_t)answer_len, escaped, sizeof(escaped));
@@ -268,45 +267,39 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
   uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
 
-  /* Extract this subscriber's offered dynamic payload types */
   uint8_t client_video_pt = 0, client_rtx_pt = 0;
   extract_sdp_video_pts(sdp, (size_t)sdp_len, &client_video_pt, &client_rtx_pt);
 
   if (room && client_ufrag[0] != '\0') {
     sfu_room_publish(room, client_ufrag, fd, sdp, (size_t)sdp_len, off_audio, off_video, off_rtx);
-    if (off_audio != 0 || off_video != 0) {
-      SFU_LOG_INFO("signaling: captured publisher SSRCs for room %" PRIu64 " ufrag=%s (audio=%u, video=%u, rtx=%u)", room->room_id, client_ufrag, off_audio,
-                   off_video, off_rtx);
-    }
   }
 
-  uint32_t ans_audio = 0, ans_video = 0, ans_rtx = 0;
   uint8_t ans_video_pt = 0, ans_rtx_pt = 0;
+  sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
+  uint32_t snaps_count = 0;
+
   if (room && client_ufrag[0] != '\0') {
-    sfu_room_get_other_publisher_ssrcs(room, client_ufrag, &ans_audio, &ans_video, &ans_rtx);
-    if (ans_video != 0) {
-      sfu_publisher_snapshot_t snaps[SFU_ROOM_MAX_PEERS];
-      uint32_t n = sfu_room_snapshot_other_publishers(room, client_ufrag, snaps, SFU_ROOM_MAX_PEERS);
-      for (uint32_t i = 0; i < n; i++) {
-        if (ans_video_pt == 0 && snaps[i].offer_sdp) {
-          extract_sdp_video_pts(snaps[i].offer_sdp, strlen(snaps[i].offer_sdp), &ans_video_pt, &ans_rtx_pt);
-        }
-        SFU_FREE(snaps[i].offer_sdp);
+    snaps_count = sfu_room_snapshot_other_publishers(room, client_ufrag, snaps, SFU_ROOM_MAX_PEERS);
+    for (uint32_t i = 0; i < snaps_count; i++) {
+      if (ans_video_pt == 0 && snaps[i].offer_sdp) {
+        extract_sdp_video_pts(snaps[i].offer_sdp, strlen(snaps[i].offer_sdp), &ans_video_pt, &ans_rtx_pt);
       }
     }
   }
 
-  /* Map incoming publisher PTs to this subscriber's negotiated PTs */
   if (ans_video_pt != 0 && client_video_pt != 0 && ans_video_pt != client_video_pt) {
     sfu_session_set_pt_translation(s->sessions, client_ufrag, ans_video_pt, client_video_pt);
-    SFU_LOG_INFO("signaling: mapped VP8 PT %u -> %u for ufrag=%s", ans_video_pt, client_video_pt, client_ufrag);
   }
   if (ans_rtx_pt != 0 && client_rtx_pt != 0 && ans_rtx_pt != client_rtx_pt) {
     sfu_session_set_pt_translation(s->sessions, client_ufrag, ans_rtx_pt, client_rtx_pt);
-    SFU_LOG_INFO("signaling: mapped RTX PT %u -> %u for ufrag=%s", ans_rtx_pt, client_rtx_pt, client_ufrag);
   }
 
-  build_and_send_answer(fd, s, client_ufrag, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx, ans_video_pt, ans_rtx_pt);
+  build_and_send_answer(fd, s, client_ufrag, sdp, (size_t)sdp_len, snaps, snaps_count, ans_video_pt, ans_rtx_pt);
+
+  /* Free the allocated SDPs only after the answer has been built */
+  for (uint32_t i = 0; i < snaps_count; i++) {
+    SFU_FREE(snaps[i].offer_sdp);
+  }
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {

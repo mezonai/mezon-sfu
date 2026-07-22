@@ -38,6 +38,9 @@ typedef struct sfu_publisher_ssrc {
 typedef struct sfu_publisher_snapshot {
   int fd;
   char ufrag[32];
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t rtx_ssrc;
   char *offer_sdp;
   size_t offer_sdp_len;
 } sfu_publisher_snapshot_t;
