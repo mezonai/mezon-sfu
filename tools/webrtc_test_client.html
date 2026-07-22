@@ -363,17 +363,22 @@
 
         <script>
             /*
-             * Meeting-room client for mezon-sfu's signaling protocol:
+             * Meeting-room client for mezon-sfu's signaling protocol (server-offerer):
              *   client -> server: {"type":"join","room":<id>}
-             *   client -> server: {"type":"offer","sdp":<sdp>}
-             *   server -> client: {"type":"answer","sdp":<sdp>}
+             *   server -> client: {"type":"joined","room":<id>}
+             *   server -> client: {"type":"offer","sdp":<sdp>}    (sent right after join, and again for
+             *                                                      every subsequent renegotiation -- the
+             *                                                      SFU is ALWAYS the offerer, never the client)
+             *   client -> server: {"type":"answer","sdp":<sdp>}
              *   server -> client: {"type":"error","message":<str>}
-             *   server -> client: {"type":"offer","sdp":<sdp>}          (server-initiated renegotiation, e.g. new remote track added)
-             *   server -> client: {"type":"renegotiate"} | {"type":"peer-joined"}   (asks US to (re)offer)
              *
              * This is a SINGLE RTCPeerConnection design: every remote participant's
              * media arrives over the same connection, distinguished by MediaStream
              * (event.streams[0]) as tracks get added via server-driven renegotiation.
+             * The client never calls createOffer() or pc.addTransceiver() itself --
+             * it only ever answers whatever offer the server sends, adding its own
+             * local tracks to the recvonly transceivers (mid 0 = audio, mid 1 = video)
+             * the server's offer always provisions for the joining peer's own upload.
              * Participants are therefore tracked by stream id, not by any
              * participant-identity message the signaling protocol doesn't send --
              * there's no explicit "who is this" from the server, so a tile's name
@@ -385,8 +390,8 @@
             let ws = null;
             let pc = null;
             let localStream = null;
-            let isInitialOfferSent = false;
-            let isRenegotiating = false;
+            let localTracksAdded = false;
+            let isNegotiating = false;
             let micEnabled = true;
             let camEnabled = true;
             let audioCtx = null;
@@ -599,7 +604,8 @@
                 document.getElementById("meetingRoom").style.display = "none";
                 document.getElementById("joinScreen").style.display = "flex";
                 joinBtn.disabled = false;
-                isInitialOfferSent = false;
+                localTracksAdded = false;
+                isNegotiating = false;
             }
 
             async function connectAndJoin() {
@@ -638,32 +644,11 @@
                         else setConnState(s, "warn");
                     };
 
-                    pc.onnegotiationneeded = async () => {
-                        if (
-                            !isInitialOfferSent ||
-                            isRenegotiating ||
-                            pc.signalingState !== "stable"
-                        )
-                            return;
-                        try {
-                            isRenegotiating = true;
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            ws.send(
-                                JSON.stringify({
-                                    type: "offer",
-                                    sdp: pc.localDescription.sdp,
-                                }),
-                            );
-                        } catch (err) {
-                            console.error(
-                                "Renegotiation offer generation failed:",
-                                err,
-                            );
-                        } finally {
-                            isRenegotiating = false;
-                        }
-                    };
+                    /* No onnegotiationneeded handler: the client never calls
+                       createOffer() in this architecture. The SFU is always the
+                       offerer -- both the initial connection and every later
+                       renegotiation (new publisher joins, etc.) arrive as a
+                       server-pushed {"type":"offer"} that this client only answers. */
 
                     pc.ontrack = (event) => {
                         const track = event.track;
@@ -728,17 +713,6 @@
                         document.getElementById("camBtn").disabled = true;
                     }
 
-                    // addTrack creates sendrecv transceivers and assigns SSRCs reliably across browsers.
-                    const audioTrack = localStream.getAudioTracks()[0];
-                    const videoTrack = localStream.getVideoTracks()[0];
-                    if (audioTrack) pc.addTrack(audioTrack, localStream);
-                    else pc.addTransceiver("audio", { direction: "recvonly" });
-                    if (videoTrack) pc.addTrack(videoTrack, localStream);
-                    else pc.addTransceiver("video", { direction: "recvonly" });
-
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-
                     setJoinStatus("Connecting to signaling server…");
                     ws = new WebSocket(wsUrl);
 
@@ -752,15 +726,6 @@
                         setConnState("joining…", "warn");
 
                         ws.send(JSON.stringify({ type: "join", room: roomId }));
-                        setTimeout(() => {
-                            ws.send(
-                                JSON.stringify({
-                                    type: "offer",
-                                    sdp: pc.localDescription.sdp,
-                                }),
-                            );
-                            isInitialOfferSent = true;
-                        }, 100);
                     };
 
                     ws.onmessage = async (event) => {
@@ -772,61 +737,64 @@
                             return;
                         }
 
-                        if (msg.type === "answer") {
-                            await pc.setRemoteDescription(
-                                new RTCSessionDescription({
-                                    type: "answer",
-                                    sdp: msg.sdp,
-                                }),
-                            );
+                        if (msg.type === "joined") {
+                            setConnState("awaiting offer…", "warn");
                             return;
                         }
 
                         if (msg.type === "offer") {
-                            // Server-initiated renegotiation (e.g. a new participant's
-                            // track needs to be added to our connection).
-                            await pc.setRemoteDescription(
-                                new RTCSessionDescription({
-                                    type: "offer",
-                                    sdp: msg.sdp,
-                                }),
-                            );
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            ws.send(
-                                JSON.stringify({
-                                    type: "answer",
-                                    sdp: pc.localDescription.sdp,
-                                }),
-                            );
-                            return;
-                        }
-
-                        if (
-                            msg.type === "renegotiate" ||
-                            msg.type === "peer-joined"
-                        ) {
-                            if (
-                                isRenegotiating ||
-                                pc.signalingState !== "stable"
-                            ) {
+                            // The SFU is always the offerer: this fires both for the
+                            // very first offer right after join and for every later
+                            // renegotiation (e.g. another participant's track being
+                            // added). Either way we just answer it.
+                            if (isNegotiating) {
                                 console.log(
-                                    "Renegotiation requested but already negotiating or unstable. Skipping.",
+                                    "Offer received while already negotiating -- ignoring (a fresh one will follow if this was superseded).",
                                 );
                                 return;
                             }
-                            isRenegotiating = true;
+                            isNegotiating = true;
                             try {
-                                const offer = await pc.createOffer();
-                                await pc.setLocalDescription(offer);
+                                await pc.setRemoteDescription(
+                                    new RTCSessionDescription({
+                                        type: "offer",
+                                        sdp: msg.sdp,
+                                    }),
+                                );
+
+                                if (!localTracksAdded) {
+                                    // The server's offer always provisions mid 0
+                                    // (recvonly audio) and mid 1 (recvonly video) for
+                                    // our own upload. addTrack() reuses those existing
+                                    // recvonly transceivers rather than creating new
+                                    // ones, which is what turns them into sendrecv.
+                                    const audioTrack =
+                                        localStream.getAudioTracks()[0];
+                                    const videoTrack =
+                                        localStream.getVideoTracks()[0];
+                                    if (audioTrack)
+                                        pc.addTrack(audioTrack, localStream);
+                                    if (videoTrack)
+                                        pc.addTrack(videoTrack, localStream);
+                                    localTracksAdded = true;
+                                }
+
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
                                 ws.send(
                                     JSON.stringify({
-                                        type: "offer",
+                                        type: "answer",
                                         sdp: pc.localDescription.sdp,
                                     }),
                                 );
+                            } catch (err) {
+                                console.error(
+                                    "Failed to answer server-initiated offer:",
+                                    err,
+                                );
+                                setConnState("negotiation failed", "err");
                             } finally {
-                                isRenegotiating = false;
+                                isNegotiating = false;
                             }
                             return;
                         }
@@ -841,7 +809,8 @@
 
                     ws.onclose = () => {
                         setConnState("disconnected", "err");
-                        isInitialOfferSent = false;
+                        localTracksAdded = false;
+                        isNegotiating = false;
                     };
                     ws.onerror = () => {
                         setConnState("signaling error", "err");
@@ -850,7 +819,8 @@
                     console.error("Connection failed:", e);
                     setJoinStatus(`WebRTC failed: ${e.message}`, true);
                     joinBtn.disabled = false;
-                    isInitialOfferSent = false;
+                    localTracksAdded = false;
+                    isNegotiating = false;
                 }
             }
         </script>
