@@ -418,12 +418,18 @@ int sfu_sdp_build_offer(const char *host, uint16_t port, const char *ufrag, cons
     return -1;
   }
 
+  SFU_LOG_INFO("SDP_BUILD: snaps=%u local_video_pt=%d", snaps_count, video_pt);
+
   /* BUNDLE group up front: mid 0/1 are always the joining peer's own upload,
      the rest are one (audio) or two (audio+video) mids per remote publisher. */
   char bundle_line[512];
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
   uint32_t remote_mid = 2;
   for (uint32_t i = 0; i < snaps_count; i++) {
+    SFU_LOG_INFO(
+        "SDP_BUILD: snap[%u] "
+        "audio_ssrc=%u video_ssrc=%u ",
+        i, snaps[i].audio_ssrc, snaps[i].video_ssrc);
     if (snaps[i].audio_ssrc != 0) {
       n = snprintf(bundle_line + blen, sizeof(bundle_line) - blen, " %u", remote_mid++);
       if (n < 0 || (size_t)n >= sizeof(bundle_line) - blen) {
