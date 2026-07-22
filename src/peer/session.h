@@ -37,11 +37,11 @@ typedef struct sfu_peer_session {
   socklen_t addr_len;
   sfu_session_state_t state;
   sfu_dtls_conn_t dtls;
-  // valid only once state == SFU_SESSION_ESTABLISHED
-  sfu_srtp_ctx_t srtp;
+  sfu_srtp_ctx_t srtp;  // valid only once state == SFU_SESSION_ESTABLISHED
   sfu_room_t *room;
   bool active;
   char ufrag[32];
+  uint8_t pt_map[128];
 } sfu_peer_session_t;
 
 #define SFU_SESSION_TABLE_MAX 256
@@ -68,5 +68,14 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
  * thin air for a peer that hasn't completed a DTLS handshake -- only
  * STUN/DTLS handling is allowed to create sessions. */
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
+
+/**
+ * Fast O(1) translation of an incoming RTP payload type to the subscriber's
+ * negotiated payload type.
+ */
+static inline uint8_t sfu_session_get_mapped_pt(const sfu_peer_session_t *session, uint8_t incoming_pt) {
+  /* Mask to 7 bits just in case, ensuring we never cause an out-of-bounds read */
+  return session->pt_map[incoming_pt & 0x7F];
+}
 
 #endif /* SFU_PEER_SESSION_H */

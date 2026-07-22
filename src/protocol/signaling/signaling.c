@@ -181,6 +181,28 @@ static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *vide
   }
 }
 
+/**
+ * @brief Thread-safely updates the RTP Payload Type translation map for a peer session.
+ */
+static void sfu_session_set_pt_translation(sfu_session_table_t *sessions, const char *ufrag, uint8_t publisher_pt, uint8_t subscriber_pt) {
+  if (!sessions || !ufrag || ufrag[0] == '\0' || publisher_pt >= 128) {
+    return;
+  }
+
+  pthread_mutex_lock(&sessions->lock);
+  for (uint32_t i = 0; i < sessions->count; i++) {
+    sfu_peer_session_t *session = &sessions->sessions[i];
+    if (session->active && strcmp(session->ufrag, ufrag) == 0) {
+      session->pt_map[publisher_pt] = subscriber_pt;
+      pthread_mutex_unlock(&sessions->lock);
+      return;
+    }
+  }
+  pthread_mutex_unlock(&sessions->lock);
+
+  SFU_LOG_DEBUG("signaling: session ufrag=%s not found in table during PT mapping (STUN pending)", ufrag);
+}
+
 static bool build_and_send_answer(int fd, sfu_signaling_server_t *s, const char *client_ufrag, const char *offer_sdp, size_t offer_sdp_len, uint32_t ans_audio,
                                   uint32_t ans_video, uint32_t ans_rtx, uint8_t ans_video_pt, uint8_t ans_rtx_pt) {
   char answer[SFU_SIGNALING_SDP_CAP];
@@ -246,6 +268,10 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
   uint32_t off_audio = 0, off_video = 0, off_rtx = 0;
   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &off_audio, &off_video, &off_rtx);
 
+  /* Extract this subscriber's offered dynamic payload types */
+  uint8_t client_video_pt = 0, client_rtx_pt = 0;
+  extract_sdp_video_pts(sdp, (size_t)sdp_len, &client_video_pt, &client_rtx_pt);
+
   if (room && client_ufrag[0] != '\0') {
     sfu_room_publish(room, client_ufrag, fd, sdp, (size_t)sdp_len, off_audio, off_video, off_rtx);
     if (off_audio != 0 || off_video != 0) {
@@ -268,6 +294,16 @@ static void handle_offer(int fd, sfu_signaling_server_t *s, sfu_room_t *room, co
         SFU_FREE(snaps[i].offer_sdp);
       }
     }
+  }
+
+  /* Map incoming publisher PTs to this subscriber's negotiated PTs */
+  if (ans_video_pt != 0 && client_video_pt != 0 && ans_video_pt != client_video_pt) {
+    sfu_session_set_pt_translation(s->sessions, client_ufrag, ans_video_pt, client_video_pt);
+    SFU_LOG_INFO("signaling: mapped VP8 PT %u -> %u for ufrag=%s", ans_video_pt, client_video_pt, client_ufrag);
+  }
+  if (ans_rtx_pt != 0 && client_rtx_pt != 0 && ans_rtx_pt != client_rtx_pt) {
+    sfu_session_set_pt_translation(s->sessions, client_ufrag, ans_rtx_pt, client_rtx_pt);
+    SFU_LOG_INFO("signaling: mapped RTX PT %u -> %u for ufrag=%s", ans_rtx_pt, client_rtx_pt, client_ufrag);
   }
 
   build_and_send_answer(fd, s, client_ufrag, sdp, (size_t)sdp_len, ans_audio, ans_video, ans_rtx, ans_video_pt, ans_rtx_pt);
