@@ -108,7 +108,6 @@
 </head>
 <body>
 
-<!-- ================= PRE-JOIN ================= -->
 <div id="joinScreen">
   <div id="joinCard">
     <h1>Mezon SFU</h1>
@@ -134,7 +133,6 @@
   </div>
 </div>
 
-<!-- ================= MEETING ROOM ================= -->
 <div id="meetingRoom">
   <div id="topBar">
     <div>Room <span class="room-label" id="roomLabel"></span> <span id="participantCount"></span></div>
@@ -225,8 +223,6 @@ function updateParticipantCount() {
   document.getElementById('participantCount').textContent = `· ${n} participant${n === 1 ? '' : 's'}`;
 }
 
-/* ---------------- tile management ---------------- */
-
 function createTile(id, { isLocal, label }) {
   const tile = document.createElement('div');
   tile.className = 'tile' + (isLocal ? ' local' : '');
@@ -284,8 +280,6 @@ function setTileStream(p, stream, hasVideo) {
   attachAudioMeter(p, stream);
 }
 
-/* ---------------- per-tile audio-level (active speaker) meter ---------------- */
-
 function attachAudioMeter(p, stream) {
   const audioTrack = stream.getAudioTracks()[0];
   if (!audioTrack) return;
@@ -313,8 +307,6 @@ function attachAudioMeter(p, stream) {
     console.warn('Audio meter unavailable for a tile:', e);
   }
 }
-
-/* ---------------- mic / camera controls ---------------- */
 
 function toggleMic() {
   micEnabled = !micEnabled;
@@ -349,8 +341,6 @@ function leaveMeeting() {
   joinBtn.disabled = false;
   isInitialOfferSent = false;
 }
-
-/* ---------------- signaling / WebRTC ---------------- */
 
 async function connectAndJoin() {
   const wsUrl = document.getElementById('wsUrl').value.trim();
@@ -397,23 +387,38 @@ async function connectAndJoin() {
      * as separate ontrack events sharing the SAME stream id -- so the
      * tile is created once and subsequent tracks just merge into it.
      */
-    pc.ontrack = (event) => {
-      const stream = event.streams[0] || new MediaStream([event.track]);
-      const id = stream.id;
+     pc.ontrack = (event) => {
+      const track = event.track;
 
-      const p = ensureParticipant(id, { isLocal: false, label: 'Participant' });
-      const hasVideo = stream.getVideoTracks().length > 0;
-      setTileStream(p, stream, hasVideo);
+      if (track.kind === 'video') {
+        // Use the track's unique ID to prevent tiles from overwriting each other
+        const id = track.id;
 
-      event.track.addEventListener('ended', () => {
-        // A track ending doesn't necessarily mean the participant left
-        // (e.g. they turned off camera) -- only remove the tile once
-        // the whole stream has no live tracks left.
-        const stillAlive = stream.getTracks().some(t => t.readyState === 'live');
-        if (!stillAlive) removeTile(id);
-      });
+        const p = ensureParticipant(id, { isLocal: false, label: 'Participant' });
 
-      setConnState('connected', 'ok');
+        // Wrap the single track in a brand new MediaStream so the <video> tag
+        // is forced to render this specific participant's video.
+        const singleVideoStream = new MediaStream([track]);
+        setTileStream(p, singleVideoStream, true);
+
+        track.addEventListener('ended', () => {
+          removeTile(id);
+        });
+
+        setConnState('connected', 'ok');
+
+      } else if (track.kind === 'audio') {
+        // Play incoming audio tracks independently in a hidden audio element.
+        // This ensures you hear everyone even if the SFU didn't group audio/video perfectly.
+        const audioEl = document.createElement('audio');
+        audioEl.autoplay = true;
+        audioEl.srcObject = new MediaStream([track]);
+        document.body.appendChild(audioEl);
+
+        track.addEventListener('ended', () => {
+          audioEl.remove();
+        });
+      }
     };
 
     // Local self-tile, shown immediately regardless of connection state.
