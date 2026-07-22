@@ -1,57 +1,62 @@
 #include "room/room.h"
 
-#include <arpa/inet.h>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
-static struct sockaddr_storage make_addr(uint16_t port) {
-  struct sockaddr_in a;
-  memset(&a, 0, sizeof(a));
-  a.sin_family = AF_INET;
-  a.sin_port = htons(port);
-  struct sockaddr_storage s;
-  memset(&s, 0, sizeof(s));
-  memcpy(&s, &a, sizeof(a));
-  return s;
-}
-
 int main(void) {
   sfu_room_t room;
-  assert(sfu_room_init(&room, 0, DEFAULT_ROOM_NAME) == 0);
 
-  struct sockaddr_storage a = make_addr(1000);
-  struct sockaddr_storage b = make_addr(2000);
-  struct sockaddr_storage c = make_addr(3000);
-  socklen_t len = sizeof(struct sockaddr_in);
+  /* 1. Initialize room */
+  assert(sfu_room_init(&room, 1, "test_room") == 0);
 
-  sfu_room_touch_peer(&room, &a, len, /*worker_id=*/0);
-  sfu_room_touch_peer(&room, &b, len, /*worker_id=*/1);
-  sfu_room_touch_peer(&room, &c, len, /*worker_id=*/1);
+  const char *ufrag_a = "ufrag_a";
+  const char *ufrag_b = "ufrag_b";
+  const char *sdp_a = "v=0\r\no=- 1001 1001 IN IP4 127.0.0.1\r\n";
+  const char *sdp_b = "v=0\r\no=- 2002 2002 IN IP4 127.0.0.1\r\n";
 
-  /* Subscribers for a's packet: b and c, not a itself. */
-  sfu_peer_entry_t out[SFU_ROOM_MAX_PEERS];
-  uint32_t n = sfu_room_list_subscribers_excluding(&room, &a, len, out, SFU_ROOM_MAX_PEERS);
-  assert(n == 2);
-  for (uint32_t i = 0; i < n; i++) {
-    assert(memcmp(&out[i].addr, &a, len) != 0);
-  }
+  uint32_t a_audio = 1001, a_video = 1002, a_rtx = 1003;
+  uint32_t b_audio = 2001, b_video = 2002, b_rtx = 2003;
 
-  /* Re-touching an existing peer refreshes worker_id rather than
-   * duplicating the entry. */
-  sfu_room_touch_peer(&room, &a, len, /*worker_id=*/2);
-  n = sfu_room_list_subscribers_excluding(&room, &b, len, out, SFU_ROOM_MAX_PEERS);
-  assert(n == 2); /* still a and c, no duplicate */
+  /* 2. Publish peer A */
+  sfu_room_publish(&room, ufrag_a, 10, sdp_a, strlen(sdp_a), a_audio, a_video, a_rtx);
 
-  bool found_a_with_new_worker = false;
-  for (uint32_t i = 0; i < n; i++) {
-    if (memcmp(&out[i].addr, &a, len) == 0) {
-      assert(out[i].worker_id == 2);
-      found_a_with_new_worker = true;
-    }
-  }
-  assert(found_a_with_new_worker);
+  /* Peer A should NOT see any other publisher yet */
+  uint32_t audio = 0, video = 0, rtx = 0;
+  assert(!sfu_room_get_other_publisher_ssrcs(&room, ufrag_a, &audio, &video, &rtx));
 
+  /* 3. Publish peer B */
+  sfu_room_publish(&room, ufrag_b, 11, sdp_b, strlen(sdp_b), b_audio, b_video, b_rtx);
+
+  /* Peer A should now see Peer B's SSRCs */
+  assert(sfu_room_get_other_publisher_ssrcs(&room, ufrag_a, &audio, &video, &rtx));
+  assert(audio == b_audio);
+  assert(video == b_video);
+  assert(rtx == b_rtx);
+
+  /* Peer B should see Peer A's SSRCs */
+  assert(sfu_room_get_other_publisher_ssrcs(&room, ufrag_b, &audio, &video, &rtx));
+  assert(audio == a_audio);
+  assert(video == a_video);
+  assert(rtx == a_rtx);
+
+  /* 4. Update Peer A's SSRCs */
+  uint32_t new_a_audio = 1010;
+  sfu_room_set_publisher_ssrcs(&room, ufrag_a, new_a_audio, 0, 0);
+
+  /* Peer B should see updated audio SSRC for Peer A, while video/rtx remain unchanged */
+  assert(sfu_room_get_other_publisher_ssrcs(&room, ufrag_b, &audio, &video, &rtx));
+  assert(audio == new_a_audio);
+  assert(video == a_video);
+  assert(rtx == a_rtx);
+
+  /* 5. Unpublish Peer B */
+  sfu_room_unpublish(&room, ufrag_b);
+
+  /* Peer A should no longer find active external publisher SSRCs */
+  assert(!sfu_room_get_other_publisher_ssrcs(&room, ufrag_a, &audio, &video, &rtx));
+
+  /* Cleanup */
   sfu_room_destroy(&room);
   printf("test_room: OK\n");
   return 0;
