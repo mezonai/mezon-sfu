@@ -1,6 +1,8 @@
 #include "room/room.h"
+
 #include <inttypes.h>
 #include <string.h>
+
 #include "media/graph.h"
 #include "util/alloc.h"
 #include "util/log.h"
@@ -22,13 +24,6 @@ int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name) {
   sfu_media_graph_init(&room->graph);
 
   return 0;
-}
-
-static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const struct sockaddr_storage *b, socklen_t b_len) {
-  if (a_len != b_len) {
-    return false;
-  }
-  return memcmp(a, b, a_len) == 0;
 }
 
 void sfu_room_set_publisher_ssrcs(sfu_room_t *room, const char *ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc) {
