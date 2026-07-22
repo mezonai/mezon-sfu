@@ -205,12 +205,16 @@ uint32_t sfu_room_snapshot_other_publishers(sfu_room_t *room, const char *exclud
     strncpy(out[n].ufrag, p->ufrag, sizeof(out[n].ufrag) - 1);
     out[n].ufrag[sizeof(out[n].ufrag) - 1] = '\0';
     out[n].fd = p->fd;
+    out[n].audio_ssrc = p->audio_ssrc;
+    out[n].video_ssrc = p->video_ssrc;
+    out[n].rtx_ssrc = p->rtx_ssrc;
     out[n].offer_sdp = SFU_MALLOC(p->offer_sdp_len + 1);
     if (!out[n].offer_sdp) {
       continue; /* skip this one on OOM rather than corrupt/crash */
     }
     memcpy(out[n].offer_sdp, p->offer_sdp, p->offer_sdp_len + 1);
     out[n].offer_sdp_len = p->offer_sdp_len;
+    SFU_LOG_INFO("ROOM_SNAPSHOT: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u", out[n].ufrag, out[n].audio_ssrc, out[n].video_ssrc, out[n].rtx_ssrc);
     n++;
   }
   pthread_mutex_unlock(&room->lock);
