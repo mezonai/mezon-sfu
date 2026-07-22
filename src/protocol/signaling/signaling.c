@@ -224,8 +224,8 @@ static bool build_and_send_offer(int fd, sfu_signaling_server_t *s, sfu_publishe
     SFU_LOG_WARN("signaling: failed to build server-initiated SDP offer (fd=%d)", fd);
     return false;
   }
-  SFU_LOG_INFO("signaling: raw offer built: %d bytes (fd=%d, video_pt=%u, rtx_pt=%u, remote_publishers=%u)", offer_len, fd, offer_video_pt, offer_rtx_pt,
-               snaps_count);
+  SFU_LOG_DEBUG("signaling: raw offer built: %d bytes (fd=%d, video_pt=%u, rtx_pt=%u, remote_publishers=%u)", offer_len, fd, offer_video_pt, offer_rtx_pt,
+                snaps_count);
 
   char escaped[SFU_SIGNALING_JSON_CAP];
   int escaped_len = sfu_json_escape(offer, (size_t)offer_len, escaped, sizeof(escaped));

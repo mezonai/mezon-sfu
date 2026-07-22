@@ -214,7 +214,6 @@ uint32_t sfu_room_snapshot_other_publishers(sfu_room_t *room, const char *exclud
     }
     memcpy(out[n].offer_sdp, p->offer_sdp, p->offer_sdp_len + 1);
     out[n].offer_sdp_len = p->offer_sdp_len;
-    SFU_LOG_INFO("ROOM_SNAPSHOT: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u", out[n].ufrag, out[n].audio_ssrc, out[n].video_ssrc, out[n].rtx_ssrc);
     n++;
   }
   pthread_mutex_unlock(&room->lock);
