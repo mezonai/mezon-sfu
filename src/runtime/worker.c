@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"

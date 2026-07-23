@@ -25,6 +25,12 @@ typedef enum {
   SFU_SESSION_FAILED,
 } sfu_session_state_t;
 
+typedef enum {
+  SFU_DTLS_FEED_ERROR = -1,      /* fatal: drop this connection/session */
+  SFU_DTLS_FEED_IN_PROGRESS = 0, /* handshake continuing; drain output and send it */
+  SFU_DTLS_FEED_ESTABLISHED = 1, /* handshake complete; srtp_keying_material is valid */
+} sfu_dtls_feed_status_t;
+
 struct sfu_peer_session;
 struct sfu_room;
 

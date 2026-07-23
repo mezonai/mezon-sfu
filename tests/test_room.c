@@ -4,60 +4,84 @@
 #include <stdio.h>
 #include <string.h>
 
+static uint32_t receiver_count(sfu_peer_session_t *peer) {
+  uint32_t n = 0;
+
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    if (peer->receivers[i].audio || peer->receivers[i].video) {
+      n++;
+    }
+  }
+
+  return n;
+}
+
 int main(void) {
   sfu_room_t room;
 
-  /* 1. Initialize room */
   assert(sfu_room_init(&room, 1, "test_room") == 0);
 
-  const char *ufrag_a = "ufrag_a";
-  const char *ufrag_b = "ufrag_b";
-  const char *sdp_a = "v=0\r\no=- 1001 1001 IN IP4 127.0.0.1\r\n";
-  const char *sdp_b = "v=0\r\no=- 2002 2002 IN IP4 127.0.0.1\r\n";
+  sfu_peer_session_t a = {0};
+  sfu_peer_session_t b = {0};
+  sfu_peer_session_t c = {0};
 
-  uint32_t a_audio = 1001, a_video = 1002, a_rtx = 1003;
-  uint32_t b_audio = 2001, b_video = 2002, b_rtx = 2003;
+  a.active = true;
+  b.active = true;
+  c.active = true;
 
-  /* 2. Publish peer A */
-  sfu_room_publish(&room, ufrag_a, 10, sdp_a, strlen(sdp_a), a_audio, a_video, a_rtx);
+  strcpy(a.ufrag, "a");
+  strcpy(b.ufrag, "b");
+  strcpy(c.ufrag, "c");
 
-  /* Peer A should NOT see any other publisher yet */
-  uint32_t audio = 0, video = 0, rtx = 0;
-  assert(!sfu_room_get_other_publisher_ssrcs(&room, ufrag_a, &audio, &video, &rtx));
+  a.uplink_audio.active = true;
+  a.uplink_video.active = true;
 
-  /* 3. Publish peer B */
-  sfu_room_publish(&room, ufrag_b, 11, sdp_b, strlen(sdp_b), b_audio, b_video, b_rtx);
+  b.uplink_audio.active = true;
+  b.uplink_video.active = true;
 
-  /* Peer A should now see Peer B's SSRCs */
-  assert(sfu_room_get_other_publisher_ssrcs(&room, ufrag_a, &audio, &video, &rtx));
-  assert(audio == b_audio);
-  assert(video == b_video);
-  assert(rtx == b_rtx);
+  c.uplink_audio.active = true;
+  c.uplink_video.active = true;
 
-  /* Peer B should see Peer A's SSRCs */
-  assert(sfu_room_get_other_publisher_ssrcs(&room, ufrag_b, &audio, &video, &rtx));
-  assert(audio == a_audio);
-  assert(video == a_video);
-  assert(rtx == a_rtx);
+  room_add_peer(&room, &a);
 
-  /* 4. Update Peer A's SSRCs */
-  uint32_t new_a_audio = 1010;
-  sfu_room_set_publisher_ssrcs(&room, ufrag_a, new_a_audio, 0, 0);
+  assert(receiver_count(&a) == 0);
 
-  /* Peer B should see updated audio SSRC for Peer A, while video/rtx remain unchanged */
-  assert(sfu_room_get_other_publisher_ssrcs(&room, ufrag_b, &audio, &video, &rtx));
-  assert(audio == new_a_audio);
-  assert(video == a_video);
-  assert(rtx == a_rtx);
+  room_add_peer(&room, &b);
 
-  /* 5. Unpublish Peer B */
-  sfu_room_unpublish(&room, ufrag_b);
+  assert(receiver_count(&a) == 1);
+  assert(receiver_count(&b) == 1);
 
-  /* Peer A should no longer find active external publisher SSRCs */
-  assert(!sfu_room_get_other_publisher_ssrcs(&room, ufrag_a, &audio, &video, &rtx));
+  room_add_peer(&room, &c);
 
-  /* Cleanup */
+  assert(receiver_count(&a) == 2);
+  assert(receiver_count(&b) == 2);
+  assert(receiver_count(&c) == 2);
+
+  /* Verify A subscribes to B and C */
+  bool saw_b = false;
+  bool saw_c = false;
+
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_receiver_slot_t *slot = &a.receivers[i];
+
+    if (!slot->video) {
+      continue;
+    }
+
+    if (slot->video == &b.uplink_video) {
+      saw_b = true;
+    }
+
+    if (slot->video == &c.uplink_video) {
+      saw_c = true;
+    }
+  }
+
+  assert(saw_b);
+  assert(saw_c);
+
   sfu_room_destroy(&room);
+
   printf("test_room: OK\n");
   return 0;
 }

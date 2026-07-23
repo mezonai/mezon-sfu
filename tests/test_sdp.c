@@ -1,5 +1,4 @@
 #include "protocol/signaling/sdp.h"
-#include "room/room.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -80,19 +79,32 @@ static int count_occurrences(const char *haystack, const char *needle) {
   return n;
 }
 
+/* Helper to setup a mock session and securely point slots to stack memory */
+static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *audio, sfu_transceiver_t *video, sfu_peer_session_t *remotes) {
+  memset(session, 0, sizeof(*session));
+  memset(audio, 0, sizeof(*audio) * SFU_MAX_REMOTE_SLOTS);
+  memset(video, 0, sizeof(*video) * SFU_MAX_REMOTE_SLOTS);
+  memset(remotes, 0, sizeof(*remotes) * SFU_MAX_REMOTE_SLOTS);
+
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    session->receivers[i].audio = &audio[i];
+    session->receivers[i].video = &video[i];
+    session->receivers[i].session = &remotes[i];
+  }
+}
+
 int main(void) {
   char answer[8192];
 
-  /* Mock publisher snapshot for audio test */
-  sfu_publisher_snapshot_t audio_snaps[1];
-  memset(&audio_snaps[0], 0, sizeof(sfu_publisher_snapshot_t));
-  audio_snaps[0].audio_ssrc = 1234567890;
-  strncpy(audio_snaps[0].ufrag, "remoteUfrag1", sizeof(audio_snaps[0].ufrag) - 1);
+  sfu_peer_session_t session1;
+  sfu_transceiver_t a1[SFU_MAX_REMOTE_SLOTS], v1[SFU_MAX_REMOTE_SLOTS];
+  sfu_peer_session_t r1[SFU_MAX_REMOTE_SLOTS];
+  setup_mock_session(&session1, a1, v1, r1);
 
-  int len = sfu_sdp_build_answer(SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
+  int len = sfu_sdp_build_answer(&session1, SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:"
                                  "FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3",
-                                 audio_snaps, 1, 0, 0, answer, sizeof(answer));
+                                 answer, sizeof(answer));
   assert(len > 0);
   answer[len] = '\0';
 
@@ -130,17 +142,21 @@ int main(void) {
   }
   assert(all_ok);
 
-  /* Mock publisher snapshot for video test */
-  sfu_publisher_snapshot_t video_snaps[1];
-  memset(&video_snaps[0], 0, sizeof(sfu_publisher_snapshot_t));
-  video_snaps[0].video_ssrc = 987654321;
-  video_snaps[0].rtx_ssrc = 987654322;
-  strncpy(video_snaps[0].ufrag, "remoteUfrag2", sizeof(video_snaps[0].ufrag) - 1);
+  /* Mock peer session for video test */
+  sfu_peer_session_t session2;
+  sfu_transceiver_t a2[SFU_MAX_REMOTE_SLOTS], v2[SFU_MAX_REMOTE_SLOTS];
+  sfu_peer_session_t r2[SFU_MAX_REMOTE_SLOTS];
+  setup_mock_session(&session2, a2, v2, r2);
+
+  session2.uplink_video.payload_type = 120;
+  session2.uplink_video.rtx_payload_type = 121;
+  v2[0].ssrc = 987654321;
+  v2[0].rtx_ssrc = 987654322;
+  strncpy(r2[0].ufrag, "remoteUfrag2", sizeof(r2[0].ufrag) - 1);
 
   /* Verify asymmetric video payload type negotiation (e.g., Firefox PT 120/121 overriding Chrome PT 96/97) */
-  len = sfu_sdp_build_answer(SAMPLE_VIDEO_OFFER, strlen(SAMPLE_VIDEO_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
-                             "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", video_snaps, 1, 120, 121, answer,
-                             sizeof(answer));
+  len = sfu_sdp_build_answer(&session2, SAMPLE_VIDEO_OFFER, strlen(SAMPLE_VIDEO_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
+                             "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", answer, sizeof(answer));
   assert(len > 0);
   answer[len] = '\0';
 
@@ -172,7 +188,7 @@ int main(void) {
   /* An offer with no m= line must fail cleanly, not crash or emit
    * a bogus answer. */
   const char *no_media = "v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n";
-  assert(sfu_sdp_build_answer(no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", NULL, 0, 0, 0, answer, sizeof(answer)) == -1);
+  assert(sfu_sdp_build_answer(&session1, no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", answer, sizeof(answer)) == -1);
 
   printf("test_sdp: OK\n");
   return 0;

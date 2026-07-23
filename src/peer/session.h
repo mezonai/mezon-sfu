@@ -5,7 +5,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "sfu/datadef.h"
-#include "transport/dtls/dtls.h"
 
 int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx);
 void sfu_session_table_destroy(sfu_session_table_t *t);

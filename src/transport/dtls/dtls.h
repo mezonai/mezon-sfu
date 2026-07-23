@@ -17,12 +17,6 @@ void sfu_dtls_ctx_destroy(sfu_dtls_ctx_t *ctx);
 int sfu_dtls_conn_init(sfu_dtls_conn_t *conn, sfu_dtls_ctx_t *ctx);
 void sfu_dtls_conn_destroy(sfu_dtls_conn_t *conn);
 
-typedef enum {
-  SFU_DTLS_FEED_ERROR = -1,      /* fatal: drop this connection/session */
-  SFU_DTLS_FEED_IN_PROGRESS = 0, /* handshake continuing; drain output and send it */
-  SFU_DTLS_FEED_ESTABLISHED = 1, /* handshake complete; srtp_keying_material is valid */
-} sfu_dtls_feed_status_t;
-
 /* Feeds one received datagram into the handshake state machine. */
 sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *data, size_t len, void (*on_established_cb)(void *userdata), void *userdata);
 

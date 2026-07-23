@@ -1,5 +1,6 @@
 #include "peer/session.h"
 #include <string.h>
+#include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
 #include "util/log.h"
 

@@ -2,7 +2,7 @@
 #define SFU_ROOM_REGISTRY_H
 
 #include <pthread.h>
-#include "room/room.h"
+#include "sfu/datadef.h"
 
 #define SFU_MAX_ROOMS 128
 

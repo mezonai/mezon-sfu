@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include "room/room.h"
 #include "util/log.h"
 
 int sfu_room_registry_init(sfu_room_registry_t *reg) {

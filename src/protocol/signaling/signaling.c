@@ -11,10 +11,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <uv.h>
-#include "peer/session.h"
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
+#include "room/room_media_graph.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
 #include "util/alloc.h"
@@ -181,28 +181,6 @@ static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *vide
       }
     }
   }
-}
-
-/**
- * @brief Thread-safely updates the RTP Payload Type translation map for a peer session.
- */
-static void sfu_session_set_pt_translation(sfu_session_table_t *sessions, const char *ufrag, uint8_t publisher_pt, uint8_t subscriber_pt) {
-  if (!sessions || !ufrag || ufrag[0] == '\0' || publisher_pt >= 128) {
-    return;
-  }
-
-  pthread_mutex_lock(&sessions->lock);
-  for (uint32_t i = 0; i < sessions->count; i++) {
-    sfu_peer_session_t *session = &sessions->sessions[i];
-    if (session->active && strcmp(session->ufrag, ufrag) == 0) {
-      session->pt_map[publisher_pt] = subscriber_pt;
-      pthread_mutex_unlock(&sessions->lock);
-      return;
-    }
-  }
-  pthread_mutex_unlock(&sessions->lock);
-
-  SFU_LOG_DEBUG("signaling: session ufrag=%s not found in table during PT mapping (STUN pending)", ufrag);
 }
 
 static bool build_and_send_initial_offer(int fd, sfu_signaling_server_t *s) {
@@ -409,25 +387,14 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
   return 0;
 }
 
-typedef struct {
-  uv_poll_t poll_handle;
-  int fd;
-  bool handshake_done;
-  char peer_ip[64];
-  int ip_detected_from_header;
-  sfu_room_t *joined_room;
-  uint64_t joined_room_id;
-  char client_ufrag[32];
-  sfu_signaling_server_t *server;
-  sfu_peer_session_t *session;
-} sfu_client_conn_t;
-
 /* Callback executed when a client handle is fully closed */
 static void on_client_close(uv_handle_t *handle) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
-  if (c->joined_room && c->client_ufrag[0] != '\0') {
-    sfu_room_unpublish(c->joined_room, c->client_ufrag);
+
+  if (c->session && c->session->room) {
+    room_remove_peer(c->session->room, c->session);
   }
+
   close(c->fd);
   SFU_FREE(c);
 }
