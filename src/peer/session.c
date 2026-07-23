@@ -53,6 +53,9 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->addr_len = addr_len;
   s->active = true;
   s->state = SFU_SESSION_NEW;
+  for (int i = 0; i < 128; i++) {
+    s->pt_map[i] = (uint8_t)i;
+  }
 
   if (sfu_dtls_conn_init(&s->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");

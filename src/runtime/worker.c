@@ -122,8 +122,23 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
     memcpy(enc->data, pkt->data, pkt->len);
     int enc_len = (int)pkt->len;
+
+    if (!is_rtcp) {
+      uint8_t incoming_pt = enc->data[1] & 0x7F;
+
+      /* Look up the expected PT for this subscriber's session
+         (e.g., mapped from SDP negotiation during signaling) */
+      uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
+
+      if (incoming_pt != expected_pt) {
+        /* Preserve the Marker bit (0x80) while overwriting the lower 7 PT bits */
+        enc->data[1] = (enc->data[1] & 0x80) | (expected_pt & 0x7F);
+      }
+    }
+
     bool protected_ = is_rtcp ? sfu_srtp_protect_rtcp(&sub_session->srtp, enc->data, &enc_len, enc->cap)
                               : sfu_srtp_protect_rtp(&sub_session->srtp, enc->data, &enc_len, enc->cap);
+
     if (!protected_) {
       SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] SRTP protect FAILED for target worker %u!", w->worker_index, i, sub->worker_id);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);

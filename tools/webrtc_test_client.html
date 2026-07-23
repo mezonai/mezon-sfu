@@ -2,287 +2,730 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <title>Mezon SFU 2-Participant Test Client</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Mezon SFU — Meeting Room</title>
         <style>
+            :root {
+                --bg: #11111b;
+                --panel: #1e1e2e;
+                --tile: #181825;
+                --border: #313244;
+                --text: #cdd6f4;
+                --muted: #a6adc8;
+                --accent: #89b4fa;
+                --accent-hover: #b4befe;
+                --ok: #a6e3a1;
+                --warn: #f9e2af;
+                --err: #f38ba8;
+                --speaking: #a6e3a1;
+            }
+            * {
+                box-sizing: border-box;
+            }
             body {
                 font-family:
                     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                     sans-serif;
-                background: #1e1e2e;
-                color: #cdd6f4;
-                max-width: 1000px;
-                margin: 40px auto;
-                padding: 20px;
+                background: var(--bg);
+                color: var(--text);
+                margin: 0;
+                height: 100vh;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
             }
-            .container {
-                background: #313244;
-                padding: 25px;
-                border-radius: 12px;
-                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+
+            /* ---------- pre-join screen ---------- */
+            #joinScreen {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            #joinCard {
+                background: var(--panel);
+                padding: 32px;
+                border-radius: 16px;
+                width: 380px;
+                box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+            }
+            #joinCard h1 {
+                font-size: 20px;
+                margin: 0 0 4px;
+            }
+            #joinCard p.sub {
+                color: var(--muted);
+                font-size: 13px;
+                margin: 0 0 20px;
             }
             .form-group {
-                margin-bottom: 15px;
+                margin-bottom: 14px;
             }
             label {
                 display: block;
-                margin-bottom: 5px;
-                font-weight: bold;
+                margin-bottom: 6px;
+                font-size: 12px;
+                color: var(--muted);
+                font-weight: 600;
             }
             input {
                 width: 100%;
-                padding: 10px;
-                background: #181825;
-                border: 1px solid #45475a;
-                color: #cdd6f4;
-                border-radius: 6px;
-                box-sizing: border-box;
+                padding: 10px 12px;
+                background: var(--tile);
+                border: 1px solid var(--border);
+                color: var(--text);
+                border-radius: 8px;
+                font-size: 14px;
+            }
+            input:focus {
+                outline: none;
+                border-color: var(--accent);
+            }
+            #joinPreview {
+                width: 100%;
+                aspect-ratio: 16/9;
+                background: #000;
+                border-radius: 10px;
+                margin-bottom: 14px;
+                object-fit: cover;
+                transform: scaleX(-1);
             }
             button {
-                background: #89b4fa;
+                background: var(--accent);
                 color: #11111b;
                 border: none;
                 padding: 12px 20px;
-                font-weight: bold;
-                border-radius: 6px;
+                font-weight: 700;
+                border-radius: 8px;
                 cursor: pointer;
                 width: 100%;
+                font-size: 14px;
             }
             button:hover {
-                background: #b4befe;
+                background: var(--accent-hover);
             }
-            #status {
-                margin-top: 15px;
-                padding: 10px;
-                border-radius: 6px;
-                background: #45475a;
-                font-family: monospace;
+            button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
             }
-            .video-grid {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 20px;
-                margin-top: 20px;
-            }
-            .video-box {
-                background: #11111b;
-                border-radius: 8px;
-                padding: 10px;
+            #joinStatus {
+                margin-top: 12px;
+                font-size: 12px;
+                color: var(--muted);
                 text-align: center;
+                min-height: 16px;
             }
-            video {
+            #joinStatus.err {
+                color: var(--err);
+            }
+
+            /* ---------- meeting room ---------- */
+            #meetingRoom {
+                display: none;
+                flex: 1;
+                flex-direction: column;
+                min-height: 0;
+            }
+            #topBar {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 10px 18px;
+                background: var(--panel);
+                border-bottom: 1px solid var(--border);
+                font-size: 13px;
+                color: var(--muted);
+                flex-shrink: 0;
+            }
+            #topBar .room-label {
+                color: var(--text);
+                font-weight: 700;
+            }
+            #connState {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .dot {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: var(--muted);
+            }
+            .dot.ok {
+                background: var(--ok);
+            }
+            .dot.warn {
+                background: var(--warn);
+            }
+            .dot.err {
+                background: var(--err);
+            }
+
+            #videoGrid {
+                flex: 1;
+                display: grid;
+                gap: 12px;
+                padding: 16px;
+                overflow-y: auto;
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                align-content: start;
+            }
+            .tile {
+                position: relative;
+                background: var(--tile);
+                border-radius: 12px;
+                overflow: hidden;
+                aspect-ratio: 16/9;
+                border: 2px solid transparent;
+                transition: border-color 0.15s;
+            }
+            .tile.speaking {
+                border-color: var(--speaking);
+            }
+            .tile video {
                 width: 100%;
-                max-height: 350px;
+                height: 100%;
+                object-fit: cover;
                 background: #000;
-                border-radius: 6px;
+                display: block;
             }
-            .local-video {
+            .tile.local video {
                 transform: scaleX(-1);
+            }
+            .tile .avatar-fallback {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: linear-gradient(135deg, #313244, #181825);
+                font-size: 40px;
+                font-weight: 700;
+                color: var(--muted);
+            }
+            .tile .name-label {
+                position: absolute;
+                left: 8px;
+                bottom: 8px;
+                background: rgba(17, 17, 27, 0.7);
+                padding: 4px 10px;
+                border-radius: 6px;
+                font-size: 12px;
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .tile .mic-icon {
+                width: 14px;
+                height: 14px;
+                opacity: 0.9;
+            }
+            .tile .mic-icon.muted {
+                color: var(--err);
+            }
+            .tile .mic-icon.live {
+                color: var(--ok);
+            }
+            .tile .badges {
+                position: absolute;
+                top: 8px;
+                right: 8px;
+                display: flex;
+                gap: 4px;
+            }
+            .tile .badge {
+                background: rgba(17, 17, 27, 0.7);
+                border-radius: 6px;
+                padding: 3px 7px;
+                font-size: 10px;
+                color: var(--muted);
+            }
+
+            #controlBar {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+                padding: 14px;
+                background: var(--panel);
+                border-top: 1px solid var(--border);
+                flex-shrink: 0;
+            }
+            .ctrl-btn {
+                width: 46px;
+                height: 46px;
+                border-radius: 50%;
+                border: none;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 18px;
+                background: var(--tile);
+                color: var(--text);
+                flex: 0 0 auto;
+            }
+            .ctrl-btn:hover {
+                background: var(--border);
+            }
+            .ctrl-btn.off {
+                background: var(--err);
+                color: #11111b;
+            }
+            .ctrl-btn.leave {
+                background: var(--err);
+                color: #11111b;
+                width: auto;
+                padding: 0 22px;
+                border-radius: 23px;
+                font-weight: 700;
+                font-size: 13px;
+            }
+            .ctrl-btn.leave:hover {
+                background: #eb6f92;
+            }
+            #participantCount {
+                color: var(--muted);
+                font-size: 12px;
+                margin-right: 6px;
             }
         </style>
     </head>
     <body>
-        <div class="container">
-            <h2>Mezon SFU Client (2 Participants)</h2>
+        <div id="joinScreen">
+            <div id="joinCard">
+                <h1>Mezon SFU</h1>
+                <p class="sub">Meeting room test client</p>
 
-            <div class="form-group">
-                <label for="wsUrl">Signaling WebSocket URL</label>
-                <input
-                    type="text"
-                    id="wsUrl"
-                    value="wss://test-sfu.nccsoft.vn/ws"
-                />
+                <video id="joinPreview" autoplay playsinline muted></video>
+
+                <div class="form-group">
+                    <label for="wsUrl">Signaling WebSocket URL</label>
+                    <input
+                        type="text"
+                        id="wsUrl"
+                        value="wss://test-sfu.nccsoft.vn/ws"
+                    />
+                </div>
+                <div class="form-group">
+                    <label for="roomId">Room ID</label>
+                    <input type="text" id="roomId" value="101" />
+                </div>
+                <div class="form-group">
+                    <label for="displayName">Your name</label>
+                    <input type="text" id="displayName" value="Guest" />
+                </div>
+
+                <button id="joinBtn" onclick="connectAndJoin()">
+                    Join meeting
+                </button>
+                <div id="joinStatus">Requesting camera/microphone…</div>
+            </div>
+        </div>
+
+        <div id="meetingRoom">
+            <div id="topBar">
+                <div>
+                    Room <span class="room-label" id="roomLabel"></span>
+                    <span id="participantCount"></span>
+                </div>
+                <div id="connState">
+                    <span class="dot" id="connDot"></span
+                    ><span id="connText">connecting…</span>
+                </div>
             </div>
 
-            <div class="form-group">
-                <label for="roomId">Room ID</label>
-                <input type="text" id="roomId" value="101" />
-            </div>
+            <div id="videoGrid"></div>
 
-            <button id="startBtn" onclick="connectAndJoin()">
-                Connect & Join Room
-            </button>
-
-            <div id="status">Status: Initializing Camera...</div>
-
-            <div class="video-grid">
-                <div class="video-box">
-                    <label>Local User (You)</label>
-                    <video
-                        id="localVideo"
-                        class="local-video"
-                        autoplay
-                        playsinline
-                        muted
-                    ></video>
-                </div>
-                <div class="video-box">
-                    <label>Remote Participant</label>
-                    <!-- Unmuted to allow audio playback -->
-                    <video id="remoteVideo" autoplay playsinline></video>
-                </div>
+            <div id="controlBar">
+                <button
+                    class="ctrl-btn"
+                    id="micBtn"
+                    onclick="toggleMic()"
+                    title="Toggle microphone"
+                >
+                    🎤
+                </button>
+                <button
+                    class="ctrl-btn"
+                    id="camBtn"
+                    onclick="toggleCam()"
+                    title="Toggle camera"
+                >
+                    📷
+                </button>
+                <button class="ctrl-btn leave" onclick="leaveMeeting()">
+                    Leave
+                </button>
             </div>
         </div>
 
         <script>
+            /*
+             * Meeting-room client for mezon-sfu's signaling protocol (server-offerer):
+             *   client -> server: {"type":"join","room":<id>}
+             *   server -> client: {"type":"joined","room":<id>}
+             *   server -> client: {"type":"offer","sdp":<sdp>}    (sent right after join, and again for
+             *                                                      every subsequent renegotiation -- the
+             *                                                      SFU is ALWAYS the offerer, never the client)
+             *   client -> server: {"type":"answer","sdp":<sdp>}
+             *   server -> client: {"type":"error","message":<str>}
+             *
+             * This is a SINGLE RTCPeerConnection design: every remote participant's
+             * media arrives over the same connection, distinguished by MediaStream
+             * (event.streams[0]) as tracks get added via server-driven renegotiation.
+             * The client never calls createOffer() or pc.addTransceiver() itself --
+             * it only ever answers whatever offer the server sends, adding its own
+             * local tracks to the recvonly transceivers (mid 0 = audio, mid 1 = video)
+             * the server's offer always provisions for the joining peer's own upload.
+             * Participants are therefore tracked by stream id, not by any
+             * participant-identity message the signaling protocol doesn't send --
+             * there's no explicit "who is this" from the server, so a tile's name
+             * label falls back to a short id if only one local participant sent a
+             * name (this client doesn't have a mechanism to receive remote display
+             * names either, since the protocol above has no such field yet).
+             */
+
             let ws = null;
             let pc = null;
             let localStream = null;
-            let remoteStream = null;
-            let isInitialOfferSent = false;
+            let localTracksAdded = false;
+            let isNegotiating = false;
+            let micEnabled = true;
+            let camEnabled = true;
+            let audioCtx = null;
 
-            const statusDiv = document.getElementById("status");
-            const startBtn = document.getElementById("startBtn");
+            /* participantId -> { tile, videoEl, stream, analyser, rafHandle, hasVideo } */
+            const participants = new Map();
+
+            const joinPreview = document.getElementById("joinPreview");
+            const joinStatus = document.getElementById("joinStatus");
+            const joinBtn = document.getElementById("joinBtn");
 
             window.addEventListener("DOMContentLoaded", async () => {
-                // Avoid calling enumerateDevices() prior to permission grant, as Chrome
-                // hides device IDs/labels before permission is granted.
                 try {
                     localStream = await navigator.mediaDevices.getUserMedia({
                         video: true,
                         audio: true,
                     });
                 } catch (e) {
-                    console.warn("Audio/Video access failed, trying audio-only fallback:", e);
+                    console.warn(
+                        "Audio/Video access failed, trying audio-only fallback:",
+                        e,
+                    );
                     try {
-                        localStream = await navigator.mediaDevices.getUserMedia({
-                            video: false,
-                            audio: true,
-                        });
+                        localStream = await navigator.mediaDevices.getUserMedia(
+                            { video: false, audio: true },
+                        );
                     } catch (err) {
-                        console.warn("Audio access failed. Joining as receiver-only:", err);
+                        console.warn(
+                            "Audio access failed. Joining as receiver-only:",
+                            err,
+                        );
                         localStream = new MediaStream();
                     }
                 }
 
-                const videoTrack = localStream.getVideoTracks()[0];
-                const audioTrack = localStream.getAudioTracks()[0];
+                joinPreview.srcObject = localStream;
 
-                if (videoTrack) {
-                    document.getElementById("localVideo").srcObject = localStream;
-                }
-
-                if (videoTrack && audioTrack) {
-                    updateStatus("Media initialized (Audio + Video). Ready to connect.");
-                } else if (audioTrack) {
-                    updateStatus("Media initialized (Audio Only). Ready to connect.");
-                } else {
-                    updateStatus("No media input found. Joining as receiver-only.");
-                }
+                const hasVideo = localStream.getVideoTracks().length > 0;
+                const hasAudio = localStream.getAudioTracks().length > 0;
+                if (hasVideo && hasAudio)
+                    setJoinStatus("Camera and mic ready.");
+                else if (hasAudio)
+                    setJoinStatus("Mic ready (no camera found).");
+                else
+                    setJoinStatus(
+                        "No media input found — joining as receiver-only.",
+                        true,
+                    );
             });
 
-            function updateStatus(msg, isError = false) {
-                statusDiv.innerText = `Status: ${msg}`;
-                statusDiv.style.color = isError ? "#f38ba8" : "#a6e3a1";
+            function setJoinStatus(msg, isError = false) {
+                joinStatus.textContent = msg;
+                joinStatus.className = isError ? "err" : "";
+            }
+
+            function setConnState(text, level) {
+                document.getElementById("connText").textContent = text;
+                const dot = document.getElementById("connDot");
+                dot.className = "dot" + (level ? " " + level : "");
+            }
+
+            function updateParticipantCount() {
+                const n = participants.size; // includes local tile
+                document.getElementById("participantCount").textContent =
+                    `· ${n} participant${n === 1 ? "" : "s"}`;
+            }
+
+            function createTile(id, { isLocal, label }) {
+                const tile = document.createElement("div");
+                tile.className = "tile" + (isLocal ? " local" : "");
+                tile.id = "tile-" + id;
+
+                const video = document.createElement("video");
+                video.autoplay = true;
+                video.playsInline = true;
+                if (isLocal) video.muted = true; // never echo your own mic back to yourself
+
+                const avatar = document.createElement("div");
+                avatar.className = "avatar-fallback";
+                avatar.textContent = (label || "?").slice(0, 1).toUpperCase();
+                avatar.style.display = "none";
+
+                const nameLabel = document.createElement("div");
+                nameLabel.className = "name-label";
+                nameLabel.innerHTML = `<span class="mic-icon live">●</span><span class="name-text">${label}</span>`;
+
+                const badges = document.createElement("div");
+                badges.className = "badges";
+
+                tile.append(video, avatar, nameLabel, badges);
+                document.getElementById("videoGrid").appendChild(tile);
+
+                return { tile, video, avatar, nameLabel, badges };
+            }
+
+            function removeTile(id) {
+                const p = participants.get(id);
+                if (!p) return;
+                if (p.rafHandle) cancelAnimationFrame(p.rafHandle);
+                p.tile.remove();
+                participants.delete(id);
+                updateParticipantCount();
+            }
+
+            function ensureParticipant(id, opts) {
+                let p = participants.get(id);
+                if (p) return p;
+
+                const { tile, video, avatar, nameLabel } = createTile(id, opts);
+                p = {
+                    tile,
+                    video,
+                    avatar,
+                    nameLabel,
+                    stream: null,
+                    hasVideo: false,
+                    rafHandle: null,
+                    analyser: null,
+                };
+                participants.set(id, p);
+                updateParticipantCount();
+                return p;
+            }
+
+            function setTileStream(p, stream, hasVideo) {
+                p.stream = stream;
+                p.hasVideo = hasVideo;
+                p.video.srcObject = stream;
+                p.video.style.display = hasVideo ? "block" : "none";
+                p.avatar.style.display = hasVideo ? "none" : "flex";
+                attachAudioMeter(p, stream);
+            }
+
+            function attachAudioMeter(p, stream) {
+                const audioTrack = stream.getAudioTracks()[0];
+                if (!audioTrack) return;
+
+                if (!audioCtx) {
+                    audioCtx = new (
+                        window.AudioContext || window.webkitAudioContext
+                    )();
+                }
+                if (p.rafHandle) cancelAnimationFrame(p.rafHandle);
+
+                try {
+                    const source = audioCtx.createMediaStreamSource(
+                        new MediaStream([audioTrack]),
+                    );
+                    const analyser = audioCtx.createAnalyser();
+                    analyser.fftSize = 256;
+                    source.connect(analyser);
+                    const data = new Uint8Array(analyser.frequencyBinCount);
+
+                    const tick = () => {
+                        analyser.getByteFrequencyData(data);
+                        const avg =
+                            data.reduce((a, b) => a + b, 0) / data.length;
+                        p.tile.classList.toggle("speaking", avg > 12); // empirical threshold, not calibrated to any spec
+                        p.rafHandle = requestAnimationFrame(tick);
+                    };
+                    tick();
+                } catch (e) {
+                    console.warn("Audio meter unavailable for a tile:", e);
+                }
+            }
+
+            function toggleMic() {
+                micEnabled = !micEnabled;
+                localStream
+                    .getAudioTracks()
+                    .forEach((t) => (t.enabled = micEnabled));
+                const btn = document.getElementById("micBtn");
+                btn.textContent = micEnabled ? "🎤" : "🔇";
+                btn.classList.toggle("off", !micEnabled);
+                const local = participants.get("local");
+                if (local) {
+                    const icon = local.nameLabel.querySelector(".mic-icon");
+                    icon.classList.toggle("live", micEnabled);
+                    icon.classList.toggle("muted", !micEnabled);
+                }
+            }
+
+            function toggleCam() {
+                camEnabled = !camEnabled;
+                localStream
+                    .getVideoTracks()
+                    .forEach((t) => (t.enabled = camEnabled));
+                const btn = document.getElementById("camBtn");
+                btn.textContent = camEnabled ? "📷" : "📵";
+                btn.classList.toggle("off", !camEnabled);
+                const local = participants.get("local");
+                if (local)
+                    setTileStream(
+                        local,
+                        localStream,
+                        camEnabled && localStream.getVideoTracks().length > 0,
+                    );
+            }
+
+            function leaveMeeting() {
+                if (ws) {
+                    ws.close();
+                    ws = null;
+                }
+                if (pc) {
+                    pc.close();
+                    pc = null;
+                }
+                participants.forEach((_, id) => removeTile(id));
+                document.getElementById("meetingRoom").style.display = "none";
+                document.getElementById("joinScreen").style.display = "flex";
+                joinBtn.disabled = false;
+                localTracksAdded = false;
+                isNegotiating = false;
             }
 
             async function connectAndJoin() {
-                const wsUrl = document.getElementById("wsUrl").value;
-                const roomId = document.getElementById("roomId").value;
+                const wsUrl = document.getElementById("wsUrl").value.trim();
+                const roomId = document.getElementById("roomId").value.trim();
+                const displayName =
+                    document.getElementById("displayName").value.trim() ||
+                    "Guest";
 
                 if (!roomId) {
-                    updateStatus("Please enter a Room ID", true);
+                    setJoinStatus("Please enter a Room ID", true);
                     return;
                 }
 
-                startBtn.disabled = true;
-                updateStatus("Preparing WebRTC PeerConnection...");
+                joinBtn.disabled = true;
+                setJoinStatus("Preparing WebRTC connection…");
 
                 try {
                     pc = new RTCPeerConnection({
-                      iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        {
-                          urls:'turn:relay.mezon.vn:5349',
-                          username:'turnmezon',
-                          credential:'QuTs4zUEcbylWemXL7MK'
-                        }
-                      ]
+                        iceServers: [
+                            { urls: "stun:stun.l.google.com:19302" },
+                            {
+                                urls: "turn:relay.mezon.vn:5349",
+                                username: "turnmezon",
+                                credential: "QuTs4zUEcbylWemXL7MK",
+                            },
+                        ],
                     });
-                    remoteStream = new MediaStream();
 
-                    const remoteVideoEl = document.getElementById("remoteVideo");
-                    remoteVideoEl.muted = false;
-                    remoteVideoEl.volume = 1.0;
-                    remoteVideoEl.srcObject = remoteStream;
-
-                    let isRenegotiating = false;
-
-                    pc.onnegotiationneeded = async () => {
-                        if (!isInitialOfferSent || isRenegotiating || pc.signalingState !== "stable") {
-                            return;
-                        }
-                        try {
-                            isRenegotiating = true;
-                            console.log("Browser triggered onnegotiationneeded. Sending updated offer...");
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
-                        } catch (err) {
-                            console.error("Renegotiation offer generation failed:", err);
-                        } finally {
-                            isRenegotiating = false;
-                        }
+                    pc.oniceconnectionstatechange = () => {
+                        const s = pc.iceConnectionState;
+                        if (s === "connected" || s === "completed")
+                            setConnState("connected", "ok");
+                        else if (s === "failed" || s === "disconnected")
+                            setConnState(s, "err");
+                        else setConnState(s, "warn");
                     };
+
+                    /* No onnegotiationneeded handler: the client never calls
+                       createOffer() in this architecture. The SFU is always the
+                       offerer -- both the initial connection and every later
+                       renegotiation (new publisher joins, etc.) arrive as a
+                       server-pushed {"type":"offer"} that this client only answers. */
 
                     pc.ontrack = (event) => {
-                        console.log(
-                            "Remote track received:",
-                            event.track.kind,
-                            event.track,
-                        );
-                        remoteStream.addTrack(event.track);
+                        const track = event.track;
 
-                        if (remoteVideoEl.srcObject !== remoteStream) {
-                            remoteVideoEl.srcObject = remoteStream;
+                        console.log('--- ontrack event fired ---');
+                        console.log('Track kind:', track.kind);
+                        console.log('Track ID:', track.id);
+                        console.log('Transceiver MID:', event.transceiver ? event.transceiver.mid : 'none');
+
+                        if (track.kind === "video") {
+                            // Use the stream's unique ID (which the backend set to the remote peer's ufrag)
+                            // instead of track.id (which is hardcoded to "remote-video-track" for everyone)
+                            const id =
+                                event.streams && event.streams.length > 0
+                                    ? event.streams[0].id
+                                    : track.id;
+
+                            // Generate a unique title based on the unique stream ID (e.g., "Peer brow")
+                            const label = "Peer " + id.substring(0, 4);
+
+                            const p = ensureParticipant(id, {
+                                isLocal: false,
+                                label: label,
+                            });
+
+                            // Wrap the single track in a brand new MediaStream so the <video> tag
+                            // is forced to render this specific participant's video.
+                            const singleVideoStream = new MediaStream([track]);
+                            setTileStream(p, singleVideoStream, true);
+
+                            track.addEventListener("ended", () => {
+                                removeTile(id);
+                            });
+
+                            setConnState("connected", "ok");
+                        } else if (track.kind === "audio") {
+                            // Play incoming audio tracks independently in a hidden audio element.
+                            // This ensures you hear everyone even if the SFU didn't group audio/video perfectly.
+                            const audioEl = document.createElement("audio");
+                            audioEl.autoplay = true;
+                            audioEl.srcObject = new MediaStream([track]);
+                            document.body.appendChild(audioEl);
+
+                            track.addEventListener("ended", () => {
+                                audioEl.remove();
+                            });
                         }
-
-                        remoteVideoEl
-                            .play()
-                            .catch((e) =>
-                                console.warn("Playout auto-play notice:", e),
-                            );
-                        updateStatus(
-                            `Connected! Remote ${event.track.kind} track active.`,
-                        );
                     };
 
-                    // addTrack creates sendrecv transceivers and assigns SSRCs reliably across browsers.
-                    const audioTrack = localStream ? localStream.getAudioTracks()[0] : null;
-                    const videoTrack = localStream ? localStream.getVideoTracks()[0] : null;
-
-                    if (audioTrack) {
-                        pc.addTrack(audioTrack, localStream);
-                    } else {
-                        pc.addTransceiver("audio", { direction: "recvonly" });
+                    // Local self-tile, shown immediately regardless of connection state.
+                    const localTile = ensureParticipant("local", {
+                        isLocal: true,
+                        label: displayName + " (You)",
+                    });
+                    const hasLocalVideo =
+                        localStream.getVideoTracks().length > 0;
+                    setTileStream(localTile, localStream, hasLocalVideo);
+                    if (!localStream.getAudioTracks().length) {
+                        document.getElementById("micBtn").disabled = true;
+                    }
+                    if (!hasLocalVideo) {
+                        document.getElementById("camBtn").disabled = true;
                     }
 
-                    if (videoTrack) {
-                        pc.addTrack(videoTrack, localStream);
-                    } else {
-                        pc.addTransceiver("video", { direction: "recvonly" });
-                    }
-
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-
-                    updateStatus("Connecting to signaling server...");
+                    setJoinStatus("Connecting to signaling server…");
                     ws = new WebSocket(wsUrl);
 
                     ws.onopen = () => {
-                        updateStatus(
-                            "Connected! Joining room and publishing offer...",
-                        );
-                        ws.send(JSON.stringify({ type: "join", room: roomId }));
+                        document.getElementById("joinScreen").style.display =
+                            "none";
+                        document.getElementById("meetingRoom").style.display =
+                            "flex";
+                        document.getElementById("roomLabel").textContent =
+                            roomId;
+                        setConnState("joining…", "warn");
 
-                        setTimeout(() => {
-                            ws.send(
-                                JSON.stringify({
-                                    type: "offer",
-                                    sdp: pc.localDescription.sdp,
-                                }),
-                            );
-                            isInitialOfferSent = true;
-                        }, 100);
+                        ws.send(JSON.stringify({ type: "join", room: roomId }));
                     };
 
                     ws.onmessage = async (event) => {
@@ -290,90 +733,94 @@
                         console.log("Signaling received:", msg);
 
                         if (msg.type === "error") {
-                            updateStatus(`Error: ${msg.message}`, true);
-                            startBtn.disabled = false;
+                            setConnState("error: " + msg.message, "err");
                             return;
                         }
 
-                        if (msg.type === "answer") {
-                            updateStatus(
-                                "SDP Answer received. Media connection active!",
-                            );
-                            await pc.setRemoteDescription(
-                                new RTCSessionDescription({
-                                    type: "answer",
-                                    sdp: msg.sdp,
-                                }),
-                            );
+                        if (msg.type === "joined") {
+                            setConnState("awaiting offer…", "warn");
+                            return;
                         }
 
                         if (msg.type === "offer") {
-                            console.log(
-                                "Server initiated renegotiation offer for new peer",
-                            );
-                            updateStatus(
-                                "New participant joined! Establishing media bridge...",
-                            );
-                            await pc.setRemoteDescription(
-                                new RTCSessionDescription({
-                                    type: "offer",
-                                    sdp: msg.sdp,
-                                }),
-                            );
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            ws.send(
-                                JSON.stringify({
-                                    type: "answer",
-                                    sdp: pc.localDescription.sdp,
-                                }),
-                            );
-                        }
-
-                        if (
-                            msg.type === "renegotiate" ||
-                            msg.type === "peer-joined"
-                        ) {
-                            if (
-                                isRenegotiating ||
-                                pc.signalingState !== "stable"
-                            ) {
+                            // The SFU is always the offerer: this fires both for the
+                            // very first offer right after join and for every later
+                            // renegotiation (e.g. another participant's track being
+                            // added). Either way we just answer it.
+                            if (isNegotiating) {
                                 console.log(
-                                    "Renegotiation requested but already negotiating or unstable. Skipping.",
+                                    "Offer received while already negotiating -- ignoring (a fresh one will follow if this was superseded).",
                                 );
                                 return;
                             }
-                            console.log("Server requested renegotiation");
-                            updateStatus(
-                                "Renegotiating session for new participant...",
-                            );
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            ws.send(
-                                JSON.stringify({
-                                    type: "offer",
-                                    sdp: pc.localDescription.sdp,
-                                }),
-                            );
+                            isNegotiating = true;
+                            try {
+                                await pc.setRemoteDescription(
+                                    new RTCSessionDescription({
+                                        type: "offer",
+                                        sdp: msg.sdp,
+                                    }),
+                                );
+
+                                if (!localTracksAdded) {
+                                    // The server's offer always provisions mid 0
+                                    // (recvonly audio) and mid 1 (recvonly video) for
+                                    // our own upload. addTrack() reuses those existing
+                                    // recvonly transceivers rather than creating new
+                                    // ones, which is what turns them into sendrecv.
+                                    const audioTrack =
+                                        localStream.getAudioTracks()[0];
+                                    const videoTrack =
+                                        localStream.getVideoTracks()[0];
+                                    if (audioTrack)
+                                        pc.addTrack(audioTrack, localStream);
+                                    if (videoTrack)
+                                        pc.addTrack(videoTrack, localStream);
+                                    localTracksAdded = true;
+                                }
+
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
+                                ws.send(
+                                    JSON.stringify({
+                                        type: "answer",
+                                        sdp: pc.localDescription.sdp,
+                                    }),
+                                );
+                            } catch (err) {
+                                console.error(
+                                    "Failed to answer server-initiated offer:",
+                                    err,
+                                );
+                                setConnState("negotiation failed", "err");
+                            } finally {
+                                isNegotiating = false;
+                            }
+                            return;
+                        }
+
+                        if (msg.type === "peer-left" && msg.streamId) {
+                            // Speculative: not part of the protocol observed so far, but
+                            // handled defensively in case the server ever sends it --
+                            // harmless no-op if it never arrives.
+                            removeTile(msg.streamId);
                         }
                     };
 
                     ws.onclose = () => {
-                        updateStatus("Signaling link disconnected.", true);
-                        startBtn.disabled = false;
-                        isInitialOfferSent = false;
-                        if (pc) pc.close();
+                        setConnState("disconnected", "err");
+                        localTracksAdded = false;
+                        isNegotiating = false;
                     };
-
                     ws.onerror = () => {
-                        updateStatus("Signaling WebSocket error.", true);
-                        startBtn.disabled = false;
+                        setConnState("signaling error", "err");
                     };
                 } catch (e) {
                     console.error("Connection failed:", e);
-                    updateStatus(`WebRTC failed: ${e.message}`, true);
-                    startBtn.disabled = false;
-                    isInitialOfferSent = false;
+                    setJoinStatus(`WebRTC failed: ${e.message}`, true);
+                    joinBtn.disabled = false;
+                    localTracksAdded = false;
+                    isNegotiating = false;
                 }
             }
         </script>
