@@ -35,20 +35,28 @@ static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const 
 sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
   pthread_mutex_lock(&t->lock);
 
+  sfu_peer_session_t *free_slot = NULL;
   for (uint32_t i = 0; i < t->count; i++) {
     if (t->sessions[i].active && addr_equal(&t->sessions[i].addr, t->sessions[i].addr_len, addr, addr_len)) {
       pthread_mutex_unlock(&t->lock);
       return &t->sessions[i];
     }
+    if (!t->sessions[i].active && !free_slot) {
+      free_slot = &t->sessions[i];
+    }
   }
 
-  if (t->count >= SFU_SESSION_TABLE_MAX) {
+  sfu_peer_session_t *s;
+  if (free_slot) {
+    s = free_slot;
+  } else if (t->count < SFU_SESSION_TABLE_MAX) {
+    s = &t->sessions[t->count++];
+  } else {
     SFU_LOG_WARN("session table full (%u), rejecting new peer", SFU_SESSION_TABLE_MAX);
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
 
-  sfu_peer_session_t *s = &t->sessions[t->count++];
   memset(s, 0, sizeof(*s));
   memcpy(&s->addr, addr, addr_len);
   s->addr_len = addr_len;
@@ -58,11 +66,13 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   for (int i = 0; i < 128; i++) {
     s->pt_map[i] = (uint8_t)i;
   }
+  s->uplink_audio.owner = s;
+  s->uplink_video.owner = s;
+  s->screen.owner = s;
 
   if (sfu_dtls_conn_init(&s->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");
     s->active = false;
-    t->count--;
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
@@ -81,4 +91,18 @@ sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct 
   }
   pthread_mutex_unlock(&t->lock);
   return NULL;
+}
+
+
+void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
+  pthread_mutex_lock(&t->lock);
+  if (s->active) {
+    if (s->state == SFU_SESSION_ESTABLISHED) {
+      sfu_srtp_ctx_destroy(&s->srtp);
+    }
+    sfu_dtls_conn_destroy(&s->dtls);
+    s->active = false;
+    s->state = SFU_SESSION_FAILED;
+  }
+  pthread_mutex_unlock(&t->lock);
 }

@@ -65,12 +65,12 @@ typedef struct sfu_transceiver {
   char stream_id[64];
   char track_id[64];
   char cname[64];
+  struct sfu_peer_session *owner;
 } sfu_transceiver_t;
 
 typedef struct sfu_receiver_slot {
   sfu_transceiver_t *video;
   sfu_transceiver_t *audio;
-  struct sfu_peer_session *session;
 } sfu_receiver_slot_t;
 
 typedef struct sfu_peer_session {

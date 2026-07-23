@@ -85,7 +85,11 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     sfu_receiver_slot_t *slot = &sender_session->receivers[i];
 
-    sfu_peer_session_t *sub_session = slot->session;
+    if (!slot->video && !slot->audio) {
+      continue;
+    }
+
+    sfu_peer_session_t *sub_session = slot->video ? slot->video->owner : slot->audio->owner;
     if (!sub_session) {
       SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] Subscriber session not found in table!", w->worker_index, i);
       continue;

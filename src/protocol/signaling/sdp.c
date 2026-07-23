@@ -425,7 +425,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
         return -1;
       }
-      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->session->ufrag) != 0) {
+      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->audio->owner->ufrag) != 0) {
         return -1;
       }
     }
@@ -478,7 +478,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
           return -1;
         }
       }
-      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->session->ufrag) != 0) {
+      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->video->owner->ufrag) != 0) {
         return -1;
       }
     }
@@ -619,7 +619,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
         return -1;
       }
-      if (append_remote_audio_ssrcs(out, out_cap, &off, audio->ssrc, slot->session->ufrag) != 0) {
+      if (append_remote_audio_ssrcs(out, out_cap, &off, audio->ssrc, audio->owner->ufrag) != 0) {
         return -1;
       }
     }
@@ -649,7 +649,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       if (append_video_codec_attributes(out, out_cap, &off, local_video_pt, local_rtx_pt) != 0) {
         return -1;
       }
-      if (append_remote_video_ssrcs(out, out_cap, &off, video->ssrc, video->rtx_ssrc, slot->session->ufrag) != 0) {
+      if (append_remote_video_ssrcs(out, out_cap, &off, video->ssrc, video->rtx_ssrc, video->owner->ufrag) != 0) {
         return -1;
       }
     }

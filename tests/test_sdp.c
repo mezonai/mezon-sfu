@@ -89,7 +89,6 @@ static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *a
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     session->receivers[i].audio = &audio[i];
     session->receivers[i].video = &video[i];
-    session->receivers[i].session = &remotes[i];
   }
 }
 

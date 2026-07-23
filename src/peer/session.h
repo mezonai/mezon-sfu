@@ -22,6 +22,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
  * STUN/DTLS handling is allowed to create sessions. */
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
 
+void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s);
+
 /**
  * Fast O(1) translation of an incoming RTP payload type to the subscriber's
  * negotiated payload type.
