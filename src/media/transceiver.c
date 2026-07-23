@@ -1,5 +1,5 @@
-#include "media/transceiver.h"
 #include <string.h>
+#include "sfu/datadef.h"
 
 void sfu_transceiver_init(sfu_transceiver_t *t, uint16_t mid, sfu_media_kind_t kind) {
   memset(t, 0, sizeof(*t));

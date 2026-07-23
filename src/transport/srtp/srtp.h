@@ -1,34 +1,10 @@
 #ifndef SFU_TRANSPORT_SRTP_H
 #define SFU_TRANSPORT_SRTP_H
 
-#include <srtp2/srtp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-/*
- * Wraps libsrtp2 around the keying material DTLS-SRTP hands us
- * (transport/dtls/dtls.h's SFU_SRTP_KEY_MATERIAL_LEN=60 bytes). Per
- * RFC 5764, the exported material is laid out as:
- *   [0:16)  client_write_master_key    [16:32) server_write_master_key
- *   [32:46) client_write_master_salt   [46:60) server_write_master_salt
- *
- * We are always the DTLS *server* in this handshake, so:
- *   - inbound  (decrypting what the peer sends us)  uses client_write
- *   - outbound (encrypting what we send the peer)    uses server_write
- *
- * Each peer session owns exactly one sfu_srtp_ctx_t -- see
- * peer/session.h. A real SFU is necessarily a decrypt-then-re-encrypt
- * relay, not a blind byte forwarder: every peer negotiated independent
- * DTLS keys, so a publisher's ciphertext must be decrypted once with
- * *its* session's inbound key, then re-encrypted once per subscriber
- * with *that subscriber's* own outbound key before forwarding. See
- * runtime/worker.c's sfu_room_forward_packet for where that happens.
- */
-typedef struct sfu_srtp_ctx {
-  srtp_t inbound;  /* decrypts packets FROM this peer */
-  srtp_t outbound; /* encrypts packets TO this peer   */
-} sfu_srtp_ctx_t;
+#include "sfu/datadef.h"
 
 /* Call once at process startup/shutdown (libsrtp2 keeps global state). */
 int sfu_srtp_global_init(void);

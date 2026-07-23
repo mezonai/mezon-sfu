@@ -1,50 +1,16 @@
 #ifndef SFU_TRANSPORT_DTLS_H
 #define SFU_TRANSPORT_DTLS_H
 
-#include <openssl/ssl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-/*
- * DTLS-SRTP (RFC 5764) server side, driven by our own io_uring UDP
- * socket rather than OpenSSL's socket BIO -- we feed received datagrams
- * in via a memory BIO and drain OpenSSL's desired output via another,
- * so the handshake bytes travel over the exact same send_zc path as
- * everything else instead of OpenSSL opening its own socket.
- *
- * WebRTC doesn't use CA-verified certificates: the self-signed cert
- * generated here is authenticated out of band via its SHA-256
- * fingerprint in the SDP answer (a=fingerprint), not a trust chain --
- * so certificate verification is intentionally off (SSL_VERIFY_NONE).
- * That fingerprint isn't wired up yet since protocol/signaling/ doesn't
- * exist -- see sfu_dtls_ctx_t's fingerprint field, computed but unused
- * until SDP generation lands.
- */
-
-#define SFU_SRTP_KEY_MATERIAL_LEN 60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
-#define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
-
-typedef struct sfu_dtls_ctx {
-  SSL_CTX *ssl_ctx;
-  char fingerprint[SFU_DTLS_FINGERPRINT_LEN]; /* certificate SHA-256, colon-hex
-                                               */
-} sfu_dtls_ctx_t;
+#include "sfu/datadef.h"
 
 /* Generates a self-signed EC (P-256) certificate and key, builds an
  * SSL_CTX configured for DTLS 1.2 server operation with the
  * SRTP_AES128_CM_SHA1_80 profile offered. Returns 0 on success. */
 int sfu_dtls_ctx_init(sfu_dtls_ctx_t *ctx);
 void sfu_dtls_ctx_destroy(sfu_dtls_ctx_t *ctx);
-
-typedef struct sfu_dtls_conn {
-  SSL *ssl;
-  BIO *rbio; /* received datagrams get written here before SSL_do_handshake */
-  BIO *wbio; /* OpenSSL writes its desired output here for us to drain+send */
-  bool established;
-  unsigned long srtp_profile_id;
-  uint8_t srtp_keying_material[SFU_SRTP_KEY_MATERIAL_LEN];
-} sfu_dtls_conn_t;
 
 /* Sets up one server-side DTLS connection (accept state) against a
  * shared ctx. One of these lives per peer session (see peer/session.h). */

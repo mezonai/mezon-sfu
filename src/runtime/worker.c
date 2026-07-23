@@ -5,6 +5,7 @@
 #include "pipeline/dispatch.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
+#include "transport/srtp/srtp.h"
 #include "util/log.h"
 
 #define SFU_WORKER_SEND_SQ_ENTRIES 1024

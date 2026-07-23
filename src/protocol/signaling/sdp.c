@@ -238,12 +238,15 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   return (int)off;
 }
 
-int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
-                         sfu_publisher_snapshot_t *snaps, uint32_t snaps_count, uint8_t video_pt, uint8_t rtx_pt, char *out, size_t out_cap) {
+int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
+                         const char *pwd, const char *fingerprint, char *out, size_t out_cap) {
   size_t off = 0;
   int in_media = 0;
   int saw_media_line = 0;
   int current_media = 0;
+
+  uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : 96;
+  uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : 97;
 
   size_t pos = 0;
   while (pos < offer_len) {
@@ -272,11 +275,12 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       bundle_line[blen] = '\0';
 
       uint32_t tmp_mid = 100;
-      for (uint32_t i = 0; i < snaps_count; i++) {
-        if (snaps[i].audio_ssrc != 0) {
+      for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+        const sfu_receiver_slot_t *slot = &session->receivers[i];
+        if (slot->audio->ssrc != 0) {
           snprintf(bundle_line + strlen(bundle_line), sizeof(bundle_line) - strlen(bundle_line), " %u", tmp_mid++);
         }
-        if (snaps[i].video_ssrc != 0) {
+        if (slot->video->ssrc != 0) {
           snprintf(bundle_line + strlen(bundle_line), sizeof(bundle_line) - strlen(bundle_line), " %u", tmp_mid++);
         }
       }
@@ -398,8 +402,9 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
   uint32_t mid_counter = 100;  // Offset MIDs to prevent clashes with client MIDs
   char buf[256];
 
-  for (uint32_t i = 0; i < snaps_count; i++) {
-    if (snaps[i].audio_ssrc != 0) {
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    const sfu_receiver_slot_t *slot = &session->receivers[i];
+    if (slot->audio->ssrc != 0) {
       snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
       if (append_line(out, out_cap, &off, buf) != 0) {
         return -1;
@@ -420,12 +425,12 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
       if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
         return -1;
       }
-      if (append_remote_audio_ssrcs(out, out_cap, &off, snaps[i].audio_ssrc, snaps[i].ufrag) != 0) {
+      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->session->ufrag) != 0) {
         return -1;
       }
     }
 
-    if (snaps[i].video_ssrc != 0) {
+    if (slot->video->ssrc != 0) {
       if (video_pt != 0) {
         if (rtx_pt != 0) {
           snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, video_pt, rtx_pt);
@@ -473,7 +478,7 @@ int sfu_sdp_build_answer(const char *offer, size_t offer_len, const char *host, 
           return -1;
         }
       }
-      if (append_remote_video_ssrcs(out, out_cap, &off, snaps[i].video_ssrc, snaps[i].rtx_ssrc, snaps[i].ufrag) != 0) {
+      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->session->ufrag) != 0) {
         return -1;
       }
     }
