@@ -4,54 +4,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <sys/socket.h>
-#include "room/room.h"
-#include "transport/dtls/dtls.h"
-#include "transport/srtp/srtp.h"
-
-/*
- * One entry per peer address, tracking connection establishment state:
- * has it passed an authenticated STUN Binding Request, and has DTLS
- * finished handshaking (at which point SRTP keying material exists).
- * This is separate from room/room.h's subscriber list -- session state
- * answers "is this peer's transport ready", room membership answers
- * "who should receive this peer's media".
- *
- * KNOWN LIMITATION: same shape as room.h's registry -- fixed-capacity,
- * mutex-guarded, no timeout/eviction. Every worker touches this table
- * once per STUN/DTLS packet (not per RTP/RTCP packet, since those skip
- * straight to the room-forward path once a session is established), so
- * the lock contention is much lighter than room.h's per-packet lookup,
- * but the same "replace with a proper structure before real load"
- * caveat applies.
- */
-typedef enum {
-  SFU_SESSION_NEW = 0,
-  SFU_SESSION_DTLS_HANDSHAKING,
-  SFU_SESSION_ESTABLISHED,
-  SFU_SESSION_FAILED,
-} sfu_session_state_t;
-
-typedef struct sfu_peer_session {
-  struct sockaddr_storage addr;
-  socklen_t addr_len;
-  sfu_session_state_t state;
-  sfu_dtls_conn_t dtls;
-  sfu_srtp_ctx_t srtp;  // valid only once state == SFU_SESSION_ESTABLISHED
-  sfu_room_t *room;
-  bool active;
-  char ufrag[32];
-  uint8_t pt_map[128];
-} sfu_peer_session_t;
-
-#define SFU_SESSION_TABLE_MAX 256
-
-typedef struct sfu_session_table {
-  sfu_peer_session_t sessions[SFU_SESSION_TABLE_MAX];
-  uint32_t count;
-  pthread_mutex_t lock;
-  sfu_dtls_ctx_t *dtls_ctx; /* shared, not owned */
-} sfu_session_table_t;
+#include "sfu/datadef.h"
 
 int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx);
 void sfu_session_table_destroy(sfu_session_table_t *t);
@@ -68,6 +21,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
  * thin air for a peer that hasn't completed a DTLS handshake -- only
  * STUN/DTLS handling is allowed to create sessions. */
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
+
+void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s);
 
 /**
  * Fast O(1) translation of an incoming RTP payload type to the subscriber's

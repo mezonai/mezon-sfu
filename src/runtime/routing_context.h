@@ -3,7 +3,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
-#include "room/room.h"
+#include "sfu/datadef.h"
 
 #define SFU_MAX_UFRAG_MAPPINGS 2048
 

@@ -1,58 +1,87 @@
 #include "room/room.h"
 
-#include <arpa/inet.h>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
-static struct sockaddr_storage make_addr(uint16_t port) {
-  struct sockaddr_in a;
-  memset(&a, 0, sizeof(a));
-  a.sin_family = AF_INET;
-  a.sin_port = htons(port);
-  struct sockaddr_storage s;
-  memset(&s, 0, sizeof(s));
-  memcpy(&s, &a, sizeof(a));
-  return s;
+static uint32_t receiver_count(sfu_peer_session_t *peer) {
+  uint32_t n = 0;
+
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    if (peer->receivers[i].audio || peer->receivers[i].video) {
+      n++;
+    }
+  }
+
+  return n;
 }
 
 int main(void) {
   sfu_room_t room;
-  assert(sfu_room_init(&room, 0, DEFAULT_ROOM_NAME) == 0);
 
-  struct sockaddr_storage a = make_addr(1000);
-  struct sockaddr_storage b = make_addr(2000);
-  struct sockaddr_storage c = make_addr(3000);
-  socklen_t len = sizeof(struct sockaddr_in);
+  assert(sfu_room_init(&room, 1, "test_room") == 0);
 
-  sfu_room_touch_peer(&room, &a, len, /*worker_id=*/0);
-  sfu_room_touch_peer(&room, &b, len, /*worker_id=*/1);
-  sfu_room_touch_peer(&room, &c, len, /*worker_id=*/1);
+  sfu_peer_session_t a = {0};
+  sfu_peer_session_t b = {0};
+  sfu_peer_session_t c = {0};
 
-  /* Subscribers for a's packet: b and c, not a itself. */
-  sfu_peer_entry_t out[SFU_ROOM_MAX_PEERS];
-  uint32_t n = sfu_room_list_subscribers_excluding(&room, &a, len, out, SFU_ROOM_MAX_PEERS);
-  assert(n == 2);
-  for (uint32_t i = 0; i < n; i++) {
-    assert(memcmp(&out[i].addr, &a, len) != 0);
-  }
+  a.active = true;
+  b.active = true;
+  c.active = true;
 
-  /* Re-touching an existing peer refreshes worker_id rather than
-   * duplicating the entry. */
-  sfu_room_touch_peer(&room, &a, len, /*worker_id=*/2);
-  n = sfu_room_list_subscribers_excluding(&room, &b, len, out, SFU_ROOM_MAX_PEERS);
-  assert(n == 2); /* still a and c, no duplicate */
+  strcpy(a.ufrag, "a");
+  strcpy(b.ufrag, "b");
+  strcpy(c.ufrag, "c");
 
-  bool found_a_with_new_worker = false;
-  for (uint32_t i = 0; i < n; i++) {
-    if (memcmp(&out[i].addr, &a, len) == 0) {
-      assert(out[i].worker_id == 2);
-      found_a_with_new_worker = true;
+  a.uplink_audio.active = true;
+  a.uplink_video.active = true;
+
+  b.uplink_audio.active = true;
+  b.uplink_video.active = true;
+
+  c.uplink_audio.active = true;
+  c.uplink_video.active = true;
+
+  room_add_peer(&room, &a);
+
+  assert(receiver_count(&a) == 0);
+
+  room_add_peer(&room, &b);
+
+  assert(receiver_count(&a) == 1);
+  assert(receiver_count(&b) == 1);
+
+  room_add_peer(&room, &c);
+
+  assert(receiver_count(&a) == 2);
+  assert(receiver_count(&b) == 2);
+  assert(receiver_count(&c) == 2);
+
+  /* Verify A subscribes to B and C */
+  bool saw_b = false;
+  bool saw_c = false;
+
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_receiver_slot_t *slot = &a.receivers[i];
+
+    if (!slot->video) {
+      continue;
+    }
+
+    if (slot->video == &b.uplink_video) {
+      saw_b = true;
+    }
+
+    if (slot->video == &c.uplink_video) {
+      saw_c = true;
     }
   }
-  assert(found_a_with_new_worker);
+
+  assert(saw_b);
+  assert(saw_c);
 
   sfu_room_destroy(&room);
+
   printf("test_room: OK\n");
   return 0;
 }

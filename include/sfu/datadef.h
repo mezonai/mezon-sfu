@@ -1,0 +1,139 @@
+#ifndef SFU_DATA_DEF_H
+#define SFU_DATA_DEF_H
+
+#include <openssl/ssl.h>
+#include <srtp2/srtp.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <sys/socket.h>
+#include "sfu/config.h"
+
+#define SFU_SRTP_KEY_MATERIAL_LEN 60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
+#define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
+#define SFU_SESSION_TABLE_MAX 256
+#define SFU_MAX_MEDIA_SOURCES 256
+#define SFU_MAX_SUBSCRIPTIONS 4096
+
+typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
+
+typedef enum { SFU_DIRECTION_INACTIVE = 0, SFU_DIRECTION_SENDONLY, SFU_DIRECTION_RECVONLY, SFU_DIRECTION_SENDRECV } sfu_direction_t;
+
+typedef enum {
+  SFU_SESSION_NEW = 0,
+  SFU_SESSION_DTLS_HANDSHAKING,
+  SFU_SESSION_ESTABLISHED,
+  SFU_SESSION_FAILED,
+} sfu_session_state_t;
+
+typedef enum {
+  SFU_DTLS_FEED_ERROR = -1,      /* fatal: drop this connection/session */
+  SFU_DTLS_FEED_IN_PROGRESS = 0, /* handshake continuing; drain output and send it */
+  SFU_DTLS_FEED_ESTABLISHED = 1, /* handshake complete; srtp_keying_material is valid */
+} sfu_dtls_feed_status_t;
+
+struct sfu_peer_session;
+struct sfu_room;
+
+typedef struct sfu_srtp_ctx {
+  srtp_t inbound;  /* decrypts packets FROM this peer */
+  srtp_t outbound; /* encrypts packets TO this peer   */
+} sfu_srtp_ctx_t;
+
+typedef struct sfu_dtls_ctx {
+  SSL_CTX *ssl_ctx;
+  char fingerprint[SFU_DTLS_FINGERPRINT_LEN]; /* certificate SHA-256, colon-hex */
+} sfu_dtls_ctx_t;
+
+typedef struct sfu_dtls_conn {
+  SSL *ssl;
+  BIO *rbio; /* received datagrams get written here before SSL_do_handshake */
+  BIO *wbio; /* OpenSSL writes its desired output here for us to drain+send */
+  bool established;
+  unsigned long srtp_profile_id;
+  uint8_t srtp_keying_material[SFU_SRTP_KEY_MATERIAL_LEN];
+} sfu_dtls_conn_t;
+
+typedef struct sfu_transceiver {
+  uint16_t mid;
+  sfu_media_kind_t kind;
+  sfu_direction_t direction;
+  bool active;
+  uint32_t ssrc;
+  uint32_t rtx_ssrc;
+  uint8_t payload_type;
+  uint8_t rtx_payload_type;
+  char stream_id[64];
+  char track_id[64];
+  char cname[64];
+  struct sfu_peer_session *owner;
+} sfu_transceiver_t;
+
+typedef struct sfu_receiver_slot {
+  sfu_transceiver_t *video;
+  sfu_transceiver_t *audio;
+} sfu_receiver_slot_t;
+
+typedef struct sfu_peer_session {
+  struct sockaddr_storage addr;
+  socklen_t addr_len;
+
+  uint16_t worker_id;
+
+  sfu_session_state_t state;
+  sfu_dtls_conn_t dtls;
+  sfu_srtp_ctx_t srtp;
+  struct sfu_room *room;
+  bool active;
+  char ufrag[32];
+  uint8_t pt_map[128];
+
+  sfu_transceiver_t uplink_audio;
+  sfu_transceiver_t uplink_video;
+  sfu_transceiver_t screen;
+
+  sfu_receiver_slot_t receivers[SFU_MAX_REMOTE_SLOTS];
+
+  bool negotiation_needed;
+} sfu_peer_session_t;
+
+typedef struct sfu_media_source {
+  uint32_t id;
+  sfu_peer_session_t *owner;
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t rtx_ssrc;
+} sfu_media_source_t;
+
+typedef struct sfu_subscription {
+  sfu_peer_session_t *subscriber;
+  sfu_media_source_t *source;
+  uint16_t receiver_mid_audio;
+  uint16_t receiver_mid_video;
+  bool active;
+} sfu_subscription_t;
+
+typedef struct sfu_media_graph {
+  sfu_media_source_t sources[SFU_MAX_MEDIA_SOURCES];
+  uint32_t source_count;
+  sfu_subscription_t subscriptions[SFU_MAX_SUBSCRIPTIONS];
+  uint32_t subscription_count;
+} sfu_media_graph_t;
+
+typedef struct sfu_session_table {
+  sfu_peer_session_t sessions[SFU_SESSION_TABLE_MAX];
+  uint32_t count;
+  pthread_mutex_t lock;
+  sfu_dtls_ctx_t *dtls_ctx; /* shared, not owned */
+} sfu_session_table_t;
+
+typedef struct sfu_room {
+  uint64_t room_id;
+  char room_name[32];
+  sfu_peer_session_t *peers[SFU_ROOM_MAX_PEERS];
+  uint32_t peer_count;
+  pthread_mutex_t lock;
+  sfu_media_graph_t graph;
+} sfu_room_t;
+
+
+#endif  // SFU_DATA_DEF_H
