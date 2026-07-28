@@ -46,6 +46,12 @@
 
 #define SFU_CACHELINE_SIZE 64
 
+#define SFU_MAX_UPLINK_TRANSCEIVERS 3      /* audio, camera, screen */
+#define SFU_MAX_REMOTE_SLOTS 128           /* remote publishers */
+#define SFU_REMOTE_TRANSCEIVERS_PER_SLOT 2 /* audio + video */
+
+#define SFU_MAX_REMOTE_TRANSCEIVERS (SFU_MAX_REMOTE_SLOTS * SFU_REMOTE_TRANSCEIVERS_PER_SLOT)
+
 #define DEFAULT_ROOM_NAME "Default Room"
 
 #define SFU_LIKELY(x) __builtin_expect(!!(x), 1)

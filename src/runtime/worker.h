@@ -6,7 +6,6 @@
 
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
-#include "peer/session.h"
 #include "room/room_registry.h"
 #include "runtime/fanout.h"
 #include "runtime/routing_context.h"

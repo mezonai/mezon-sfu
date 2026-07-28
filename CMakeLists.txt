@@ -66,6 +66,7 @@ add_library(sfu_core STATIC
   src/transport/srtp/srtp.c
   src/peer/session.c
   src/room/room.c
+  src/room/room_media_graph.c
   src/room/room_registry.c
   src/protocol/websocket/ws.c
   src/protocol/signaling/json_lite.c
@@ -79,6 +80,10 @@ add_library(sfu_core STATIC
   src/runtime/scheduler.c
   src/runtime/signal.c
   src/runtime/routing_context.c
+  src/media/graph.c
+  src/media/source.c
+  src/media/subscription.c
+  src/media/transceiver.c
 )
 
 target_include_directories(sfu_core PUBLIC
