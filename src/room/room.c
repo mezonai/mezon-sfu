@@ -1,7 +1,6 @@
 #include "room/room.h"
 #include <inttypes.h>
 #include <string.h>
-#include "media/graph.h"
 
 int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name) {
   memset(room, 0, sizeof(*room));
@@ -16,8 +15,6 @@ int sfu_room_init(sfu_room_t *room, uint64_t room_id, const char *room_name) {
   if (pthread_mutex_init(&room->lock, NULL) != 0) {
     return -1;
   }
-
-  sfu_media_graph_init(&room->graph);
 
   return 0;
 }

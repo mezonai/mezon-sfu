@@ -11,8 +11,6 @@
 #define SFU_SRTP_KEY_MATERIAL_LEN 60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
 #define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
 #define SFU_SESSION_TABLE_MAX 256
-#define SFU_MAX_MEDIA_SOURCES 256
-#define SFU_MAX_SUBSCRIPTIONS 4096
 
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
@@ -96,29 +94,6 @@ typedef struct sfu_peer_session {
   bool negotiation_needed;
 } sfu_peer_session_t;
 
-typedef struct sfu_media_source {
-  uint32_t id;
-  sfu_peer_session_t *owner;
-  uint32_t audio_ssrc;
-  uint32_t video_ssrc;
-  uint32_t rtx_ssrc;
-} sfu_media_source_t;
-
-typedef struct sfu_subscription {
-  sfu_peer_session_t *subscriber;
-  sfu_media_source_t *source;
-  uint16_t receiver_mid_audio;
-  uint16_t receiver_mid_video;
-  bool active;
-} sfu_subscription_t;
-
-typedef struct sfu_media_graph {
-  sfu_media_source_t sources[SFU_MAX_MEDIA_SOURCES];
-  uint32_t source_count;
-  sfu_subscription_t subscriptions[SFU_MAX_SUBSCRIPTIONS];
-  uint32_t subscription_count;
-} sfu_media_graph_t;
-
 typedef struct sfu_session_table {
   sfu_peer_session_t sessions[SFU_SESSION_TABLE_MAX];
   uint32_t count;
@@ -132,7 +107,6 @@ typedef struct sfu_room {
   sfu_peer_session_t *peers[SFU_ROOM_MAX_PEERS];
   uint32_t peer_count;
   pthread_mutex_t lock;
-  sfu_media_graph_t graph;
 } sfu_room_t;
 
 
