@@ -43,9 +43,9 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
   if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
     return -1;
   }
-  if (append_line(out, out_cap, offset, "a=ice-lite") != 0) {
-    return -1;
-  }
+  // if (append_line(out, out_cap, offset, "a=ice-lite") != 0) {
+  //   return -1;
+  // }
   n = snprintf(attr, sizeof(attr), "a=ice-ufrag:%s", ufrag);
   if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
     return -1;
@@ -177,6 +177,10 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   }
 
   if (append_line(out, out_cap, &off, "a=group:BUNDLE 0 1") != 0) {
+    return -1;
+  }
+
+  if (append_line(out, out_cap, &off, "a=ice-lite") != 0) {
     return -1;
   }
 
@@ -552,6 +556,9 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     }
   }
   if (append_line(out, out_cap, &off, bundle_line) != 0) {
+    return -1;
+  }
+  if (append_line(out, out_cap, &off, "a=ice-lite") != 0) {
     return -1;
   }
 
