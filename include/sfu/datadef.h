@@ -6,11 +6,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
-#include "sfu/config.h"
 
 #define SFU_SRTP_KEY_MATERIAL_LEN 60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
 #define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
-#define SFU_SESSION_TABLE_MAX 256
+#define SFU_SESSION_TABLE_MAX 8192
+#define SFU_ROOM_MAX_PEERS 256
+#define SFU_MAX_REMOTE_SLOTS (SFU_ROOM_MAX_PEERS - 1)
 
 #define SFU_SIGNALING_RECV_CAP 16384
 #define SFU_SIGNALING_SDP_CAP 16384
@@ -95,13 +96,14 @@ typedef struct sfu_peer_session {
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
 
-  sfu_receiver_slot_t receivers[SFU_MAX_REMOTE_SLOTS];
+  sfu_receiver_slot_t **receivers;
+  uint32_t receiver_capacity;
 
   bool negotiation_needed;
 } sfu_peer_session_t;
 
 typedef struct sfu_session_table {
-  sfu_peer_session_t *sessions[SFU_SESSION_TABLE_MAX];
+  sfu_peer_session_t **sessions;
   uint32_t capacity;
   uint32_t count;
   pthread_mutex_t lock;
@@ -111,7 +113,8 @@ typedef struct sfu_session_table {
 typedef struct sfu_room {
   uint64_t room_id;
   char room_name[32];
-  sfu_peer_session_t *peers[SFU_ROOM_MAX_PEERS];
+  sfu_peer_session_t **peers;
+  uint32_t peer_capacity;
   uint32_t peer_count;
   pthread_mutex_t lock;
 } sfu_room_t;
