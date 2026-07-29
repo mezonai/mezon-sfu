@@ -362,30 +362,6 @@
         </div>
 
         <script>
-            /*
-             * Meeting-room client for mezon-sfu's signaling protocol (server-offerer):
-             *   client -> server: {"type":"join","room":<id>}
-             *   server -> client: {"type":"joined","room":<id>}
-             *   server -> client: {"type":"offer","sdp":<sdp>}    (sent right after join, and again for
-             *                                                      every subsequent renegotiation -- the
-             *                                                      SFU is ALWAYS the offerer, never the client)
-             *   client -> server: {"type":"answer","sdp":<sdp>}
-             *   server -> client: {"type":"error","message":<str>}
-             *
-             * This is a SINGLE RTCPeerConnection design: every remote participant's
-             * media arrives over the same connection, distinguished by MediaStream
-             * (event.streams[0]) as tracks get added via server-driven renegotiation.
-             * The client never calls createOffer() or pc.addTransceiver() itself --
-             * it only ever answers whatever offer the server sends, adding its own
-             * local tracks to the recvonly transceivers (mid 0 = audio, mid 1 = video)
-             * the server's offer always provisions for the joining peer's own upload.
-             * Participants are therefore tracked by stream id, not by any
-             * participant-identity message the signaling protocol doesn't send --
-             * there's no explicit "who is this" from the server, so a tile's name
-             * label falls back to a short id if only one local participant sent a
-             * name (this client doesn't have a mechanism to receive remote display
-             * names either, since the protocol above has no such field yet).
-             */
 
             let ws = null;
             let pc = null;
@@ -750,7 +726,7 @@
                                         type: "offer",
                                         sdp: msg.sdp,
                                     }),
-                                );
+                                ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
                                 if (!localTracksAdded) {
                                     const audioTrack =
