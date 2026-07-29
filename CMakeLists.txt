@@ -80,10 +80,6 @@ add_library(sfu_core STATIC
   src/runtime/scheduler.c
   src/runtime/signal.c
   src/runtime/routing_context.c
-  src/media/graph.c
-  src/media/source.c
-  src/media/subscription.c
-  src/media/transceiver.c
 )
 
 target_include_directories(sfu_core PUBLIC
