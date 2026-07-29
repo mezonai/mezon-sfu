@@ -600,16 +600,18 @@
                 setJoinStatus("Preparing WebRTC connection…");
 
                 try {
-                    pc = new RTCPeerConnection({
-                        iceServers: [
-                            { urls: "stun:stun.l.google.com:19302" },
-                            {
-                                urls: "turn:relay.mezon.vn:5349",
-                                username: "turnmezon",
-                                credential: "QuTs4zUEcbylWemXL7MK",
-                            },
-                        ],
-                    });
+                    // pc = new RTCPeerConnection({
+                    //     iceServers: [
+                    //         { urls: "stun:stun.l.google.com:19302" },
+                    //         {
+                    //             urls: "turn:relay.mezon.vn:5349",
+                    //             username: "turnmezon",
+                    //             credential: "QuTs4zUEcbylWemXL7MK",
+                    //         },
+                    //     ],
+                    // });
+
+                    pc = new RTCPeerConnection({ iceServers: [] });
 
                     pc.oniceconnectionstatechange = () => {
                         const s = pc.iceConnectionState;
