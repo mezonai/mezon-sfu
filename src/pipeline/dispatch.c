@@ -132,8 +132,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         }
 
         if (!session->room) {
-          room_add_peer(room, session);
           SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
+          room_add_peer(room, session);
         }
 
         if (session->worker_id == UINT16_MAX) {

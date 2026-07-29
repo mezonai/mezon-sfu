@@ -277,6 +277,11 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       uint32_t tmp_mid = 100;
       for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
         const sfu_receiver_slot_t *slot = &session->receivers[i];
+
+        if (!slot->audio && !slot->video) {
+          continue;
+        }
+
         if (slot->audio->ssrc != 0) {
           snprintf(bundle_line + strlen(bundle_line), sizeof(bundle_line) - strlen(bundle_line), " %u", tmp_mid++);
         }
@@ -404,6 +409,11 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
 
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     const sfu_receiver_slot_t *slot = &session->receivers[i];
+
+    if (!slot->audio && !slot->video) {
+      continue;
+    }
+
     if (slot->audio->ssrc != 0) {
       snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
       if (append_line(out, out_cap, &off, buf) != 0) {
@@ -518,6 +528,10 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     const sfu_receiver_slot_t *slot = &session->receivers[i];
 
+    if (!slot->audio && !slot->video) {
+      continue;
+    }
+
     const sfu_transceiver_t *audio = slot->audio;
     const sfu_transceiver_t *video = slot->video;
 
@@ -594,6 +608,10 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   uint32_t mid_counter = 2;
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     const sfu_receiver_slot_t *slot = &session->receivers[i];
+
+    if (!slot->audio && !slot->video) {
+      continue;
+    }
 
     const sfu_transceiver_t *audio = slot->audio;
     const sfu_transceiver_t *video = slot->video;
