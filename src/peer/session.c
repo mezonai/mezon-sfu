@@ -121,3 +121,10 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
   }
   pthread_mutex_unlock(&t->lock);
 }
+
+void sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len) {
+  pthread_mutex_lock(&t->lock);
+  memcpy(&s->addr, addr, addr_len);
+  s->addr_len = addr_len;
+  pthread_mutex_unlock(&t->lock);
+}

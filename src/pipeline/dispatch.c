@@ -133,7 +133,24 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   /* Bind room directly to peer session if retrieved from routing_table */
   if (have_ufrag) {
     if (room) {
-      sfu_peer_session_t *session = sfu_session_table_get_or_create(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
+      sfu_peer_session_t *session = NULL;
+      if (client_ufrag[0] != '\0') {
+        session = sfu_session_table_find_by_ufrag(w->sessions, client_ufrag);
+      }
+
+      if (session) {
+        bool addr_changed = !(session->addr_len == pkt->peer_addr_len && memcmp(&session->addr, &pkt->peer_addr, pkt->peer_addr_len) == 0);
+        if (addr_changed) {
+          if (session->state == SFU_SESSION_ESTABLISHED) {
+            SFU_LOG_DEBUG("worker %u: ufrag=%s STUN from alternate candidate %s:%u (session already established at different addr, not rebinding)",
+                          w->worker_index, client_ufrag, ip, port);
+          } else {
+            sfu_session_table_rebind_addr(w->sessions, session, &pkt->peer_addr, pkt->peer_addr_len);
+          }
+        }
+      } else {
+        session = sfu_session_table_get_or_create(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
+      }
       if (!session) {
         SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
       } else {
