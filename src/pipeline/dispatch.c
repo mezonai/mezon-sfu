@@ -137,12 +137,10 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
         if (session->worker_id == UINT16_MAX) {
           session->worker_id = w->worker_index;
-
           SFU_LOG_INFO("worker %u: session ufrag=%s assigned to worker %u", w->worker_index, session->ufrag, session->worker_id);
-        } else {
-          SFU_LOG_ERROR("worker ownership mismatch: ufrag=%s owner=%u current=%u", session->ufrag, session->worker_id, w->worker_index);
-
-          return;
+        } else if (session->worker_id != w->worker_index) {
+          SFU_LOG_INFO("worker %u: session ufrag=%s worker ownership migrating %u -> %u", w->worker_index, session->ufrag, session->worker_id, w->worker_index);
+          session->worker_id = w->worker_index; /* actually migrate, don't just log and bail */
         }
       }
     } else {
