@@ -8,6 +8,11 @@
 int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
   memset(t, 0, sizeof(*t));
   t->capacity = SFU_SESSION_TABLE_MAX;
+  t->sessions = SFU_CALLOC(t->capacity, sizeof(*t->sessions));
+
+  if (!t->sessions) {
+    return -1;
+  }
   t->dtls_ctx = dtls_ctx;
 
   if (pthread_mutex_init(&t->lock, NULL) != 0) {
@@ -25,14 +30,22 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
       }
       sfu_dtls_conn_destroy(&t->sessions[i]->dtls);
     }
+
+    if (t->sessions[i]->receivers) {
+      for (uint32_t j = 0; j < t->sessions[i]->receiver_capacity; j++) {
+        SFU_FREE(t->sessions[i]->receivers[j]);
+      }
+      SFU_FREE(t->sessions[i]->receivers);
+      t->sessions[i]->receivers = NULL;
+      t->sessions[i]->receiver_capacity = 0;
+    }
   }
 
-  for (uint32_t i = 0; i < t->count; i++) {
-    SFU_FREE(t->sessions[i]);
-    t->sessions[i] = NULL;
-  }
+  SFU_FREE(t->sessions);
+  t->sessions = NULL;
 
   t->count = 0;
+  t->capacity = 0;
 
   pthread_mutex_unlock(&t->lock);
   pthread_mutex_destroy(&t->lock);
@@ -115,8 +128,13 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->uplink_video.owner = s;
   s->screen.owner = s;
 
+  s->receiver_capacity = 0;
+  s->receivers = NULL;
+
   if (sfu_dtls_conn_init(&s->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");
+
+    SFU_FREE(s->receivers);
 
     SFU_FREE(s);
     t->sessions[index] = NULL;

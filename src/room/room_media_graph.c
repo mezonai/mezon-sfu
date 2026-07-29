@@ -1,14 +1,32 @@
 #include "room/room_media_graph.h"
 #include <pthread.h>
 #include <string.h>
+#include "util/alloc.h"
 #include "util/log.h"
 
 static sfu_receiver_slot_t *alloc_receiver_slot(sfu_peer_session_t *peer) {
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    sfu_receiver_slot_t *slot = &peer->receivers[i];
+  if (!peer->receivers) {
+    peer->receiver_capacity = SFU_MAX_REMOTE_SLOTS;
+    peer->receivers = SFU_CALLOC(peer->receiver_capacity, sizeof(*peer->receivers));
+    if (!peer->receivers) {
+      return NULL;
+    }
+  }
+
+  for (uint32_t i = 0; i < peer->receiver_capacity; i++) {
+    sfu_receiver_slot_t *slot = peer->receivers[i];
+
+    if (slot == NULL) {
+      slot = SFU_CALLOC(1, sizeof(*slot));
+      if (!slot) {
+        return NULL;
+      }
+
+      peer->receivers[i] = slot;
+      return slot;
+    }
 
     if (slot->audio == NULL && slot->video == NULL) {
-      memset(slot, 0, sizeof(*slot));
       return slot;
     }
   }
@@ -87,7 +105,7 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
 
     bool touched = false;
     for (uint32_t s = 0; s < SFU_MAX_REMOTE_SLOTS; s++) {
-      sfu_receiver_slot_t *slot = &other->receivers[s];
+      sfu_receiver_slot_t *slot = other->receivers[s];
       if ((slot->audio && slot->audio->owner == peer) || (slot->video && slot->video->owner == peer)) {
         slot->audio = NULL;
         slot->video = NULL;
@@ -99,7 +117,7 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     }
   }
 
-  memset(peer->receivers, 0, sizeof(peer->receivers));
+  memset(peer->receivers, 0, peer->receiver_capacity * sizeof(*peer->receivers));
 
   peer->room = NULL;
   peer->negotiation_needed = false;

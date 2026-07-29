@@ -82,8 +82,12 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    sfu_receiver_slot_t *slot = &sender_session->receivers[i];
+  for (uint32_t i = 0; i < sender_session->receiver_capacity; i++) {
+    sfu_receiver_slot_t *slot = sender_session->receivers[i];
+
+    if (!slot) {
+      continue;
+    }
 
     if (!slot->video && !slot->audio) {
       continue;
