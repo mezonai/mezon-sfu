@@ -242,6 +242,14 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   return (int)off;
 }
 
+static inline sfu_receiver_slot_t *sfu_session_receiver(const sfu_peer_session_t *session, uint32_t i) {
+  if (!session->receivers || i >= session->receiver_capacity) {
+    return NULL;
+  }
+
+  return session->receivers[i];
+}
+
 int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
                          const char *pwd, const char *fingerprint, char *out, size_t out_cap) {
   size_t off = 0;
@@ -280,7 +288,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
 
       uint32_t tmp_mid = 100;
       for (uint32_t i = 0; i < session->receiver_capacity; i++) {
-        const sfu_receiver_slot_t *slot = session->receivers[i];
+        const sfu_receiver_slot_t *slot = sfu_session_receiver(session, i);
 
         if (!slot) {
           continue;
@@ -416,7 +424,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
   char buf[256];
 
   for (uint32_t i = 0; i < session->receiver_capacity; i++) {
-    const sfu_receiver_slot_t *slot = session->receivers[i];
+    const sfu_receiver_slot_t *slot = sfu_session_receiver(session, i);
 
     if (!slot) {
       continue;
@@ -538,7 +546,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
   uint32_t remote_mid = 2;
   for (uint32_t i = 0; i < session->receiver_capacity; i++) {
-    const sfu_receiver_slot_t *slot = session->receivers[i];
+    const sfu_receiver_slot_t *slot = sfu_session_receiver(session, i);
 
     if (!slot) {
       continue;
@@ -626,7 +634,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   /* mid 2..N: one SENDONLY section per remote publisher already in the room. */
   uint32_t mid_counter = 2;
   for (uint32_t i = 0; i < session->receiver_capacity; i++) {
-    const sfu_receiver_slot_t *slot = session->receivers[i];
+    const sfu_receiver_slot_t *slot = sfu_session_receiver(session, i);
 
     if (!slot) {
       continue;
