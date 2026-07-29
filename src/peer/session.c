@@ -93,6 +93,21 @@ sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct 
   return NULL;
 }
 
+sfu_peer_session_t *sfu_session_table_find_by_ufrag(sfu_session_table_t *t, const char *ufrag) {
+  if (!ufrag || ufrag[0] == '\0') {
+    return NULL;
+  }
+
+  pthread_mutex_lock(&t->lock);
+  for (uint32_t i = 0; i < t->count; i++) {
+    if (t->sessions[i].active && t->sessions[i].ufrag[0] != '\0' && strcmp(t->sessions[i].ufrag, ufrag) == 0) {
+      pthread_mutex_unlock(&t->lock);
+      return &t->sessions[i];
+    }
+  }
+  pthread_mutex_unlock(&t->lock);
+  return NULL;
+}
 
 void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
   pthread_mutex_lock(&t->lock);

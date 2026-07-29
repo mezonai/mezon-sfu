@@ -644,12 +644,6 @@
                         else setConnState(s, "warn");
                     };
 
-                    /* No onnegotiationneeded handler: the client never calls
-                       createOffer() in this architecture. The SFU is always the
-                       offerer -- both the initial connection and every later
-                       renegotiation (new publisher joins, etc.) arrive as a
-                       server-pushed {"type":"offer"} that this client only answers. */
-
                     pc.ontrack = (event) => {
                         const track = event.track;
 
@@ -743,10 +737,6 @@
                         }
 
                         if (msg.type === "offer") {
-                            // The SFU is always the offerer: this fires both for the
-                            // very first offer right after join and for every later
-                            // renegotiation (e.g. another participant's track being
-                            // added). Either way we just answer it.
                             if (isNegotiating) {
                                 console.log(
                                     "Offer received while already negotiating -- ignoring (a fresh one will follow if this was superseded).",
@@ -763,11 +753,6 @@
                                 );
 
                                 if (!localTracksAdded) {
-                                    // The server's offer always provisions mid 0
-                                    // (recvonly audio) and mid 1 (recvonly video) for
-                                    // our own upload. addTrack() reuses those existing
-                                    // recvonly transceivers rather than creating new
-                                    // ones, which is what turns them into sendrecv.
                                     const audioTrack =
                                         localStream.getAudioTracks()[0];
                                     const videoTrack =

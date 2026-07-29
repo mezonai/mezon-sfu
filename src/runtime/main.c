@@ -45,6 +45,8 @@ static uint16_t parse_port(int argc, char **argv, int index, uint16_t default_po
 int main(int argc, char **argv) {
   sfu_log_set_level(SFU_LOG_LEVEL_INFO);
 
+  signal(SIGPIPE, SIG_IGN);
+
   int positional[8];
   int positional_count = 0;
 

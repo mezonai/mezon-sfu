@@ -12,6 +12,10 @@
 #define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
 #define SFU_SESSION_TABLE_MAX 256
 
+#define SFU_SIGNALING_RECV_CAP 16384
+#define SFU_SIGNALING_SDP_CAP 16384
+#define SFU_SIGNALING_JSON_CAP 32768
+
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
 typedef enum { SFU_DIRECTION_INACTIVE = 0, SFU_DIRECTION_SENDONLY, SFU_DIRECTION_RECVONLY, SFU_DIRECTION_SENDRECV } sfu_direction_t;
@@ -76,6 +80,8 @@ typedef struct sfu_peer_session {
   socklen_t addr_len;
 
   uint16_t worker_id;
+
+  int fd;
 
   sfu_session_state_t state;
   sfu_dtls_conn_t dtls;

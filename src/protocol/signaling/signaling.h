@@ -34,12 +34,17 @@ typedef struct {
   char client_ufrag[32];
   sfu_signaling_server_t *server;
   sfu_peer_session_t *session;
+
+  uv_timer_t answer_retry_timer;
+  char pending_answer_sdp[SFU_SIGNALING_SDP_CAP];
+  int pending_answer_sdp_len;
+  int answer_retry_count;
 } sfu_client_conn_t;
 
 int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, const char *media_host, uint16_t media_port,
                                const sfu_ice_credentials_t *ice_creds, const sfu_dtls_ctx_t *dtls_ctx, sfu_session_table_t *sessions,
                                sfu_room_registry_t *room_registry, sfu_routing_table_t *routing_table);
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
-void sfu_signaling_trigger_renegotiation(sfu_room_t *room, const char *exclude_ufrag);
+void sfu_signaling_trigger_renegotiation(sfu_room_t *room);
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */

@@ -67,6 +67,10 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   char client_ufrag[32];
   bool have_ufrag = sfu_stun_extract_client_ufrag(pkt->data, pkt->len, w->ice_creds->ufrag, client_ufrag, sizeof(client_ufrag));
   sfu_room_t *room = NULL;
+  int matched_signaling_fd = -1;
+  bool has_pending_answer = false;
+  uint32_t pending_audio_ssrc = 0, pending_video_ssrc = 0, pending_rtx_ssrc = 0;
+  uint8_t pending_video_pt = 0, pending_rtx_pt = 0;
 
   if (have_ufrag) {
     pthread_mutex_lock(&w->routing_table->mutex);
@@ -81,13 +85,11 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 
     if (match) {
-      /* Migrate path ownership if NAT/ICE shifts traffic to a new worker core */
       if (match->has_owner && match->worker_index != w->worker_index) {
         SFU_LOG_INFO("worker %u: Migrating ufrag=%s from worker %u (NAT path changed to %s:%u)", w->worker_index, client_ufrag, match->worker_index, ip, port);
         match->worker_index = w->worker_index;
       }
 
-      /* Claim path ownership if first time seeing this peer's network traffic */
       if (!match->has_owner) {
         match->worker_index = w->worker_index;
         match->has_owner = true;
@@ -95,6 +97,16 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
       }
 
       room = (sfu_room_t *)match->room;
+      matched_signaling_fd = match->fd;
+      if (match->has_pending_answer) {
+        has_pending_answer = true;
+        pending_audio_ssrc = match->pending_audio_ssrc;
+        pending_video_ssrc = match->pending_video_ssrc;
+        pending_rtx_ssrc = match->pending_rtx_ssrc;
+        pending_video_pt = match->pending_video_pt;
+        pending_rtx_pt = match->pending_rtx_pt;
+        match->has_pending_answer = false; /* consume once */
+      }
     }
     pthread_mutex_unlock(&w->routing_table->mutex);
   } else {
@@ -134,6 +146,28 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         if (!session->room) {
           SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
           room_add_peer(room, session);
+          session->fd = matched_signaling_fd;
+
+          if (has_pending_answer) {
+            session->uplink_audio.ssrc = pending_audio_ssrc;
+            session->uplink_audio.active = (pending_audio_ssrc != 0);
+            session->uplink_video.ssrc = pending_video_ssrc;
+            session->uplink_video.rtx_ssrc = pending_rtx_ssrc;
+            session->uplink_video.active = (pending_video_ssrc != 0);
+            session->uplink_video.payload_type = pending_video_pt;
+            session->uplink_video.rtx_payload_type = pending_rtx_pt;
+            for (int pi = 0; pi < 128; pi++) {
+              session->pt_map[pi] = (uint8_t)pi;
+            }
+            if (pending_video_pt != 0) {
+              session->pt_map[96] = pending_video_pt;
+            }
+            if (pending_rtx_pt != 0) {
+              session->pt_map[97] = pending_rtx_pt;
+            }
+            SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u", w->worker_index, client_ufrag,
+                         pending_audio_ssrc, pending_video_ssrc, pending_rtx_ssrc);
+          }
         }
 
         if (session->worker_id == UINT16_MAX) {
@@ -141,7 +175,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
           SFU_LOG_INFO("worker %u: session ufrag=%s assigned to worker %u", w->worker_index, session->ufrag, session->worker_id);
         } else if (session->worker_id != w->worker_index) {
           SFU_LOG_INFO("worker %u: session ufrag=%s worker ownership migrating %u -> %u", w->worker_index, session->ufrag, session->worker_id, w->worker_index);
-          session->worker_id = w->worker_index; /* actually migrate, don't just log and bail */
+          session->worker_id = w->worker_index;
         }
       }
     } else {
@@ -192,7 +226,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
 
         if (session->room) {
           SFU_LOG_INFO("worker %u: SRTP secure pipeline verified. Dispatching room renegotiation for room context.", w->worker_index);
-          sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room, session->ufrag);
+          sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
         }
       }
       break;
@@ -215,7 +249,7 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   SFU_LOG_DEBUG("worker %u: Raw UDP dispatch received %u bytes from %s:%u", w->worker_index, pkt->len, ip, port);
 
   if (sfu_stun_is_stun_packet(pkt->data, pkt->len)) {
-    SFU_LOG_INFO("worker %u: Identified STUN packet from %s:%u", w->worker_index, ip, port);
+    SFU_LOG_DEBUG("worker %u: Identified STUN packet from %s:%u", w->worker_index, ip, port);
     handle_stun(w, pkt);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
