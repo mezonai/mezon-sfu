@@ -101,7 +101,8 @@ typedef struct sfu_peer_session {
 } sfu_peer_session_t;
 
 typedef struct sfu_session_table {
-  sfu_peer_session_t sessions[SFU_SESSION_TABLE_MAX];
+  sfu_peer_session_t *sessions[SFU_SESSION_TABLE_MAX];
+  uint32_t capacity;
   uint32_t count;
   pthread_mutex_t lock;
   sfu_dtls_ctx_t *dtls_ctx; /* shared, not owned */
