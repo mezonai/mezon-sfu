@@ -7,8 +7,8 @@
 static uint32_t receiver_count(sfu_peer_session_t *peer) {
   uint32_t n = 0;
 
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    if (peer->receivers[i].audio || peer->receivers[i].video) {
+  for (uint32_t i = 0; i < peer->receiver_capacity; i++) {
+    if (peer->receivers[i]->audio || peer->receivers[i]->video) {
       n++;
     }
   }
@@ -61,8 +61,8 @@ int main(void) {
   bool saw_b = false;
   bool saw_c = false;
 
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    sfu_receiver_slot_t *slot = &a.receivers[i];
+  for (uint32_t i = 0; i < a.receiver_capacity; i++) {
+    sfu_receiver_slot_t *slot = a.receivers[i];
 
     if (!slot->video) {
       continue;

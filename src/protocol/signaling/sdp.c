@@ -279,8 +279,12 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       bundle_line[blen] = '\0';
 
       uint32_t tmp_mid = 100;
-      for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-        const sfu_receiver_slot_t *slot = &session->receivers[i];
+      for (uint32_t i = 0; i < session->receiver_capacity; i++) {
+        const sfu_receiver_slot_t *slot = session->receivers[i];
+
+        if (!slot) {
+          continue;
+        }
 
         if (!slot->audio && !slot->video) {
           continue;
@@ -411,8 +415,12 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
   uint32_t mid_counter = 100;  // Offset MIDs to prevent clashes with client MIDs
   char buf[256];
 
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    const sfu_receiver_slot_t *slot = &session->receivers[i];
+  for (uint32_t i = 0; i < session->receiver_capacity; i++) {
+    const sfu_receiver_slot_t *slot = session->receivers[i];
+
+    if (!slot) {
+      continue;
+    }
 
     if (!slot->audio && !slot->video) {
       continue;
@@ -529,8 +537,12 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   char bundle_line[512];
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
   uint32_t remote_mid = 2;
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    const sfu_receiver_slot_t *slot = &session->receivers[i];
+  for (uint32_t i = 0; i < session->receiver_capacity; i++) {
+    const sfu_receiver_slot_t *slot = session->receivers[i];
+
+    if (!slot) {
+      continue;
+    }
 
     if (!slot->audio && !slot->video) {
       continue;
@@ -613,8 +625,12 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
 
   /* mid 2..N: one SENDONLY section per remote publisher already in the room. */
   uint32_t mid_counter = 2;
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    const sfu_receiver_slot_t *slot = &session->receivers[i];
+  for (uint32_t i = 0; i < session->receiver_capacity; i++) {
+    const sfu_receiver_slot_t *slot = session->receivers[i];
+
+    if (!slot) {
+      continue;
+    }
 
     if (!slot->audio && !slot->video) {
       continue;

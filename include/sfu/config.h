@@ -32,22 +32,12 @@
  * itself. See net/io_uring.c's sfu_worker_release_packet(). */
 #define SFU_RELEASE_QUEUE_CAPACITY 8192
 
-/* Fixed-capacity, mutex-guarded peer table. This is a control-plane-style
- * placeholder, NOT the final concurrency design -- every packet currently
- * pays a mutex lock to look up subscribers. Once real join/publish
- * signaling and SSRC-based routing exist, replace with a sharded or
- * RCU/seqlock-style per-room structure so the packet hot path never
- * blocks on a lock (see the mutex-guarded hash table lesson from
- * mezon-proto-server's handshake rate limiter). */
-#define SFU_ROOM_MAX_PEERS 256
-
 #define SFU_DEFAULT_MEDIA_PORT 7000     /* shared RTP/RTCP/STUN UDP port   */
 #define SFU_DEFAULT_SIGNALING_PORT 8000 /* WebSocket signaling TCP port    */
 
 #define SFU_CACHELINE_SIZE 64
 
 #define SFU_MAX_UPLINK_TRANSCEIVERS 3      /* audio, camera, screen */
-#define SFU_MAX_REMOTE_SLOTS 128           /* remote publishers */
 #define SFU_REMOTE_TRANSCEIVERS_PER_SLOT 2 /* audio + video */
 
 #define SFU_MAX_REMOTE_TRANSCEIVERS (SFU_MAX_REMOTE_SLOTS * SFU_REMOTE_TRANSCEIVERS_PER_SLOT)
