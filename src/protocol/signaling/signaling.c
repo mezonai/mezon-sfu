@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <uv.h>
+#include "peer/session.h"
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
@@ -20,11 +21,7 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
-#define SFU_SIGNALING_RECV_CAP 16384
-#define SFU_SIGNALING_SDP_CAP 16384
-#define SFU_SIGNALING_JSON_CAP 32768
-
-void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room) {
+void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd) {
   pthread_mutex_lock(&table->mutex);
 
   for (int i = 0; i < table->count; i++) {
@@ -40,8 +37,8 @@ void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufra
     strncpy(entry->ufrag, client_ufrag, sizeof(entry->ufrag) - 1);
     entry->ufrag[sizeof(entry->ufrag) - 1] = '\0';
     entry->room = room;
+    entry->fd = fd;
 
-    /* Explicitly reset worker ownership so the first worker to see STUN claims it */
     entry->has_owner = false;
     entry->worker_index = 0;
 
@@ -266,8 +263,8 @@ static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signal
  *        the server ever offers, this can never race against a client-side
  *        offer (no glare, no rollback needed).
  */
-void sfu_signaling_trigger_renegotiation(sfu_room_t *room, const char *exclude_ufrag) {
-  if (!room || !exclude_ufrag || !g_signaling_server) {
+void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
+  if (!room || !g_signaling_server) {
     return;
   }
 
@@ -278,21 +275,10 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room, const char *exclude_u
       continue;
     }
 
-    if (strcmp(session->ufrag, exclude_ufrag) == 0) {
-      continue;
-    }
-
-    if (build_and_send_offer(g_signaling_server->listen_fd, session, g_signaling_server)) {
-      SFU_LOG_INFO(
-          "signaling: sent renegotiation offer "
-          "to ufrag=%s (fd=%d)",
-          session->ufrag, g_signaling_server->listen_fd);
-
+    if (build_and_send_offer(session->fd, session, g_signaling_server)) {
+      SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->ufrag, session->fd);
     } else {
-      SFU_LOG_WARN(
-          "signaling: failed to send renegotiation "
-          "offer to fd=%d",
-          g_signaling_server->listen_fd);
+      SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
     }
   }
 }
@@ -314,9 +300,11 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
   extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
 
   session->uplink_audio.ssrc = audio_ssrc;
+  session->uplink_audio.active = (audio_ssrc != 0);
 
   session->uplink_video.ssrc = video_ssrc;
   session->uplink_video.rtx_ssrc = rtx_ssrc;
+  session->uplink_video.active = (video_ssrc != 0);
 
   session->uplink_video.payload_type = video_pt;
   session->uplink_video.rtx_payload_type = rtx_pt;
@@ -333,8 +321,8 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
     session->pt_map[97] = rtx_pt;
   }
 
-  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt,
-               rtx_pt);
+  SFU_LOG_DEBUG("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt,
+                rtx_pt);
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
@@ -503,12 +491,24 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
               if (sdp_len >= 0) {
                 bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, c->client_ufrag, sizeof(c->client_ufrag));
                 if (have_ufrag) {
-                  sfu_register_ufrag_room(s->routing_table, c->client_ufrag, c->joined_room);
+                  sfu_register_ufrag_room(s->routing_table, c->client_ufrag, c->joined_room, c->fd);
                   SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64, c->client_ufrag, c->joined_room_id);
                 } else {
                   c->client_ufrag[0] = '\0';
                 }
-                handle_answer(c->session, sdp, sdp_len);
+                sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
+                if (session) {
+                  c->session = session;
+                  handle_answer(session, sdp, sdp_len);
+                } else {
+                  uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
+                  uint8_t video_pt = 0, rtx_pt = 0;
+                  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &audio_ssrc, &video_ssrc, &rtx_ssrc);
+                  extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
+
+                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt, rtx_pt);
+                  SFU_LOG_WARN("signaling: answer for ufrag=%s arrived before session was created; stashed parsed SSRCs for apply on bind", c->client_ufrag);
+                }
               }
             }
           } else {
