@@ -6,6 +6,7 @@
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
+#include "room/room.h"
 #include "runtime/routing_context.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
@@ -131,7 +132,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         }
 
         if (!session->room) {
-          session->room = room;
+          room_add_peer(room, session);
           SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
         }
 
