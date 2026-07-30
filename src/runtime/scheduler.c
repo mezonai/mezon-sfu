@@ -4,13 +4,17 @@
 #include "util/log.h"
 
 #include <netinet/in.h>
+#include <pthread.h>
 #include <string.h>
 #include <unistd.h>
+#include "util/alloc.h"
 
 #define SFU_DISPATCH_SQ_ENTRIES 1024
 #define SFU_DISPATCH_CQ_ENTRIES 4096
 #define SFU_DISPATCH_REAP_BATCH 256
 #define SFU_DISPATCH_IDLE_SLEEP_US 100
+
+#define SFU_PENDING_FREE_SWEEP_INTERVAL_SEC 1
 
 int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count, int recv_bgid,
                        uint32_t buf_count, uint32_t buf_size) {
@@ -26,21 +30,88 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_
     return -1;
   }
 
+  s->pending_free_head = NULL;
+  if (pthread_mutex_init(&s->pending_free_lock, NULL) != 0) {
+    SFU_LOG_ERROR("scheduler: failed to init pending_free_lock");
+    sfu_ring_destroy(&s->recv_ring);
+    return -1;
+  }
+  clock_gettime(CLOCK_MONOTONIC, &s->last_sweep);
+
   return 0;
 }
 
-void sfu_scheduler_destroy(sfu_scheduler_t *s) { sfu_ring_destroy(&s->recv_ring); }
+void sfu_scheduler_destroy(sfu_scheduler_t *s) {
+  sfu_ring_destroy(&s->recv_ring);
 
-/* FNV-1a over the sender's address bytes -- cheap, decent distribution
- * for the placeholder 4-tuple routing key described in scheduler.h. */
-static uint32_t hash_peer_addr(const struct sockaddr_storage *addr, socklen_t len) {
-  const uint8_t *bytes = (const uint8_t *)addr;
-  uint32_t h = 2166136261u;
-  for (socklen_t i = 0; i < len; i++) {
-    h ^= bytes[i];
-    h *= 16777619u;
+  sfu_deferred_free_t *df = s->pending_free_head;
+  while (df) {
+    sfu_deferred_free_t *next = df->next;
+    SFU_FREE(df->ptr);
+    SFU_FREE(df->worker_generations);
+    SFU_FREE(df);
+    df = next;
   }
-  return h;
+  s->pending_free_head = NULL;
+  pthread_mutex_destroy(&s->pending_free_lock);
+}
+
+void sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr) {
+  sfu_deferred_free_t *df = SFU_CALLOC(1, sizeof(*df));
+  if (!df) {
+    SFU_LOG_ERROR("scheduler: failed to allocate deferred-free node, leaking ptr=%p", ptr);
+    return;
+  }
+
+  df->ptr = ptr;
+  df->worker_count = s->worker_count;
+  df->worker_generations = SFU_CALLOC(s->worker_count, sizeof(uint64_t));
+  if (!df->worker_generations) {
+    SFU_LOG_ERROR("scheduler: failed to snapshot generations, leaking ptr=%p", ptr);
+    SFU_FREE(df);
+    return;
+  }
+  for (uint32_t i = 0; i < s->worker_count; i++) {
+    df->worker_generations[i] = __atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE);
+  }
+
+  pthread_mutex_lock(&s->pending_free_lock);
+  df->next = s->pending_free_head;
+  s->pending_free_head = df;
+  pthread_mutex_unlock(&s->pending_free_lock);
+}
+
+static void sweep_pending_frees(sfu_scheduler_t *s) {
+  if (!s->pending_free_head) {
+    return;
+  }
+
+  pthread_mutex_lock(&s->pending_free_lock);
+
+  sfu_deferred_free_t **cursor = &s->pending_free_head;
+  while (*cursor) {
+    sfu_deferred_free_t *df = *cursor;
+
+    bool safe = true;
+    for (uint32_t i = 0; i < df->worker_count; i++) {
+      uint64_t current = __atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE);
+      if (current == df->worker_generations[i]) {
+        safe = false;
+        break;
+      }
+    }
+
+    if (safe) {
+      *cursor = df->next;
+      SFU_FREE(df->ptr);
+      SFU_FREE(df->worker_generations);
+      SFU_FREE(df);
+    } else {
+      cursor = &df->next;
+    }
+  }
+
+  pthread_mutex_unlock(&s->pending_free_lock);
 }
 
 typedef struct {
@@ -50,12 +121,9 @@ typedef struct {
 static void on_recv(void *user_data, sfu_packet_t *pkt) {
   sfu_scheduler_t *s = ((recv_ctx_t *)user_data)->s;
 
-  uint32_t h = hash_peer_addr(&pkt->peer_addr, pkt->peer_addr_len);
+  uint32_t h = fnv1a(&pkt->peer_addr, pkt->peer_addr_len);
   uint32_t worker_idx = h % s->worker_count;
 
-  /* Ownership of this reference transfers into the inbox. If the
-   * worker's inbox is full (backpressure), we must not leak the
-   * packet -- release it here, which recycles the kernel buffer. */
   if (!sfu_spsc_ring_push(&s->workers[worker_idx].inbox, pkt)) {
     SFU_LOG_WARN("worker %u inbox full, dropping packet", worker_idx);
     sfu_ring_release_packet(&s->recv_ring, s->pp, pkt);
@@ -79,14 +147,16 @@ static void *scheduler_thread_main(void *arg) {
   while (!sfu_shutdown_requested()) {
     unsigned reaped = sfu_ring_reap(&s->recv_ring, SFU_DISPATCH_REAP_BATCH, s->pp, NULL, on_recv, NULL, &ctx);
 
-    /* Only this thread may touch its own buf_ring -- drain every
-     * worker's release queue here and hand kernel buffer indices
-     * back to the kernel, batched per worker. See
-     * sfu_worker_release_packet's doc for why workers can't do
-     * this themselves. */
     unsigned returned = 0;
     for (uint32_t i = 0; i < s->worker_count; i++) {
       returned += sfu_ring_drain_kernel_buffer_returns(&s->recv_ring, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
+    }
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec - s->last_sweep.tv_sec >= SFU_PENDING_FREE_SWEEP_INTERVAL_SEC) {
+      sweep_pending_frees(s);
+      s->last_sweep = now;
     }
 
     if (reaped == 0 && returned == 0) {

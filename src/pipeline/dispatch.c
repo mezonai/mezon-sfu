@@ -6,7 +6,7 @@
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
-#include "room/room.h"
+#include "room/room_media_graph.h"
 #include "runtime/routing_context.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
@@ -75,7 +75,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (have_ufrag) {
     pthread_mutex_lock(&w->routing_table->mutex);
 
-    /* Search the injected structure for this client's allocation context */
     sfu_routing_entry_t *match = NULL;
     for (int i = 0; i < w->routing_table->count; i++) {
       if (strcmp(w->routing_table->entries[i].ufrag, client_ufrag) == 0) {
@@ -130,7 +129,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   send_raw(w, response, response_len, &pkt->peer_addr, pkt->peer_addr_len);
 
-  /* Bind room directly to peer session if retrieved from routing_table */
   if (have_ufrag) {
     if (room) {
       sfu_peer_session_t *session = NULL;
@@ -154,7 +152,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
       if (!session) {
         SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
       } else {
-        /* ALWAYS update ufrag when authenticated STUN traffic is seen */
         if (session->ufrag[0] == '\0') {
           strncpy(session->ufrag, client_ufrag, sizeof(session->ufrag) - 1);
           session->ufrag[sizeof(session->ufrag) - 1] = '\0';
@@ -163,7 +160,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
         if (!session->room) {
           SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
-          room_add_peer(room, session);
+          room_add_peer(room, session, w->scheduler);
           session->fd = matched_signaling_fd;
 
           if (has_pending_answer) {

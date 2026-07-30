@@ -16,7 +16,7 @@
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
                     sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions, sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds,
-                    uint32_t inbox_capacity, int send_bgid) {
+                    sfu_scheduler_t *scheduler, uint32_t inbox_capacity, int send_bgid) {
   memset(w, 0, sizeof(*w));
   w->core_id = core_id;
   w->worker_index = worker_index;
@@ -27,6 +27,7 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
   w->sessions = sessions;
   w->ice_creds = ice_creds;
   w->routing_table = routing_table;
+  w->scheduler = scheduler;
 
   if (sfu_spsc_ring_init(&w->inbox, inbox_capacity) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init inbox ring", worker_index);
@@ -82,8 +83,11 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
-  for (uint32_t i = 0; i < sender_session->receiver_capacity; i++) {
-    sfu_receiver_slot_t *slot = sender_session->receivers[i];
+  sfu_receiver_slot_t **receivers = __atomic_load_n(&sender_session->receivers, __ATOMIC_ACQUIRE);
+  uint32_t receiver_capacity = __atomic_load_n(&sender_session->receiver_capacity, __ATOMIC_ACQUIRE);
+
+  for (uint32_t i = 0; i < receiver_capacity; i++) {
+    sfu_receiver_slot_t *slot = receivers[i];
 
     if (!slot) {
       continue;
@@ -118,13 +122,9 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
     if (!is_rtcp) {
       uint8_t incoming_pt = enc->data[1] & 0x7F;
-
-      /* Look up the expected PT for this subscriber's session
-         (e.g., mapped from SDP negotiation during signaling) */
       uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
 
       if (incoming_pt != expected_pt) {
-        /* Preserve the Marker bit (0x80) while overwriting the lower 7 PT bits */
         enc->data[1] = (enc->data[1] & 0x80) | (expected_pt & 0x7F);
       }
     }
@@ -204,6 +204,8 @@ static void *worker_thread_main(void *arg) {
     if (!did_work) {
       usleep(SFU_WORKER_IDLE_SLEEP_US);
     }
+
+    __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
   }
 
   SFU_LOG_INFO("worker %u shutting down", w->worker_index);

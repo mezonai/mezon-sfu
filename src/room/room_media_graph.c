@@ -1,10 +1,9 @@
 #include "room/room_media_graph.h"
 #include <pthread.h>
-#include <string.h>
 #include "util/alloc.h"
 #include "util/log.h"
 
-static sfu_receiver_slot_t *alloc_receiver_slot(sfu_peer_session_t *peer) {
+static sfu_receiver_slot_t *alloc_receiver_slot(sfu_peer_session_t *peer, sfu_scheduler_t *scheduler) {
   for (uint32_t i = 0; i < peer->receiver_capacity; i++) {
     sfu_receiver_slot_t *slot = peer->receivers[i];
     if (slot && slot->audio == NULL && slot->video == NULL) {
@@ -13,29 +12,37 @@ static sfu_receiver_slot_t *alloc_receiver_slot(sfu_peer_session_t *peer) {
   }
 
   uint32_t new_capacity = peer->receiver_capacity == 0 ? 4 : peer->receiver_capacity * 2;
-  sfu_receiver_slot_t **grown = SFU_REALLOC(peer->receivers, new_capacity * sizeof(*grown));
-  if (!grown) {
+  sfu_receiver_slot_t **new_array = SFU_CALLOC(new_capacity, sizeof(*new_array));
+  if (!new_array) {
     return NULL;
   }
-  memset(grown + peer->receiver_capacity, 0, (new_capacity - peer->receiver_capacity) * sizeof(*grown));
-  peer->receivers = grown;
-  peer->receiver_capacity = new_capacity;
-
+  for (uint32_t i = 0; i < peer->receiver_capacity; i++) {
+    new_array[i] = peer->receivers[i];
+  }
   sfu_receiver_slot_t *slot = SFU_CALLOC(1, sizeof(*slot));
   if (!slot) {
+    SFU_FREE(new_array);
     return NULL;
   }
+  new_array[peer->receiver_capacity] = slot;
 
-  for (uint32_t i = 0; i < peer->receiver_capacity; i++) {
-    if (!peer->receivers[i]) {
-      peer->receivers[i] = slot;
-      return slot;
+  sfu_receiver_slot_t **old_array = peer->receivers;
+
+  __atomic_store_n(&peer->receiver_capacity, new_capacity, __ATOMIC_RELEASE);
+  __atomic_store_n(&peer->receivers, new_array, __ATOMIC_RELEASE);
+
+  if (old_array) {
+    if (scheduler) {
+      sfu_scheduler_retire_ptr(scheduler, old_array);
+    } else {
+      SFU_LOG_ERROR("alloc_receiver_slot: no scheduler to retire old_array=%p, leaking", (void *)old_array);
     }
   }
-  return NULL;
+
+  return slot;
 }
 
-void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
+void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *scheduler) {
   pthread_mutex_lock(&room->lock);
 
   if (peer->room == room) {
@@ -59,13 +66,13 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
       continue;
     }
 
-    sfu_receiver_slot_t *slot = alloc_receiver_slot(other);
+    sfu_receiver_slot_t *slot = alloc_receiver_slot(other, scheduler);
     if (slot) {
       slot->audio = &peer->uplink_audio;
       slot->video = &peer->uplink_video;
     }
 
-    slot = alloc_receiver_slot(peer);
+    slot = alloc_receiver_slot(peer, scheduler);
     if (slot) {
       slot->audio = &other->uplink_audio;
       slot->video = &other->uplink_video;
