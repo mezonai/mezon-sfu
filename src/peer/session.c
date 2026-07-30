@@ -37,6 +37,9 @@ int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
   t->dtls_ctx = dtls_ctx;
 
   if (pthread_mutex_init(&t->lock, NULL) != 0) {
+    SFU_FREE(t->sessions);
+    t->sessions = NULL;
+    t->capacity = 0;
     return -1;
   }
 
@@ -105,6 +108,7 @@ static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const 
 
 static bool addr_matches_direct(uint32_t idx, void *ctx_) {
   addr_match_ctx_t *ctx = ctx_;
+  if (idx >= ctx->t->count) return false;
   sfu_peer_session_t *s = ctx->t->sessions[idx];
   return s && s->active && s->addr_len == ctx->addr_len && memcmp(&s->addr, ctx->addr, ctx->addr_len) == 0;
 }
@@ -124,22 +128,19 @@ void sfu_session_table_index_addr(sfu_session_table_t *t, sfu_peer_session_t *se
   uint32_t hash = fnv1a(&session->addr, session->addr_len);
   addr_match_ctx_t ctx = {t, &session->addr, session->addr_len};
   uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, true);
-  t->addr_index[slot].hash = hash;
-  t->addr_index[slot].index = idx;
+  if (slot != SFU_HASH_EMPTY) {
+    t->addr_index[slot].hash = hash;
+    t->addr_index[slot].index = idx;
+  }
 }
 
 sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
   pthread_mutex_lock(&t->lock);
 
-  int free_index = -1;
-
   for (uint32_t i = 0; i < t->count; i++) {
     sfu_peer_session_t *session = t->sessions[i];
 
     if (!session) {
-      if (free_index < 0) {
-        free_index = (int)i;
-      }
       continue;
     }
 
@@ -148,26 +149,12 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
       return session;
     }
 
-    if (!session->active && free_index < 0) {
-      free_index = (int)i;
-    }
   }
 
   uint32_t index;
 
-  if (free_index >= 0) {
-    index = (uint32_t)free_index;
-
-    if (t->sessions[index] == NULL) {
-      t->sessions[index] = SFU_CALLOC(1, sizeof(sfu_peer_session_t));
-      if (!t->sessions[index]) {
-        pthread_mutex_unlock(&t->lock);
-        return NULL;
-      }
-    }
-  } else if (t->count < t->capacity) {
+  if (t->count < t->capacity) {
     index = t->count++;
-
     t->sessions[index] = SFU_CALLOC(1, sizeof(sfu_peer_session_t));
     if (!t->sessions[index]) {
       t->count--;
@@ -184,6 +171,10 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   memset(s, 0, sizeof(*s));
 
+  if (!addr || addr_len > sizeof(s->addr)) {
+    SFU_FREE(s); t->sessions[index] = NULL; t->count--;
+    pthread_mutex_unlock(&t->lock); return NULL;
+  }
   memcpy(&s->addr, addr, addr_len);
   s->addr_len = addr_len;
   s->active = true;
@@ -225,6 +216,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
 static bool addr_matches(uint32_t idx, void *ctx_) {
   addr_match_ctx_t *ctx = ctx_;
+  if (idx >= ctx->t->count) return false;
   sfu_peer_session_t *s = ctx->t->sessions[idx];
   return s && s->active && s->addr_len == ctx->addr_len && memcmp(&s->addr, ctx->addr, ctx->addr_len) == 0;
 }
@@ -241,6 +233,7 @@ sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct 
 
 static bool ufrag_matches(uint32_t idx, void *ctx_) {
   ufrag_match_ctx_t *ctx = ctx_;
+  if (idx >= ctx->t->count) return false;
   sfu_peer_session_t *s = ctx->t->sessions[idx];
   return s && s->active && s->ufrag[0] != '\0' && strcmp(s->ufrag, ctx->ufrag) == 0;
 }
@@ -266,6 +259,22 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
   }
 
   pthread_mutex_lock(&t->lock);
+  if (s->addr_len > 0) {
+    uint32_t hash = fnv1a(&s->addr, s->addr_len);
+    addr_match_ctx_t ctx = {t, &s->addr, s->addr_len};
+    uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
+    if (slot != SFU_HASH_EMPTY) {
+      t->addr_index[slot].index = SFU_HASH_DELETED;
+    }
+  }
+  if (s->ufrag[0] != '\0') {
+    uint32_t hash = fnv1a(s->ufrag, strlen(s->ufrag));
+    ufrag_match_ctx_t ctx = {t, s->ufrag};
+    uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches, &ctx, false);
+    if (slot != SFU_HASH_EMPTY) {
+      t->ufrag_index[slot].index = SFU_HASH_DELETED;
+    }
+  }
   if (s->active) {
     if (s->state == SFU_SESSION_ESTABLISHED) {
       sfu_srtp_ctx_destroy(&s->srtp);
@@ -288,12 +297,20 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
 }
 
 void sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len) {
+  if (!addr || addr_len > sizeof(s->addr)) return;
   pthread_mutex_lock(&t->lock);
+  if (s->addr_len > 0) {
+    uint32_t hash = fnv1a(&s->addr, s->addr_len);
+    addr_match_ctx_t ctx = {t, &s->addr, s->addr_len};
+    uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
+    if (slot != SFU_HASH_EMPTY) {
+      t->addr_index[slot].index = SFU_HASH_DELETED;
+    }
+  }
   memcpy(&s->addr, addr, addr_len);
   s->addr_len = addr_len;
-  pthread_mutex_unlock(&t->lock);
-
   sfu_session_table_index_addr(t, s);
+  pthread_mutex_unlock(&t->lock);
 }
 
 void sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *session) {
@@ -314,8 +331,10 @@ void sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *s
   uint32_t hash = fnv1a(session->ufrag, strlen(session->ufrag));
   ufrag_match_ctx_t ctx = {t, session->ufrag};
   uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches, &ctx, true);
-  t->ufrag_index[slot].hash = hash;
-  t->ufrag_index[slot].index = idx;
+  if (slot != SFU_HASH_EMPTY) {
+    t->ufrag_index[slot].hash = hash;
+    t->ufrag_index[slot].index = idx;
+  }
 
   pthread_mutex_unlock(&t->lock);
 }

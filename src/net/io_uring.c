@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sched.h>
 
 /* Helper to safely format address data at the low-level ring layer */
 static void format_ring_peer_addr(const struct sockaddr *addr, char *out_ip, uint16_t *out_port) {
@@ -161,8 +162,11 @@ void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispat
     sfu_packet_pool_free_meta(pp, pkt);
 
     void *item = (void *)(uintptr_t)((uint64_t)kbuf_index + 1);
-    if (!sfu_spsc_ring_push(to_dispatcher, item)) {
-      SFU_LOG_WARN("release queue to dispatcher full, kernel buffer %u temporarily leaked", kbuf_index);
+    /* The metadata no longer owns the provided buffer, so ownership must
+     * remain here until the dispatcher accepts it. Dropping the index on a
+     * full queue permanently removes that buffer from the kernel ring. */
+    while (!sfu_spsc_ring_push(to_dispatcher, item)) {
+      sched_yield();
     }
   } else {
     sfu_packet_pool_free(pp, pkt);

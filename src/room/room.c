@@ -17,6 +17,7 @@ int sfu_room_init(sfu_room_t *room, uint64_t room_id) {
   room->peers = SFU_CALLOC(room->peer_capacity, sizeof(*room->peers));
 
   if (!room->peers) {
+    pthread_mutex_destroy(&room->lock);
     return -1;
   }
 

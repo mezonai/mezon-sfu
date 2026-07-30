@@ -3,60 +3,56 @@
 #include <stdio.h>
 #include <string.h>
 
-int sfu_json_extract_string(const char *json, const char *field, char *out, size_t out_cap) {
+int sfu_json_extract_string(const char *json, size_t json_len, const char *field, char *out, size_t out_cap) {
   char needle[128];
   int needle_len = snprintf(needle, sizeof(needle), "\"%s\"", field);
-  const char *p = strstr(json, needle);
+  if (needle_len < 0 || (size_t)needle_len >= sizeof(needle) || (size_t)needle_len > json_len) {
+    return -1;
+  }
+
+  const char *end = json + json_len;
+  const char *p = NULL;
+  for (const char *candidate = json; candidate + needle_len <= end; candidate++) {
+    if (memcmp(candidate, needle, (size_t)needle_len) == 0) {
+      p = candidate + needle_len;
+      break;
+    }
+  }
   if (!p) {
     return -1;
   }
-  p += needle_len;
 
-  while (*p == ' ' || *p == ':') {
+  while (p < end && (*p == ' ' || *p == ':')) {
     p++;
   }
-  if (*p != '"') {
+  if (p == end || *p++ != '"') {
     return -1;
   }
-  p++;
 
   size_t out_len = 0;
-  while (*p && *p != '"') {
-    char c = *p;
+  while (p < end && *p != '"') {
+    char c = *p++;
     if (c == '\\') {
-      p++;
-      switch (*p) {
-        case 'n':
-          c = '\n';
-          break;
-        case 'r':
-          c = '\r';
-          break;
-        case 't':
-          c = '\t';
-          break;
-        case '"':
-          c = '"';
-          break;
-        case '\\':
-          c = '\\';
-          break;
-        case '/':
-          c = '/';
-          break;
-        default:
-          c = *p;
-          break; /* unknown escape: pass through literally */
+      if (p == end) {
+        return -1;
+      }
+      switch (*p++) {
+        case 'n': c = '\n'; break;
+        case 'r': c = '\r'; break;
+        case 't': c = '\t'; break;
+        case '"': c = '"'; break;
+        case '\\': c = '\\'; break;
+        case '/': c = '/'; break;
+        default: c = p[-1]; break;
       }
     }
     if (out_len + 1 >= out_cap) {
       return -1;
     }
     out[out_len++] = c;
-    p++;
   }
-  if (*p != '"') {
-    return -1; /* unterminated string */
+  if (p == end || *p != '"') {
+    return -1;
   }
 
   out[out_len] = '\0';

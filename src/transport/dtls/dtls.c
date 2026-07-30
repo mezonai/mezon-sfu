@@ -141,10 +141,12 @@ int sfu_dtls_conn_init(sfu_dtls_conn_t *conn, sfu_dtls_ctx_t *ctx) {
   conn->rbio = BIO_new(BIO_s_mem());
   conn->wbio = BIO_new(BIO_s_mem());
   if (!conn->rbio || !conn->wbio) {
-    SSL_free(conn->ssl); /* frees any BIO already assigned */
-    if (conn->rbio && !conn->wbio) {
-      BIO_free(conn->rbio);
-    }
+    BIO_free(conn->rbio);
+    BIO_free(conn->wbio);
+    conn->rbio = NULL;
+    conn->wbio = NULL;
+    SSL_free(conn->ssl);
+    conn->ssl = NULL;
     return -1;
   }
 

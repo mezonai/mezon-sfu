@@ -8,7 +8,7 @@ int main(void) {
   /* Basic extraction. */
   {
     char out[64];
-    int n = sfu_json_extract_string("{\"type\":\"offer\",\"sdp\":\"hello\"}", "type", out, sizeof(out));
+    int n = sfu_json_extract_string("{\"type\":\"offer\",\"sdp\":\"hello\"}", strlen("{\"type\":\"offer\",\"sdp\":\"hello\"}"), "type", out, sizeof(out));
     assert(n == 5);
     assert(strcmp(out, "offer") == 0);
   }
@@ -20,7 +20,7 @@ int main(void) {
         "{\"type\":\"offer\",\"sdp\":\"v=0\\r\\no=- 1 2 IN IP4 "
         "1.2.3.4\\r\\n\"}";
     char out[128];
-    int n = sfu_json_extract_string(json, "sdp", out, sizeof(out));
+    int n = sfu_json_extract_string(json, strlen(json), "sdp", out, sizeof(out));
     assert(n > 0);
     assert(strcmp(out, "v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\n") == 0);
   }
@@ -28,7 +28,7 @@ int main(void) {
   /* Missing field. */
   {
     char out[16];
-    assert(sfu_json_extract_string("{\"type\":\"offer\"}", "sdp", out, sizeof(out)) == -1);
+    assert(sfu_json_extract_string("{\"type\":\"offer\"}", strlen("{\"type\":\"offer\"}"), "sdp", out, sizeof(out)) == -1);
   }
 
   /* Escape round-trips back to the original through extraction. */
@@ -42,7 +42,7 @@ int main(void) {
     snprintf(json, sizeof(json), "{\"sdp\":\"%s\"}", escaped);
 
     char roundtrip[256];
-    int rlen = sfu_json_extract_string(json, "sdp", roundtrip, sizeof(roundtrip));
+    int rlen = sfu_json_extract_string(json, strlen(json), "sdp", roundtrip, sizeof(roundtrip));
     assert(rlen == (int)strlen(original));
     assert(memcmp(roundtrip, original, (size_t)rlen) == 0);
   }
@@ -50,8 +50,24 @@ int main(void) {
   /* Overflow must fail cleanly, not corrupt/truncate silently past cap. */
   {
     char tiny[4];
-    int n = sfu_json_extract_string("{\"sdp\":\"toolong\"}", "sdp", tiny, sizeof(tiny));
+    int n = sfu_json_extract_string("{\"sdp\":\"toolong\"}", strlen("{\"sdp\":\"toolong\"}"), "sdp", tiny, sizeof(tiny));
     assert(n == -1);
+  }
+
+  /* The parser must not require NUL termination. */
+  {
+    const char json[] = {'{', '"', 's', 'd', 'p', '"', ':', '"', 'o', 'k', '"', '}'};
+    char out[8];
+    assert(sfu_json_extract_string(json, sizeof(json), "sdp", out, sizeof(out)) == 2);
+    assert(strcmp(out, "ok") == 0);
+  }
+
+  /* A trailing escape at the explicit boundary is malformed and must not
+   * inspect the byte just beyond that boundary. */
+  {
+    const char json[] = {'{', '"', 's', 'd', 'p', '"', ':', '"', 'x', '\\', '"', '}'};
+    char out[8];
+    assert(sfu_json_extract_string(json, 10, "sdp", out, sizeof(out)) == -1);
   }
 
   printf("test_json_lite: OK\n");
