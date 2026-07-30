@@ -216,11 +216,6 @@ static bool build_and_send_initial_offer(int fd, sfu_signaling_server_t *s) {
   return true;
 }
 
-/**
- * @brief Builds a fresh server-initiated SDP offer and pushes it to fd as
- *        {"type":"offer","sdp":...}. Used both for a peer's initial offer
- *        right after "join" and for re-offers during renegotiation.
- */
 static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s) {
   char offer[SFU_SIGNALING_SDP_CAP];
   int offer_len =
@@ -252,22 +247,12 @@ static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signal
   return true;
 }
 
-/**
- * @brief Thread-safe public trigger to invoke room-wide renegotiation.
- *        Called directly by workers once a peer finishes DTLS handshake steps.
- *
- *        In the server-offerer architecture the SFU never asks a client to
- *        renegotiate -- it just builds and pushes a brand new offer to every
- *        other established peer in the room, adding a send section for the
- *        publisher (exclude_ufrag) whose DTLS keys just came up. Because only
- *        the server ever offers, this can never race against a client-side
- *        offer (no glare, no rollback needed).
- */
 void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   if (!room || !g_signaling_server) {
     return;
   }
 
+  pthread_mutex_lock(&room->lock);
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *session = room->peers[i];
 
@@ -281,6 +266,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
       SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
     }
   }
+  pthread_mutex_unlock(&room->lock);
 }
 
 static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
@@ -375,7 +361,6 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
   return 0;
 }
 
-/* Callback executed when a client handle is fully closed */
 static void on_client_close(uv_handle_t *handle) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
 
@@ -383,11 +368,12 @@ static void on_client_close(uv_handle_t *handle) {
     room_remove_peer(c->session->room, c->session);
   }
 
+  sfu_session_table_remove(c->server->sessions, c->session);
+
   close(c->fd);
   SFU_FREE(c);
 }
 
-/* Helper to initiate closing a client connection */
 static void disconnect_client(sfu_client_conn_t *c) {
   if (!uv_is_closing((uv_handle_t *)&c->poll_handle)) {
     uv_poll_stop(&c->poll_handle);
@@ -395,7 +381,6 @@ static void disconnect_client(sfu_client_conn_t *c) {
   }
 }
 
-/* Main I/O callback for active client WebSocket connections */
 static void on_client_readable(uv_poll_t *handle, int status, int events) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
   sfu_signaling_server_t *s = c->server;

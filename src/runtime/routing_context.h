@@ -32,4 +32,14 @@ void sfu_routing_table_init(sfu_routing_table_t *table);
 void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
                                           uint8_t video_pt, uint8_t rtx_pt);
 
+static inline uint32_t fnv1a(const void *data, size_t len) {
+  const uint8_t *p = (const uint8_t *)data;
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < len; i++) {
+    h ^= p[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
 #endif

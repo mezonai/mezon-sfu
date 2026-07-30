@@ -158,6 +158,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         if (session->ufrag[0] == '\0') {
           strncpy(session->ufrag, client_ufrag, sizeof(session->ufrag) - 1);
           session->ufrag[sizeof(session->ufrag) - 1] = '\0';
+          sfu_session_table_index_ufrag(w->sessions, session);
         }
 
         if (!session->room) {

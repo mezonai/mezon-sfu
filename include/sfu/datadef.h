@@ -17,6 +17,12 @@
 #define SFU_SIGNALING_SDP_CAP 16384
 #define SFU_SIGNALING_JSON_CAP 32768
 
+#define SFU_HASH_EMPTY UINT32_MAX
+#define SFU_HASH_DELETED (UINT32_MAX - 1)
+
+#define SFU_SESSION_ADDR_HASH_SLOTS 512 /* power of 2, >> SFU_SESSION_TABLE_MAX */
+#define SFU_SESSION_UFRAG_HASH_SLOTS 512
+
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
 typedef enum { SFU_DIRECTION_INACTIVE = 0, SFU_DIRECTION_SENDONLY, SFU_DIRECTION_RECVONLY, SFU_DIRECTION_SENDRECV } sfu_direction_t;
@@ -102,17 +108,24 @@ typedef struct sfu_peer_session {
   bool negotiation_needed;
 } sfu_peer_session_t;
 
+typedef struct sfu_hash_slot {
+  uint32_t hash;
+  uint32_t index;
+} sfu_hash_slot_t;
+
 typedef struct sfu_session_table {
   sfu_peer_session_t **sessions;
   uint32_t capacity;
   uint32_t count;
   pthread_mutex_t lock;
-  sfu_dtls_ctx_t *dtls_ctx; /* shared, not owned */
+  sfu_dtls_ctx_t *dtls_ctx;
+
+  sfu_hash_slot_t addr_index[SFU_SESSION_ADDR_HASH_SLOTS];
+  sfu_hash_slot_t ufrag_index[SFU_SESSION_UFRAG_HASH_SLOTS];
 } sfu_session_table_t;
 
 typedef struct sfu_room {
   uint64_t room_id;
-  char room_name[32];
   sfu_peer_session_t **peers;
   uint32_t peer_capacity;
   uint32_t peer_count;

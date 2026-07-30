@@ -40,17 +40,15 @@ sfu_room_t *sfu_room_registry_get_or_create(sfu_room_registry_t *reg, uint64_t r
   }
 
   sfu_room_t *room = &reg->rooms[reg->room_count++];
-  char default_name[128];
-  snprintf(default_name, sizeof(default_name), "Room %" PRIu64, room_id);
 
-  if (sfu_room_init(room, room_id, default_name) != 0) {
+  if (sfu_room_init(room, room_id) != 0) {
     SFU_LOG_ERROR("Failed to initialize room struct for %" PRIu64, room_id);
     reg->room_count--;
     pthread_mutex_unlock(&reg->lock);
     return NULL;
   }
 
-  SFU_LOG_INFO("Created new room: ID=%" PRIu64 " [%s]", room_id, default_name);
+  SFU_LOG_INFO("Created new room: ID=%" PRIu64, room_id);
   pthread_mutex_unlock(&reg->lock);
   return room;
 }

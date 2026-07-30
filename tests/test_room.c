@@ -19,7 +19,7 @@ static uint32_t receiver_count(sfu_peer_session_t *peer) {
 int main(void) {
   sfu_room_t room;
 
-  assert(sfu_room_init(&room, 1, "test_room") == 0);
+  assert(sfu_room_init(&room, 1) == 0);
 
   sfu_peer_session_t a = {0};
   sfu_peer_session_t b = {0};
