@@ -272,7 +272,7 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
     }
     sfu_dtls_conn_destroy(&s->dtls);
 
-    if (s->receivers) { /* also fixes the leak flagged earlier */
+    if (s->receivers) {
       for (uint32_t i = 0; i < s->receiver_capacity; i++) {
         SFU_FREE(s->receivers[i]);
       }
