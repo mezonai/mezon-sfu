@@ -29,6 +29,7 @@ typedef struct {
 } sfu_routing_table_t;
 
 void sfu_routing_table_init(sfu_routing_table_t *table);
+void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd);
 void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
                                           uint8_t video_pt, uint8_t rtx_pt);
 

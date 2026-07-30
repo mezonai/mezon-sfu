@@ -298,10 +298,10 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
           continue;
         }
 
-        if (slot->audio->ssrc != 0) {
+        if (slot->audio && slot->audio->ssrc != 0) {
           snprintf(bundle_line + strlen(bundle_line), sizeof(bundle_line) - strlen(bundle_line), " %u", tmp_mid++);
         }
-        if (slot->video->ssrc != 0) {
+        if (slot->video && slot->video->ssrc != 0) {
           snprintf(bundle_line + strlen(bundle_line), sizeof(bundle_line) - strlen(bundle_line), " %u", tmp_mid++);
         }
       }
@@ -434,7 +434,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       continue;
     }
 
-    if (slot->audio->ssrc != 0) {
+    if (slot->audio && slot->audio->ssrc != 0) {
       snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
       if (append_line(out, out_cap, &off, buf) != 0) {
         return -1;
@@ -460,7 +460,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       }
     }
 
-    if (slot->video->ssrc != 0) {
+    if (slot->video && slot->video->ssrc != 0) {
       if (video_pt != 0) {
         if (rtx_pt != 0) {
           snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, video_pt, rtx_pt);

@@ -9,7 +9,7 @@ static uint32_t receiver_count(sfu_peer_session_t *peer) {
   uint32_t n = 0;
 
   for (uint32_t i = 0; i < peer->receiver_capacity; i++) {
-    if (peer->receivers[i]->audio || peer->receivers[i]->video) {
+    if (peer->receivers && peer->receivers[i] && (peer->receivers[i]->audio || peer->receivers[i]->video)) {
       n++;
     }
   }
@@ -19,7 +19,7 @@ static uint32_t receiver_count(sfu_peer_session_t *peer) {
 
 int main(void) {
   sfu_room_t room;
-  sfu_scheduler_t scheduler;
+  sfu_scheduler_t scheduler = {0};
 
   assert(sfu_room_init(&room, 1) == 0);
 
@@ -66,7 +66,7 @@ int main(void) {
   for (uint32_t i = 0; i < a.receiver_capacity; i++) {
     sfu_receiver_slot_t *slot = a.receivers[i];
 
-    if (!slot->video) {
+    if (!slot || !slot->video) {
       continue;
     }
 

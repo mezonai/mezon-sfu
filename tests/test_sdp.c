@@ -79,16 +79,25 @@ static int count_occurrences(const char *haystack, const char *needle) {
   return n;
 }
 
-/* Helper to setup a mock session and securely point slots to stack memory */
+static sfu_receiver_slot_t mock_slots[SFU_MAX_REMOTE_SLOTS];
+static sfu_receiver_slot_t *mock_slot_ptrs[SFU_MAX_REMOTE_SLOTS];
+
 static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *audio, sfu_transceiver_t *video, sfu_peer_session_t *remotes) {
   memset(session, 0, sizeof(*session));
   memset(audio, 0, sizeof(*audio) * SFU_MAX_REMOTE_SLOTS);
   memset(video, 0, sizeof(*video) * SFU_MAX_REMOTE_SLOTS);
   memset(remotes, 0, sizeof(*remotes) * SFU_MAX_REMOTE_SLOTS);
+  memset(mock_slots, 0, sizeof(mock_slots));
 
-  for (uint32_t i = 0; i < session->receiver_capacity; i++) {
-    session->receivers[i]->audio = &audio[i];
-    session->receivers[i]->video = &video[i];
+  session->receiver_capacity = SFU_MAX_REMOTE_SLOTS;
+  session->receivers = mock_slot_ptrs;
+
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    mock_slot_ptrs[i] = &mock_slots[i];
+    mock_slots[i].audio = &audio[i];
+    mock_slots[i].video = &video[i];
+    audio[i].owner = &remotes[i];
+    video[i].owner = &remotes[i];
   }
 }
 
