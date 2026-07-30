@@ -444,12 +444,12 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
         disconnect_client(c);
       } else {
         char type[32];
-        if (sfu_json_extract_string(buf, "type", type, sizeof(type)) >= 0) {
+        if (sfu_json_extract_string(buf, (size_t)n, "type", type, sizeof(type)) >= 0) {
           if (strcmp(type, "join") == 0) {
             char room_str[64] = {0};
             uint64_t room_id = 0;
 
-            if (sfu_json_extract_string(buf, "room", room_str, sizeof(room_str)) >= 0) {
+            if (sfu_json_extract_string(buf, (size_t)n, "room", room_str, sizeof(room_str)) >= 0) {
               room_id = (uint64_t)strtoull(room_str, NULL, 10);
             }
 
@@ -481,7 +481,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
               sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}", 49);
             } else {
               char sdp[SFU_SIGNALING_SDP_CAP];
-              int sdp_len = sfu_json_extract_string(buf, "sdp", sdp, sizeof(sdp));
+              int sdp_len = sfu_json_extract_string(buf, (size_t)n, "sdp", sdp, sizeof(sdp));
               if (sdp_len >= 0) {
                 bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, c->client_ufrag, sizeof(c->client_ufrag));
                 if (have_ufrag) {

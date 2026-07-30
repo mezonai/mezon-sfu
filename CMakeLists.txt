@@ -40,8 +40,8 @@ find_library(BORINGSSL_SSL_LIB NAMES ssl PATHS "/usr/local/lib/boringssl" NO_DEF
 find_library(BORINGSSL_CRYPTO_LIB NAMES crypto PATHS "/usr/local/lib/boringssl" NO_DEFAULT_PATH REQUIRED)
 
 # Set libsrtp include path and locate the library
-find_path(SRTP_INCLUDE_DIR NAMES srtp2/srtp.h PATHS "/usr/local/include" "/usr/include" REQUIRED)
-find_library(SRTP2_LIBRARY NAMES srtp2 PATHS "/usr/local/lib" "/usr/local/lib/boringssl" "/usr/lib/x86_64-linux-gnu" "/usr/lib" REQUIRED)
+set(SRTP_INCLUDE_DIR "/usr/local/include/srtp2")
+find_library(SRTP2_LIBRARY NAMES srtp2 PATHS "/usr/local/lib" NO_DEFAULT_PAT REQUIRED)
 
 # Set libuv headers and library installed by libuv1-dev
 find_path(LIBUV_INCLUDE_DIR NAMES uv.h)
