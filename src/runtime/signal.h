@@ -8,5 +8,6 @@
  * polls sfu_shutdown_requested() once per batch and exits cleanly. */
 void sfu_install_shutdown_handler(void);
 bool sfu_shutdown_requested(void);
+void sfu_request_shutdown(void);
 
 #endif /* SFU_RUNTIME_SIGNAL_H */

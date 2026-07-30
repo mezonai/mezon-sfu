@@ -58,8 +58,14 @@ void sfu_scheduler_destroy(sfu_scheduler_t *s) {
 
 void sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr) {
   sfu_deferred_free_t *df = SFU_CALLOC(1, sizeof(*df));
+  uint64_t fallback_generations[SFU_MAX_WORKERS];
   if (!df) {
-    SFU_LOG_ERROR("scheduler: failed to allocate deferred-free node, leaking ptr=%p", ptr);
+    SFU_LOG_WARN("scheduler: deferred-free allocation failed; reclaiming synchronously");
+    for (uint32_t i = 0; i < s->worker_count; i++)
+      fallback_generations[i] = __atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE);
+    for (uint32_t i = 0; i < s->worker_count; i++)
+      while (__atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE) == fallback_generations[i]) usleep(100);
+    SFU_FREE(ptr);
     return;
   }
 
@@ -67,8 +73,13 @@ void sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr) {
   df->worker_count = s->worker_count;
   df->worker_generations = SFU_CALLOC(s->worker_count, sizeof(uint64_t));
   if (!df->worker_generations) {
-    SFU_LOG_ERROR("scheduler: failed to snapshot generations, leaking ptr=%p", ptr);
+    SFU_LOG_WARN("scheduler: generation snapshot allocation failed; reclaiming synchronously");
     SFU_FREE(df);
+    for (uint32_t i = 0; i < s->worker_count; i++)
+      fallback_generations[i] = __atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE);
+    for (uint32_t i = 0; i < s->worker_count; i++)
+      while (__atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE) == fallback_generations[i]) usleep(100);
+    SFU_FREE(ptr);
     return;
   }
   for (uint32_t i = 0; i < s->worker_count; i++) {

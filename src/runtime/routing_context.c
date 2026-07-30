@@ -2,15 +2,21 @@
 #include <string.h>
 #include "util/log.h"
 
-void sfu_routing_table_init(sfu_routing_table_t *table) {
+int sfu_routing_table_init(sfu_routing_table_t *table) {
   if (!table) {
-    return;
+    return -1;
   }
 
   memset(table->entries, 0, sizeof(table->entries));
   table->count = 0;
 
-  pthread_mutex_init(&table->mutex, NULL);
+  return pthread_mutex_init(&table->mutex, NULL) == 0 ? 0 : -1;
+}
+
+void sfu_routing_table_destroy(sfu_routing_table_t *table) {
+  if (table) {
+    pthread_mutex_destroy(&table->mutex);
+  }
 }
 
 void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
