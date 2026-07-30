@@ -1,8 +1,9 @@
-#include "room/room.h"
-
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include "room/room.h"
+#include "room/room_media_graph.h"
+#include "runtime/scheduler.h"
 
 static uint32_t receiver_count(sfu_peer_session_t *peer) {
   uint32_t n = 0;
@@ -18,8 +19,9 @@ static uint32_t receiver_count(sfu_peer_session_t *peer) {
 
 int main(void) {
   sfu_room_t room;
+  sfu_scheduler_t scheduler;
 
-  assert(sfu_room_init(&room, 1, "test_room") == 0);
+  assert(sfu_room_init(&room, 1) == 0);
 
   sfu_peer_session_t a = {0};
   sfu_peer_session_t b = {0};
@@ -42,16 +44,16 @@ int main(void) {
   c.uplink_audio.active = true;
   c.uplink_video.active = true;
 
-  room_add_peer(&room, &a);
+  room_add_peer(&room, &a, &scheduler);
 
   assert(receiver_count(&a) == 0);
 
-  room_add_peer(&room, &b);
+  room_add_peer(&room, &b, &scheduler);
 
   assert(receiver_count(&a) == 1);
   assert(receiver_count(&b) == 1);
 
-  room_add_peer(&room, &c);
+  room_add_peer(&room, &c, &scheduler);
 
   assert(receiver_count(&a) == 2);
   assert(receiver_count(&b) == 2);

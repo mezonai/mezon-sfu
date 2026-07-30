@@ -43,6 +43,11 @@ static uint16_t parse_port(int argc, char **argv, int index, uint16_t default_po
 }
 
 int main(int argc, char **argv) {
+  _Static_assert(SFU_SESSION_ADDR_HASH_SLOTS >= SFU_SESSION_TABLE_MAX * 2, "addr hash table too small for max load factor target");
+  _Static_assert(SFU_SESSION_UFRAG_HASH_SLOTS >= SFU_SESSION_TABLE_MAX * 2, "ufrag hash table too small for max load factor target");
+  _Static_assert((SFU_SESSION_ADDR_HASH_SLOTS & (SFU_SESSION_ADDR_HASH_SLOTS - 1)) == 0, "addr hash table size must be power of 2");
+  _Static_assert((SFU_SESSION_UFRAG_HASH_SLOTS & (SFU_SESSION_UFRAG_HASH_SLOTS - 1)) == 0, "ufrag hash table size must be power of 2");
+
   sfu_log_set_level(SFU_LOG_LEVEL_INFO);
 
   signal(SIGPIPE, SIG_IGN);
@@ -93,11 +98,10 @@ int main(int argc, char **argv) {
   sfu_room_registry_t *room_registry = SFU_CALLOC(1, sizeof(*room_registry));
   sfu_session_table_t *sessions = SFU_CALLOC(1, sizeof(*sessions));
   sfu_routing_table_t *routing_table = SFU_CALLOC(1, sizeof(*routing_table));
-  sfu_scheduler_t *scheduler = SFU_CALLOC(1, sizeof(*scheduler));
   sfu_fanout_mesh_t *mesh = SFU_CALLOC(1, sizeof(*mesh));
   sfu_packet_pool_t *pp = SFU_CALLOC(1, sizeof(*pp));
 
-  if (!room_registry || !sessions || !routing_table || !scheduler || !mesh || !pp) {
+  if (!room_registry || !sessions || !routing_table || !mesh || !pp) {
     SFU_LOG_ERROR("failed to allocate top-level runtime structures");
     return 1;
   }
@@ -144,20 +148,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Initialize workers with reference to room registry, sessions, and shared routing table
-  for (uint32_t i = 0; i < worker_count; i++) {
-    int core_id = (int)(i + 1) % (online > 1 ? online : 1);
-    int send_bgid = SFU_PROVIDED_BUF_GROUP_ID + 1 + (int)i;
-    if (sfu_worker_init(&workers[i], core_id, i, fd, pp, room_registry, mesh, sessions, routing_table, &ice_creds, SFU_WORKER_QUEUE_CAPACITY, send_bgid) != 0) {
-      SFU_LOG_ERROR("failed to init worker %u", i);
-      return 1;
-    }
-    if (sfu_worker_start(&workers[i]) != 0) {
-      SFU_LOG_ERROR("failed to start worker %u", i);
-      return 1;
-    }
-  }
-
+  sfu_scheduler_t *scheduler = SFU_CALLOC(1, sizeof(*scheduler));
   if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, SFU_PROVIDED_BUF_GROUP_ID, SFU_PROVIDED_BUF_COUNT, SFU_PACKET_BUF_SIZE) != 0) {
     SFU_LOG_ERROR("failed to init scheduler");
     return 1;
@@ -165,6 +156,20 @@ int main(int argc, char **argv) {
   if (sfu_scheduler_start(scheduler) != 0) {
     SFU_LOG_ERROR("failed to start scheduler");
     return 1;
+  }
+
+  for (uint32_t i = 0; i < worker_count; i++) {
+    int core_id = (int)(i + 1) % (online > 1 ? online : 1);
+    int send_bgid = SFU_PROVIDED_BUF_GROUP_ID + 1 + (int)i;
+    if (sfu_worker_init(&workers[i], core_id, i, fd, pp, room_registry, mesh, sessions, routing_table, &ice_creds, scheduler, SFU_WORKER_QUEUE_CAPACITY,
+                        send_bgid) != 0) {
+      SFU_LOG_ERROR("failed to init worker %u", i);
+      return 1;
+    }
+    if (sfu_worker_start(&workers[i]) != 0) {
+      SFU_LOG_ERROR("failed to start worker %u", i);
+      return 1;
+    }
   }
 
   // Start unified signaling server passing shared room registry, session table, and routing table
