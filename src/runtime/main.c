@@ -43,6 +43,11 @@ static uint16_t parse_port(int argc, char **argv, int index, uint16_t default_po
 }
 
 int main(int argc, char **argv) {
+  _Static_assert(SFU_SESSION_ADDR_HASH_SLOTS >= SFU_SESSION_TABLE_MAX * 2, "addr hash table too small for max load factor target");
+  _Static_assert(SFU_SESSION_UFRAG_HASH_SLOTS >= SFU_SESSION_TABLE_MAX * 2, "ufrag hash table too small for max load factor target");
+  _Static_assert((SFU_SESSION_ADDR_HASH_SLOTS & (SFU_SESSION_ADDR_HASH_SLOTS - 1)) == 0, "addr hash table size must be power of 2");
+  _Static_assert((SFU_SESSION_UFRAG_HASH_SLOTS & (SFU_SESSION_UFRAG_HASH_SLOTS - 1)) == 0, "ufrag hash table size must be power of 2");
+
   sfu_log_set_level(SFU_LOG_LEVEL_INFO);
 
   signal(SIGPIPE, SIG_IGN);
