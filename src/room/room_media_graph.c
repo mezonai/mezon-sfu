@@ -49,7 +49,6 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     return;
   }
 
-  /* add to room */
   room->peers[room->peer_count++] = peer;
   peer->room = room;
 
@@ -60,21 +59,18 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
       continue;
     }
 
-    /* other subscribes to peer */
     sfu_receiver_slot_t *slot = alloc_receiver_slot(other);
     if (slot) {
       slot->audio = &peer->uplink_audio;
       slot->video = &peer->uplink_video;
     }
 
-    /* peer subscribes to other */
     slot = alloc_receiver_slot(peer);
     if (slot) {
       slot->audio = &other->uplink_audio;
       slot->video = &other->uplink_video;
     }
 
-    /* both peers require renegotiation */
     other->negotiation_needed = true;
     peer->negotiation_needed = true;
   }
@@ -105,7 +101,7 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     }
 
     bool touched = false;
-    for (uint32_t s = 0; s < SFU_MAX_REMOTE_SLOTS; s++) {
+    for (uint32_t s = 0; s < other->receiver_capacity; s++) {
       sfu_receiver_slot_t *slot = other->receivers[s];
       if (!slot) {
         continue;

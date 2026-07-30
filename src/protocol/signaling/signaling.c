@@ -364,11 +364,12 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
 static void on_client_close(uv_handle_t *handle) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
 
-  if (c->session && c->session->room) {
-    room_remove_peer(c->session->room, c->session);
+  if (c->session) {
+    if (c->session->room) {
+      room_remove_peer(c->session->room, c->session);
+    }
+    sfu_session_table_remove(c->server->sessions, c->session);
   }
-
-  sfu_session_table_remove(c->server->sessions, c->session);
 
   close(c->fd);
   SFU_FREE(c);
