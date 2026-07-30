@@ -47,5 +47,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
                                sfu_room_registry_t *room_registry, sfu_routing_table_t *routing_table);
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 void sfu_signaling_trigger_renegotiation(sfu_room_t *room);
+void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd);
+
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */

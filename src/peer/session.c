@@ -259,8 +259,22 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
   }
 
   pthread_mutex_lock(&t->lock);
-  for (uint32_t i = 0; i < SFU_SESSION_ADDR_HASH_SLOTS; i++) if (t->addr_index[i].index < t->count && t->sessions[t->addr_index[i].index] == s) t->addr_index[i].index = SFU_HASH_DELETED;
-  for (uint32_t i = 0; i < SFU_SESSION_UFRAG_HASH_SLOTS; i++) if (t->ufrag_index[i].index < t->count && t->sessions[t->ufrag_index[i].index] == s) t->ufrag_index[i].index = SFU_HASH_DELETED;
+  if (s->addr_len > 0) {
+    uint32_t hash = fnv1a(&s->addr, s->addr_len);
+    addr_match_ctx_t ctx = {t, &s->addr, s->addr_len};
+    uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
+    if (slot != SFU_HASH_EMPTY) {
+      t->addr_index[slot].index = SFU_HASH_DELETED;
+    }
+  }
+  if (s->ufrag[0] != '\0') {
+    uint32_t hash = fnv1a(s->ufrag, strlen(s->ufrag));
+    ufrag_match_ctx_t ctx = {t, s->ufrag};
+    uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches, &ctx, false);
+    if (slot != SFU_HASH_EMPTY) {
+      t->ufrag_index[slot].index = SFU_HASH_DELETED;
+    }
+  }
   if (s->active) {
     if (s->state == SFU_SESSION_ESTABLISHED) {
       sfu_srtp_ctx_destroy(&s->srtp);
@@ -285,9 +299,13 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
 void sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len) {
   if (!addr || addr_len > sizeof(s->addr)) return;
   pthread_mutex_lock(&t->lock);
-  for (uint32_t i = 0; i < SFU_SESSION_ADDR_HASH_SLOTS; i++) {
-    uint32_t idx = t->addr_index[i].index;
-    if (idx < t->count && t->sessions[idx] == s) t->addr_index[i].index = SFU_HASH_DELETED;
+  if (s->addr_len > 0) {
+    uint32_t hash = fnv1a(&s->addr, s->addr_len);
+    addr_match_ctx_t ctx = {t, &s->addr, s->addr_len};
+    uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
+    if (slot != SFU_HASH_EMPTY) {
+      t->addr_index[slot].index = SFU_HASH_DELETED;
+    }
   }
   memcpy(&s->addr, addr, addr_len);
   s->addr_len = addr_len;
