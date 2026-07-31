@@ -727,12 +727,13 @@
                                     }
                                 });
 
-                                for (const id of [...participants.keys()]) {
-                                  console.log("remove track id", id);
-                                  if (id === "local") continue;
-                                  if (!activeStreamIds.has(id)) {
-                                    removeTile(id);
-                                  }
+                                for (const [id, p] of participants.entries()) {
+                                    console.log('remove track', id, p);
+                                    if (id === "local") continue;
+                                    const track = p.stream ? p.stream.getTracks()[0] : null;
+                                    if (!track || !activeTrackIds.has(track.id)) {
+                                        removeTile(id);
+                                    }
                                 }
 
                                 if (!localTracksAdded) {
