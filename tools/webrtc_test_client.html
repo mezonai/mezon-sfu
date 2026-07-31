@@ -719,23 +719,20 @@
                                     }),
                                 ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
-                                // Collect IDs of all tracks currently alive in the WebRTC receivers
                                 const activeTrackIds = new Set();
                                 pc.getReceivers().forEach(r => {
+                                    console.log('collect track state', r.track.readyState);
                                     if (r.track && r.track.readyState === "live") {
                                         activeTrackIds.add(r.track.id);
                                     }
                                 });
 
-                                // Remove participants whose tracks are no longer active
-                                for (const [id, p] of participants.entries()) {
-                                    if (id === "local") continue;
-
-                                    // Check if the participant's stored track still exists in the active receivers list
-                                    const track = p.stream ? p.stream.getTracks()[0] : null;
-                                    if (!track || !activeTrackIds.has(track.id)) {
-                                        removeTile(id);
-                                    }
+                                for (const id of [...participants.keys()]) {
+                                  console.log("remove track id", id);
+                                  if (id === "local") continue;
+                                  if (!activeStreamIds.has(id)) {
+                                    removeTile(id);
+                                  }
                                 }
 
                                 if (!localTracksAdded) {
