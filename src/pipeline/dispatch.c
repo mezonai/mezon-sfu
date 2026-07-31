@@ -15,7 +15,6 @@
 
 extern bool sfu_lookup_ufrag_room(const char *client_ufrag, sfu_room_t **out_room);
 
-/* Helper to convert socket storage to string for clean diagnostic logging */
 static void format_peer_endpoint(const struct sockaddr_storage *addr, char *out_ip, uint16_t *out_port) {
   strcpy(out_ip, "unknown");
   *out_port = 0;
@@ -217,8 +216,6 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   SFU_LOG_INFO("worker %u: Feeding %u bytes of DTLS data from %s:%u (current state: %d, room %s)", w->worker_index, pkt->len, ip, port, session->state,
                session->room ? "BOUND" : "unbound");
 
-  // Since we implemented the callback option in dtls.c, we pass NULL here if we handle it locally inside the worker switch block,
-  // OR we pass your event hook. Let's keep it clean by driving the logic right when the state officially switches below.
   sfu_dtls_feed_status_t status = sfu_dtls_conn_feed(&session->cold->dtls, pkt->data, pkt->len, NULL, NULL);
 
   uint8_t out[4096];
@@ -280,6 +277,5 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   SFU_LOG_DEBUG("worker %u RTP from %s:%u len=%u", w->worker_index, ip, port, pkt->len);
 
-  /* Media traffic */
   sfu_room_forward_packet(w, pkt);
 }
