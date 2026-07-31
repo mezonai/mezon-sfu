@@ -74,11 +74,6 @@ static bool extract_sdp_ice_ufrag(const char *sdp, size_t sdp_len, char *out, si
   return false;
 }
 
-/* Server-offerer architecture: the SFU is always the one running one signaling
-   server instance per process (see main.c), so a module-level pointer lets
-   sfu_signaling_trigger_renegotiation() -- invoked from worker/dispatch.c with
-   only a room handle -- reach media_host/ice_creds/dtls_ctx to build a fresh
-   offer without threading the server pointer through the whole call chain. */
 static sfu_signaling_server_t *g_signaling_server = NULL;
 
 static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc) {
@@ -531,17 +526,28 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
       setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
       sfu_client_conn_t *c = (sfu_client_conn_t *)SFU_CALLOC(1, sizeof(sfu_client_conn_t));
-      if (!c) { close(fd); return; }
+      if (!c) {
+        close(fd);
+        return;
+      }
       c->fd = fd;
       c->server = s;
       c->handshake_done = false;
       strcpy(c->peer_ip, "unknown");
 
       int rc = uv_poll_init_socket(handle->loop, &c->poll_handle, fd);
-      if (rc != 0) { SFU_LOG_ERROR("signaling: uv_poll_init_socket failed: %s", uv_strerror(rc)); close(fd); SFU_FREE(c); return; }
+      if (rc != 0) {
+        SFU_LOG_ERROR("signaling: uv_poll_init_socket failed: %s", uv_strerror(rc));
+        close(fd);
+        SFU_FREE(c);
+        return;
+      }
       c->poll_handle.data = c;
       rc = uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
-      if (rc != 0) { SFU_LOG_ERROR("signaling: uv_poll_start failed: %s", uv_strerror(rc)); uv_close((uv_handle_t *)&c->poll_handle, on_client_close); }
+      if (rc != 0) {
+        SFU_LOG_ERROR("signaling: uv_poll_start failed: %s", uv_strerror(rc));
+        uv_close((uv_handle_t *)&c->poll_handle, on_client_close);
+      }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
       SFU_LOG_ERROR("signaling: accept failed: %s", strerror(errno));
     }

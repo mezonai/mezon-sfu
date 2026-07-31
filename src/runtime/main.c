@@ -107,11 +107,15 @@ int main(int argc, char **argv) {
   dtls_initialized = true;
   sfu_ice_credentials_generate(&ice_creds);
   const char *public_host = getenv("SFU_PUBLIC_HOST");
-  if (!public_host) public_host = "127.0.0.1";
+  if (!public_host) {
+    public_host = "127.0.0.1";
+  }
   SFU_LOG_INFO("local ICE credentials: ufrag=%s pwd=%s public_host=%s", ice_creds.ufrag, ice_creds.pwd, public_host);
 
   fd = sfu_udp_socket_create(port);
-  if (fd < 0) goto cleanup;
+  if (fd < 0) {
+    goto cleanup;
+  }
   if (sfu_packet_pool_init(pp, SFU_PACKET_POOL_CAPACITY, SFU_PACKET_BUF_SIZE) != 0) {
     SFU_LOG_ERROR("failed to init packet pool");
     goto cleanup;
@@ -119,7 +123,9 @@ int main(int argc, char **argv) {
   packet_pool_initialized = true;
   online = sfu_online_cpu_count();
   worker_count = (uint32_t)(online > 1 ? online - 1 : 1);
-  if (worker_count > SFU_MAX_WORKERS) worker_count = SFU_MAX_WORKERS;
+  if (worker_count > SFU_MAX_WORKERS) {
+    worker_count = SFU_MAX_WORKERS;
+  }
   SFU_LOG_INFO("detected %d online cpus: 1 dispatcher + %u workers", online, worker_count);
   workers = SFU_CALLOC(worker_count, sizeof(*workers));
   scheduler = SFU_CALLOC(1, sizeof(*scheduler));
@@ -127,32 +133,50 @@ int main(int argc, char **argv) {
     SFU_LOG_ERROR("failed to allocate runtime threads");
     goto cleanup;
   }
-  if (sfu_routing_table_init(routing_table) != 0) goto cleanup;
+  if (sfu_routing_table_init(routing_table) != 0) {
+    goto cleanup;
+  }
   routing_initialized = true;
-  if (sfu_room_registry_init(room_registry) != 0) goto cleanup;
+  if (sfu_room_registry_init(room_registry) != 0) {
+    goto cleanup;
+  }
   room_registry_initialized = true;
-  if (sfu_fanout_mesh_init(mesh, worker_count, SFU_FANOUT_RING_CAPACITY, SFU_FANOUT_JOB_POOL_CAPACITY) != 0) goto cleanup;
+  if (sfu_fanout_mesh_init(mesh, worker_count, SFU_FANOUT_RING_CAPACITY, SFU_FANOUT_JOB_POOL_CAPACITY) != 0) {
+    goto cleanup;
+  }
   mesh_initialized = true;
-  if (sfu_session_table_init(sessions, &dtls_ctx) != 0) goto cleanup;
+  if (sfu_session_table_init(sessions, &dtls_ctx) != 0) {
+    goto cleanup;
+  }
   sessions_initialized = true;
-  if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, SFU_PROVIDED_BUF_GROUP_ID, SFU_PROVIDED_BUF_COUNT, SFU_PACKET_BUF_SIZE) != 0) goto cleanup;
+  if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, SFU_PROVIDED_BUF_GROUP_ID, SFU_PROVIDED_BUF_COUNT, SFU_PACKET_BUF_SIZE) != 0) {
+    goto cleanup;
+  }
   scheduler_initialized = true;
 
   for (uint32_t i = 0; i < worker_count; i++) {
     int core_id = (int)(i + 1) % (online > 1 ? online : 1);
     int send_bgid = SFU_PROVIDED_BUF_GROUP_ID + 1 + (int)i;
-    if (sfu_worker_init(&workers[i], core_id, i, fd, pp, room_registry, mesh, sessions, routing_table, &ice_creds, scheduler,
-                        SFU_WORKER_QUEUE_CAPACITY, send_bgid) != 0) goto cleanup;
+    if (sfu_worker_init(&workers[i], core_id, i, fd, pp, room_registry, mesh, sessions, routing_table, &ice_creds, scheduler, SFU_WORKER_QUEUE_CAPACITY,
+                        send_bgid) != 0) {
+      goto cleanup;
+    }
     workers_initialized++;
   }
   /* Start consumers before the dispatcher can enqueue packets for them. */
   for (uint32_t i = 0; i < worker_count; i++) {
-    if (sfu_worker_start(&workers[i]) != 0) goto cleanup;
+    if (sfu_worker_start(&workers[i]) != 0) {
+      goto cleanup;
+    }
     workers_started++;
   }
-  if (sfu_scheduler_start(scheduler) != 0) goto cleanup;
+  if (sfu_scheduler_start(scheduler) != 0) {
+    goto cleanup;
+  }
   scheduler_started = true;
-  if (sfu_signaling_server_start(&signaling, signaling_port, public_host, port, &ice_creds, &dtls_ctx, sessions, room_registry, routing_table) != 0) goto cleanup;
+  if (sfu_signaling_server_start(&signaling, signaling_port, public_host, port, &ice_creds, &dtls_ctx, sessions, room_registry, routing_table) != 0) {
+    goto cleanup;
+  }
   signaling_started = true;
 
   SFU_LOG_INFO("mezon-sfu ready: media UDP port %u, signaling ws://%s:%u (pid=%d)", port, public_host, signaling_port, getpid());
@@ -161,20 +185,48 @@ int main(int argc, char **argv) {
   rc = 0;
 
 cleanup:
-  if (signaling_started) sfu_signaling_server_stop(&signaling);
-  if (rc != 0 && (scheduler_started || workers_started)) sfu_request_shutdown();
-  if (scheduler_started) sfu_scheduler_join(scheduler);
-  for (uint32_t i = 0; i < workers_started; i++) sfu_worker_join(&workers[i]);
-  if (scheduler_initialized) sfu_scheduler_destroy(scheduler);
-  for (uint32_t i = 0; i < workers_initialized; i++) sfu_worker_destroy(&workers[i]);
-  if (sessions_initialized) sfu_session_table_destroy(sessions);
-  if (mesh_initialized) sfu_fanout_mesh_destroy(mesh);
-  if (room_registry_initialized) sfu_room_registry_destroy(room_registry);
-  if (routing_initialized) sfu_routing_table_destroy(routing_table);
-  if (packet_pool_initialized) sfu_packet_pool_destroy(pp);
-  if (fd >= 0) close(fd);
-  if (dtls_initialized) sfu_dtls_ctx_destroy(&dtls_ctx);
-  if (srtp_initialized) sfu_srtp_global_deinit();
+  if (signaling_started) {
+    sfu_signaling_server_stop(&signaling);
+  }
+  if (rc != 0 && (scheduler_started || workers_started)) {
+    sfu_request_shutdown();
+  }
+  if (scheduler_started) {
+    sfu_scheduler_join(scheduler);
+  }
+  for (uint32_t i = 0; i < workers_started; i++) {
+    sfu_worker_join(&workers[i]);
+  }
+  if (scheduler_initialized) {
+    sfu_scheduler_destroy(scheduler);
+  }
+  for (uint32_t i = 0; i < workers_initialized; i++) {
+    sfu_worker_destroy(&workers[i]);
+  }
+  if (sessions_initialized) {
+    sfu_session_table_destroy(sessions);
+  }
+  if (mesh_initialized) {
+    sfu_fanout_mesh_destroy(mesh);
+  }
+  if (room_registry_initialized) {
+    sfu_room_registry_destroy(room_registry);
+  }
+  if (routing_initialized) {
+    sfu_routing_table_destroy(routing_table);
+  }
+  if (packet_pool_initialized) {
+    sfu_packet_pool_destroy(pp);
+  }
+  if (fd >= 0) {
+    close(fd);
+  }
+  if (dtls_initialized) {
+    sfu_dtls_ctx_destroy(&dtls_ctx);
+  }
+  if (srtp_initialized) {
+    sfu_srtp_global_deinit();
+  }
   SFU_FREE(scheduler);
   SFU_FREE(workers);
   SFU_FREE(pp);
@@ -182,7 +234,9 @@ cleanup:
   SFU_FREE(routing_table);
   SFU_FREE(sessions);
   SFU_FREE(room_registry);
-  if (rc != 0) return rc;
+  if (rc != 0) {
+    return rc;
+  }
 
   SFU_LOG_INFO("mezon-sfu stopped cleanly");
   return 0;

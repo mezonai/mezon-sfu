@@ -2,8 +2,8 @@
 #define SFU_PROTOCOL_SIGNALING_H
 
 #include <pthread.h>
-#include <stdint.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <uv.h>
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
@@ -16,8 +16,8 @@ typedef struct sfu_signaling_server {
   uv_async_t async_waker;
   char media_host[64];
   uint16_t media_port;
-  const sfu_ice_credentials_t *ice_creds; /* shared, not owned */
-  const sfu_dtls_ctx_t *dtls_ctx;         /* shared, not owned */
+  const sfu_ice_credentials_t *ice_creds;
+  const sfu_dtls_ctx_t *dtls_ctx;
   sfu_session_table_t *sessions;
   sfu_room_registry_t *room_registry;
   sfu_routing_table_t *routing_table;

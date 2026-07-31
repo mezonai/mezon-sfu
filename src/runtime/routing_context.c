@@ -39,13 +39,17 @@ void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char
 }
 
 void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd) {
-  if (!table) return;
+  if (!table) {
+    return;
+  }
   pthread_mutex_lock(&table->mutex);
   for (int i = 0; i < table->count;) {
     if (table->entries[i].fd == fd) {
       table->entries[i] = table->entries[--table->count];
       memset(&table->entries[table->count], 0, sizeof(table->entries[0]));
-    } else i++;
+    } else {
+      i++;
+    }
   }
   pthread_mutex_unlock(&table->mutex);
 }
