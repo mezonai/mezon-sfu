@@ -48,6 +48,8 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 void sfu_signaling_trigger_renegotiation(sfu_room_t *room);
 void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd);
+void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
+                                             size_t pass_sz, uint32_t ttl_seconds);
 
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */

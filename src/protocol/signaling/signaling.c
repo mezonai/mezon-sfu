@@ -4,6 +4,9 @@
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/base64.h>
+#include <openssl/digest.h>
+#include <openssl/hmac.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -20,6 +23,64 @@
 #include "runtime/routing_context.h"
 #include "util/alloc.h"
 #include "util/log.h"
+
+static bool build_and_send_joined_response(sfu_client_conn_t *c, uint64_t room_id) {
+  if (!c || !c->server) {
+    return false;
+  }
+
+  char turn_secret[64] = {0};
+
+  sfu_signaling_server_t *s = c->server;
+  char response[1024];
+  int response_len = 0;
+
+  if (turn_secret[0] != '\0' && s->media_host[0] != '\0') {
+    char turn_user[64] = {0};
+    char turn_pass[64] = {0};
+
+    sfu_signaling_generate_turn_credentials(turn_secret, c->peer_ip, turn_user, sizeof(turn_user), turn_pass, sizeof(turn_pass), 86400);
+
+    response_len = snprintf(response, sizeof(response),
+                            "{"
+                            "\"type\":\"joined\","
+                            "\"room\":\"%" PRIu64
+                            "\","
+                            "\"iceServers\":["
+                            "{\"urls\":\"stun:%s:3478\"},"
+                            "{\"urls\":\"turn:%s:3478?transport=udp\",\"username\":\"%s\",\"credential\":\"%s\"},"
+                            "{\"urls\":\"turn:%s:443?transport=tcp\",\"username\":\"%s\",\"credential\":\"%s\"}"
+                            "]"
+                            "}",
+                            room_id, s->media_host, s->media_host, turn_user, turn_pass, s->media_host, turn_user, turn_pass);
+  } else {
+    const char *host = (s->media_host[0] != '\0') ? s->media_host : "stun.l.google.com";
+    uint16_t port = (s->media_host[0] != '\0') ? 3478 : 19302;
+
+    response_len = snprintf(response, sizeof(response),
+                            "{"
+                            "\"type\":\"joined\","
+                            "\"room\":\"%" PRIu64
+                            "\","
+                            "\"iceServers\":["
+                            "{\"urls\":\"stun:%s:%u\"}"
+                            "]"
+                            "}",
+                            room_id, host, port);
+  }
+
+  if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
+    SFU_LOG_WARN("signaling: joined response message too large (fd=%d)", c->fd);
+    return false;
+  }
+
+  if (sfu_ws_send_text(c->fd, response, (size_t)response_len) != 0) {
+    SFU_LOG_WARN("signaling: failed to send joined response (fd=%d)", c->fd);
+    return false;
+  }
+
+  return true;
+}
 
 void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd) {
   pthread_mutex_lock(&table->mutex);
@@ -463,6 +524,10 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
 
                 SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64, c->peer_ip, room_id);
 
+                if (!build_and_send_joined_response(c, room_id)) {
+                  SFU_LOG_WARN("signaling: failed to send joined response (fd=%d)", c->fd);
+                }
+
                 char response[128];
                 snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
                 sfu_ws_send_text(c->fd, response, strlen(response));
@@ -664,4 +729,34 @@ void sfu_signaling_server_stop(sfu_signaling_server_t *s) {
   if (g_signaling_server == s) {
     g_signaling_server = NULL;
   }
+}
+
+void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
+                                             size_t pass_sz, uint32_t ttl_seconds) {
+  if (!secret || !out_username || !out_password || user_sz == 0 || pass_sz == 0) {
+    return;
+  }
+
+  time_t expiry = time(NULL) + (ttl_seconds > 0 ? ttl_seconds : 86400);
+  snprintf(out_username, user_sz, "%ld:%s", (long)expiry, username_suffix ? username_suffix : "user");
+
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len = 0;
+
+  /* BoringSSL HMAC API */
+  if (!HMAC(EVP_sha1(), secret, strlen(secret), (const unsigned char *)out_username, strlen(out_username), digest, &digest_len)) {
+    out_password[0] = '\0';
+    return;
+  }
+
+  /* BoringSSL EVP_EncodeBlock calculates required output length as 4 * ((in_len + 2) / 3) + 1 null byte */
+  size_t required_b64_len = 4 * ((digest_len + 2) / 3) + 1;
+  if (pass_sz < required_b64_len) {
+    SFU_LOG_ERROR("signaling: pass_sz buffer too small for TURN password");
+    out_password[0] = '\0';
+    return;
+  }
+
+  /* EVP_EncodeBlock encodes to base64 and automatically null-terminates out_password */
+  EVP_EncodeBlock((uint8_t *)out_password, digest, digest_len);
 }

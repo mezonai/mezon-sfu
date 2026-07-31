@@ -538,42 +538,21 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     return -1;
   }
 
-  SFU_LOG_DEBUG("SDP_BUILD: receivers=%d", SFU_MAX_REMOTE_SLOTS);
+  SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_capacity=%u", session->ufrag, session->receiver_capacity);
 
-  /* BUNDLE group up front: mid 0/1 are always the joining peer's own upload,
-     the rest are one (audio) or two (audio+video) mids per remote publisher. */
   char bundle_line[512];
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
-  uint32_t remote_mid = 2;
   for (uint32_t i = 0; i < session->receiver_capacity; i++) {
     const sfu_receiver_slot_t *slot = sfu_session_receiver(session, i);
-
     if (!slot) {
       continue;
     }
 
-    if (!slot->audio && !slot->video) {
-      continue;
+    n = snprintf(bundle_line + blen, sizeof(bundle_line) - blen, " %u %u", slot->mid_audio, slot->mid_video);
+    if (n < 0 || (size_t)n >= sizeof(bundle_line) - blen) {
+      return -1;
     }
-
-    const sfu_transceiver_t *audio = slot->audio;
-    const sfu_transceiver_t *video = slot->video;
-
-    if (audio->active && slot->audio->ssrc != 0) {
-      n = snprintf(bundle_line + blen, sizeof(bundle_line) - blen, " %u", remote_mid++);
-      if (n < 0 || (size_t)n >= sizeof(bundle_line) - blen) {
-        return -1;
-      }
-      blen += (size_t)n;
-    }
-
-    if (video->active && video->ssrc != 0) {
-      n = snprintf(bundle_line + blen, sizeof(bundle_line) - blen, " %u", remote_mid++);
-      if (n < 0 || (size_t)n >= sizeof(bundle_line) - blen) {
-        return -1;
-      }
-      blen += (size_t)n;
-    }
+    blen += (size_t)n;
   }
   if (append_line(out, out_cap, &off, bundle_line) != 0) {
     return -1;
@@ -585,7 +564,6 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   uint8_t local_video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : 96;
   uint8_t local_rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : 97;
 
-  /* mid 0: server RECEIVES the joining peer's own microphone. */
   n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     return -1;
@@ -606,7 +584,6 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     return -1;
   }
 
-  /* mid 1: server RECEIVES the joining peer's own camera/screen. */
   if (local_rtx_pt != 0) {
     n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, local_video_pt, local_rtx_pt);
   } else {
@@ -631,74 +608,67 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     return -1;
   }
 
-  /* mid 2..N: one SENDONLY section per remote publisher already in the room. */
-  uint32_t mid_counter = 2;
   for (uint32_t i = 0; i < session->receiver_capacity; i++) {
     const sfu_receiver_slot_t *slot = sfu_session_receiver(session, i);
-
     if (!slot) {
       continue;
     }
 
-    if (!slot->audio && !slot->video) {
-      continue;
+    bool audio_live = slot->audio && slot->audio->active && slot->audio->ssrc != 0;
+    bool video_live = slot->video && slot->video->active && slot->video->ssrc != 0;
+
+    n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
+    if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
+      return -1;
     }
-
-    const sfu_transceiver_t *audio = slot->audio;
-    const sfu_transceiver_t *video = slot->video;
-
-    if (audio->active && audio->ssrc != 0) {
-      n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
-      if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
-        return -1;
-      }
-      if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
-        return -1;
-      }
-      if (append_line(out, out_cap, &off, "a=sendonly") != 0) {
-        return -1;
-      }
-      n = snprintf(buf, sizeof(buf), "a=mid:%u", mid_counter++);
-      if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
-        return -1;
-      }
-      if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
-        return -1;
-      }
-      if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
-        return -1;
-      }
-      if (append_remote_audio_ssrcs(out, out_cap, &off, audio->ssrc, audio->owner->ufrag) != 0) {
+    if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, audio_live ? "a=sendonly" : "a=inactive") != 0) {
+      return -1;
+    }
+    n = snprintf(buf, sizeof(buf), "a=mid:%u", slot->mid_audio);
+    if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
+      return -1;
+    }
+    if (audio_live) {
+      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->audio->owner->ufrag) != 0) {
         return -1;
       }
     }
 
-    if (video->active && video->ssrc != 0) {
-      if (local_rtx_pt != 0) {
-        n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, local_video_pt, local_rtx_pt);
-      } else {
-        n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u", port, local_video_pt);
-      }
-      if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
-        return -1;
-      }
-      if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
-        return -1;
-      }
-      if (append_line(out, out_cap, &off, "a=sendonly") != 0) {
-        return -1;
-      }
-      n = snprintf(buf, sizeof(buf), "a=mid:%u", mid_counter++);
-      if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
-        return -1;
-      }
-      if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
-        return -1;
-      }
-      if (append_video_codec_attributes(out, out_cap, &off, local_video_pt, local_rtx_pt) != 0) {
-        return -1;
-      }
-      if (append_remote_video_ssrcs(out, out_cap, &off, video->ssrc, video->rtx_ssrc, video->owner->ufrag) != 0) {
+    if (local_rtx_pt != 0) {
+      n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, local_video_pt, local_rtx_pt);
+    } else {
+      n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u", port, local_video_pt);
+    }
+    if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
+      return -1;
+    }
+    if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, video_live ? "a=sendonly" : "a=inactive") != 0) {
+      return -1;
+    }
+    n = snprintf(buf, sizeof(buf), "a=mid:%u", slot->mid_video);
+    if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
+      return -1;
+    }
+    if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+      return -1;
+    }
+    if (append_video_codec_attributes(out, out_cap, &off, local_video_pt, local_rtx_pt) != 0) {
+      return -1;
+    }
+    if (video_live) {
+      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->video->owner->ufrag) != 0) {
         return -1;
       }
     }
