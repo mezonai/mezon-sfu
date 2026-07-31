@@ -11,25 +11,22 @@
 
 typedef struct sfu_deferred_free {
   void *ptr;
-  uint32_t worker_count;
   uint64_t *worker_generations;
   struct sfu_deferred_free *next;
+  uint32_t worker_count;
 } sfu_deferred_free_t;
 
 typedef struct sfu_scheduler {
-  int core_id;
   sfu_ring_t recv_ring;
-  sfu_packet_pool_t *pp;
-
-  sfu_worker_t *workers;
-  uint32_t worker_count;
-
-  pthread_t thread;
-  int fd;
-
-  sfu_deferred_free_t *pending_free_head;
   pthread_mutex_t pending_free_lock;
   struct timespec last_sweep;
+  sfu_packet_pool_t *pp;
+  sfu_worker_t *workers;
+  sfu_deferred_free_t *pending_free_head;
+  pthread_t thread;
+  uint32_t worker_count;
+  int core_id;
+  int fd;
 } sfu_scheduler_t;
 
 int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count, int recv_bgid,

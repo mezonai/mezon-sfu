@@ -455,7 +455,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
         return -1;
       }
-      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->audio->owner->ufrag) != 0) {
+      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->audio->owner->cold->ufrag) != 0) {
         return -1;
       }
     }
@@ -508,7 +508,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
           return -1;
         }
       }
-      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->video->owner->ufrag) != 0) {
+      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->video->owner->cold->ufrag) != 0) {
         return -1;
       }
     }
@@ -538,7 +538,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     return -1;
   }
 
-  SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_capacity=%u", session->ufrag, session->receiver_capacity);
+  SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_capacity=%u", session->cold->ufrag, session->receiver_capacity);
 
   char bundle_line[512];
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
@@ -638,7 +638,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       return -1;
     }
     if (audio_live) {
-      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->audio->owner->ufrag) != 0) {
+      if (append_remote_audio_ssrcs(out, out_cap, &off, slot->audio->ssrc, slot->audio->owner->cold->ufrag) != 0) {
         return -1;
       }
     }
@@ -668,7 +668,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       return -1;
     }
     if (video_live) {
-      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->video->owner->ufrag) != 0) {
+      if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->video->owner->cold->ufrag) != 0) {
         return -1;
       }
     }

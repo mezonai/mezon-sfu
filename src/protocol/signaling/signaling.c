@@ -318,7 +318,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
     }
 
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
-      SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->ufrag, session->fd);
+      SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     } else {
       SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
     }
@@ -364,8 +364,8 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
     session->pt_map[97] = rtx_pt;
   }
 
-  SFU_LOG_DEBUG("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt,
-                rtx_pt);
+  SFU_LOG_DEBUG("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->cold->ufrag, audio_ssrc, video_ssrc, rtx_ssrc,
+                video_pt, rtx_pt);
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {

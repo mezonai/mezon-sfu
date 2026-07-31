@@ -137,7 +137,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
       }
 
       if (session) {
-        bool addr_changed = !(session->addr_len == pkt->peer_addr_len && memcmp(&session->addr, &pkt->peer_addr, pkt->peer_addr_len) == 0);
+        bool addr_changed = !(session->cold->addr_len == pkt->peer_addr_len && memcmp(&session->cold->addr, &pkt->peer_addr, pkt->peer_addr_len) == 0);
         if (addr_changed) {
           if (session->state == SFU_SESSION_ESTABLISHED) {
             SFU_LOG_DEBUG("worker %u: ufrag=%s STUN from alternate candidate %s:%u (session already established at different addr, not rebinding)",
@@ -152,9 +152,9 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
       if (!session) {
         SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
       } else {
-        if (session->ufrag[0] == '\0') {
-          strncpy(session->ufrag, client_ufrag, sizeof(session->ufrag) - 1);
-          session->ufrag[sizeof(session->ufrag) - 1] = '\0';
+        if (session->cold->ufrag[0] == '\0') {
+          strncpy(session->cold->ufrag, client_ufrag, sizeof(session->cold->ufrag) - 1);
+          session->cold->ufrag[sizeof(session->cold->ufrag) - 1] = '\0';
           sfu_session_table_index_ufrag(w->sessions, session);
         }
 
@@ -187,9 +187,10 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
         if (session->worker_id == UINT16_MAX) {
           session->worker_id = w->worker_index;
-          SFU_LOG_INFO("worker %u: session ufrag=%s assigned to worker %u", w->worker_index, session->ufrag, session->worker_id);
+          SFU_LOG_INFO("worker %u: session ufrag=%s assigned to worker %u", w->worker_index, session->cold->ufrag, session->worker_id);
         } else if (session->worker_id != w->worker_index) {
-          SFU_LOG_INFO("worker %u: session ufrag=%s worker ownership migrating %u -> %u", w->worker_index, session->ufrag, session->worker_id, w->worker_index);
+          SFU_LOG_INFO("worker %u: session ufrag=%s worker ownership migrating %u -> %u", w->worker_index, session->cold->ufrag, session->worker_id,
+                       w->worker_index);
           session->worker_id = w->worker_index;
         }
       }
@@ -218,10 +219,10 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   // Since we implemented the callback option in dtls.c, we pass NULL here if we handle it locally inside the worker switch block,
   // OR we pass your event hook. Let's keep it clean by driving the logic right when the state officially switches below.
-  sfu_dtls_feed_status_t status = sfu_dtls_conn_feed(&session->dtls, pkt->data, pkt->len, NULL, NULL);
+  sfu_dtls_feed_status_t status = sfu_dtls_conn_feed(&session->cold->dtls, pkt->data, pkt->len, NULL, NULL);
 
   uint8_t out[4096];
-  size_t out_len = sfu_dtls_conn_drain_output(&session->dtls, out, sizeof(out));
+  size_t out_len = sfu_dtls_conn_drain_output(&session->cold->dtls, out, sizeof(out));
   if (out_len > 0) {
     send_raw(w, out, out_len, &pkt->peer_addr, pkt->peer_addr_len);
   }
@@ -229,7 +230,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   switch (status) {
     case SFU_DTLS_FEED_ESTABLISHED:
       if (session->state != SFU_SESSION_ESTABLISHED) {
-        if (sfu_srtp_ctx_init_from_dtls(&session->srtp, session->dtls.srtp_keying_material, session->dtls.srtp_profile_id, true) != 0) {
+        if (sfu_srtp_ctx_init_from_dtls(&session->srtp, session->cold->dtls.srtp_keying_material, session->cold->dtls.srtp_profile_id, true) != 0) {
           SFU_LOG_ERROR("worker %u: failed to derive SRTP keys after DTLS handshake for %s:%u", w->worker_index, ip, port);
           session->state = SFU_SESSION_FAILED;
           break;
