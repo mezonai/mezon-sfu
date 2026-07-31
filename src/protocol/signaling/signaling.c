@@ -360,6 +360,8 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
 static void on_client_close(uv_handle_t *handle) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
 
+  SFU_LOG_INFO("signaling: on_client_close fired for fd=%d ufrag=%s session=%p", c->fd, c->client_ufrag, (void *)c->session);
+
   sfu_peer_session_t *session = c->session;
   if (!session && c->client_ufrag[0] != '\0') {
     session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
