@@ -160,7 +160,7 @@ int main(void) {
   session2.uplink_video.rtx_payload_type = 121;
   v2[0].ssrc = 987654321;
   v2[0].rtx_ssrc = 987654322;
-  strncpy(r2[0].ufrag, "remoteUfrag2", sizeof(r2[0].ufrag) - 1);
+  strncpy(r2[0].cold->ufrag, "remoteUfrag2", sizeof(r2[0].cold->ufrag) - 1);
 
   /* Verify asymmetric video payload type negotiation (e.g., Firefox PT 120/121 overriding Chrome PT 96/97) */
   len = sfu_sdp_build_answer(&session2, SAMPLE_VIDEO_OFFER, strlen(SAMPLE_VIDEO_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",

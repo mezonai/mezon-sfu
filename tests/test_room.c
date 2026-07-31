@@ -31,9 +31,9 @@ int main(void) {
   b.active = true;
   c.active = true;
 
-  strcpy(a.ufrag, "a");
-  strcpy(b.ufrag, "b");
-  strcpy(c.ufrag, "c");
+  strcpy(a.cold->ufrag, "a");
+  strcpy(b.cold->ufrag, "b");
+  strcpy(c.cold->ufrag, "c");
 
   a.uplink_audio.active = true;
   a.uplink_video.active = true;

@@ -142,12 +142,12 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     SFU_LOG_DEBUG("worker fwd from %u to %u (len=%u)", w->worker_index, sub_session->worker_id, enc->len);
 
     if (sub_session->worker_id == w->worker_index) {
-      if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub_session->addr, sub_session->addr_len) != 0) {
+      if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub_session->cold->addr, sub_session->cold->addr_len) != 0) {
         SFU_LOG_WARN("worker %u: local send SQ full, dropping to subscriber", w->worker_index);
       }
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
-      if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub_session->worker_id, enc, &sub_session->addr, sub_session->addr_len)) {
+      if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub_session->worker_id, enc, &sub_session->cold->addr, sub_session->cold->addr_len)) {
         SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] fanout_mesh_enqueue failed (queue full?) to worker %u", w->worker_index, i, sub_session->worker_id);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       }
