@@ -161,9 +161,6 @@ void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispat
     sfu_packet_pool_free_meta(pp, pkt);
 
     void *item = (void *)(uintptr_t)((uint64_t)kbuf_index + 1);
-    /* The metadata no longer owns the provided buffer, so ownership must
-     * remain here until the dispatcher accepts it. Dropping the index on a
-     * full queue permanently removes that buffer from the kernel ring. */
     while (!sfu_spsc_ring_push(to_dispatcher, item)) {
       sched_yield();
     }
