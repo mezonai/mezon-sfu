@@ -80,16 +80,15 @@ typedef struct sfu_transceiver {
 typedef struct sfu_receiver_slot {
   sfu_transceiver_t *video;
   sfu_transceiver_t *audio;
+  uint32_t mid_audio;
+  uint32_t mid_video;
 } sfu_receiver_slot_t;
 
 typedef struct sfu_peer_session {
+  int fd;
   struct sockaddr_storage addr;
   socklen_t addr_len;
-
   uint16_t worker_id;
-
-  int fd;
-
   sfu_session_state_t state;
   sfu_dtls_conn_t dtls;
   sfu_srtp_ctx_t srtp;
@@ -97,15 +96,13 @@ typedef struct sfu_peer_session {
   bool active;
   char ufrag[32];
   uint8_t pt_map[128];
-
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
-
   sfu_receiver_slot_t **receivers;
   uint32_t receiver_capacity;
-
   bool negotiation_needed;
+  uint32_t next_remote_mid;
 } sfu_peer_session_t;
 
 typedef struct sfu_hash_slot {
@@ -119,7 +116,6 @@ typedef struct sfu_session_table {
   uint32_t count;
   pthread_mutex_t lock;
   sfu_dtls_ctx_t *dtls_ctx;
-
   sfu_hash_slot_t addr_index[SFU_SESSION_ADDR_HASH_SLOTS];
   sfu_hash_slot_t ufrag_index[SFU_SESSION_UFRAG_HASH_SLOTS];
 } sfu_session_table_t;

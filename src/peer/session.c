@@ -108,7 +108,9 @@ static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const 
 
 static bool addr_matches_direct(uint32_t idx, void *ctx_) {
   addr_match_ctx_t *ctx = ctx_;
-  if (idx >= ctx->t->count) return false;
+  if (idx >= ctx->t->count) {
+    return false;
+  }
   sfu_peer_session_t *s = ctx->t->sessions[idx];
   return s && s->active && s->addr_len == ctx->addr_len && memcmp(&s->addr, ctx->addr, ctx->addr_len) == 0;
 }
@@ -148,7 +150,6 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
       pthread_mutex_unlock(&t->lock);
       return session;
     }
-
   }
 
   uint32_t index;
@@ -172,8 +173,11 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   memset(s, 0, sizeof(*s));
 
   if (!addr || addr_len > sizeof(s->addr)) {
-    SFU_FREE(s); t->sessions[index] = NULL; t->count--;
-    pthread_mutex_unlock(&t->lock); return NULL;
+    SFU_FREE(s);
+    t->sessions[index] = NULL;
+    t->count--;
+    pthread_mutex_unlock(&t->lock);
+    return NULL;
   }
   memcpy(&s->addr, addr, addr_len);
   s->addr_len = addr_len;
@@ -191,6 +195,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   s->receiver_capacity = 0;
   s->receivers = NULL;
+
+  s->next_remote_mid = 2;
 
   sfu_session_table_index_addr(t, s);
 
@@ -216,7 +222,9 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
 static bool addr_matches(uint32_t idx, void *ctx_) {
   addr_match_ctx_t *ctx = ctx_;
-  if (idx >= ctx->t->count) return false;
+  if (idx >= ctx->t->count) {
+    return false;
+  }
   sfu_peer_session_t *s = ctx->t->sessions[idx];
   return s && s->active && s->addr_len == ctx->addr_len && memcmp(&s->addr, ctx->addr, ctx->addr_len) == 0;
 }
@@ -233,7 +241,9 @@ sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct 
 
 static bool ufrag_matches(uint32_t idx, void *ctx_) {
   ufrag_match_ctx_t *ctx = ctx_;
-  if (idx >= ctx->t->count) return false;
+  if (idx >= ctx->t->count) {
+    return false;
+  }
   sfu_peer_session_t *s = ctx->t->sessions[idx];
   return s && s->active && s->ufrag[0] != '\0' && strcmp(s->ufrag, ctx->ufrag) == 0;
 }
@@ -297,7 +307,9 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
 }
 
 void sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len) {
-  if (!addr || addr_len > sizeof(s->addr)) return;
+  if (!addr || addr_len > sizeof(s->addr)) {
+    return;
+  }
   pthread_mutex_lock(&t->lock);
   if (s->addr_len > 0) {
     uint32_t hash = fnv1a(&s->addr, s->addr_len);

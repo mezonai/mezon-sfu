@@ -19,11 +19,16 @@ static sfu_receiver_slot_t *alloc_receiver_slot(sfu_peer_session_t *peer, sfu_sc
   for (uint32_t i = 0; i < peer->receiver_capacity; i++) {
     new_array[i] = peer->receivers[i];
   }
+
   sfu_receiver_slot_t *slot = SFU_CALLOC(1, sizeof(*slot));
   if (!slot) {
     SFU_FREE(new_array);
     return NULL;
   }
+
+  slot->mid_audio = peer->next_remote_mid++;
+  slot->mid_video = peer->next_remote_mid++;
+
   new_array[peer->receiver_capacity] = slot;
 
   sfu_receiver_slot_t **old_array = peer->receivers;
@@ -49,7 +54,6 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
     pthread_mutex_unlock(&room->lock);
     return;
   }
-
   if (room->peer_count >= SFU_ROOM_MAX_PEERS) {
     pthread_mutex_unlock(&room->lock);
     SFU_LOG_WARN("room %" PRIu64 " full", room->room_id);
@@ -61,7 +65,6 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
 
   for (uint32_t i = 0; i + 1 < room->peer_count; i++) {
     sfu_peer_session_t *other = room->peers[i];
-
     if (!other || other == peer) {
       continue;
     }
@@ -70,12 +73,16 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
     if (slot) {
       slot->audio = &peer->uplink_audio;
       slot->video = &peer->uplink_video;
+    } else {
+      SFU_LOG_WARN("room %" PRIu64 ": failed to allocate receiver slot for peer subscribing to %s", room->room_id, peer->ufrag);
     }
 
     slot = alloc_receiver_slot(peer, scheduler);
     if (slot) {
       slot->audio = &other->uplink_audio;
       slot->video = &other->uplink_video;
+    } else {
+      SFU_LOG_WARN("room %" PRIu64 ": failed to allocate receiver slot for %s subscribing to peer", room->room_id, peer->ufrag);
     }
 
     other->negotiation_needed = true;
