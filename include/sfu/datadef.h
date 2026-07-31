@@ -104,6 +104,7 @@ typedef struct sfu_peer_session {
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
   uint8_t pt_map[128];
+  int64_t user_id;
   uint32_t next_remote_mid;
   uint32_t receiver_capacity;
   int fd;

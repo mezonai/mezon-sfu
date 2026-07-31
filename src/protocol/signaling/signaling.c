@@ -504,11 +504,18 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
         char type[32];
         if (sfu_json_extract_string(buf, (size_t)n, "type", type, sizeof(type)) >= 0) {
           if (strcmp(type, "join") == 0) {
-            char room_str[64] = {0};
+            char room_str[32] = {0};
+            char str_user_id[32] = {0};
             uint64_t room_id = 0;
+            uint64_t user_id = 0;
 
             if (sfu_json_extract_string(buf, (size_t)n, "room", room_str, sizeof(room_str)) >= 0) {
               room_id = (uint64_t)strtoull(room_str, NULL, 10);
+            }
+
+            if (sfu_json_extract_string(buf, (size_t)n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
+              user_id = (uint64_t)strtoull(str_user_id, NULL, 10);
+              c->user_id = user_id;
             }
 
             if (room_id == 0) {
@@ -555,6 +562,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
                   c->session = session;
+                  c->session->user_id = c->user_id;
                   handle_answer(session, sdp, sdp_len);
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
