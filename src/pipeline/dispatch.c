@@ -104,7 +104,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         pending_rtx_ssrc = match->pending_rtx_ssrc;
         pending_video_pt = match->pending_video_pt;
         pending_rtx_pt = match->pending_rtx_pt;
-        match->has_pending_answer = false; /* consume once */
+        match->has_pending_answer = false;
       }
     }
     pthread_mutex_unlock(&w->routing_table->mutex);
@@ -117,7 +117,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         w->worker_index, ip, port);
   }
 
-  uint8_t response[512];
+  uint8_t response[512] = {0};
   size_t response_len = sfu_stun_handle_binding_request(pkt->data, pkt->len, w->ice_creds, &pkt->peer_addr, pkt->peer_addr_len, response, sizeof(response));
 
   if (response_len == 0) {
