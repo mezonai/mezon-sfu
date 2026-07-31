@@ -26,3 +26,5 @@ void sfu_install_shutdown_handler(void) {
 }
 
 bool sfu_shutdown_requested(void) { return g_shutdown != 0; }
+
+void sfu_request_shutdown(void) { g_shutdown = 1; }

@@ -2,6 +2,7 @@
 #define SFU_PROTOCOL_SIGNALING_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <uv.h>
 #include "room/room_registry.h"
@@ -11,12 +12,12 @@
 typedef struct sfu_signaling_server {
   int listen_fd;
   pthread_t thread;
-  volatile int running;
+  atomic_bool running;
   uv_async_t async_waker;
   char media_host[64];
   uint16_t media_port;
-  const sfu_ice_credentials_t *ice_creds; /* shared, not owned */
-  const sfu_dtls_ctx_t *dtls_ctx;         /* shared, not owned */
+  const sfu_ice_credentials_t *ice_creds;
+  const sfu_dtls_ctx_t *dtls_ctx;
   sfu_session_table_t *sessions;
   sfu_room_registry_t *room_registry;
   sfu_routing_table_t *routing_table;
@@ -46,5 +47,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
                                sfu_room_registry_t *room_registry, sfu_routing_table_t *routing_table);
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 void sfu_signaling_trigger_renegotiation(sfu_room_t *room);
+void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd);
+
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */

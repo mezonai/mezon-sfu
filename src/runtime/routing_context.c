@@ -2,15 +2,21 @@
 #include <string.h>
 #include "util/log.h"
 
-void sfu_routing_table_init(sfu_routing_table_t *table) {
+int sfu_routing_table_init(sfu_routing_table_t *table) {
   if (!table) {
-    return;
+    return -1;
   }
 
   memset(table->entries, 0, sizeof(table->entries));
   table->count = 0;
 
-  pthread_mutex_init(&table->mutex, NULL);
+  return pthread_mutex_init(&table->mutex, NULL) == 0 ? 0 : -1;
+}
+
+void sfu_routing_table_destroy(sfu_routing_table_t *table) {
+  if (table) {
+    pthread_mutex_destroy(&table->mutex);
+  }
 }
 
 void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
@@ -29,5 +35,21 @@ void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char
     }
   }
   SFU_LOG_WARN("signaling: no routing entry for ufrag=%s to attach pending answer", client_ufrag);
+  pthread_mutex_unlock(&table->mutex);
+}
+
+void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd) {
+  if (!table) {
+    return;
+  }
+  pthread_mutex_lock(&table->mutex);
+  for (int i = 0; i < table->count;) {
+    if (table->entries[i].fd == fd) {
+      table->entries[i] = table->entries[--table->count];
+      memset(&table->entries[table->count], 0, sizeof(table->entries[0]));
+    } else {
+      i++;
+    }
+  }
   pthread_mutex_unlock(&table->mutex);
 }

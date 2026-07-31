@@ -6,7 +6,7 @@
 #include "util/log.h"
 
 #include <arpa/inet.h>
-#include <errno.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -161,8 +161,8 @@ void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispat
     sfu_packet_pool_free_meta(pp, pkt);
 
     void *item = (void *)(uintptr_t)((uint64_t)kbuf_index + 1);
-    if (!sfu_spsc_ring_push(to_dispatcher, item)) {
-      SFU_LOG_WARN("release queue to dispatcher full, kernel buffer %u temporarily leaked", kbuf_index);
+    while (!sfu_spsc_ring_push(to_dispatcher, item)) {
+      sched_yield();
     }
   } else {
     sfu_packet_pool_free(pp, pkt);

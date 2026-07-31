@@ -27,6 +27,7 @@ void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufra
   for (int i = 0; i < table->count; i++) {
     if (strcmp(table->entries[i].ufrag, client_ufrag) == 0) {
       table->entries[i].room = room;
+      table->entries[i].fd = fd;
       pthread_mutex_unlock(&table->mutex);
       return;
     }
@@ -73,11 +74,6 @@ static bool extract_sdp_ice_ufrag(const char *sdp, size_t sdp_len, char *out, si
   return false;
 }
 
-/* Server-offerer architecture: the SFU is always the one running one signaling
-   server instance per process (see main.c), so a module-level pointer lets
-   sfu_signaling_trigger_renegotiation() -- invoked from worker/dispatch.c with
-   only a room handle -- reach media_host/ice_creds/dtls_ctx to build a fresh
-   offer without threading the server pointer through the whole call chain. */
 static sfu_signaling_server_t *g_signaling_server = NULL;
 
 static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc) {
@@ -369,6 +365,8 @@ static void on_client_close(uv_handle_t *handle) {
     session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
   }
 
+  sfu_routing_table_unregister_fd(c->server->routing_table, c->fd);
+
   if (session) {
     if (session->room) {
       room_remove_peer(session->room, session);
@@ -441,12 +439,12 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
         disconnect_client(c);
       } else {
         char type[32];
-        if (sfu_json_extract_string(buf, "type", type, sizeof(type)) >= 0) {
+        if (sfu_json_extract_string(buf, (size_t)n, "type", type, sizeof(type)) >= 0) {
           if (strcmp(type, "join") == 0) {
             char room_str[64] = {0};
             uint64_t room_id = 0;
 
-            if (sfu_json_extract_string(buf, "room", room_str, sizeof(room_str)) >= 0) {
+            if (sfu_json_extract_string(buf, (size_t)n, "room", room_str, sizeof(room_str)) >= 0) {
               room_id = (uint64_t)strtoull(room_str, NULL, 10);
             }
 
@@ -478,7 +476,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
               sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}", 49);
             } else {
               char sdp[SFU_SIGNALING_SDP_CAP];
-              int sdp_len = sfu_json_extract_string(buf, "sdp", sdp, sizeof(sdp));
+              int sdp_len = sfu_json_extract_string(buf, (size_t)n, "sdp", sdp, sizeof(sdp));
               if (sdp_len >= 0) {
                 bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, c->client_ufrag, sizeof(c->client_ufrag));
                 if (have_ufrag) {
@@ -527,16 +525,31 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
       int one = 1;
       setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-      sfu_client_conn_t *c = (sfu_client_conn_t *)SFU_MALLOC(sizeof(sfu_client_conn_t));
-      memset(c, 0, sizeof(sfu_client_conn_t));
+      sfu_client_conn_t *c = (sfu_client_conn_t *)SFU_CALLOC(1, sizeof(sfu_client_conn_t));
+      if (!c) {
+        close(fd);
+        return;
+      }
       c->fd = fd;
       c->server = s;
       c->handshake_done = false;
       strcpy(c->peer_ip, "unknown");
 
-      uv_poll_init_socket(handle->loop, &c->poll_handle, fd);
+      int rc = uv_poll_init_socket(handle->loop, &c->poll_handle, fd);
+      if (rc != 0) {
+        SFU_LOG_ERROR("signaling: uv_poll_init_socket failed: %s", uv_strerror(rc));
+        close(fd);
+        SFU_FREE(c);
+        return;
+      }
       c->poll_handle.data = c;
-      uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
+      rc = uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
+      if (rc != 0) {
+        SFU_LOG_ERROR("signaling: uv_poll_start failed: %s", uv_strerror(rc));
+        uv_close((uv_handle_t *)&c->poll_handle, on_client_close);
+      }
+    } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+      SFU_LOG_ERROR("signaling: accept failed: %s", strerror(errno));
     }
   }
 }
@@ -572,7 +585,7 @@ static void *signaling_loop_main(void *arg) {
   listen_poll.data = s;
   uv_poll_start(&listen_poll, UV_READABLE, on_server_readable);
 
-  while (s->running) {
+  while (atomic_load(&s->running)) {
     uv_run(&loop, UV_RUN_DEFAULT);
   }
 
@@ -622,7 +635,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
     return -1;
   }
 
-  s->running = 1;
+  atomic_store(&s->running, true);
   if (pthread_create(&s->thread, NULL, signaling_loop_main, s) != 0) {
     SFU_LOG_ERROR("signaling: failed to spawn accept loop thread");
     close(s->listen_fd);
@@ -636,11 +649,11 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
 }
 
 void sfu_signaling_server_stop(sfu_signaling_server_t *s) {
-  if (!s || !s->running) {
+  if (!s || !atomic_load(&s->running)) {
     return;
   }
 
-  s->running = 0;
+  atomic_store(&s->running, false);
   uv_async_send(&s->async_waker);
 
   pthread_join(s->thread, NULL);
