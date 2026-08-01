@@ -237,9 +237,7 @@ SRTP
 UDP
 ```
 
-## Recommendation
-
-Priority item:
+## Priority item
 
 1. **SVC support** (layer parsing and forwarding)
 2. **TWCC feedback generation**
