@@ -1,7 +1,3 @@
-If your long-term goal is **a production-grade SFU comparable to Google Cloud Conferencing (GCC) quality**, then yes—the first major milestone is **SVC**.
-
-I'd structure the roadmap like this:
-
 ## Phase 1: Transport Layer (Current)
 
 * ✅ ICE
@@ -13,9 +9,6 @@ I'd structure the roadmap like this:
 * ✅ Payload type translation
 * ✅ Per-peer transceiver model
 
-At the end of this phase, you have a working SFU.
-
----
 
 ## Phase 2: SVC Support (Highest Priority)
 
@@ -75,8 +68,6 @@ Just packet filtering.
 
 This is the biggest feature after basic forwarding.
 
----
-
 ## Phase 3: Congestion Control (TWCC)
 
 Need:
@@ -113,8 +104,6 @@ desired layer
 
 switch SVC layer
 ```
-
----
 
 ## Phase 4: Layer Scheduler
 
@@ -157,8 +146,6 @@ The scheduler understands:
 * Pinning
 * Bandwidth
 
----
-
 ## Phase 5: NACK / RTX
 
 Support:
@@ -167,8 +154,6 @@ Support:
 * Packet history
 * NACK parser
 * Retransmission scheduler
-
----
 
 ## Phase 6: PLI / FIR
 
@@ -194,8 +179,6 @@ Modern WebRTC prefers:
 
 REMB is legacy.
 
----
-
 ## Phase 8: Advanced GCC
 
 Now optimize:
@@ -205,8 +188,6 @@ Now optimize:
 * fairness
 * probing
 * bitrate allocation
-
----
 
 # Architecture
 
@@ -256,11 +237,9 @@ SRTP
 UDP
 ```
 
----
-
 ## Recommendation
 
-I would prioritize the work in this order:
+Priority item:
 
 1. **SVC support** (layer parsing and forwarding)
 2. **TWCC feedback generation**
