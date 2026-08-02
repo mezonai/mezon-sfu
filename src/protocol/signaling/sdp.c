@@ -220,8 +220,8 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   }
 
 
-  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX,
-              SFU_PT_VP8, SFU_PT_VP8_RTX);
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
+               SFU_PT_VP8_RTX);
 
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     return -1;
@@ -475,7 +475,6 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
     }
 
     if (slot->video && slot->video->ssrc != 0) {
-
       uint8_t remote_video_pt = slot->video->payload_type != 0 ? slot->video->payload_type : SFU_PT_VP8;
       uint8_t remote_rtx_pt = slot->video->rtx_payload_type != 0 ? slot->video->rtx_payload_type : SFU_PT_VP8_RTX;
 
