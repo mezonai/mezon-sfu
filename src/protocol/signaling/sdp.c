@@ -72,9 +72,12 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
 }
 
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, uint8_t video_pt, uint8_t rtx_pt) {
+  sfu_video_codec_t codec = sfu_video_codec_from_pt(video_pt);
+  const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9) ? "VP9" : (codec == SFU_VIDEO_CODEC_AV1) ? "AV1" : "VP8";
+
   char line[128];
   int n;
-  n = snprintf(line, sizeof(line), "a=rtpmap:%u VP8/90000", video_pt);
+  n = snprintf(line, sizeof(line), "a=rtpmap:%u %s/90000", video_pt, codec_name);
   if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
     return -1;
   }
@@ -85,6 +88,12 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
   n = snprintf(line, sizeof(line), "a=rtcp-fb:%u nack pli", video_pt);
   if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
     return -1;
+  }
+  if (codec == SFU_VIDEO_CODEC_VP9) {
+    n = snprintf(line, sizeof(line), "a=fmtp:%u profile-id=0", video_pt);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
   }
   if (rtx_pt != 0) {
     n = snprintf(line, sizeof(line), "a=rtpmap:%u rtx/90000", rtx_pt);
@@ -184,9 +193,6 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  const uint8_t video_pt = 96;
-  const uint8_t rtx_pt = 97;
-
   n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
 
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
@@ -213,7 +219,9 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, video_pt, rtx_pt);
+
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX,
+              SFU_PT_VP8, SFU_PT_VP8_RTX);
 
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     return -1;
@@ -235,7 +243,13 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_video_codec_attributes(out, out_cap, &off, video_pt, rtx_pt) != 0) {
+  if (append_video_codec_attributes(out, out_cap, &off, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0) {
+    return -1;
+  }
+  if (append_video_codec_attributes(out, out_cap, &off, SFU_PT_AV1, SFU_PT_AV1_RTX) != 0) {
+    return -1;
+  }
+  if (append_video_codec_attributes(out, out_cap, &off, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0) {
     return -1;
   }
 
@@ -257,8 +271,8 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
   int saw_media_line = 0;
   int current_media = 0;
 
-  uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : 96;
-  uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : 97;
+  uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
+  uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
 
   size_t pos = 0;
   while (pos < offer_len) {
@@ -461,14 +475,14 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
     }
 
     if (slot->video && slot->video->ssrc != 0) {
-      if (video_pt != 0) {
-        if (rtx_pt != 0) {
-          snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, video_pt, rtx_pt);
-        } else {
-          snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u", port, video_pt);
-        }
+
+      uint8_t remote_video_pt = slot->video->payload_type != 0 ? slot->video->payload_type : SFU_PT_VP8;
+      uint8_t remote_rtx_pt = slot->video->rtx_payload_type != 0 ? slot->video->rtx_payload_type : SFU_PT_VP8_RTX;
+
+      if (remote_rtx_pt != 0) {
+        snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, remote_video_pt, remote_rtx_pt);
       } else {
-        snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF 96 97", port);  // Default Chrome fallback
+        snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u", port, remote_video_pt);
       }
       if (append_line(out, out_cap, &off, buf) != 0) {
         return -1;
@@ -486,27 +500,8 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
         return -1;
       }
-
-      if (video_pt != 0) {
-        if (append_video_codec_attributes(out, out_cap, &off, video_pt, rtx_pt) != 0) {
-          return -1;
-        }
-      } else {
-        if (append_line(out, out_cap, &off, "a=rtpmap:96 VP8/90000") != 0) {
-          return -1;
-        }
-        if (append_line(out, out_cap, &off, "a=rtcp-fb:96 nack") != 0) {
-          return -1;
-        }
-        if (append_line(out, out_cap, &off, "a=rtcp-fb:96 nack pli") != 0) {
-          return -1;
-        }
-        if (append_line(out, out_cap, &off, "a=rtpmap:97 rtx/90000") != 0) {
-          return -1;
-        }
-        if (append_line(out, out_cap, &off, "a=fmtp:97 apt=96") != 0) {
-          return -1;
-        }
+      if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {
+        return -1;
       }
       if (append_remote_video_ssrcs(out, out_cap, &off, slot->video->ssrc, slot->video->rtx_ssrc, slot->video->owner->cold->ufrag) != 0) {
         return -1;
@@ -561,8 +556,8 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     return -1;
   }
 
-  uint8_t local_video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : 96;
-  uint8_t local_rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : 97;
+  uint8_t local_video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
+  uint8_t local_rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
 
   n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
@@ -643,10 +638,14 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       }
     }
 
-    if (local_rtx_pt != 0) {
-      n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, local_video_pt, local_rtx_pt);
+
+    uint8_t remote_video_pt = (video_live && slot->video->payload_type != 0) ? slot->video->payload_type : local_video_pt;
+    uint8_t remote_rtx_pt = (video_live && slot->video->rtx_payload_type != 0) ? slot->video->rtx_payload_type : local_rtx_pt;
+
+    if (remote_rtx_pt != 0) {
+      n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, remote_video_pt, remote_rtx_pt);
     } else {
-      n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u", port, local_video_pt);
+      n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u", port, remote_video_pt);
     }
     if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
       return -1;
@@ -664,7 +663,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
       return -1;
     }
-    if (append_video_codec_attributes(out, out_cap, &off, local_video_pt, local_rtx_pt) != 0) {
+    if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {
       return -1;
     }
     if (video_live) {

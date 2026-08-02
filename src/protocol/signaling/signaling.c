@@ -191,7 +191,6 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
   }
 }
 
-/* Extracts VP8 and RTX dynamic payload type numbers from an SDP offer */
 static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *video_pt, uint8_t *rtx_pt) {
   *video_pt = 0;
   *rtx_pt = 0;
@@ -227,7 +226,11 @@ static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *vide
       if (endptr > line + 9 && *endptr == ' ' && pt < 128) {
         const char *codec = endptr + 1;
         size_t codec_len = len - (size_t)(codec - line);
-        if (codec_len >= 3 && (memcmp(codec, "VP8", 3) == 0 || memcmp(codec, "vp8", 3) == 0)) {
+        if (codec_len >= 3 && (memcmp(codec, "VP9", 3) == 0 || memcmp(codec, "vp9", 3) == 0)) {
+          *video_pt = (uint8_t)pt;
+        } else if (codec_len >= 3 && (memcmp(codec, "AV1", 3) == 0 || memcmp(codec, "av1", 3) == 0)) {
+          *video_pt = (uint8_t)pt;
+        } else if (codec_len >= 3 && (memcmp(codec, "VP8", 3) == 0 || memcmp(codec, "vp8", 3) == 0)) {
           *video_pt = (uint8_t)pt;
         } else if (codec_len >= 3 && (memcmp(codec, "rtx", 3) == 0 || memcmp(codec, "RTX", 3) == 0)) {
           *rtx_pt = (uint8_t)pt;
