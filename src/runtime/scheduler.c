@@ -270,7 +270,7 @@ void sfu_scheduler_adapt_layer(sfu_worker_t *w, sfu_subscriber_scheduler_t *sche
     // Re-using last_pli_time as the throttle timer (from our previous step)
     if (now - publisher->last_pli_time > 1000) {
       publisher->last_pli_time = now;
-      sfu_session_request_keyframe(w, publisher, true);  // true = FIR
+      sfu_session_request_keyframe(w, publisher, true);
     }
   }
 }
