@@ -81,6 +81,8 @@ add_library(sfu_core STATIC
   src/runtime/scheduler.c
   src/runtime/signal.c
   src/runtime/routing_context.c
+  src/congestion/gcc.c
+  src/congestion/twcc_parser.c
 )
 
 target_include_directories(sfu_core PUBLIC

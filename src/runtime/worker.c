@@ -2,6 +2,9 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include "congestion/gcc.h"
+#include "congestion/twcc_history.h"
+#include "congestion/twcc_parser.h"
 #include "media/svc/vp9_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
@@ -79,6 +82,29 @@ static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
   return (offset <= len) ? (int)offset : -1;
 }
 
+static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
+  // Example VP9 bitrate ladder
+  if (bitrate_bps > 1200000) {
+    session->target_sid = 2;  // High resolution (e.g., 720p)
+    session->target_tid = 2;  // Full framerate (e.g., 30fps)
+  } else if (bitrate_bps > 500000) {
+    session->target_sid = 1;  // Medium resolution (e.g., 360p)
+    session->target_tid = 2;
+  } else if (bitrate_bps > 150000) {
+    session->target_sid = 0;  // Low resolution (e.g., 180p)
+    session->target_tid = 1;  // Half framerate (e.g., 15fps)
+  } else {
+    session->target_sid = 0;
+    session->target_tid = 0;  // Lowest framerate
+  }
+}
+
+static inline int64_t get_monotonic_time_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000 + (ts.tv_nsec / 1000000);
+}
+
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_peer_session_t *sender_session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
 
@@ -104,6 +130,35 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
   pkt->len = (uint32_t)plain_len;
+
+  if (is_rtcp && pkt->len >= 8) {
+    uint8_t fmt = pkt->data[0] & 0x1F;
+    uint8_t pt = pkt->data[1];
+
+    if (pt == 205 && fmt == 15) {  // Transport-Wide Feedback
+      sfu_twcc_parser_t parser;
+
+      if (sfu_twcc_parser_init(&parser, pkt->data, pkt->len) == 0) {
+        gcc_packet_info_t twcc_pkt;
+        uint32_t estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+
+        // Iterate through status chunks in feedback packet
+        while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
+          // Lookup local send history using parsed sequence number
+          if (sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
+            // Feed completely populated packet info into GCC BWE engine
+            estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+          }
+        }
+
+        // Adapt active dynamic target layers
+        sfu_svc_update_layers(sender_session, estimated_bps);
+      }
+
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      return;
+    }
+  }
 
   bool is_vp9 = false;
   sfu_vp9_descriptor_t vp9_desc = {0};
@@ -205,6 +260,12 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] fanout_mesh_enqueue failed (queue full?) to worker %u", w->worker_index, i, sub_session->worker_id);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       }
+    }
+
+    if (!is_rtcp) {
+      uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+      int64_t now_ms = get_monotonic_time_ms();
+      sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc->len);
     }
   }
 
