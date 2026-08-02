@@ -124,7 +124,7 @@ typedef struct sfu_peer_session {
   uint32_t receiver_capacity;
   int fd;
   uint16_t worker_id;
-  uint16_t next_twcc_seq;
+  _Atomic uint16_t next_twcc_seq;
   uint8_t state;
   uint8_t target_sid;
   uint8_t target_tid;
