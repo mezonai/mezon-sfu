@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include "media/svc/vp9_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "runtime/cpu.h"
@@ -40,7 +41,6 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
     return -1;
   }
 
-  /* Send-only ring: no provided buffers, this worker never recvs. */
   if (sfu_ring_init(&w->send_ring, fd, SFU_WORKER_SEND_SQ_ENTRIES, SFU_WORKER_SEND_CQ_ENTRIES, 0, 0, send_bgid, false) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init send ring", worker_index);
     sfu_spsc_ring_destroy(&w->release_to_dispatcher);
@@ -55,6 +55,28 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   sfu_ring_destroy(&w->send_ring);
   sfu_spsc_ring_destroy(&w->release_to_dispatcher);
   sfu_spsc_ring_destroy(&w->inbox);
+}
+
+static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
+  if (len < 12) {
+    return -1;
+  }
+  uint8_t csrc_count = data[0] & 0x0F;
+  uint32_t offset = 12 + (csrc_count * 4);
+
+  if (len < offset) {
+    return -1;
+  }
+
+  if (data[0] & 0x10) {
+    if (len < offset + 4) {
+      return -1;
+    }
+    uint16_t ext_len = (data[offset + 2] << 8) | data[offset + 3];
+    offset += 4 + (ext_len * 4);
+  }
+
+  return (offset <= len) ? (int)offset : -1;
 }
 
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
@@ -83,6 +105,26 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
+  bool is_vp9 = false;
+  sfu_vp9_descriptor_t vp9_desc = {0};
+  bool vp9_parsed_ok = false;
+
+  if (!is_rtcp) {
+    uint8_t incoming_pt = pkt->data[1] & 0x7F;
+    if (incoming_pt == sender_session->uplink_video.payload_type) {
+      is_vp9 = true;
+      int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
+
+      if (payload_offset > 0) {
+        const uint8_t *payload = pkt->data + payload_offset;
+        size_t payload_len = pkt->len - payload_offset;
+        if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
+          vp9_parsed_ok = true;
+        }
+      }
+    }
+  }
+
   sfu_receiver_slot_t **receivers = __atomic_load_n(&sender_session->receivers, __ATOMIC_ACQUIRE);
   uint32_t receiver_capacity = __atomic_load_n(&sender_session->receiver_capacity, __ATOMIC_ACQUIRE);
 
@@ -105,6 +147,18 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     if (sub_session->state != SFU_SESSION_ESTABLISHED) {
       SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] Subscriber session NOT ESTABLISHED (state=%d)!", w->worker_index, i, sub_session->state);
       continue;
+    }
+
+    if (is_vp9 && vp9_parsed_ok && slot->video) {
+      // Assuming slot->video holds the subscriber's requested maximum SID and TID
+      // Adjust 'target_sid' and 'target_tid' to match your actual struct definition
+      uint8_t target_sid = 2;  // Default to max for now; populate via signaling
+      uint8_t target_tid = 2;
+
+      if (vp9_desc.sid > target_sid || vp9_desc.tid > target_tid) {
+        // Drop the packet for this specific subscriber
+        continue;
+      }
     }
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
