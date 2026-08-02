@@ -52,6 +52,7 @@ if(NOT LIBUV_INCLUDE_DIR OR NOT LIBUV_LIBRARY)
 endif()
 
 add_library(sfu_core STATIC
+  src/media/svc/vp9_parser.c
   src/memory/pool.c
   src/memory/packet_pool.c
   src/memory/refcount.c
