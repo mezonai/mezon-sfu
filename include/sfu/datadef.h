@@ -117,6 +117,8 @@ typedef struct sfu_peer_session {
   sfu_transceiver_t screen;
   uint8_t pt_map[128];
   int64_t user_id;
+  int64_t last_pli_time;
+  int64_t last_fir_time;
   uint32_t peer_id;
   uint32_t next_remote_mid;
   uint32_t receiver_capacity;
@@ -126,6 +128,7 @@ typedef struct sfu_peer_session {
   uint8_t state;
   uint8_t target_sid;
   uint8_t target_tid;
+  uint8_t fir_seq;
   bool active;
   bool negotiation_needed;
 } sfu_peer_session_t;
