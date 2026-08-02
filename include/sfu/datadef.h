@@ -46,6 +46,7 @@ typedef struct sfu_peer_session sfu_peer_session_t;
 typedef struct sfu_room sfu_room_t;
 typedef struct gcc_bwe_context gcc_bwe_context_t;
 typedef struct sfu_twcc_history sfu_twcc_history_t;
+typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
 
 typedef struct sfu_srtp_ctx {
   srtp_t inbound;
@@ -103,14 +104,16 @@ typedef struct sfu_peer_session {
   sfu_room_t *room;
   gcc_bwe_context_t *gcc_ctx;
   sfu_twcc_history_t *twcc_history;
-  sfu_receiver_slot_t **receivers;
+  sfu_subscriber_scheduler_t *scheduler;
   sfu_peer_session_cold_t *cold;
+  sfu_receiver_slot_t **receivers;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
   uint8_t pt_map[128];
   int64_t user_id;
+  uint32_t peer_id;
   uint32_t next_remote_mid;
   uint32_t receiver_capacity;
   int fd;
