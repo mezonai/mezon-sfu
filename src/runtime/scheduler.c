@@ -3,8 +3,10 @@
 #include <pthread.h>
 #include <string.h>
 #include <unistd.h>
+#include "peer/session.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
+#include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "sfu/datadef.h"
 #include "util/alloc.h"
@@ -207,13 +209,13 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
   sched->target_tid = 0;
   sched->current_sid = 0;
   sched->current_tid = 0;
-  sched->needs_keyframe = true;  // Wait for an I-frame to start decoding
+  sched->needs_keyframe = true;
 }
 
 bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe) {
   if (sched->needs_keyframe) {
     if (!is_keyframe) {
-      return false;  // Drop everything until we get a clean start
+      return false;
     }
     sched->needs_keyframe = false;
     sched->current_sid = sched->target_sid;
@@ -254,4 +256,21 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
   }
 
   return true;  // Frame is required by this subscriber
+}
+
+void sfu_scheduler_adapt_layer(sfu_worker_t *w, sfu_subscriber_scheduler_t *sched, sfu_peer_session_t *publisher, uint8_t target_spatial_layer) {
+  // Check if the spatial layer (sid) is actually changing
+  if (sched->current_sid != target_spatial_layer) {
+    sched->target_sid = target_spatial_layer;
+    sched->needs_keyframe = true;  // Use your struct's exact boolean name
+
+    // Request FIR to force a keyframe on the new layer
+    int64_t now = sfu_now_ms();
+
+    // Re-using last_pli_time as the throttle timer (from our previous step)
+    if (now - publisher->last_pli_time > 1000) {
+      publisher->last_pli_time = now;
+      sfu_session_request_keyframe(w, publisher, true);  // true = FIR
+    }
+  }
 }

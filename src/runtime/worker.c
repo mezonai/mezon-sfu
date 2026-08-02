@@ -153,6 +153,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       sfu_nack_parser_init(&nack_parser, pkt->data, pkt->len);
 
       uint16_t lost_seq;
+      bool unrecoverable_loss = false;
       while (sfu_nack_parser_next(&nack_parser, &lost_seq)) {
         uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
         uint32_t orig_len = 0;
@@ -181,8 +182,19 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
             sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
           }
           sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+        } else {
+          unrecoverable_loss = true;
         }
       }
+      if (unrecoverable_loss) {
+        // Throttle PLIs to prevent flooding the publisher (e.g., max 1 per second)
+        int64_t now = sfu_now_ms();
+        if (now - sender_session->last_pli_time > 1000) {
+          sender_session->last_pli_time = now;
+          sfu_session_request_keyframe(w, sender_session, false);  // false = PLI
+        }
+      }
+
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
       return;
     }

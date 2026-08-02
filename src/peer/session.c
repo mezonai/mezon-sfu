@@ -1,7 +1,9 @@
 #include "peer/session.h"
 #include <string.h>
 #include "room/room_media_graph.h"
+#include "rtcp/rtcp_kf.h"
 #include "runtime/routing_context.h"
+#include "runtime/worker.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
 #include "util/alloc.h"
@@ -372,4 +374,39 @@ void sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *s
   }
 
   pthread_mutex_unlock(&t->lock);
+}
+
+void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
+  sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
+  if (!rtcp_pkt) {
+    return;
+  }
+
+  int rtcp_len = 0;
+
+  // The SFU's identifier in the RTCP packet.
+  // Safely hardcoded to 1 since we are just an intermediate router.
+  uint32_t sfu_sender_ssrc = 1;
+
+  // The publisher's media SSRC that we want a keyframe for
+  uint32_t media_ssrc = publisher->uplink_video.ssrc;
+
+  if (use_fir) {
+    rtcp_len = sfu_rtcp_build_fir(sfu_sender_ssrc, media_ssrc, &publisher->fir_seq, rtcp_pkt->data, rtcp_pkt->cap);
+  } else {
+    rtcp_len = sfu_rtcp_build_pli(sfu_sender_ssrc, media_ssrc, rtcp_pkt->data, rtcp_pkt->cap);
+  }
+
+  if (rtcp_len > 0) {
+    if (sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap)) {
+      rtcp_pkt->len = (uint32_t)rtcp_len;
+
+      // Send the RTCP packet back to the publisher
+      sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
+    } else {
+      SFU_LOG_WARN("Failed to SRTP protect keyframe request for peer %u", publisher->peer_id);
+    }
+  }
+
+  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
 }
