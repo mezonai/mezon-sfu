@@ -25,6 +25,8 @@
 #define SFU_SESSION_ADDR_HASH_SLOTS 16384
 #define SFU_SESSION_UFRAG_HASH_SLOTS 16384
 
+#define SFU_MAX_PAYLOAD_SIZE 2048
+
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
 typedef enum { SFU_DIRECTION_INACTIVE = 0, SFU_DIRECTION_SENDONLY, SFU_DIRECTION_RECVONLY, SFU_DIRECTION_SENDRECV } sfu_direction_t;
@@ -47,6 +49,7 @@ typedef struct sfu_room sfu_room_t;
 typedef struct gcc_bwe_context gcc_bwe_context_t;
 typedef struct sfu_twcc_history sfu_twcc_history_t;
 typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
+typedef struct sfu_rtx_cache sfu_rtx_cache_t;
 
 typedef struct sfu_srtp_ctx {
   srtp_t inbound;
@@ -105,6 +108,7 @@ typedef struct sfu_peer_session {
   gcc_bwe_context_t *gcc_ctx;
   sfu_twcc_history_t *twcc_history;
   sfu_subscriber_scheduler_t *scheduler;
+  sfu_rtx_cache_t *rtx_cache;
   sfu_peer_session_cold_t *cold;
   sfu_receiver_slot_t **receivers;
   sfu_srtp_ctx_t srtp;

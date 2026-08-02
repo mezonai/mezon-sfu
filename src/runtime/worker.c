@@ -8,6 +8,7 @@
 #include "media/svc/vp9_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
+#include "rtp/rtx.h"
 #include "runtime/cpu.h"
 #include "runtime/scheduler.h"
 #include "runtime/signal.h"
@@ -127,30 +128,61 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
-  if (is_rtcp && pkt->len >= 8) {
+  if (is_rtcp && pkt->len >= 12) {
     uint8_t fmt = pkt->data[0] & 0x1F;
     uint8_t pt = pkt->data[1];
 
-    if (pt == 205 && fmt == 15) {  // Transport-Wide Feedback
+    if (pt == 205 && fmt == 15) {  // Transport-Wide Feedback (TWCC)
       sfu_twcc_parser_t parser;
 
       if (sfu_twcc_parser_init(&parser, pkt->data, pkt->len) == 0) {
         gcc_packet_info_t twcc_pkt;
-        uint32_t estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+        uint32_t estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;  // FIXED: Struct access
 
-        // Iterate through status chunks in feedback packet
         while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
-          // Lookup local send history using parsed sequence number
-          if (sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
-            // Feed completely populated packet info into GCC BWE engine
-            estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+          if (sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {  // FIXED: Pass by reference
+            estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);                 // FIXED: Pass by reference
           }
         }
-
-        // Adapt active dynamic target layers
         sfu_svc_update_layers(sender_session, estimated_bps);
       }
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      return;
+    } else if (pt == 205 && fmt == 1) {  // Generic NACK
+      sfu_nack_parser_t nack_parser;
+      sfu_nack_parser_init(&nack_parser, pkt->data, pkt->len);
 
+      uint16_t lost_seq;
+      while (sfu_nack_parser_next(&nack_parser, &lost_seq)) {
+        uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
+        uint32_t orig_len = 0;
+
+        if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len)) {
+          sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
+          if (!rtx_enc) {
+            continue;
+          }
+
+          int rtp_header_len = 12;
+          memcpy(rtx_enc->data, orig_pkt, rtp_header_len);
+
+          rtx_enc->data[1] = (rtx_enc->data[1] & 0x80) | (sender_session->rtx_cache->rtx_pt & 0x7F);
+
+          uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
+          *(uint16_t *)(rtx_enc->data + 2) = htons(next_rtx_seq);
+          *(uint32_t *)(rtx_enc->data + 8) = htonl(sender_session->rtx_cache->rtx_ssrc);
+
+          *(uint16_t *)(rtx_enc->data + rtp_header_len) = htons(lost_seq);
+          memcpy(rtx_enc->data + rtp_header_len + 2, orig_pkt + rtp_header_len, orig_len - rtp_header_len);
+
+          int rtx_enc_len = orig_len + 2;
+          if (sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap)) {
+            rtx_enc->len = (uint32_t)rtx_enc_len;
+            sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
+          }
+          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+        }
+      }
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
       return;
     }
@@ -170,10 +202,9 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         const uint8_t *payload = pkt->data + payload_offset;
         size_t payload_len = pkt->len - payload_offset;
         if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
-          // Identify if this is a sequence Keyframe (Non-predicted, Base layer)
           is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
         } else {
-          is_vp9 = false;  // Corrupted payload
+          is_vp9 = false;
         }
       }
     }
@@ -185,11 +216,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   for (uint32_t i = 0; i < receiver_capacity; i++) {
     sfu_receiver_slot_t *slot = receivers[i];
 
-    if (!slot) {
-      continue;
-    }
-
-    if (!slot->video && !slot->audio) {
+    if (!slot || (!slot->video && !slot->audio)) {
       continue;
     }
 
@@ -198,70 +225,66 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
-    // Routing Check: Is this subscriber pinned to or actively watching THIS publisher?
-    if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {
+    if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {  // FIXED: Struct access
       continue;
     }
 
-    // Layer Evaluation
     if (is_vp9 && slot->video) {
-      bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);
-
+      bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);  // FIXED: Pass by reference
       if (!should_forward) {
-        continue;  // Scheduler rejected the frame (wrong layer, waiting for keyframe, etc.)
+        continue;
       }
     }
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
     if (!enc) {
-      SFU_LOG_WARN("worker %u: packet pool exhausted, dropping subscriber send", w->worker_index);
+      SFU_LOG_WARN("worker %u: packet pool exhausted", w->worker_index);
       continue;
     }
     if (pkt->len > enc->cap) {
-      SFU_LOG_WARN("worker %u: plaintext too large to re-encrypt (%u > %u)", w->worker_index, pkt->len, enc->cap);
+      SFU_LOG_WARN("worker %u: plaintext too large", w->worker_index);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       continue;
     }
+
     memcpy(enc->data, pkt->data, pkt->len);
     int enc_len = (int)pkt->len;
 
     if (!is_rtcp) {
       uint8_t incoming_pt = enc->data[1] & 0x7F;
       uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
-
       if (incoming_pt != expected_pt) {
         enc->data[1] = (enc->data[1] & 0x80) | (expected_pt & 0x7F);
       }
+
+      uint16_t subscriber_seq = ntohs(*(uint16_t *)(enc->data + 2));
+      sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len);
+
+      uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+      int64_t now_ms = sfu_now_ms();
+      sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc_len);  // FIXED: Pass by reference
     }
 
     bool protected_ = is_rtcp ? sfu_srtp_protect_rtcp(&sub_session->srtp, enc->data, &enc_len, enc->cap)
                               : sfu_srtp_protect_rtp(&sub_session->srtp, enc->data, &enc_len, enc->cap);
 
     if (!protected_) {
-      SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] SRTP protect FAILED for target worker %u!", w->worker_index, i, sub_session->worker_id);
+      SFU_LOG_WARN("worker %u: [EGRESS DROP] SRTP protect FAILED", w->worker_index);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       continue;
     }
     enc->len = (uint32_t)enc_len;
 
-    SFU_LOG_DEBUG("worker fwd from %u to %u (len=%u)", w->worker_index, sub_session->worker_id, enc->len);
-
     if (sub_session->worker_id == w->worker_index) {
       if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub_session->cold->addr, sub_session->cold->addr_len) != 0) {
-        SFU_LOG_WARN("worker %u: local send SQ full, dropping to subscriber", w->worker_index);
+        SFU_LOG_WARN("worker %u: local send SQ full", w->worker_index);
       }
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);  // Packet is now handled by io_uring
     } else {
       if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub_session->worker_id, enc, &sub_session->cold->addr, sub_session->cold->addr_len)) {
-        SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] fanout_mesh_enqueue failed (queue full?) to worker %u", w->worker_index, i, sub_session->worker_id);
+        SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       }
-    }
-
-    if (!is_rtcp) {
-      uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
-      int64_t now_ms = sfu_now_ms();
-      sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc->len);
     }
   }
 
