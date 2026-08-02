@@ -24,6 +24,11 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
+uint32_t generate_unique_id(void) {
+  static atomic_uint_fast32_t counter = 0;
+  return atomic_fetch_add(&counter, 1) + 1;
+}
+
 static bool build_and_send_joined_response(sfu_client_conn_t *c, uint64_t room_id) {
   if (!c || !c->server) {
     return false;
@@ -566,6 +571,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 if (session) {
                   c->session = session;
                   c->session->user_id = c->user_id;
+                  c->session->peer_id = generate_unique_id();
                   handle_answer(session, sdp, sdp_len);
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;

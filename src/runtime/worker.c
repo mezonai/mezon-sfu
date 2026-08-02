@@ -2,10 +2,16 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include "congestion/gcc.h"
+#include "congestion/twcc_history.h"
+#include "congestion/twcc_parser.h"
+#include "media/svc/vp9_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "runtime/cpu.h"
+#include "runtime/scheduler.h"
 #include "runtime/signal.h"
+#include "runtime/timer.h"
 #include "transport/srtp/srtp.h"
 #include "util/log.h"
 
@@ -40,7 +46,6 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
     return -1;
   }
 
-  /* Send-only ring: no provided buffers, this worker never recvs. */
   if (sfu_ring_init(&w->send_ring, fd, SFU_WORKER_SEND_SQ_ENTRIES, SFU_WORKER_SEND_CQ_ENTRIES, 0, 0, send_bgid, false) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init send ring", worker_index);
     sfu_spsc_ring_destroy(&w->release_to_dispatcher);
@@ -55,6 +60,45 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   sfu_ring_destroy(&w->send_ring);
   sfu_spsc_ring_destroy(&w->release_to_dispatcher);
   sfu_spsc_ring_destroy(&w->inbox);
+}
+
+static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
+  if (len < 12) {
+    return -1;
+  }
+  uint8_t csrc_count = data[0] & 0x0F;
+  uint32_t offset = 12 + (csrc_count * 4);
+
+  if (len < offset) {
+    return -1;
+  }
+
+  if (data[0] & 0x10) {
+    if (len < offset + 4) {
+      return -1;
+    }
+    uint16_t ext_len = (data[offset + 2] << 8) | data[offset + 3];
+    offset += 4 + (ext_len * 4);
+  }
+
+  return (offset <= len) ? (int)offset : -1;
+}
+
+static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
+  // Example VP9 bitrate ladder
+  if (bitrate_bps > 1200000) {
+    session->target_sid = 2;  // High resolution (e.g., 720p)
+    session->target_tid = 2;  // Full framerate (e.g., 30fps)
+  } else if (bitrate_bps > 500000) {
+    session->target_sid = 1;  // Medium resolution (e.g., 360p)
+    session->target_tid = 2;
+  } else if (bitrate_bps > 150000) {
+    session->target_sid = 0;  // Low resolution (e.g., 180p)
+    session->target_tid = 1;  // Half framerate (e.g., 15fps)
+  } else {
+    session->target_sid = 0;
+    session->target_tid = 0;  // Lowest framerate
+  }
 }
 
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
@@ -83,6 +127,58 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
+  if (is_rtcp && pkt->len >= 8) {
+    uint8_t fmt = pkt->data[0] & 0x1F;
+    uint8_t pt = pkt->data[1];
+
+    if (pt == 205 && fmt == 15) {  // Transport-Wide Feedback
+      sfu_twcc_parser_t parser;
+
+      if (sfu_twcc_parser_init(&parser, pkt->data, pkt->len) == 0) {
+        gcc_packet_info_t twcc_pkt;
+        uint32_t estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+
+        // Iterate through status chunks in feedback packet
+        while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
+          // Lookup local send history using parsed sequence number
+          if (sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
+            // Feed completely populated packet info into GCC BWE engine
+            estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+          }
+        }
+
+        // Adapt active dynamic target layers
+        sfu_svc_update_layers(sender_session, estimated_bps);
+      }
+
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      return;
+    }
+  }
+
+  bool is_vp9 = false;
+  sfu_vp9_descriptor_t vp9_desc = {0};
+  bool is_keyframe = false;
+
+  if (!is_rtcp) {
+    uint8_t incoming_pt = pkt->data[1] & 0x7F;
+    if (incoming_pt == sender_session->uplink_video.payload_type) {
+      is_vp9 = true;
+      int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
+
+      if (payload_offset > 0) {
+        const uint8_t *payload = pkt->data + payload_offset;
+        size_t payload_len = pkt->len - payload_offset;
+        if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
+          // Identify if this is a sequence Keyframe (Non-predicted, Base layer)
+          is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
+        } else {
+          is_vp9 = false;  // Corrupted payload
+        }
+      }
+    }
+  }
+
   sfu_receiver_slot_t **receivers = __atomic_load_n(&sender_session->receivers, __ATOMIC_ACQUIRE);
   uint32_t receiver_capacity = __atomic_load_n(&sender_session->receiver_capacity, __ATOMIC_ACQUIRE);
 
@@ -98,13 +194,22 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 
     sfu_peer_session_t *sub_session = slot->video ? slot->video->owner : slot->audio->owner;
-    if (!sub_session) {
-      SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] Subscriber session not found in table!", w->worker_index, i);
+    if (!sub_session || sub_session->state != SFU_SESSION_ESTABLISHED) {
       continue;
     }
-    if (sub_session->state != SFU_SESSION_ESTABLISHED) {
-      SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] Subscriber session NOT ESTABLISHED (state=%d)!", w->worker_index, i, sub_session->state);
+
+    // Routing Check: Is this subscriber pinned to or actively watching THIS publisher?
+    if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {
       continue;
+    }
+
+    // Layer Evaluation
+    if (is_vp9 && slot->video) {
+      bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);
+
+      if (!should_forward) {
+        continue;  // Scheduler rejected the frame (wrong layer, waiting for keyframe, etc.)
+      }
     }
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
@@ -151,6 +256,12 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         SFU_LOG_WARN("worker %u: [EGRESS DROP SUB %u] fanout_mesh_enqueue failed (queue full?) to worker %u", w->worker_index, i, sub_session->worker_id);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       }
+    }
+
+    if (!is_rtcp) {
+      uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+      int64_t now_ms = sfu_now_ms();
+      sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc->len);
     }
   }
 

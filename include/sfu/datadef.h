@@ -7,8 +7,10 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
-#define SFU_SRTP_KEY_MATERIAL_LEN 60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
-#define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
+// SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt)
+#define SFU_SRTP_KEY_MATERIAL_LEN 60
+// "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul
+#define SFU_DTLS_FINGERPRINT_LEN 96
 #define SFU_SESSION_TABLE_MAX 8192
 #define SFU_ROOM_MAX_PEERS 256
 #define SFU_MAX_REMOTE_SLOTS (SFU_ROOM_MAX_PEERS - 1)
@@ -42,6 +44,9 @@ typedef enum {
 
 typedef struct sfu_peer_session sfu_peer_session_t;
 typedef struct sfu_room sfu_room_t;
+typedef struct gcc_bwe_context gcc_bwe_context_t;
+typedef struct sfu_twcc_history sfu_twcc_history_t;
+typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
 
 typedef struct sfu_srtp_ctx {
   srtp_t inbound;
@@ -97,19 +102,26 @@ typedef struct {
 
 typedef struct sfu_peer_session {
   sfu_room_t *room;
-  sfu_receiver_slot_t **receivers;
+  gcc_bwe_context_t *gcc_ctx;
+  sfu_twcc_history_t *twcc_history;
+  sfu_subscriber_scheduler_t *scheduler;
   sfu_peer_session_cold_t *cold;
+  sfu_receiver_slot_t **receivers;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
   uint8_t pt_map[128];
   int64_t user_id;
+  uint32_t peer_id;
   uint32_t next_remote_mid;
   uint32_t receiver_capacity;
   int fd;
   uint16_t worker_id;
+  uint16_t next_twcc_seq;
   uint8_t state;
+  uint8_t target_sid;
+  uint8_t target_tid;
   bool active;
   bool negotiation_needed;
 } sfu_peer_session_t;
