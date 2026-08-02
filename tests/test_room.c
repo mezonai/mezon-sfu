@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "room/room.h"
 #include "room/room_media_graph.h"
@@ -30,6 +31,12 @@ int main(void) {
   a.active = true;
   b.active = true;
   c.active = true;
+
+  /* Allocate cold pointers for stack-allocated sessions */
+  a.cold = calloc(1, sizeof(sfu_peer_session_cold_t));
+  b.cold = calloc(1, sizeof(sfu_peer_session_cold_t));
+  c.cold = calloc(1, sizeof(sfu_peer_session_cold_t));
+  assert(a.cold && b.cold && c.cold);
 
   strcpy(a.cold->ufrag, "a");
   strcpy(b.cold->ufrag, "b");
@@ -81,6 +88,11 @@ int main(void) {
 
   assert(saw_b);
   assert(saw_c);
+
+  /* Clean up cold pointers */
+  free(a.cold);
+  free(b.cold);
+  free(c.cold);
 
   sfu_room_destroy(&room);
 

@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *SAMPLE_OFFER =
@@ -89,6 +90,10 @@ static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *a
   memset(remotes, 0, sizeof(*remotes) * SFU_MAX_REMOTE_SLOTS);
   memset(mock_slots, 0, sizeof(mock_slots));
 
+  /* Allocate cold pointer for session */
+  session->cold = calloc(1, sizeof(sfu_peer_session_cold_t));
+  assert(session->cold != NULL);
+
   session->receiver_capacity = SFU_MAX_REMOTE_SLOTS;
   session->receivers = mock_slot_ptrs;
 
@@ -98,6 +103,17 @@ static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *a
     mock_slots[i].video = &video[i];
     audio[i].owner = &remotes[i];
     video[i].owner = &remotes[i];
+
+    /* Allocate cold pointer for each remote peer */
+    remotes[i].cold = calloc(1, sizeof(sfu_peer_session_cold_t));
+    assert(remotes[i].cold != NULL);
+  }
+}
+
+static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t *remotes) {
+  free(session->cold);
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    free(remotes[i].cold);
   }
 }
 
@@ -197,6 +213,10 @@ int main(void) {
    * a bogus answer. */
   const char *no_media = "v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n";
   assert(sfu_sdp_build_answer(&session1, no_media, strlen(no_media), "127.0.0.1", 17030, "u", "p", "AA:BB", answer, sizeof(answer)) == -1);
+
+  /* Clean up allocated cold pointers */
+  cleanup_mock_session(&session1, r1);
+  cleanup_mock_session(&session2, r2);
 
   printf("test_sdp: OK\n");
   return 0;

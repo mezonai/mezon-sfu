@@ -1,8 +1,12 @@
 #include "peer/session.h"
 #include <string.h>
+#include "congestion/gcc.h"
+#include "congestion/twcc_history.h"
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_kf.h"
+#include "rtp/rtx.h"
 #include "runtime/routing_context.h"
+#include "runtime/scheduler.h"
 #include "runtime/worker.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
@@ -95,6 +99,23 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
     }
 
     SFU_FREE(s->receivers);
+
+    /* Free RTX cache if allocated */
+    if (s->rtx_cache) {
+      sfu_rtx_cache_destroy(s->rtx_cache);
+      SFU_FREE(s->rtx_cache);
+    }
+
+    /* Free other context pointers if allocated */
+    if (s->gcc_ctx) {
+      SFU_FREE(s->gcc_ctx);
+    }
+    if (s->twcc_history) {
+      SFU_FREE(s->twcc_history);
+    }
+    if (s->scheduler) {
+      SFU_FREE(s->scheduler);
+    }
 
     SFU_FREE(s->cold);
     SFU_FREE(s);
@@ -221,6 +242,27 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   sfu_session_table_index_addr(t, s);
 
+  /* Allocate GCC context for bandwidth estimation */
+  s->gcc_ctx = SFU_CALLOC(1, sizeof(gcc_bwe_context_t));
+  if (s->gcc_ctx) {
+    gcc_bwe_init(s->gcc_ctx, 300000, 50000, 5000000);  /* start: 300kbps, min: 50kbps, max: 5Mbps */
+  }
+
+  /* Allocate TWCC history for packet tracking */
+  s->twcc_history = SFU_CALLOC(1, sizeof(sfu_twcc_history_t));
+
+  /* Allocate subscriber scheduler for SVC layer selection */
+  s->scheduler = SFU_CALLOC(1, sizeof(sfu_subscriber_scheduler_t));
+  if (s->scheduler) {
+    sfu_subscriber_scheduler_init(s->scheduler, 0);
+  }
+
+  /* Allocate RTX cache for NACK retransmission */
+  s->rtx_cache = SFU_CALLOC(1, sizeof(sfu_rtx_cache_t));
+  if (s->rtx_cache) {
+    sfu_rtx_cache_init(s->rtx_cache, 0, 0);  /* Will be configured later with proper SSRC/PT */
+  }
+
   if (sfu_dtls_conn_init(&s->cold->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");
 
@@ -228,6 +270,21 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
     if (s->cold) {
       SFU_FREE(s->cold);
+    }
+
+    /* Free allocated context pointers on failure */
+    if (s->gcc_ctx) {
+      SFU_FREE(s->gcc_ctx);
+    }
+    if (s->twcc_history) {
+      SFU_FREE(s->twcc_history);
+    }
+    if (s->scheduler) {
+      SFU_FREE(s->scheduler);
+    }
+    if (s->rtx_cache) {
+      sfu_rtx_cache_destroy(s->rtx_cache);
+      SFU_FREE(s->rtx_cache);
     }
 
     SFU_FREE(s);
@@ -323,6 +380,27 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
       SFU_FREE(s->receivers);
       s->receivers = NULL;
       s->receiver_capacity = 0;
+    }
+
+    /* Free RTX cache if allocated */
+    if (s->rtx_cache) {
+      sfu_rtx_cache_destroy(s->rtx_cache);
+      SFU_FREE(s->rtx_cache);
+      s->rtx_cache = NULL;
+    }
+
+    /* Free other context pointers if allocated */
+    if (s->gcc_ctx) {
+      SFU_FREE(s->gcc_ctx);
+      s->gcc_ctx = NULL;
+    }
+    if (s->twcc_history) {
+      SFU_FREE(s->twcc_history);
+      s->twcc_history = NULL;
+    }
+    if (s->scheduler) {
+      SFU_FREE(s->scheduler);
+      s->scheduler = NULL;
     }
 
     s->active = false;
