@@ -83,6 +83,7 @@ add_library(sfu_core STATIC
   src/runtime/routing_context.c
   src/congestion/gcc.c
   src/congestion/twcc_parser.c
+  src/rtp/rtx.c
 )
 
 target_include_directories(sfu_core PUBLIC
