@@ -89,32 +89,99 @@ static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
 // session, mirroring the pre-Phase-2 behavior.
 #define SFU_WORKER_KF_THROTTLE_MS 1000
 
+/* Routes a GCC bitrate estimate into the subscriber's layer scheduler
+ * (CC-02). The estimate updates the scheduler fields consumed by
+ * sfu_scheduler_evaluate_frame in the forwarding hot path — not the unused
+ * session-level target_sid/tid copies. */
 static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
-  // Example VP9 bitrate ladder
-  if (bitrate_bps > 1200000) {
-    session->target_sid = 2;  // High resolution (e.g., 720p)
-    session->target_tid = 2;  // Full framerate (e.g., 30fps)
-  } else if (bitrate_bps > 500000) {
-    session->target_sid = 1;  // Medium resolution (e.g., 360p)
-    session->target_tid = 2;
-  } else if (bitrate_bps > 150000) {
-    session->target_sid = 0;  // Low resolution (e.g., 180p)
-    session->target_tid = 1;  // Half framerate (e.g., 15fps)
-  } else {
-    session->target_sid = 0;
-    session->target_tid = 0;  // Lowest framerate
+  if (!session->scheduler) {
+    return;
+  }
+  sfu_subscriber_scheduler_set_bitrate(session->scheduler, bitrate_bps);
+}
+
+/* Test hook: the static helper above is exercised end-to-end by
+ * test_worker_protocol through this alias. */
+void sfu_test_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) { sfu_svc_update_layers(session, bitrate_bps); }
+
+/* Resolves feedback Media SSRC to the source publisher session.
+ *
+ * The SFU forwards RTP with the publisher's original SSRC, so the Media SSRC
+ * a subscriber names in PLI/NACK is the *publisher's uplink* SSRC. The room's
+ * publishers are scanned: for every room peer we acquire its immutable
+ * receiver snapshot (a coherent pin on the entry set) and require BOTH that
+ * the peer's uplink video SSRC (or its RTX SSRC) equals `media_ssrc` AND that
+ * the peer currently forwards to `subscriber`. The second condition prevents
+ * keyframe requests to a publisher this subscriber does not watch when two
+ * publishers share a room. The matching publisher is returned with a caller
+ * pin (+1 ref) the caller must sfu_session_release().
+ *
+ * A snapshot scan can miss if a snapshot publish races the feedback. That is
+ * benign here (we only skip a throttled keyframe request) and always errs on
+ * the side of NOT routing to a publisher that stopped forwarding to this
+ * subscriber. Returns NULL when no publisher matches. */
+static sfu_peer_session_t *sfu_worker_find_publisher_by_media_ssrc(sfu_peer_session_t *subscriber, uint32_t media_ssrc) {
+  sfu_room_t *room = subscriber->room;
+  if (!room) {
+    return NULL;
+  }
+
+  pthread_mutex_lock(&room->lock);
+  sfu_peer_session_t *result = NULL;
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *publisher = room->peers[i];
+    if (publisher == subscriber) {
+      continue;
+    }
+    if (publisher->uplink_video.ssrc != media_ssrc && publisher->uplink_video.rtx_ssrc != media_ssrc) {
+      continue;
+    }
+    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(publisher);
+    if (!snap) {
+      continue;
+    }
+    for (uint32_t j = 0; j < snap->count; j++) {
+      const sfu_receiver_entry_t *e = &snap->entries[j];
+      if (e->subscriber == subscriber && e->has_video) {
+        atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+        result = publisher;
+        break;
+      }
+    }
+    sfu_receiver_snapshot_release(snap);
+    if (result) {
+      break;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+  return result;
+}
+
+/* Issues a PLI to `publisher`, throttled to one request per
+ * SFU_WORKER_KF_THROTTLE_MS per publisher session. */
+static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher) {
+  int64_t now = (int64_t)sfu_now_ms();
+  if (now - publisher->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
+    publisher->last_pli_time = now;
+    sfu_session_request_keyframe(w, publisher, false);  // false = PLI
   }
 }
 
-static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *session) {
-  // NOTE: session here is the session the feedback arrived on. True
-  // Media-SSRC -> publisher session routing lands with the session/stream
-  // lookup rework in the next phase.
-  int64_t now = (int64_t)sfu_now_ms();
-  if (now - session->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
-    session->last_pli_time = now;
-    sfu_session_request_keyframe(w, session, false);  // false = PLI
+/* Keyframe recovery for subscriber feedback (CC-03/CC-04): the Media SSRC in
+ * a PLI or an unrecoverable NACK names the stream the *subscriber* receives,
+ * so the request must go to the publisher that forwards that stream, not to
+ * the session the feedback arrived on. When the SSRC cannot be resolved
+ * (routing not yet published or source switching), fall back to the feedback
+ * session so recovery keeps the pre-existing behavior. */
+static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
+  sfu_peer_session_t *publisher = sfu_worker_find_publisher_by_media_ssrc(feedback_session, media_ssrc);
+  if (!publisher) {
+    sfu_metric_inc("rtcp_kf_unresolved");
+    publisher = feedback_session;
+    atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
   }
+  sfu_worker_request_keyframe_throttled(w, publisher);
+  sfu_session_release(publisher);
 }
 
 static void sfu_worker_handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
@@ -157,10 +224,11 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     return;
   }
 
-  // NOTE: lookup stays on the existing per-session RTX cache regardless of
-  // the NACK media SSRC; stream-scoped RTX caches are a later phase.
+  // NOTE: cache lookup stays on the existing per-session RTX cache regardless
+  // of the NACK media SSRC; stream-scoped RTX caches are a later phase. The
+  // media SSRC is used to route unrecoverable-loss keyframe requests to the
+  // source publisher (CC-04).
   uint32_t nack_media_ssrc = sfu_nack_parser_media_ssrc(&nack_parser);
-  (void)nack_media_ssrc;
 
   uint16_t requested[SFU_WORKER_NACK_REQUEST_CAP];
   uint32_t requested_count = 0;
@@ -224,9 +292,8 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
   }
 
   if (unrecoverable_loss) {
-    // On cache miss keep the existing keyframe fallback. Follow-up: route by
-    // media SSRC once stream-scoped lookup lands.
-    sfu_worker_request_keyframe_throttled(w, sender_session);
+    // Cache miss: ask the source publisher of the lost stream for a keyframe.
+    sfu_worker_request_source_keyframe(w, sender_session, nack_media_ssrc);
   }
 }
 
@@ -236,10 +303,9 @@ static void sfu_worker_handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *se
     sfu_metric_inc("rtcp_pli_bad");
     return;
   }
-  // NOTE: pli.media_ssrc is parsed and validated, but the keyframe request is
-  // still issued via the existing session path; Media-SSRC publisher routing
-  // is next phase.
-  sfu_worker_request_keyframe_throttled(w, sender_session);
+  // Route the keyframe request to the publisher that sources pli.media_ssrc
+  // (CC-03), not to the subscriber the feedback arrived on.
+  sfu_worker_request_source_keyframe(w, sender_session, pli.media_ssrc);
 }
 
 static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {

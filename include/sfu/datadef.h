@@ -173,6 +173,10 @@ typedef struct sfu_peer_session {
   _Atomic uint8_t lifecycle;
   _Atomic bool accepts_work;
   uint8_t state;
+  /* Deprecated (CC-02): GCC routes through sfu_subscriber_scheduler_set_bitrate
+   * into the scheduler fields consumed by sfu_scheduler_evaluate_frame. These
+   * session-level copies are no longer written or read; kept only to avoid a
+   * struct-layout flag day. */
   uint8_t target_sid;
   uint8_t target_tid;
   uint8_t fir_seq;

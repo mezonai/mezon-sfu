@@ -193,6 +193,28 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
   return true;  // Frame is required by this subscriber
 }
 
+void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps) {
+  // VP9 bitrate ladder. Downshifts take effect immediately in
+  // sfu_scheduler_evaluate_frame; upshifts wait for a valid switching point
+  // (P=0 for spatial, U=1 for temporal), so no keyframe forcing is needed here.
+  uint8_t sid, tid;
+  if (bitrate_bps > 1200000) {
+    sid = 2;  // High resolution (e.g., 720p)
+    tid = 2;  // Full framerate (e.g., 30fps)
+  } else if (bitrate_bps > 500000) {
+    sid = 1;  // Medium resolution (e.g., 360p)
+    tid = 2;
+  } else if (bitrate_bps > 150000) {
+    sid = 0;  // Low resolution (e.g., 180p)
+    tid = 1;  // Half framerate (e.g., 15fps)
+  } else {
+    sid = 0;
+    tid = 0;  // Lowest framerate
+  }
+  sched->target_sid = sid;
+  sched->target_tid = tid;
+}
+
 void sfu_scheduler_adapt_layer(sfu_worker_t *w, sfu_subscriber_scheduler_t *sched, sfu_peer_session_t *publisher, uint8_t target_spatial_layer) {
   // Check if the spatial layer (sid) is actually changing
   if (sched->current_sid != target_spatial_layer) {

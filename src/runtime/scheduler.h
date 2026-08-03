@@ -43,4 +43,10 @@ bool sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr);
 void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t initial_publisher);
 bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe);
 
+/* Maps a congestion-control bitrate estimate onto the exact target SID/TID
+ * fields consumed by sfu_scheduler_evaluate_frame (CC-02). This is the single
+ * control entry point for GCC output: it writes the scheduler the forwarding
+ * hot path actually reads, never the duplicate session-level fields. */
+void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps);
+
 #endif /* SFU_RUNTIME_SCHEDULER_H */
