@@ -137,17 +137,32 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
       if (sfu_twcc_parser_init(&parser, pkt->data, pkt->len) == 0) {
         gcc_packet_info_t twcc_pkt;
-        uint32_t estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+        uint32_t estimated_bps = 0;
+
+        if (sender_session->gcc_ctx) {
+          estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+        }
+
         while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
-          if (sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
-            estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+          if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
+            if (sender_session->gcc_ctx) {
+              estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+            }
           }
         }
-        sfu_svc_update_layers(sender_session, estimated_bps);
+
+        if (estimated_bps > 0) {
+          sfu_svc_update_layers(sender_session, estimated_bps);
+        }
       }
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
       return;
-    } else if (pt == 205 && fmt == 1) {
+    } else if (pt == 205 && fmt == 1) {  // Generic NACK
+      if (!sender_session->rtx_cache) {
+        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+        return;
+      }
+
       sfu_nack_parser_t nack_parser;
       sfu_nack_parser_init(&nack_parser, pkt->data, pkt->len);
 
@@ -238,6 +253,10 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
+    if (!sub_session->scheduler) {
+      continue;
+    }
+
     if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {
       continue;
     }
@@ -277,7 +296,9 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
       uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
       int64_t now_ms = sfu_now_ms();
-      sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc_len);  // FIXED: Pass by reference
+      if (sub_session->twcc_history) {
+        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc_len);
+      }
     }
 
     bool protected_ = is_rtcp ? sfu_srtp_protect_rtcp(&sub_session->srtp, enc->data, &enc_len, enc->cap)

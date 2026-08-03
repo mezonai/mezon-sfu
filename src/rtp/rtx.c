@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "sfu/datadef.h"
+#include "util/alloc.h"
 
 void sfu_nack_parser_init(sfu_nack_parser_t *parser, const uint8_t *data, uint32_t len) {
   // RTCP Header (4) + Sender SSRC (4) + Media SSRC (4) = 12 bytes
@@ -60,7 +61,7 @@ void sfu_rtx_cache_init(sfu_rtx_cache_t *cache) {
   // Pre-allocate memory for the packet copies to avoid malloc() in the hot path.
   // 1024 entries * 1500 bytes = ~1.5MB per subscriber.
   for (int i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
-    cache->entries[i].data = (uint8_t *)malloc(SFU_MAX_PAYLOAD_SIZE);
+    cache->entries[i].data = (uint8_t *)SFU_CALLOC(1, SFU_MAX_PAYLOAD_SIZE);
     cache->entries[i].valid = false;
   }
 }
@@ -92,10 +93,14 @@ bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, 
   return false;
 }
 
-void sfu_rtx_cache_free(sfu_rtx_cache_t *cache) {
+// Cleanup function to free pre-allocated buffers when session closes
+void sfu_rtx_cache_destroy(sfu_rtx_cache_t *cache) {
+  if (!cache) {
+    return;
+  }
   for (int i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
     if (cache->entries[i].data) {
-      free(cache->entries[i].data);
+      SFU_FREE(cache->entries[i].data);
       cache->entries[i].data = NULL;
     }
   }

@@ -21,6 +21,7 @@ typedef struct sfu_rtx_cache {
   uint16_t next_rtx_seq;
 } sfu_rtx_cache_t;
 
+// NACK Iteration State
 typedef struct {
   const uint8_t *nack_ptr;
   const uint8_t *nack_end;
@@ -32,6 +33,7 @@ typedef struct {
 void sfu_rtx_cache_init(sfu_rtx_cache_t *cache);
 void sfu_rtx_cache_put(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt);
 bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc, uint8_t *out_rtx_pt);
+void sfu_rtx_cache_destroy(sfu_rtx_cache_t *cache);
 
 void sfu_nack_parser_init(sfu_nack_parser_t *parser, const uint8_t *data, uint32_t len);
 bool sfu_nack_parser_next(sfu_nack_parser_t *parser, uint16_t *lost_seq);
