@@ -69,10 +69,6 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   sfu_spsc_ring_destroy(&w->inbox);
 }
 
-/* Strict RTP header walk via the shared parser. Same accept/reject semantics
- * as the old inline helper (no version check, extension fully bounded), plus
- * padding validation, which is behavior-safe here because VP9 media is never
- * sent padded. Returns payload offset or -1. */
 static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
   sfu_rtp_packet_t packet;
   if (!sfu_rtp_packet_parse(data, len, &packet)) {
@@ -81,12 +77,8 @@ static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
   return (int)packet.header_len;
 }
 
-// Cap on distinct lost sequence numbers serviced per NACK member; bounds work
-// per feedback packet and dedups expanded BLP runs.
 #define SFU_WORKER_NACK_REQUEST_CAP 48
 
-// Throttle keyframe requests triggered by feedback to one per second per
-// session, mirroring the pre-Phase-2 behavior.
 #define SFU_WORKER_KF_THROTTLE_MS 1000
 
 static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
@@ -107,9 +99,6 @@ static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_
 }
 
 static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *session) {
-  // NOTE: session here is the session the feedback arrived on. True
-  // Media-SSRC -> publisher session routing lands with the session/stream
-  // lookup rework in the next phase.
   int64_t now = (int64_t)sfu_now_ms();
   if (now - session->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
     session->last_pli_time = now;
@@ -157,8 +146,6 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     return;
   }
 
-  // NOTE: lookup stays on the existing per-session RTX cache regardless of
-  // the NACK media SSRC; stream-scoped RTX caches are a later phase.
   uint32_t nack_media_ssrc = sfu_nack_parser_media_ssrc(&nack_parser);
   (void)nack_media_ssrc;
 
@@ -198,10 +185,6 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
 
       uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
       size_t rtx_built_len = 0;
-      // sfu_rtx_build conservatively requires orig_len + 2 bytes of output
-      // capacity; the cache only stores packets with len + 2 <=
-      // SFU_MAX_PAYLOAD_SIZE <= pool buffer cap, so a successful get always
-      // fits. On failure the scratch buffer is untouched.
       if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, next_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
         sfu_metric_inc("rtx_build_fail");
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
@@ -224,8 +207,6 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
   }
 
   if (unrecoverable_loss) {
-    // On cache miss keep the existing keyframe fallback. Follow-up: route by
-    // media SSRC once stream-scoped lookup lands.
     sfu_worker_request_keyframe_throttled(w, sender_session);
   }
 }
@@ -236,9 +217,6 @@ static void sfu_worker_handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *se
     sfu_metric_inc("rtcp_pli_bad");
     return;
   }
-  // NOTE: pli.media_ssrc is parsed and validated, but the keyframe request is
-  // still issued via the existing session path; Media-SSRC publisher routing
-  // is next phase.
   sfu_worker_request_keyframe_throttled(w, sender_session);
 }
 
@@ -248,14 +226,10 @@ static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *se
     sfu_metric_inc("rtcp_pli_bad");
     return;
   }
-  // Minimal handling: subscribers are not supposed to FIR the SFU; log only.
   SFU_LOG_DEBUG("worker %u: RTCP FIR from peer %u (media_ssrc=%u, %zu entries) ignored", w->worker_index, sender_session->peer_id, fir.media_ssrc,
                 fir.entry_count);
 }
 
-/* Iterate the (already SRTCP-unprotected) compound RTCP packet and dispatch
- * every valid member. A malformed member drops the remainder of the compound
- * and bumps rtcp_compound_malformed. Consumes pkt; never forwards it. */
 static void sfu_worker_handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_packet_t *pkt) {
   sfu_rtcp_compound_iter iter;
   sfu_rtcp_compound_iter_init(&iter, pkt->data, pkt->len);
@@ -301,9 +275,6 @@ static void sfu_worker_handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_s
 }
 
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
-  /* Sender pin (F-01): the acquired reference covers the entire packet path,
-   * so the session (and its SRTP/RTX state) stays valid even if the session
-   * is concurrently closed elsewhere. */
   sfu_peer_session_t *sender_session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
 
   if (!sender_session) {
@@ -359,10 +330,6 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-  /* Immutable receiver snapshot (F-03/F-04): one coherent view of the
-   * subscriber set for the whole packet. Every entry's subscriber session is
-   * retained by the snapshot, so it is safe to use for the full forwarding
-   * path without any additional pinning (F-01). */
   sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(sender_session);
   uint32_t receiver_count = snap ? snap->count : 0;
 

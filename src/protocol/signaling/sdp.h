@@ -32,9 +32,6 @@ static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
   }
 }
 
-/* Read-only view over one receiver-snapshot entry used by the SDP builders.
- * Plain value type (no ownership); the SDP caller must hold the snapshot it
- * was filled from, or be running under the room lock. */
 typedef struct sfu_sdp_receiver_view {
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
