@@ -4,24 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
-/*
- * Built-in counters. Keep the table small and static: hot-path sites will
- * call sfu_metric_inc() by string name. Linear scan is fine at this scale;
- * switch to enum indices only if profiling shows lookup cost.
- *
- * Names here are stable ABI for snapshot consumers — do not rename lightly.
- */
 static const char *const k_metric_names[] = {
-    "msg_trunc_drop",
-    "json_reject",
-    /* Phase 2 worker protocol integration counters. */
-    "rtcp_compound_malformed",
-    "rtcp_member_unknown",
-    "rtcp_twcc_bad",
-    "rtcp_nack_bad",
-    "rtcp_pli_bad",
-    "rtcp_nack_dropped",
-    "rtx_build_fail",
+    "msg_trunc_drop", "json_reject",  "rtcp_compound_malformed", "rtcp_member_unknown", "rtcp_twcc_bad",
+    "rtcp_nack_bad",  "rtcp_pli_bad", "rtcp_nack_dropped",       "rtx_build_fail",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };
