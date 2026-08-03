@@ -132,7 +132,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint8_t fmt = pkt->data[0] & 0x1F;
     uint8_t pt = pkt->data[1];
 
-    if (pt == 205 && fmt == 15) {  // Transport-Wide Feedback (TWCC)
+    if (pt == 205 && fmt == 15) {
       sfu_twcc_parser_t parser;
 
       if (sfu_twcc_parser_init(&parser, pkt->data, pkt->len) == 0) {
@@ -157,7 +157,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       }
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
       return;
-    } else if (pt == 205 && fmt == 1) {  // Generic NACK
+    } else if (pt == 205 && fmt == 1) {
       if (!sender_session->rtx_cache) {
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return;
