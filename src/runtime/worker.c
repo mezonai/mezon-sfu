@@ -11,6 +11,7 @@
 #include "rtcp/rtcp_compound.h"
 #include "rtcp/rtcp_fb.h"
 #include "rtp/rtp_packet.h"
+#include "rtp/rtp_ext.h"
 #include "rtp/rtx.h"
 #include "rtp/rtx_build.h"
 #include "runtime/cpu.h"
@@ -481,10 +482,23 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len, slot->video_rtx_ssrc, slot->video_rtx_pt);
       }
 
-      uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
-      int64_t now_ms = sfu_now_ms();
-      if (sub_session->twcc_history) {
-        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc_len);
+      /* CC-01: write the per-subscriber transport-wide sequence into the
+       * negotiated RTP extension BEFORE protecting/sending, and record
+       * history only when the wire packet actually carries that exact value
+       * (CC-14: a failed write must not create an unmatched history entry).
+       * twcc_extmap_id == 0 means transport-cc was not negotiated with this
+       * subscriber; neither extension nor history is touched. */
+      if (sub_session->twcc_extmap_id != 0) {
+        uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+        size_t new_len = (size_t)enc_len;
+        if (sfu_rtp_ext_write_twcc(enc->data, (size_t)enc_len, enc->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
+          enc_len = (int)new_len;
+          if (sub_session->twcc_history) {
+            sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, sfu_now_ms(), enc_len);
+          }
+        } else {
+          sfu_metric_inc("twcc_write_fail");
+        }
       }
     }
 

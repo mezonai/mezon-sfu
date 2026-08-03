@@ -72,6 +72,22 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
   return 0;
 }
 
+/* Appends the transport-wide CC offer/answer contract for one media section:
+ * the extmap mapping the locally-chosen ID plus the transport-cc feedback
+ * capability (CC-11). The SFU always offers ID 5 on its sendonly sections;
+ * the peer answers with the ID it will accept (see handle_answer), which is
+ * what the egress path writes into RTP. */
+#define SFU_TWCC_LOCAL_EXTMAP_ID 5
+
+static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset) {
+  char line[160];
+  int n = snprintf(line, sizeof(line), "a=extmap:%d http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", SFU_TWCC_LOCAL_EXTMAP_ID);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+  return 0;
+}
+
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, uint8_t video_pt, uint8_t rtx_pt) {
   sfu_video_codec_t codec = sfu_video_codec_from_pt(video_pt);
   const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9) ? "VP9" : (codec == SFU_VIDEO_CODEC_AV1) ? "AV1" : "VP8";
@@ -87,6 +103,10 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
     return -1;
   }
   n = snprintf(line, sizeof(line), "a=rtcp-fb:%u nack pli", video_pt);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+  n = snprintf(line, sizeof(line), "a=rtcp-fb:%u transport-cc", video_pt);
   if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
     return -1;
   }
@@ -508,6 +528,9 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
         goto fail;
       }
+      if (append_twcc_attributes(out, out_cap, &off) != 0) {
+        goto fail;
+      }
       if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {
         goto fail;
       }
@@ -678,6 +701,9 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       goto fail;
     }
     if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+      goto fail;
+    }
+    if (append_twcc_attributes(out, out_cap, &off) != 0) {
       goto fail;
     }
     if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {

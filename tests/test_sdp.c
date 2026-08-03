@@ -157,6 +157,38 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
   }
 }
 
+/* CC-11: the answer-side extmap negotiation extractor accepts the URI forms
+ * browsers emit and rejects garbage. */
+static void test_twcc_extmap_extraction(void) {
+  extern uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len);
+
+  /* Chrome-style answer: numeric ID with the draft URI. */
+  const char *chrome = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+                       "a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
+  assert(sfu_test_extract_twcc_extmap_id(chrome, strlen(chrome)) == 5);
+
+  /* Direction suffix must still parse. */
+  const char *with_dir = "a=extmap:3/recvonly http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
+  assert(sfu_test_extract_twcc_extmap_id(with_dir, strlen(with_dir)) == 3);
+
+  /* Non-TWCC extmap lines are ignored. */
+  const char *other = "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
+                      "a=extmap:2 urn:ietf:params:rtp-hdrext:toffset\r\n";
+  assert(sfu_test_extract_twcc_extmap_id(other, strlen(other)) == 0);
+
+  /* Invalid IDs are rejected: 0, 15 (reserved in one-byte form), non-numeric. */
+  assert(sfu_test_extract_twcc_extmap_id("a=extmap:0 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n", 77) == 0);
+  const char *id15 = "a=extmap:15 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
+  assert(sfu_test_extract_twcc_extmap_id(id15, strlen(id15)) == 0);
+  const char *junk = "a=extmap:xy transport-wide-cc\r\n";
+  assert(sfu_test_extract_twcc_extmap_id(junk, strlen(junk)) == 0);
+
+  /* A line that merely mentions the URI without the extmap prefix is not
+   * a negotiation. */
+  const char *no_prefix = "a=rtcp-fb:96 transport-cc\r\n";
+  assert(sfu_test_extract_twcc_extmap_id(no_prefix, strlen(no_prefix)) == 0);
+}
+
 int main(void) {
   char answer[8192];
 
@@ -244,6 +276,11 @@ int main(void) {
       {"offered Chrome PT 97 removed", !contains(answer, "a=rtpmap:97 rtx/90000")},
       {"remote video SSRC injected", contains(answer, "a=ssrc:987654321 cname:remote-peer")},
       {"remote rtx SSRC FID group injected", contains(answer, "a=ssrc-group:FID 987654321 987654322")},
+      /* CC-11: the answer's sendonly video section must offer the
+       * transport-wide CC contract so the subscriber can report TWCC
+       * feedback for the stream it receives. */
+      {"transport-cc extmap offered", contains(answer, "a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01")},
+      {"transport-cc rtcp-fb offered", contains(answer, "a=rtcp-fb:120 transport-cc")},
   };
 
   all_ok = 1;
@@ -263,6 +300,8 @@ int main(void) {
   /* Clean up allocated cold pointers */
   cleanup_mock_session(&session1, r1);
   cleanup_mock_session(&session2, r2);
+
+  test_twcc_extmap_extraction();
 
   printf("test_sdp: OK\n");
   return 0;

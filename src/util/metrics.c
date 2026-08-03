@@ -24,6 +24,8 @@ static const char *const k_metric_names[] = {
     "rtx_build_fail",
     /* Feedback whose Media SSRC resolved to no publisher (CC-03/CC-04). */
     "rtcp_kf_unresolved",
+    /* Egress TWCC extension write failures (CC-01). */
+    "twcc_write_fail",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

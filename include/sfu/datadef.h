@@ -168,6 +168,11 @@ typedef struct sfu_peer_session {
   uint32_t next_remote_mid;
   int fd;
   uint16_t worker_id;
+  /* Negotiated transport-wide CC extmap ID for RTP this session RECEIVES
+   * from the SFU (sendonly sections of the server offer / the subscriber's
+   * answer). 0 means transport-cc was not negotiated: the egress path must
+   * not write a TWCC extension or record send history. */
+  uint8_t twcc_extmap_id;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint32_t refcount;
   _Atomic uint8_t lifecycle;

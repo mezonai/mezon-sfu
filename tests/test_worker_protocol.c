@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "memory/packet_pool.h"
+#include "congestion/twcc_history.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "room/room.h"
@@ -512,6 +513,106 @@ static void test_gcc_estimate_reaches_scheduler(void) {
   fixture_destroy(&f);
 }
 
+/* CC-01: forwarding to a subscriber with a negotiated transport-cc extmap
+ * writes the per-subscriber TWCC sequence into the packet's RTP extension and
+ * records the same value in send history; a subscriber without negotiation
+ * gets neither. */
+static void test_egress_writes_twcc_extension(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  /* Subscriber (base.session) setup: scheduler selects the publisher, TWCC
+   * negotiated at extmap id 5, history allocated. An RTX cache is required
+   * by the forwarding path (it puts every forwarded video packet). */
+  sfu_peer_session_t *sub = f.base.session;
+  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
+  assert(sub->scheduler != NULL);
+  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
+  sub->twcc_extmap_id = 5;
+  assert(sub->twcc_history == NULL);
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+  assert(sub->rtx_cache != NULL); /* from fixture_init */
+
+  /* Neither session claims the packet's PT as its uplink video PT, so the
+   * packet is not VP9-parsed (VP9 detection keys on the SENDER's uplink PT)
+   * and sfu_scheduler_evaluate_frame — which would drop our synthetic
+   * non-keyframe — never runs. The plain forward path still applies. */
+  f.publisher->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.rtx_payload_type = 0;
+
+  /* Feed one publisher RTP packet through the ingress path. */
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, 1000, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f.publisher->cold->addr;
+  pkt->peer_addr_len = f.publisher->cold->addr_len;
+  sfu_room_forward_packet(&f.base.w, pkt);
+
+  /* The forwarded packet is retained by the send ring (never submitted), so
+   * verify through history + metrics: the first allocated TWCC sequence (0)
+   * must be recorded, and the recorded size must include the extension block
+   * growth over the plaintext RTP length. */
+  gcc_packet_info_t info = {0};
+  assert(sfu_twcc_history_lookup(sub->twcc_history, 0, &info)); /* first seq = 0 */
+  assert(info.size_bytes > plain_len);                          /* grew by the ext block */
+  assert(sfu_metric_get("twcc_write_fail") == 0);
+
+  kf_fixture_destroy(&f);
+}
+
+/* Without a negotiated extmap id, forwarding writes no extension and records
+ * no history. */
+static void test_egress_no_twcc_without_negotiation(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
+  assert(sub->scheduler != NULL);
+  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
+  sub->twcc_extmap_id = 0; /* not negotiated */
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+
+  f.publisher->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.rtx_payload_type = 0;
+
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, 1001, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f.publisher->cold->addr;
+  pkt->peer_addr_len = f.publisher->cold->addr_len;
+  sfu_room_forward_packet(&f.base.w, pkt);
+
+  gcc_packet_info_t info = {0};
+  assert(!sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
+
+  kf_fixture_destroy(&f);
+}
+
 int main(void) {
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -525,6 +626,8 @@ int main(void) {
   test_nack_miss_routes_to_source_publisher();
   test_pli_unknown_ssrc_falls_back();
   test_gcc_estimate_reaches_scheduler();
+  test_egress_writes_twcc_extension();
+  test_egress_no_twcc_without_negotiation();
   printf("test_worker_protocol: OK\n");
   return 0;
 }
