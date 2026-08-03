@@ -74,15 +74,6 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
   return for_insert && first_deleted >= 0 ? (uint32_t)first_deleted : SFU_HASH_EMPTY;
 }
 
-/* ---------------------------------------------------------------------------
- * Receiver snapshot helpers (F-03/F-04)
- * ------------------------------------------------------------------------- */
-
-/* Lock-free acquire-with-retain: the pointer is only replaced (release
- * store) while the outgoing snapshot still holds the writer's reference, so
- * the CAS below can never resurrect a fully-dead snapshot. Memory-reuse ABA
- * is impossible while the CAS could succeed, because the outgoing snapshot's
- * writer reference is only dropped after the replacement store. */
 sfu_receiver_snapshot_t *sfu_session_receivers_acquire(const sfu_peer_session_t *s) {
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
   while (snap) {
@@ -113,21 +104,12 @@ void sfu_receiver_snapshot_release(sfu_receiver_snapshot_t *snap) {
   }
 }
 
-/* Publishes a fully-built snapshot on the owning session and retires the old
- * one by dropping the writer's reference. Call with the room lock held. */
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
   sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->receivers, memory_order_acquire);
   atomic_store_explicit(&owner->receivers, new_snap, memory_order_release);
   sfu_receiver_snapshot_release(old);
 }
 
-/* ---------------------------------------------------------------------------
- * Session teardown
- * ------------------------------------------------------------------------- */
-
-/* Centralized teardown. Runs exactly once, when the last refcount is dropped.
- * `active` is never cleared before this point (logical close keeps it set),
- * so initialized DTLS/SRTP state is always destroyed here. */
 static void sfu_session_free_resources(sfu_peer_session_t *s) {
   if (!s) {
     return;
@@ -188,9 +170,6 @@ static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const 
   return memcmp(a, b, a_len) == 0;
 }
 
-/* Table-lock-held helpers. */
-
-/* Returns the session's member index, or UINT32_MAX if not a live member. */
 static uint32_t table_member_index(const sfu_session_table_t *t, const sfu_peer_session_t *session) {
   for (uint32_t i = 0; i < t->count; i++) {
     if (t->sessions[i] == session) {
@@ -200,8 +179,6 @@ static uint32_t table_member_index(const sfu_session_table_t *t, const sfu_peer_
   return UINT32_MAX;
 }
 
-/* A hash entry is only matched while the member index it references is still
- * live; the addr/ufrag bytes are compared against the session's cold data. */
 static bool addr_matches_direct(uint32_t idx, void *ctx_) {
   addr_match_ctx_t *ctx = ctx_;
   if (idx >= ctx->t->count) {
@@ -220,7 +197,6 @@ static bool ufrag_matches_direct(uint32_t idx, void *ctx_) {
   return s && s->cold->ufrag[0] != '\0' && strcmp(s->cold->ufrag, ctx->ufrag) == 0;
 }
 
-/* Removes the addr hash entry referencing member index `idx`, if any. */
 static void table_remove_addr_hash(sfu_session_table_t *t, sfu_peer_session_t *s, uint32_t idx) {
   if (s->cold->addr_len == 0) {
     return;
@@ -233,7 +209,6 @@ static void table_remove_addr_hash(sfu_session_table_t *t, sfu_peer_session_t *s
   }
 }
 
-/* Removes the ufrag hash entry referencing member index `idx`, if any. */
 static void table_remove_ufrag_hash(sfu_session_table_t *t, sfu_peer_session_t *s, uint32_t idx) {
   if (s->cold->ufrag[0] == '\0') {
     return;
@@ -246,8 +221,6 @@ static void table_remove_ufrag_hash(sfu_session_table_t *t, sfu_peer_session_t *
   }
 }
 
-/* Indexes the session's current address. Call with the table lock held; the
- * caller must have verified membership. */
 static void table_index_addr_locked(sfu_session_table_t *t, sfu_peer_session_t *session, uint32_t idx) {
   uint32_t hash = fnv1a(&session->cold->addr, session->cold->addr_len);
   addr_match_ctx_t ctx = {t, &session->cold->addr, session->cold->addr_len};
@@ -258,13 +231,6 @@ static void table_index_addr_locked(sfu_session_table_t *t, sfu_peer_session_t *
   }
 }
 
-/* ---------------------------------------------------------------------------
- * Creation
- * ------------------------------------------------------------------------- */
-
-/* Frees a session that failed part-way through construction, before it was
- * ever published. Safe on partially-initialized sessions: DTLS is destroyed
- * only when its SSL object exists. */
 static void session_destroy_unpublished(sfu_peer_session_t *s) {
   if (!s) {
     return;
@@ -354,10 +320,6 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   s->next_remote_mid = 2;
 
-  /* All fallible initialization happens BEFORE the session is published into
-   * the table or any hash, so a construction failure leaves no observable
-   * trace (no slot, no hash entry, no way for another thread to find it). */
-
   s->gcc_ctx = SFU_CALLOC(1, sizeof(gcc_bwe_context_t));
   if (s->gcc_ctx) {
     gcc_bwe_init(s->gcc_ctx, 300000, 50000, 5000000);
@@ -412,10 +374,6 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   return s;
 }
 
-/* ---------------------------------------------------------------------------
- * Lookups (return a caller pin)
- * ------------------------------------------------------------------------- */
-
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
   if (!addr || addr_len == 0) {
     return NULL;
@@ -456,10 +414,6 @@ sfu_peer_session_t *sfu_session_table_find_by_ufrag(sfu_session_table_t *t, cons
   return result;
 }
 
-/* ---------------------------------------------------------------------------
- * Close
- * ------------------------------------------------------------------------- */
-
 bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
   if (!t || !s) {
     return false;
@@ -474,14 +428,9 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
     return false;
   }
 
-  /* First OPEN -> CLOSING transition. */
   atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_CLOSING, memory_order_release);
   atomic_store_explicit(&s->accepts_work, false, memory_order_release);
 
-  /* Remove ALL hash entries referencing this session's member index (scan by
-   * index, not by any active-state predicate) and clear the table slot. The
-   * slot becomes a reusable hole for the next create. `active` deliberately
-   * stays true so final teardown destroys initialized DTLS/SRTP state. */
   uint32_t idx = table_member_index(t, s);
   if (idx != UINT32_MAX) {
     table_remove_addr_hash(t, s, idx);
@@ -499,17 +448,11 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
     room_remove_peer(room, s);
   }
 
-  /* Drop the table's reference; remaining caller/snapshot pins keep the
-   * allocation alive. */
   sfu_session_release(s);
   return true;
 }
 
 void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) { (void)sfu_session_begin_close(t, s); }
-
-/* ---------------------------------------------------------------------------
- * Rebind / ufrag indexing (rejected once closing or not a member)
- * ------------------------------------------------------------------------- */
 
 bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len) {
   if (!t || !s || !addr || addr_len == 0 || addr_len > sizeof(s->cold->addr)) {
@@ -560,10 +503,6 @@ bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *s
   return true;
 }
 
-/* ---------------------------------------------------------------------------
- * Table destroy
- * ------------------------------------------------------------------------- */
-
 void sfu_session_table_destroy(sfu_session_table_t *t) {
   /* No concurrent table users may exist here (workers joined, signaling
    * stopped, all caller pins released); the lock below is defensive. */
@@ -608,10 +547,6 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
 
   pthread_mutex_destroy(&t->lock);
 }
-
-/* ---------------------------------------------------------------------------
- * Keyframe requests
- * ------------------------------------------------------------------------- */
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
   sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
