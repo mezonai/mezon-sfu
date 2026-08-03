@@ -102,3 +102,7 @@ add_executable(test_worker_protocol test_worker_protocol.c)
 target_link_libraries(test_worker_protocol PRIVATE sfu_core)
 add_test(NAME worker_protocol COMMAND test_worker_protocol)
 
+add_executable(test_vp9_parser test_vp9_parser.c)
+target_link_libraries(test_vp9_parser PRIVATE sfu_core)
+add_test(NAME vp9_parser COMMAND test_vp9_parser)
+
