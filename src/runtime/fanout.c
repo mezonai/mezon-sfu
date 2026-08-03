@@ -1,4 +1,5 @@
 #include "runtime/fanout.h"
+#include "sfu/config.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -7,6 +8,12 @@
 
 int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count, uint32_t ring_capacity, uint32_t job_pool_capacity) {
   memset(mesh, 0, sizeof(*mesh));
+
+  if (worker_count < 1 || worker_count > SFU_MAX_WORKERS) {
+    SFU_LOG_ERROR("fanout mesh: invalid worker_count %u (must be 1..%d)", worker_count, SFU_MAX_WORKERS);
+    return -1;
+  }
+
   mesh->worker_count = worker_count;
 
   if (sfu_pool_init(&mesh->job_pool, job_pool_capacity, sizeof(sfu_fanout_job_t)) != 0) {

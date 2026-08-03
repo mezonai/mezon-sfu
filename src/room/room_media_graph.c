@@ -38,7 +38,9 @@ static sfu_receiver_slot_t *alloc_receiver_slot(sfu_peer_session_t *peer, sfu_sc
 
   if (old_array) {
     if (scheduler) {
-      sfu_scheduler_retire_ptr(scheduler, old_array);
+      if (!sfu_scheduler_retire_ptr(scheduler, old_array)) {
+        SFU_LOG_ERROR("alloc_receiver_slot: retirement failed for old_array=%p; leaking safely", (void *)old_array);
+      }
     } else {
       SFU_LOG_ERROR("alloc_receiver_slot: no scheduler to retire old_array=%p, leaking", (void *)old_array);
     }

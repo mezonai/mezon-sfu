@@ -46,3 +46,39 @@ add_executable(test_session_table test_session_table.c)
 target_link_libraries(test_session_table PRIVATE sfu_core)
 add_test(NAME session_table COMMAND test_session_table)
 
+add_executable(test_netbytes test_netbytes.c)
+target_link_libraries(test_netbytes PRIVATE sfu_core)
+add_test(NAME netbytes COMMAND test_netbytes)
+
+add_executable(test_metrics test_metrics.c)
+target_link_libraries(test_metrics PRIVATE sfu_core)
+add_test(NAME metrics COMMAND test_metrics)
+
+add_executable(test_rtx_capacity test_rtx_capacity.c)
+target_link_libraries(test_rtx_capacity PRIVATE sfu_core)
+add_test(NAME rtx_capacity COMMAND test_rtx_capacity)
+
+add_executable(test_epoch_reclaimer test_epoch_reclaimer.c)
+target_link_libraries(test_epoch_reclaimer PRIVATE sfu_core)
+add_test(NAME epoch_reclaimer COMMAND test_epoch_reclaimer)
+
+add_executable(test_rtcp_compound test_rtcp_compound.c)
+target_link_libraries(test_rtcp_compound PRIVATE sfu_core)
+add_test(NAME rtcp_compound COMMAND test_rtcp_compound)
+
+add_executable(test_rtp_packet test_rtp_packet.c)
+target_link_libraries(test_rtp_packet PRIVATE sfu_core)
+add_test(NAME rtp_packet COMMAND test_rtp_packet)
+
+add_executable(test_rtcp_fb test_rtcp_fb.c)
+target_link_libraries(test_rtcp_fb PRIVATE sfu_core)
+add_test(NAME rtcp_fb COMMAND test_rtcp_fb)
+
+add_executable(test_valkey_queue test_valkey_queue.c)
+target_link_libraries(test_valkey_queue PRIVATE sfu_core)
+add_test(NAME valkey_queue COMMAND test_valkey_queue)
+
+add_executable(test_rtx_build test_rtx_build.c)
+target_link_libraries(test_rtx_build PRIVATE sfu_core)
+add_test(NAME rtx_build COMMAND test_rtx_build)
+

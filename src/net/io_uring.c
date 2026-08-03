@@ -224,6 +224,10 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
 
   if (o->flags & MSG_TRUNC) {
     SFU_LOG_WARN("datagram truncated from %s:%u (bid=%u), dropping", peer_ip, peer_port, bid);
+    int mask = io_uring_buf_ring_mask(r->buf_count);
+    io_uring_buf_ring_add(r->buf_ring, buf, r->buf_size, bid, mask, 0);
+    io_uring_buf_ring_advance(r->buf_ring, 1);
+    goto maybe_rearm;
   }
 
   sfu_packet_t *pkt = sfu_packet_pool_alloc_meta(pp);

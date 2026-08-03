@@ -1,8 +1,5 @@
 #include "twcc_parser.h"
-#include <arpa/inet.h>
-
-// Helper to read 24-bit integer
-static uint32_t read_24bit(const uint8_t *data) { return (data[0] << 16) | (data[1] << 8) | data[2]; }
+#include "util/netbytes.h"
 
 int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t len) {
   // Basic RTCP Header (4) + Sender SSRC (4) + Media SSRC (4) + TWCC Header (8) = 20 bytes min
@@ -14,10 +11,10 @@ int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t 
   parser->len = len;
 
   // TWCC specific fields start at offset 12 (after Sender SSRC and Media SSRC)
-  parser->base_seq = ntohs(*(uint16_t *)(data + 12));
-  parser->packet_status_count = ntohs(*(uint16_t *)(data + 14));
+  parser->base_seq = sfu_read_be16(data + 12);
+  parser->packet_status_count = sfu_read_be16(data + 14);
 
-  uint32_t reference_time_24b = read_24bit(data + 16);
+  uint32_t reference_time_24b = sfu_read_be24(data + 16);
   // Reference time is in multiples of 64ms
   parser->current_time_ms = (int64_t)reference_time_24b * 64;
 
@@ -34,7 +31,7 @@ int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t 
   uint16_t temp_processed = 0;
 
   while (temp_processed < parser->packet_status_count && temp_offset + 2 <= len) {
-    uint16_t chunk = ntohs(*(uint16_t *)(data + temp_offset));
+    uint16_t chunk = sfu_read_be16(data + temp_offset);
     temp_offset += 2;
 
     if ((chunk & 0x8000) == 0) {
@@ -58,7 +55,7 @@ static uint8_t get_next_status(sfu_twcc_parser_t *parser) {
       return TWCC_STATUS_NOT_RECEIVED;  // EOF
     }
 
-    parser->current_chunk = ntohs(*(uint16_t *)(parser->data + parser->chunk_offset));
+    parser->current_chunk = sfu_read_be16(parser->data + parser->chunk_offset);
     parser->chunk_offset += 2;
 
     if ((parser->current_chunk & 0x8000) == 0) {
@@ -114,7 +111,7 @@ bool sfu_twcc_parser_next(sfu_twcc_parser_t *parser, gcc_packet_info_t *out_pkt)
       if (parser->delta_offset + 2 > parser->len) {
         return false;  // Corrupted
       }
-      int16_t delta_250us = (int16_t)ntohs(*(uint16_t *)(parser->data + parser->delta_offset));
+      int16_t delta_250us = (int16_t)sfu_read_be16(parser->data + parser->delta_offset);
       parser->delta_offset += 2;
       recv_delta_ms = (delta_250us * 250) / 1000;
     }

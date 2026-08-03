@@ -73,52 +73,65 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
   return for_insert && first_deleted >= 0 ? (uint32_t)first_deleted : SFU_HASH_EMPTY;
 }
 
+static void sfu_session_free_resources(sfu_peer_session_t *s) {
+  if (!s) {
+    return;
+  }
+
+  if (s->active) {
+    if (s->state == SFU_SESSION_ESTABLISHED) {
+      sfu_srtp_ctx_destroy(&s->srtp);
+    }
+    if (s->cold) {
+      sfu_dtls_conn_destroy(&s->cold->dtls);
+    }
+  }
+
+  if (s->receivers) {
+    for (uint32_t i = 0; i < s->receiver_capacity; i++) {
+      SFU_FREE(s->receivers[i]);
+      s->receivers[i] = NULL;
+    }
+    SFU_FREE(s->receivers);
+    s->receivers = NULL;
+  }
+  s->receiver_capacity = 0;
+
+  if (s->rtx_cache) {
+    sfu_rtx_cache_destroy(s->rtx_cache);
+    SFU_FREE(s->rtx_cache);
+    s->rtx_cache = NULL;
+  }
+  if (s->gcc_ctx) {
+    SFU_FREE(s->gcc_ctx);
+    s->gcc_ctx = NULL;
+  }
+  if (s->twcc_history) {
+    SFU_FREE(s->twcc_history);
+    s->twcc_history = NULL;
+  }
+  if (s->scheduler) {
+    SFU_FREE(s->scheduler);
+    s->scheduler = NULL;
+  }
+  if (s->cold) {
+    SFU_FREE(s->cold);
+    s->cold = NULL;
+  }
+}
+
 void sfu_session_table_destroy(sfu_session_table_t *t) {
   pthread_mutex_lock(&t->lock);
 
   for (uint32_t i = 0; i < t->count; i++) {
-    if (!t->sessions[i]) {
-      continue;
-    }
-
-    if (t->sessions[i]->active) {
-      if (t->sessions[i]->state == SFU_SESSION_ESTABLISHED) {
-        sfu_srtp_ctx_destroy(&t->sessions[i]->srtp);
-      }
-      sfu_dtls_conn_destroy(&t->sessions[i]->cold->dtls);
-    }
-    if (t->sessions[i]->receivers) {
-      for (uint32_t j = 0; j < t->sessions[i]->receiver_capacity; j++) {
-        SFU_FREE(t->sessions[i]->receivers[j]);
-      }
-      SFU_FREE(t->sessions[i]->receivers);
-    }
     sfu_peer_session_t *s = t->sessions[i];
     if (!s) {
       continue;
     }
 
-    SFU_FREE(s->receivers);
-
-    /* Free RTX cache if allocated */
-    if (s->rtx_cache) {
-      sfu_rtx_cache_destroy(s->rtx_cache);
-      SFU_FREE(s->rtx_cache);
-    }
-
-    /* Free other context pointers if allocated */
-    if (s->gcc_ctx) {
-      SFU_FREE(s->gcc_ctx);
-    }
-    if (s->twcc_history) {
-      SFU_FREE(s->twcc_history);
-    }
-    if (s->scheduler) {
-      SFU_FREE(s->scheduler);
-    }
-
-    SFU_FREE(s->cold);
+    sfu_session_free_resources(s);
     SFU_FREE(s);
+    t->sessions[i] = NULL;
   }
 
   SFU_FREE(t->sessions);
@@ -256,32 +269,30 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   s->rtx_cache = SFU_CALLOC(1, sizeof(sfu_rtx_cache_t));
   if (s->rtx_cache) {
-    sfu_rtx_cache_init(s->rtx_cache);
+    if (sfu_rtx_cache_init(s->rtx_cache) != 0) {
+      SFU_FREE(s->rtx_cache);
+      s->rtx_cache = NULL;
+    }
+  }
+  if (!s->rtx_cache) {
+    SFU_LOG_ERROR("failed to init RTX cache for new peer session");
+
+    sfu_session_free_resources(s);
+    SFU_FREE(s);
+    t->sessions[index] = NULL;
+
+    if (index + 1 == t->count) {
+      t->count--;
+    }
+
+    pthread_mutex_unlock(&t->lock);
+    return NULL;
   }
 
   if (sfu_dtls_conn_init(&s->cold->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");
 
-    SFU_FREE(s->receivers);
-
-    if (s->cold) {
-      SFU_FREE(s->cold);
-    }
-
-    if (s->gcc_ctx) {
-      SFU_FREE(s->gcc_ctx);
-    }
-    if (s->twcc_history) {
-      SFU_FREE(s->twcc_history);
-    }
-    if (s->scheduler) {
-      SFU_FREE(s->scheduler);
-    }
-    if (s->rtx_cache) {
-      sfu_rtx_cache_destroy(s->rtx_cache);
-      SFU_FREE(s->rtx_cache);
-    }
-
+    sfu_session_free_resources(s);
     SFU_FREE(s);
     t->sessions[index] = NULL;
 
@@ -363,41 +374,7 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
     }
   }
   if (s->active) {
-    if (s->state == SFU_SESSION_ESTABLISHED) {
-      sfu_srtp_ctx_destroy(&s->srtp);
-    }
-    sfu_dtls_conn_destroy(&s->cold->dtls);
-
-    if (s->receivers) {
-      for (uint32_t i = 0; i < s->receiver_capacity; i++) {
-        SFU_FREE(s->receivers[i]);
-      }
-      SFU_FREE(s->receivers);
-      s->receivers = NULL;
-      s->receiver_capacity = 0;
-    }
-
-    /* Free RTX cache if allocated */
-    if (s->rtx_cache) {
-      sfu_rtx_cache_destroy(s->rtx_cache);
-      SFU_FREE(s->rtx_cache);
-      s->rtx_cache = NULL;
-    }
-
-    /* Free other context pointers if allocated */
-    if (s->gcc_ctx) {
-      SFU_FREE(s->gcc_ctx);
-      s->gcc_ctx = NULL;
-    }
-    if (s->twcc_history) {
-      SFU_FREE(s->twcc_history);
-      s->twcc_history = NULL;
-    }
-    if (s->scheduler) {
-      SFU_FREE(s->scheduler);
-      s->scheduler = NULL;
-    }
-
+    sfu_session_free_resources(s);
     s->active = false;
     s->state = SFU_SESSION_FAILED;
   }
