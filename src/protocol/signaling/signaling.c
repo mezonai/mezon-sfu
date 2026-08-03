@@ -325,11 +325,22 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
       continue;
     }
 
+    /* Pin the session for the whole build+send (F-18). The room lock alone
+     * already keeps the session alive here — the room's membership reference
+     * is only dropped by room_remove_peer under this same lock, and teardown
+     * cannot complete before then — but holding an explicit pin means the
+     * safety of the SDP build no longer depends on the room lock never being
+     * released mid-loop; a future restructure that drops the lock while
+     * iterating cannot turn the traversal into a use-after-free. The session
+     * is a live OPEN member (accepts_work above), so its refcount is >= 2
+     * (table + room) and cannot hit zero concurrently. */
+    atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
       SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     } else {
       SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
     }
+    sfu_session_release(session);
   }
   pthread_mutex_unlock(&room->lock);
 }

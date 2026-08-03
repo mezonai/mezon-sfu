@@ -2,6 +2,7 @@
 #include "peer/session.h"
 #include "util/log.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -299,6 +300,12 @@ static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t 
   return true;
 }
 
+/* Lifetime invariant (F-18): the caller keeps `session` alive for the whole
+ * build via a refcounted pin or the room lock (see sdp.h). All receiver-set
+ * traversal below goes through the retained immutable snapshot acquired at
+ * entry; no snapshot entry is ever followed back into a mutable session. The
+ * only mutable session state read is uplink_video PT negotiation, which is a
+ * benign best-effort default. */
 int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
                          const char *pwd, const char *fingerprint, char *out, size_t out_cap) {
   size_t off = 0;
@@ -306,9 +313,12 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
   int saw_media_line = 0;
   int current_media = 0;
 
+  assert(session != NULL);
+
   /* Coherent, immutable view of the receiver set for the whole build (F-03). */
   sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
+  assert(snap != NULL || receiver_count == 0);
 
   uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
   uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
@@ -548,15 +558,22 @@ fail:
   return -1;
 }
 
+/* Lifetime invariant (F-18): same contract as sfu_sdp_build_answer — the
+ * caller keeps `session` alive via a refcounted pin or the room lock, and
+ * all receiver-set traversal goes through the retained immutable snapshot
+ * acquired here. */
 int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                         char *out, size_t out_cap) {
   size_t off = 0;
   char buf[512];
   int n;
 
+  assert(session != NULL);
+
   /* Coherent, immutable view of the receiver set for the whole build (F-03). */
   sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
+  assert(snap != NULL || receiver_count == 0);
 
   /* Session-level header. Fresh o= line since there is no inbound offer to mirror. */
   if (append_line(out, out_cap, &off, "v=0") != 0) {

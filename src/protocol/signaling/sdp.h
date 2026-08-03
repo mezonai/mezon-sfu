@@ -50,6 +50,17 @@ typedef struct sfu_sdp_receiver_view {
   char owner_ufrag[32];
 } sfu_sdp_receiver_view_t;
 
+/* Lifetime invariants for the session-taking SDP builders below (F-18):
+ * the caller must guarantee that `session` (and therefore session->cold)
+ * stays alive for the whole call, either by holding a refcounted pin
+ * (sfu_session_release discipline) or by holding the session's room lock.
+ * The builders only read immutable or caller-pinned state: the receiver
+ * set is traversed exclusively through a retained snapshot acquired at
+ * entry (sfu_session_receivers_acquire / sfu_receiver_snapshot_release);
+ * the only mutable session fields read are uplink_video.payload_type /
+ * rtx_payload_type, which are benign best-effort negotiation defaults
+ * (any concurrent value yields a valid SDP). They never follow snapshot
+ * entries back into owner/session pointers. */
 int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
                          const char *pwd, const char *fingerprint, char *out, size_t out_cap);
 
