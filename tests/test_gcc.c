@@ -221,6 +221,38 @@ static void test_feedback_gap_not_counted_as_overuse(void) {
   assert(ctx.trendline.usage_state != GCC_BWE_OVERUSE);
 }
 
+/* CC-13: loss above 10% caps the estimate at the acknowledged rate; moderate
+ * loss blocks increases; small loss is a no-op. */
+static void test_loss_has_control_effect(void) {
+  gcc_bwe_context_t ctx;
+  gcc_bwe_init(&ctx, START, MINB, MAXB);
+  ctx.aimd.current_bitrate_bps = 1000000;
+  ctx.aimd.have_ack_bitrate = true;
+  ctx.aimd.ack_bitrate_bps = 400000;
+
+  /* Heavy loss: capped to ack rate. */
+  gcc_bwe_report_loss(&ctx, 15, 100);
+  assert(ctx.aimd.current_bitrate_bps == 400000);
+  assert(ctx.aimd.state == GCC_RATE_CTRL_HOLD);
+
+  /* Moderate loss: holds state, no decrease below current. */
+  ctx.aimd.state = GCC_RATE_CTRL_INCREASE;
+  ctx.aimd.current_bitrate_bps = 500000;
+  gcc_bwe_report_loss(&ctx, 5, 100);
+  assert(ctx.aimd.current_bitrate_bps == 500000);
+  assert(ctx.aimd.state == GCC_RATE_CTRL_HOLD);
+
+  /* Small loss: no-op. */
+  ctx.aimd.state = GCC_RATE_CTRL_INCREASE;
+  gcc_bwe_report_loss(&ctx, 1, 100);
+  assert(ctx.aimd.state == GCC_RATE_CTRL_INCREASE);
+
+  /* Degenerate inputs never crash or corrupt. */
+  gcc_bwe_report_loss(&ctx, 0, 0);
+  gcc_bwe_report_loss(&ctx, 10, 0);
+  assert(ctx.aimd.current_bitrate_bps == 500000);
+}
+
 int main(void) {
   test_steadily_growing_queue_detected();
   test_constant_delay_is_normal();
@@ -230,6 +262,7 @@ int main(void) {
   test_init_validates_bounds();
   test_reorder_ignored();
   test_feedback_gap_not_counted_as_overuse();
+  test_loss_has_control_effect();
   printf("test_gcc: OK\n");
   return 0;
 }

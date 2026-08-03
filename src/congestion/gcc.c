@@ -229,6 +229,28 @@ static void update_ack_bitrate(gcc_aimd_controller_t *aimd, const gcc_arrival_gr
   aimd->have_ack_bitrate = true;
 }
 
+void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) {
+  if (!ctx || total == 0 || lost == 0) {
+    return;
+  }
+  gcc_aimd_controller_t *aimd = &ctx->aimd;
+
+  if (lost * 100 > total * 10) {
+    /* Heavy loss: the delay estimator cannot see the queue through losses,
+     * so cap the estimate at the acknowledged receive rate. */
+    if (aimd->have_ack_bitrate && aimd->current_bitrate_bps > aimd->ack_bitrate_bps) {
+      aimd->current_bitrate_bps = aimd->ack_bitrate_bps;
+      if (aimd->current_bitrate_bps < aimd->min_bitrate_bps) {
+        aimd->current_bitrate_bps = aimd->min_bitrate_bps;
+      }
+    }
+    aimd->state = GCC_RATE_CTRL_HOLD;
+  } else if (lost * 100 > total * 2) {
+    /* Moderate loss: hold; do not probe upward into loss. */
+    aimd->state = GCC_RATE_CTRL_HOLD;
+  }
+}
+
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt) {
   gcc_arrival_group_t *cg = &ctx->current_group;
 

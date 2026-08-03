@@ -77,6 +77,7 @@ int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t 
 
   parser->current_seq = parser->base_seq;
   parser->packets_processed = 0;
+  parser->packets_lost = 0;
   parser->chunk_offset = TWCC_FIXED_LEN;
   parser->statuses_left_in_chunk = 0;
   parser->current_chunk = 0;
@@ -138,6 +139,7 @@ bool sfu_twcc_parser_next(sfu_twcc_parser_t *parser, gcc_packet_info_t *out_pkt)
     parser->packets_processed++;
 
     if (status == TWCC_STATUS_NOT_RECEIVED) {
+      parser->packets_lost++;
       continue; /* lost packet: no receive delta follows */
     }
     if (status == TWCC_STATUS_RESERVED) {

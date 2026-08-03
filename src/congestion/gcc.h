@@ -102,4 +102,10 @@ typedef struct gcc_bwe_context {
 void gcc_bwe_init(gcc_bwe_context_t *ctx, uint32_t start_bitrate, uint32_t min_bitrate, uint32_t max_bitrate);
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt);
 
+/* Applies a loss signal from a completed TWCC feedback batch (CC-13):
+ * `lost` packets out of `total` reported statuses. Loss above 10% caps the
+ * estimate at the acknowledged receive rate; loss above 2% blocks further
+ * increases for this batch. Below 2% is a no-op. */
+void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total);
+
 #endif  // SFU_GCC_H

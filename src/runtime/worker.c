@@ -225,6 +225,12 @@ static void sfu_worker_handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *s
     sender_session->twcc_last_feedback_ref_us = batch[batch_count - 1].receive_time_us;
   }
 
+  /* CC-13: loss gets a control effect. */
+  if (sender_session->gcc_ctx && parser.packets_lost > 0) {
+    gcc_bwe_report_loss(sender_session->gcc_ctx, parser.packets_lost, parser.packet_status_count);
+    estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+  }
+
   if (estimated_bps > 0) {
     sfu_svc_update_layers(sender_session, estimated_bps);
   }

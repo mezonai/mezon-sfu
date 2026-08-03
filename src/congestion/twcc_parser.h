@@ -50,6 +50,9 @@ typedef struct {
   uint16_t statuses_left_in_chunk;
 
   uint32_t packets_processed;
+  /* Statuses seen so far with NOT_RECEIVED (CC-13): callers use this to give
+   * loss a control effect instead of dropping it on the floor. */
+  uint32_t packets_lost;
 } sfu_twcc_parser_t;
 
 int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t len, int64_t unwrap_anchor_us);
