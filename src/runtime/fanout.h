@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 
 #include "memory/pool.h"
+#include "sfu/datadef.h"
 #include "sfu/packet.h"
 #include "util/ringbuffer.h"
 
@@ -38,10 +39,33 @@
  * (which retains its own separate reference for the in-flight send) and
  * then releases the reference the job carried.
  */
+/* Forwarding job kinds (CC-10). READY jobs carry a fully rewritten,
+ * SRTP-protected packet (the pre-CC-10 behavior, kept for any non-media
+ * users). FORWARD jobs carry an UNPROTECTED plaintext copy of the publisher
+ * packet plus immutable routing metadata; the destination (subscriber's)
+ * worker performs every per-subscriber mutation — payload-type mapping, RTX
+ * cache insert, TWCC extension write + history, SRTP protect — so all egress
+ * state for a subscriber is owned by exactly one thread. */
+typedef enum sfu_fanout_job_kind {
+  SFU_FANOUT_JOB_READY = 0,
+  SFU_FANOUT_JOB_FORWARD = 1,
+} sfu_fanout_job_kind_t;
+
 typedef struct sfu_fanout_job {
   sfu_packet_t *pkt;
   struct sockaddr_storage dst;
   socklen_t dst_len;
+  /* FORWARD jobs only: destination subscriber session, pinned (+1 ref) by the
+   * producer; the consumer releases it after processing. NULL for READY. */
+  sfu_peer_session_t *subscriber;
+  /* FORWARD jobs only: value copy of the publisher's routing metadata for
+   * this destination (from the immutable receiver snapshot). */
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  bool has_video;
+  uint8_t kind; /* sfu_fanout_job_kind_t */
 } sfu_fanout_job_t;
 
 typedef struct sfu_fanout_mesh {
@@ -59,6 +83,15 @@ void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh);
  * ownership did not transfer. */
 bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, const struct sockaddr_storage *dst_addr,
                              socklen_t dst_len);
+
+/* Producer side for FORWARD jobs (CC-10). Same ownership contract as
+ * sfu_fanout_mesh_enqueue for pkt; additionally the caller must have pinned
+ * `subscriber` (+1 ref) — ownership of that pin transfers to the job on
+ * success and stays with the caller on failure. The video_* fields are value
+ * copies of the publisher's routing metadata for this destination. */
+bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt,
+                                     sfu_peer_session_t *subscriber, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
+                                     uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video);
 
 /* Consumer side: pops up to max_count jobs addressed to dst_worker
  * across every source worker's ring into it, invoking on_job for each.

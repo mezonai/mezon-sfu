@@ -82,7 +82,14 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
  * store) while the outgoing snapshot still holds the writer's reference, so
  * the CAS below can never resurrect a fully-dead snapshot. Memory-reuse ABA
  * is impossible while the CAS could succeed, because the outgoing snapshot's
- * writer reference is only dropped after the replacement store. */
+ * writer reference is only dropped after the replacement store.
+ *
+ * Concurrency note: publishing (room_media_graph.c) is serialized by the
+ * room lock, so there is at most one writer per session. The single-writer
+ * invariant matters here: a CAS retry after a failed refcount increment
+ * reloads the session pointer, and with one writer that reload sees either
+ * the same live snapshot or its fully-published replacement — never a
+ * half-retired one. */
 sfu_receiver_snapshot_t *sfu_session_receivers_acquire(const sfu_peer_session_t *s) {
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
   while (snap) {

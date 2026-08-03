@@ -343,6 +343,62 @@ static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *se
                 fir.entry_count);
 }
 
+/* Per-subscriber egress processing (CC-10). Runs ONLY on the subscriber's
+ * owning worker: all mutation of subscriber-owned state (payload-type map
+ * read, RTX cache insert, TWCC sequence/extension/history, SRTP protect)
+ * happens here, so each of those structures has exactly one writer thread
+ * even when many publisher workers fan out to the same subscriber.
+ *
+ * `pkt` holds an UNPROTECTED plaintext copy of the publisher's RTP packet
+ * (owned by the caller, released by the caller). `dst`/`dst_len` is a value
+ * copy of the subscriber's address; `video_*`/`has_video` are the publisher's
+ * routing metadata for this subscriber from the immutable receiver snapshot.
+ * The subscriber pin must be held by the caller. */
+static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst,
+                                      socklen_t dst_len, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video) {
+  int enc_len = (int)pkt->len;
+
+  uint8_t incoming_pt = pkt->data[1] & 0x7F;
+  uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
+  if (incoming_pt != expected_pt) {
+    pkt->data[1] = (pkt->data[1] & 0x80) | (expected_pt & 0x7F);
+  }
+
+  uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
+  if (has_video && incoming_pt == video_pt && sub_session->rtx_cache) {
+    sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, video_rtx_ssrc, video_rtx_pt);
+  }
+
+  /* CC-01: write the per-subscriber transport-wide sequence into the
+   * negotiated RTP extension BEFORE protecting/sending, and record history
+   * only when the wire packet actually carries that exact value (CC-14).
+   * twcc_extmap_id == 0 means transport-cc was not negotiated. */
+  if (sub_session->twcc_extmap_id != 0) {
+    uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+    size_t new_len = (size_t)enc_len;
+    if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
+      enc_len = (int)new_len;
+      if (sub_session->twcc_history) {
+        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, (int64_t)sfu_now_us(), (uint32_t)enc_len);
+      }
+    } else {
+      sfu_metric_inc("twcc_write_fail");
+    }
+  }
+
+  if (!sfu_srtp_protect_rtp(&sub_session->srtp, pkt->data, &enc_len, pkt->cap)) {
+    SFU_LOG_WARN("worker %u: [EGRESS DROP] SRTP protect FAILED", w->worker_index);
+    sfu_metric_inc("egress_protect_fail");
+    return;
+  }
+  pkt->len = (uint32_t)enc_len;
+
+  if (sfu_ring_queue_send_zc(&w->send_ring, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
+    SFU_LOG_WARN("worker %u: [EGRESS DROP] send SQ full", w->worker_index);
+    sfu_metric_inc("egress_send_full");
+  }
+}
+
 /* Iterate the (already SRTCP-unprotected) compound RTCP packet and dispatch
  * every valid member. A malformed member drops the remainder of the compound
  * and bumps rtcp_compound_malformed. Consumes pkt; never forwards it. */
@@ -490,59 +546,26 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
+    /* Plaintext copy; all per-subscriber mutation happens on the
+     * subscriber's owning worker (CC-10). */
     memcpy(enc->data, pkt->data, pkt->len);
-    int enc_len = (int)pkt->len;
-
-    if (!is_rtcp) {
-      uint8_t incoming_pt = enc->data[1] & 0x7F;
-      uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
-      if (incoming_pt != expected_pt) {
-        enc->data[1] = (enc->data[1] & 0x80) | (expected_pt & 0x7F);
-      }
-
-      uint16_t subscriber_seq = sfu_read_be16(enc->data + 2);
-      if (slot->has_video && incoming_pt == slot->video_pt) {
-        sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len, slot->video_rtx_ssrc, slot->video_rtx_pt);
-      }
-
-      /* CC-01: write the per-subscriber transport-wide sequence into the
-       * negotiated RTP extension BEFORE protecting/sending, and record
-       * history only when the wire packet actually carries that exact value
-       * (CC-14: a failed write must not create an unmatched history entry).
-       * twcc_extmap_id == 0 means transport-cc was not negotiated with this
-       * subscriber; neither extension nor history is touched. */
-      if (sub_session->twcc_extmap_id != 0) {
-        uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
-        size_t new_len = (size_t)enc_len;
-        if (sfu_rtp_ext_write_twcc(enc->data, (size_t)enc_len, enc->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
-          enc_len = (int)new_len;
-          if (sub_session->twcc_history) {
-            sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, (int64_t)sfu_now_us(), enc_len);
-          }
-        } else {
-          sfu_metric_inc("twcc_write_fail");
-        }
-      }
-    }
-
-    bool protected_ = is_rtcp ? sfu_srtp_protect_rtcp(&sub_session->srtp, enc->data, &enc_len, enc->cap)
-                              : sfu_srtp_protect_rtp(&sub_session->srtp, enc->data, &enc_len, enc->cap);
-
-    if (!protected_) {
-      SFU_LOG_WARN("worker %u: [EGRESS DROP] SRTP protect FAILED", w->worker_index);
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
-      continue;
-    }
-    enc->len = (uint32_t)enc_len;
+    enc->len = pkt->len;
 
     if (sub_session->worker_id == w->worker_index) {
-      if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub_session->cold->addr, sub_session->cold->addr_len) != 0) {
-        SFU_LOG_WARN("worker %u: local send SQ full", w->worker_index);
-      }
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);  // Packet is now handled by io_uring
+      /* Local subscriber: this worker IS the egress owner. */
+      sfu_worker_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_pt, slot->video_rtx_pt,
+                                slot->video_rtx_ssrc, slot->has_video);
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
-      if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub_session->worker_id, enc, &sub_session->cold->addr, sub_session->cold->addr_len)) {
+      /* Remote subscriber: hand the plaintext + immutable routing metadata
+       * to its worker. Pin the session for the job; ownership of the pin
+       * transfers to the job only on successful enqueue. */
+      atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
+      if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, enc, sub_session, &sub_session->cold->addr,
+                                           sub_session->cold->addr_len, slot->video_ssrc, slot->video_rtx_ssrc, slot->video_pt, slot->video_rtx_pt,
+                                           slot->has_video)) {
         SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
+        sfu_session_release(sub_session);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       }
     }
@@ -553,13 +576,23 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 
-static void handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
+void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
-  SFU_LOG_DEBUG("worker %u: [FANOUT DEQUEUE] Sending %u bytes to peer socket via io_uring", w->worker_index, job->pkt->len);
-
-  if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
-    SFU_LOG_WARN("worker %u: [EGRESS DROP] remote-fanout send SQ full, dropping packet", w->worker_index);
+  if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
+    /* CC-10: this worker owns the subscriber's egress state. The job carries
+     * a plaintext packet, a pinned session, and immutable routing metadata;
+     * perform the full per-subscriber rewrite + protect + send here. The
+     * subscriber may have closed since enqueue: the pin keeps the allocation
+     * valid, and state/SRTP remain initialized through logical close, so
+     * processing is safe; a fully-torn-down SRTP context simply fails
+     * protect and drops. */
+    sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_pt, job->video_rtx_pt, job->video_rtx_ssrc, job->has_video);
+    sfu_session_release(job->subscriber);
+  } else {
+    if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
+      SFU_LOG_WARN("worker %u: [EGRESS DROP] remote-fanout send SQ full, dropping packet", w->worker_index);
+    }
   }
 
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
@@ -583,7 +616,7 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, handle_fanout_job, w);
+    unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, sfu_worker_handle_fanout_job, w);
     if (fanned > 0) {
       did_work = true;
     }
@@ -619,7 +652,7 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    if (sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, handle_fanout_job, w) > 0) {
+    if (sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, sfu_worker_handle_fanout_job, w) > 0) {
       did_work = true;
     }
 

@@ -26,6 +26,9 @@ static const char *const k_metric_names[] = {
     "rtcp_kf_unresolved",
     /* Egress TWCC extension write failures (CC-01). */
     "twcc_write_fail",
+    /* Egress owner-side failures (CC-10). */
+    "egress_protect_fail",
+    "egress_send_full",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

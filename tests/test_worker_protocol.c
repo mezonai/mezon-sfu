@@ -613,6 +613,78 @@ static void test_egress_no_twcc_without_negotiation(void) {
   kf_fixture_destroy(&f);
 }
 
+/* CC-10: a publisher on worker 0 forwarding to a subscriber owned by worker
+ * 1 must hand a FORWARD job through the fanout mesh; the destination worker
+ * performs the full egress rewrite (TWCC extension + history) there — the
+ * publisher worker touches none of the subscriber's egress state. */
+static void test_remote_forward_egress_on_owner(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_fanout_mesh_t mesh;
+  assert(sfu_fanout_mesh_init(&mesh, 2, 16, 32) == 0);
+  f.base.w.mesh = &mesh;
+  f.base.w.worker_index = 0;
+
+  sfu_worker_t w1;
+  memset(&w1, 0, sizeof(w1));
+  w1.pp = &f.base.pp;
+  w1.sessions = &f.base.sessions;
+  w1.worker_index = 1;
+  w1.mesh = &mesh;
+  int w1_fds[2];
+  assert(pipe(w1_fds) == 0);
+  assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sub->worker_id = 1; /* owned by the other worker */
+  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
+  assert(sub->scheduler != NULL);
+  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
+  sub->twcc_extmap_id = 5;
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+
+  f.publisher->uplink_video.payload_type = 0;
+  sub->uplink_video.payload_type = 0;
+  sub->uplink_video.rtx_payload_type = 0;
+
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, 2000, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f.publisher->cold->addr;
+  pkt->peer_addr_len = f.publisher->cold->addr_len;
+  sfu_room_forward_packet(&f.base.w, pkt);
+
+  /* The publisher worker must NOT have written any TWCC state yet: the job
+   * is queued, not processed. */
+  gcc_packet_info_t info = {0};
+  assert(!sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
+
+  /* Drain on the owning worker: egress rewrite happens there. */
+  unsigned drained = sfu_fanout_mesh_drain(&mesh, 1, 8, sfu_worker_handle_fanout_job, &w1);
+  assert(drained == 1);
+  assert(sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
+  assert(info.size_bytes > plain_len);
+
+  sfu_ring_destroy(&w1.send_ring);
+  close(w1_fds[0]);
+  close(w1_fds[1]);
+  f.base.w.mesh = NULL;
+  sfu_fanout_mesh_destroy(&mesh);
+  kf_fixture_destroy(&f);
+}
+
 int main(void) {
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -628,6 +700,7 @@ int main(void) {
   test_gcc_estimate_reaches_scheduler();
   test_egress_writes_twcc_extension();
   test_egress_no_twcc_without_negotiation();
+  test_remote_forward_egress_on_owner();
   printf("test_worker_protocol: OK\n");
   return 0;
 }
