@@ -3,6 +3,7 @@
 
 #include <openssl/ssl.h>
 #include <srtp2/srtp.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
@@ -38,6 +39,19 @@ typedef enum {
   SFU_SESSION_FAILED,
 } sfu_session_state_t;
 
+/* Session lifecycle (Phase 3, F-01/F-03/F-04 fix):
+ *  - OPEN: published in the session table, lookup-able, accepts work.
+ *  - CLOSING: logically closed. Removed from the table and every hash index;
+ *    no new references can be acquired. Existing refcounted pins keep the
+ *    allocation (and its initialized DTLS/SRTP/RTX state) alive until the
+ *    last sfu_session_release().
+ * `active` stays true through CLOSING so that final teardown always destroys
+ * initialized DTLS/SRTP state regardless of when logical close happened. */
+typedef enum {
+  SFU_SESSION_LIFECYCLE_OPEN = 0,
+  SFU_SESSION_LIFECYCLE_CLOSING,
+} sfu_session_lifecycle_t;
+
 typedef enum {
   SFU_DTLS_FEED_ERROR = -1,
   SFU_DTLS_FEED_IN_PROGRESS = 0,
@@ -50,6 +64,7 @@ typedef struct gcc_bwe_context gcc_bwe_context_t;
 typedef struct sfu_twcc_history sfu_twcc_history_t;
 typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
 typedef struct sfu_rtx_cache sfu_rtx_cache_t;
+typedef struct sfu_receiver_snapshot sfu_receiver_snapshot_t;
 
 typedef struct sfu_srtp_ctx {
   srtp_t inbound;
@@ -89,12 +104,42 @@ typedef struct sfu_transceiver {
   sfu_transceiver_metadata_t *metadata;
 } sfu_transceiver_t;
 
-typedef struct sfu_receiver_slot {
-  sfu_transceiver_t *video;
-  sfu_transceiver_t *audio;
+/* One immutable routing entry inside a receiver snapshot. `subscriber` is a
+ * retained (refcounted) destination session; it stays valid for as long as
+ * the entry's snapshot is held, so a worker may use it for the full packet
+ * path without any additional pinning. All remaining fields are value copies
+ * of the publisher's routing metadata taken under the room lock; no mutable
+ * transceiver chains are exposed to readers. */
+typedef struct sfu_receiver_entry {
+  sfu_peer_session_t *subscriber;
+  char subscriber_ufrag[32];
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
   uint32_t mid_audio;
   uint32_t mid_video;
-} sfu_receiver_slot_t;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  bool has_audio;
+  bool has_video;
+  bool audio_active;
+  bool video_active;
+} sfu_receiver_entry_t;
+
+/* Immutable, refcounted copy-on-write receiver set (F-03/F-04). Readers
+ * acquire-load the session's snapshot pointer, retain it via a CAS on the
+ * refcount (skipping snapshots already draining to zero), traverse entries,
+ * and release. Writers build a fully-populated replacement under the room
+ * lock and release-store it before dropping the old snapshot's writer
+ * reference, so a live pointer can never reference a freed snapshot. The old
+ * snapshot is freed once the last reader lets go. */
+struct sfu_receiver_snapshot {
+  _Atomic uint32_t refcount;
+  uint64_t generation;
+  uint32_t count;
+  uint32_t capacity;
+  sfu_receiver_entry_t entries[];
+};
 
 typedef struct {
   struct sockaddr_storage addr;
@@ -110,7 +155,7 @@ typedef struct sfu_peer_session {
   sfu_subscriber_scheduler_t *scheduler;
   sfu_rtx_cache_t *rtx_cache;
   sfu_peer_session_cold_t *cold;
-  sfu_receiver_slot_t **receivers;
+  _Atomic(sfu_receiver_snapshot_t *) receivers;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
@@ -121,10 +166,12 @@ typedef struct sfu_peer_session {
   int64_t last_fir_time;
   uint32_t peer_id;
   uint32_t next_remote_mid;
-  uint32_t receiver_capacity;
   int fd;
   uint16_t worker_id;
   _Atomic uint16_t next_twcc_seq;
+  _Atomic uint32_t refcount;
+  _Atomic uint8_t lifecycle;
+  _Atomic bool accepts_work;
   uint8_t state;
   uint8_t target_sid;
   uint8_t target_tid;

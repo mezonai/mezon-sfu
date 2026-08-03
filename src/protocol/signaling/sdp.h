@@ -32,6 +32,24 @@ static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
   }
 }
 
+/* Read-only view over one receiver-snapshot entry used by the SDP builders.
+ * Plain value type (no ownership); the SDP caller must hold the snapshot it
+ * was filled from, or be running under the room lock. */
+typedef struct sfu_sdp_receiver_view {
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
+  uint32_t mid_audio;
+  uint32_t mid_video;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  bool has_audio;
+  bool has_video;
+  bool audio_active;
+  bool video_active;
+  char owner_ufrag[32];
+} sfu_sdp_receiver_view_t;
+
 int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
                          const char *pwd, const char *fingerprint, char *out, size_t out_cap);
 

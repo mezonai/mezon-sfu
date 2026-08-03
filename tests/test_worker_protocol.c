@@ -188,6 +188,7 @@ static void fixture_destroy(fixture_t *f) {
   sfu_rtx_cache_destroy(f->cache);
   SFU_FREE(f->cache);
   f->session->rtx_cache = NULL; /* table teardown must not double-free */
+  sfu_session_release(f->session);   /* drop the caller pin from get_or_create */
   sfu_session_table_destroy(&f->sessions); /* destroys copied SRTP handles */
   f->srtp.inbound = NULL;
   f->srtp.outbound = NULL;
