@@ -176,6 +176,11 @@ typedef struct sfu_peer_session {
   /* Reference time (microseconds) of the last processed TWCC feedback; anchors
    * 24-bit reference-time unwrapping for the next feedback (CC-12). */
   int64_t twcc_last_feedback_ref_us;
+  /* Egress stream generation (F-10): bumped on source switch / renegotiation
+   * by the session's owning worker. RTX cache entries are tagged with the
+   * generation at put time and only match NACK lookups at the current
+   * generation, so pre-switch media can never be retransmitted. */
+  _Atomic uint32_t egress_generation;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint32_t refcount;
   _Atomic uint8_t lifecycle;

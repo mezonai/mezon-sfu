@@ -248,11 +248,12 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     return;
   }
 
-  // NOTE: cache lookup stays on the existing per-session RTX cache regardless
-  // of the NACK media SSRC; stream-scoped RTX caches are a later phase. The
-  // media SSRC is used to route unrecoverable-loss keyframe requests to the
-  // source publisher (CC-04).
+  /* F-10: the NACK's media SSRC and the current egress generation scope every
+   * cache lookup — entries cached for another stream or before a source
+   * switch are invisible. Unrecoverable-loss keyframes route by media SSRC to
+   * the source publisher (CC-04). */
   uint32_t nack_media_ssrc = sfu_nack_parser_media_ssrc(&nack_parser);
+  uint32_t nack_generation = atomic_load_explicit(&sender_session->egress_generation, memory_order_acquire);
 
   uint16_t requested[SFU_WORKER_NACK_REQUEST_CAP];
   uint32_t requested_count = 0;
@@ -282,7 +283,7 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     uint32_t rtx_ssrc = 0;
     uint8_t rtx_pt = 0;
 
-    if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt)) {
+    if (sfu_rtx_cache_get_stream(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
       sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
       if (!rtx_enc) {
         continue;
@@ -355,7 +356,8 @@ static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *se
  * routing metadata for this subscriber from the immutable receiver snapshot.
  * The subscriber pin must be held by the caller. */
 static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst,
-                                      socklen_t dst_len, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video) {
+                                      socklen_t dst_len, uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc,
+                                      bool has_video) {
   int enc_len = (int)pkt->len;
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
@@ -364,9 +366,14 @@ static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_s
     pkt->data[1] = (pkt->data[1] & 0x80) | (expected_pt & 0x7F);
   }
 
+  /* F-10: cache entries are scoped to the stream the subscriber receives
+   * (the publisher's uplink SSRC, forwarded unchanged) and the current
+   * egress generation, so a NACK naming another stream — or a pre-switch
+   * stream — can never hit this entry. */
   uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
   if (has_video && incoming_pt == video_pt && sub_session->rtx_cache) {
-    sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, video_rtx_ssrc, video_rtx_pt);
+    sfu_rtx_cache_put_stream(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, video_rtx_ssrc, video_rtx_pt, video_ssrc,
+                             atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
   }
 
   /* CC-01: write the per-subscriber transport-wide sequence into the
@@ -553,8 +560,8 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
     if (sub_session->worker_id == w->worker_index) {
       /* Local subscriber: this worker IS the egress owner. */
-      sfu_worker_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_pt, slot->video_rtx_pt,
-                                slot->video_rtx_ssrc, slot->has_video);
+      sfu_worker_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt,
+                                slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
       /* Remote subscriber: hand the plaintext + immutable routing metadata
@@ -587,7 +594,8 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
      * valid, and state/SRTP remain initialized through logical close, so
      * processing is safe; a fully-torn-down SRTP context simply fails
      * protect and drops. */
-    sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_pt, job->video_rtx_pt, job->video_rtx_ssrc, job->has_video);
+    sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_ssrc, job->video_pt, job->video_rtx_pt,
+                              job->video_rtx_ssrc, job->has_video);
     sfu_session_release(job->subscriber);
   } else {
     if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {

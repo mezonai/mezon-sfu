@@ -209,7 +209,7 @@ static void test_compound_nack_rtx_dispatch(void) {
   uint8_t pkt_buf[512];
   size_t pkt_len;
   build_rtp_video(pkt_buf, 42, 100, &pkt_len);
-  sfu_rtx_cache_put(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT);
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
   assert(f.cache->next_rtx_seq == 0);
 
   uint8_t nack[64];
@@ -251,7 +251,7 @@ static void test_compound_pli_then_nack(void) {
   uint8_t pkt_buf[512];
   size_t pkt_len;
   build_rtp_video(pkt_buf, 7, 60, &pkt_len);
-  sfu_rtx_cache_put(f.cache, 7, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT);
+  sfu_rtx_cache_put_stream(f.cache, 7, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
 
   uint8_t compound[128];
   size_t pli_len = build_pli(compound);
@@ -272,7 +272,7 @@ static void test_malformed_tail_drops_remainder(void) {
   uint8_t pkt_buf[512];
   size_t pkt_len;
   build_rtp_video(pkt_buf, 9, 60, &pkt_len);
-  sfu_rtx_cache_put(f.cache, 9, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT);
+  sfu_rtx_cache_put_stream(f.cache, 9, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
 
   uint8_t compound[128];
   size_t nack_len = build_nack(compound, (uint16_t[]){9, 0x0000}, 2);
@@ -685,6 +685,55 @@ static void test_remote_forward_egress_on_owner(void) {
   kf_fixture_destroy(&f);
 }
 
+/* F-10: a NACK naming a different stream than the cached entry must miss
+ * (and route a keyframe to that stream's publisher), never retransmit the
+ * wrong media. */
+static void test_nack_wrong_stream_misses_cache(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t pkt_buf[512];
+  size_t pkt_len;
+  build_rtp_video(pkt_buf, 42, 100, &pkt_len);
+  /* Cached for stream MEDIA_SSRC... */
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
+
+  /* ...but the NACK names a DIFFERENT media SSRC. */
+  uint8_t nack[64];
+  size_t hdr = rtcp_member_header(nack, 1, 205, MEDIA_SSRC, 8);
+  sfu_write_be32(nack + 8, 0xfeedface);
+  sfu_write_be16(nack + 12, 42);
+  sfu_write_be16(nack + 14, 0);
+  feed_rtcp(&f, nack, hdr);
+
+  assert(f.cache->next_rtx_seq == 0);   /* no retransmission */
+  assert(f.session->last_pli_time != 0); /* miss -> keyframe fallback */
+  fixture_destroy(&f);
+}
+
+/* F-10: bumping the egress generation (source switch) invalidates all
+ * previously cached entries wholesale. */
+static void test_generation_bump_invalidates_cache(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t pkt_buf[512];
+  size_t pkt_len;
+  build_rtp_video(pkt_buf, 42, 100, &pkt_len);
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
+
+  /* Source switch: generation 0 -> 1. */
+  atomic_store(&f.session->egress_generation, 1);
+
+  uint8_t nack[64];
+  size_t nack_len = build_nack(nack, (uint16_t[]){42, 0x0000}, 2);
+  feed_rtcp(&f, nack, nack_len);
+
+  assert(f.cache->next_rtx_seq == 0);    /* stale entry not served */
+  assert(f.session->last_pli_time != 0); /* miss -> keyframe fallback */
+  fixture_destroy(&f);
+}
+
 int main(void) {
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -701,6 +750,8 @@ int main(void) {
   test_egress_writes_twcc_extension();
   test_egress_no_twcc_without_negotiation();
   test_remote_forward_egress_on_owner();
+  test_nack_wrong_stream_misses_cache();
+  test_generation_bump_invalidates_cache();
   printf("test_worker_protocol: OK\n");
   return 0;
 }
