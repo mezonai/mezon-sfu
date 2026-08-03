@@ -1,4 +1,5 @@
 #include "protocol/signaling/sdp.h"
+#include "peer/session.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -80,37 +81,76 @@ static int count_occurrences(const char *haystack, const char *needle) {
   return n;
 }
 
-static sfu_receiver_slot_t mock_slots[SFU_MAX_REMOTE_SLOTS];
-static sfu_receiver_slot_t *mock_slot_ptrs[SFU_MAX_REMOTE_SLOTS];
-
+/* Builds a mock session whose receiver snapshot mirrors what room_add_peer
+ * would produce for `SFU_MAX_REMOTE_SLOTS` remote publishers. The remotes are
+ * stack-allocated with refcount=1 (owned by this test) plus one ref per
+ * snapshot entry, released via the session's snapshot on cleanup. */
 static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *audio, sfu_transceiver_t *video, sfu_peer_session_t *remotes) {
   memset(session, 0, sizeof(*session));
   memset(audio, 0, sizeof(*audio) * SFU_MAX_REMOTE_SLOTS);
   memset(video, 0, sizeof(*video) * SFU_MAX_REMOTE_SLOTS);
   memset(remotes, 0, sizeof(*remotes) * SFU_MAX_REMOTE_SLOTS);
-  memset(mock_slots, 0, sizeof(mock_slots));
 
   /* Allocate cold pointer for session */
   session->cold = calloc(1, sizeof(sfu_peer_session_cold_t));
   assert(session->cold != NULL);
 
-  session->receiver_capacity = SFU_MAX_REMOTE_SLOTS;
-  session->receivers = mock_slot_ptrs;
+  sfu_receiver_snapshot_t *snap = calloc(1, sizeof(*snap) + SFU_MAX_REMOTE_SLOTS * sizeof(snap->entries[0]));
+  assert(snap != NULL);
+  atomic_store(&snap->refcount, 1);
+  snap->count = SFU_MAX_REMOTE_SLOTS;
+  snap->capacity = SFU_MAX_REMOTE_SLOTS;
 
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    mock_slot_ptrs[i] = &mock_slots[i];
-    mock_slots[i].audio = &audio[i];
-    mock_slots[i].video = &video[i];
     audio[i].owner = &remotes[i];
     video[i].owner = &remotes[i];
 
     /* Allocate cold pointer for each remote peer */
     remotes[i].cold = calloc(1, sizeof(sfu_peer_session_cold_t));
     assert(remotes[i].cold != NULL);
+    atomic_store(&remotes[i].refcount, 2); /* test pin + snapshot pin */
+    atomic_store(&remotes[i].lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
+    atomic_store(&remotes[i].accepts_work, true);
+
+    sfu_receiver_entry_t *e = &snap->entries[i];
+    e->subscriber = &remotes[i];
+    e->has_audio = true;
+    e->has_video = true;
+    e->mid_audio = 2 + i * 2;
+    e->mid_video = 3 + i * 2;
+  }
+
+  atomic_store(&session->receivers, snap);
+}
+
+/* Publishes the mock audio/video transceiver state into the snapshot entries
+ * (mirrors the room-media-graph copy step). Call after mutating the mock
+ * transceivers. */
+static void sync_mock_snapshot(sfu_peer_session_t *session, sfu_transceiver_t *audio, sfu_transceiver_t *video) {
+  sfu_receiver_snapshot_t *snap = atomic_load(&session->receivers);
+  assert(snap != NULL);
+  for (uint32_t i = 0; i < snap->count; i++) {
+    sfu_receiver_entry_t *e = &snap->entries[i];
+    e->audio_ssrc = audio[i].ssrc;
+    e->video_ssrc = video[i].ssrc;
+    e->video_rtx_ssrc = video[i].rtx_ssrc;
+    e->video_pt = video[i].payload_type;
+    e->video_rtx_pt = video[i].rtx_payload_type;
+    e->audio_active = audio[i].active;
+    e->video_active = video[i].active;
+    snprintf(e->subscriber_ufrag, sizeof(e->subscriber_ufrag), "%s", audio[i].owner->cold->ufrag);
   }
 }
 
 static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t *remotes) {
+  sfu_receiver_snapshot_t *snap = atomic_load(&session->receivers);
+  if (snap) {
+    atomic_store(&session->receivers, NULL);
+    /* Free the snapshot directly: the mock remotes are stack-allocated, so
+     * sfu_receiver_snapshot_release (which would sfu_session_release and
+     * ultimately free them) cannot be used here. */
+    free(snap);
+  }
   free(session->cold);
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     free(remotes[i].cold);
@@ -176,7 +216,13 @@ int main(void) {
   session2.uplink_video.rtx_payload_type = 121;
   v2[0].ssrc = 987654321;
   v2[0].rtx_ssrc = 987654322;
+  v2[0].active = true;
+  /* Remote publisher negotiates the same asymmetric PTs (needed now that the
+   * snapshot holds value copies of the remote transceiver's PT fields). */
+  v2[0].payload_type = 120;
+  v2[0].rtx_payload_type = 121;
   strncpy(r2[0].cold->ufrag, "remoteUfrag2", sizeof(r2[0].cold->ufrag) - 1);
+  sync_mock_snapshot(&session2, a2, v2);
 
   /* Verify asymmetric video payload type negotiation (e.g., Firefox PT 120/121 overriding Chrome PT 96/97) */
   len = sfu_sdp_build_answer(&session2, SAMPLE_VIDEO_OFFER, strlen(SAMPLE_VIDEO_OFFER), "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",

@@ -321,7 +321,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *session = room->peers[i];
 
-    if (!session) {
+    if (!session || !sfu_session_accepts_work(session)) {
       continue;
     }
 
@@ -429,20 +429,21 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
 static void on_client_close(uv_handle_t *handle) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
 
-  SFU_LOG_INFO("signaling: on_client_close fired for fd=%d ufrag=%s session=%p", c->fd, c->client_ufrag, (void *)c->session);
-
-  sfu_peer_session_t *session = c->session;
-  if (!session && c->client_ufrag[0] != '\0') {
-    session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
-  }
+  SFU_LOG_INFO("signaling: on_client_close fired for fd=%d ufrag=%s", c->fd, c->client_ufrag);
 
   sfu_routing_table_unregister_fd(c->server->routing_table, c->fd);
 
+  /* Fresh acquired ufrag lookup (c->session is never a valid reference; the
+   * borrowed pointer was removed in Phase 3). The pin keeps the session alive
+   * across begin_close, which is idempotent and detaches the room itself. */
+  sfu_peer_session_t *session = NULL;
+  if (c->client_ufrag[0] != '\0') {
+    session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
+  }
+
   if (session) {
-    if (session->room) {
-      room_remove_peer(session->room, session);
-    }
-    sfu_session_table_remove(c->server->sessions, session);
+    (void)sfu_session_begin_close(c->server->sessions, session);
+    sfu_session_release(session);
   }
 
   close(c->fd);
@@ -567,12 +568,14 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 } else {
                   c->client_ufrag[0] = '\0';
                 }
+                /* Acquired pin, used and released within this callback; the
+                 * borrowed c->session pointer was removed in Phase 3. */
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
-                  c->session = session;
-                  c->session->user_id = c->user_id;
-                  c->session->peer_id = generate_unique_id();
+                  session->user_id = c->user_id;
+                  session->peer_id = generate_unique_id();
                   handle_answer(session, sdp, sdp_len);
+                  sfu_session_release(session);
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
                   uint8_t video_pt = 0, rtx_pt = 0;
