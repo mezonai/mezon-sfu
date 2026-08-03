@@ -598,6 +598,43 @@ static void *worker_thread_main(void *arg) {
     __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
   }
 
+  /* Shutdown drain (F-17): zero-copy sends retain a packet reference until
+   * their notification CQE is reaped. Flush queued work, submit, and keep
+   * reaping until a full quiet pass observes no inbox work, no fanout jobs,
+   * and no completions; outstanding notification CQEs that never arrive
+   * (kernel already torn down, sends that errored before notification) are
+   * bounded by the idle-pass cap so shutdown cannot hang. */
+  for (unsigned idle_passes = 0; idle_passes < 32;) {
+    bool did_work = false;
+
+    void *item;
+    while (sfu_spsc_ring_pop(&w->inbox, &item)) {
+      sfu_dispatch_packet(w, (sfu_packet_t *)item);
+      did_work = true;
+    }
+
+    if (sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, handle_fanout_job, w) > 0) {
+      did_work = true;
+    }
+
+    if (sfu_ring_submit(&w->send_ring) > 0) {
+      did_work = true;
+    }
+
+    if (sfu_ring_reap(&w->send_ring, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w) > 0) {
+      did_work = true;
+    }
+
+    if (did_work) {
+      idle_passes = 0;
+    } else {
+      idle_passes++;
+      usleep(SFU_WORKER_IDLE_SLEEP_US);
+    }
+
+    __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
+  }
+
   SFU_LOG_INFO("worker %u shutting down", w->worker_index);
   return NULL;
 }
