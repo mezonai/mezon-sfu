@@ -6,19 +6,6 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
-/* ---------------------------------------------------------------------------
- * Copy-on-write receiver snapshots (F-03/F-04)
- *
- * room_add_peer / room_remove_peer never mutate a receiver slot in place.
- * For every affected peer they build a fully-populated replacement snapshot
- * (retaining a reference on each destination session) and release-store it;
- * the superseded snapshot keeps serving in-flight readers until they release
- * it. An allocation failure leaves the peer's current snapshot untouched and
- * is reported via the return value of the builder.
- * ------------------------------------------------------------------------- */
-
-/* Copies immutable routing metadata for destination `dst` into `e` and takes
- * a reference on `dst`. Call with the room lock held. */
 static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *dst) {
   atomic_fetch_add_explicit(&dst->refcount, 1, memory_order_relaxed);
 
@@ -169,8 +156,7 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
     if (snap) {
       snapshot_replace(other, snap);
     } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for peer subscribing to %s", room->room_id,
-                   peer->cold ? peer->cold->ufrag : "?");
+      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for peer subscribing to %s", room->room_id, peer->cold ? peer->cold->ufrag : "?");
     }
 
     /* the new peer subscribes to other's uplink */
@@ -178,8 +164,7 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
     if (snap) {
       snapshot_replace(peer, snap);
     } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for %s subscribing to peer", room->room_id,
-                   peer->cold ? peer->cold->ufrag : "?");
+      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for %s subscribing to peer", room->room_id, peer->cold ? peer->cold->ufrag : "?");
     }
   }
 
