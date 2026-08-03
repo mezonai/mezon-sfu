@@ -37,8 +37,6 @@ static uint16_t run_chunk(uint8_t symbol, uint16_t run) { return (uint16_t)(symb
  * exactly (CC-12: no truncation to integer ms). */
 static void test_small_deltas_microsecond_precision(void) {
   uint8_t buf[64];
-  uint16_t chunks[1];
-  chunks[0] = 0;
   uint8_t chunk_bytes[2];
   sfu_write_be16(chunk_bytes, run_chunk(TWCC_STATUS_SMALL_DELTA, 3));
   uint8_t deltas[3] = {1, 2, 3}; /* 250, 500, 750 us */
