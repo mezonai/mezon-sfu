@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <unistd.h>
+#include "congestion/gcc.h"
 #include "peer/session.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
@@ -138,12 +139,8 @@ int sfu_scheduler_start(sfu_scheduler_t *s) {
 void sfu_scheduler_join(sfu_scheduler_t *s) { pthread_join(s->thread, NULL); }
 
 void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t initial_publisher) {
+  memset(sched, 0, sizeof(*sched));
   sched->active_publisher_id = initial_publisher;
-  sched->is_pinned = false;
-  sched->target_sid = 0;
-  sched->target_tid = 0;
-  sched->current_sid = 0;
-  sched->current_tid = 0;
   sched->needs_keyframe = true;
 }
 
@@ -193,41 +190,108 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
   return true;  // Frame is required by this subscriber
 }
 
+/* VP9 bitrate ladder rungs (bits/s). A rung's layer set becomes the target
+ * only when the estimate clears the rung's UP threshold (rung rate + 20%
+ * headroom) and stays until it falls below the rung's DOWN threshold (rung
+ * rate), giving asymmetric up/down hysteresis. */
+typedef struct sfu_layer_rung {
+  uint32_t rate_bps;
+  uint8_t sid;
+  uint8_t tid;
+} sfu_layer_rung_t;
+
+static const sfu_layer_rung_t k_layer_ladder[] = {
+    {150000, 0, 1},   /* 180p, half framerate */
+    {500000, 1, 2},   /* 360p, full framerate */
+    {1200000, 2, 2},  /* 720p, full framerate */
+};
+#define SFU_LAYER_LADDER_LEN (sizeof(k_layer_ladder) / sizeof(k_layer_ladder[0]))
+#define SFU_LAYER_UP_HEADROOM_NUM 6 /* up threshold = rate * 1.2 */
+#define SFU_LAYER_UP_HEADROOM_DEN 5
+/* Dwell time: target changes no more often than this, so a jittery estimate
+ * cannot flap layers on every feedback. */
+#define SFU_LAYER_DWELL_US 500000LL
+
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps) {
-  // VP9 bitrate ladder. Downshifts take effect immediately in
-  // sfu_scheduler_evaluate_frame; upshifts wait for a valid switching point
-  // (P=0 for spatial, U=1 for temporal), so no keyframe forcing is needed here.
-  uint8_t sid, tid;
-  if (bitrate_bps > 1200000) {
-    sid = 2;  // High resolution (e.g., 720p)
-    tid = 2;  // Full framerate (e.g., 30fps)
-  } else if (bitrate_bps > 500000) {
-    sid = 1;  // Medium resolution (e.g., 360p)
-    tid = 2;
-  } else if (bitrate_bps > 150000) {
-    sid = 0;  // Low resolution (e.g., 180p)
-    tid = 1;  // Half framerate (e.g., 15fps)
-  } else {
-    sid = 0;
-    tid = 0;  // Lowest framerate
+  /* Map the estimate onto the ladder with hysteresis: walk to the highest
+   * rung whose UP threshold is cleared, but never below the current rung
+   * unless the DOWN threshold is broken. */
+  uint8_t target_sid = 0, target_tid = 0;
+  int chosen = -1;
+
+  for (int i = (int)SFU_LAYER_LADDER_LEN - 1; i >= 0; i--) {
+    uint64_t up = (uint64_t)k_layer_ladder[i].rate_bps * SFU_LAYER_UP_HEADROOM_NUM / SFU_LAYER_UP_HEADROOM_DEN;
+    if (bitrate_bps >= up) {
+      chosen = i;
+      break;
+    }
   }
-  sched->target_sid = sid;
-  sched->target_tid = tid;
+  if (chosen >= 0) {
+    target_sid = k_layer_ladder[chosen].sid;
+    target_tid = k_layer_ladder[chosen].tid;
+  }
+
+  /* Hysteresis on the way down: hold the current rung while the estimate
+   * stays at or above its (un-headroomed) rate. Only applies once a target
+   * has actually been committed — before the first climb there is nothing
+   * to hold, and holding the floor rung would mask real climbs. */
+  if (sched->last_target_change_us != 0 && chosen < (int)SFU_LAYER_LADDER_LEN - 1) {
+    int current_rung = -1;
+    for (int i = (int)SFU_LAYER_LADDER_LEN - 1; i >= 0; i--) {
+      if (sched->target_sid >= k_layer_ladder[i].sid && sched->target_tid >= k_layer_ladder[i].tid) {
+        current_rung = i;
+        break;
+      }
+    }
+    if (current_rung > chosen && current_rung >= 0 && bitrate_bps >= k_layer_ladder[current_rung].rate_bps) {
+      chosen = current_rung;
+      target_sid = k_layer_ladder[chosen].sid;
+      target_tid = k_layer_ladder[chosen].tid;
+    }
+  }
+
+  if (target_sid == sched->target_sid && target_tid == sched->target_tid) {
+    return;
+  }
+
+  /* Dwell: suppress target changes that arrive faster than the dwell
+   * window, unless we have never committed a layer yet. */
+  int64_t now = (int64_t)sfu_now_us();
+  if (sched->last_target_change_us != 0 && now - sched->last_target_change_us < SFU_LAYER_DWELL_US) {
+    return;
+  }
+  sched->last_target_change_us = now;
+  sched->target_sid = target_sid;
+  sched->target_tid = target_tid;
 }
 
-void sfu_scheduler_adapt_layer(sfu_worker_t *w, sfu_subscriber_scheduler_t *sched, sfu_peer_session_t *publisher, uint8_t target_spatial_layer) {
-  // Check if the spatial layer (sid) is actually changing
-  if (sched->current_sid != target_spatial_layer) {
-    sched->target_sid = target_spatial_layer;
-    sched->needs_keyframe = true;  // Use your struct's exact boolean name
+/* Source-switch transaction (#83): re-aims the selector at a new publisher
+ * and resets every piece of per-stream state so no stale media, stale
+ * retransmission cache, or stale estimate leaks across the switch. Call from
+ * the session's owning worker only (post-CC-10 single-writer rule). The
+ * keyframe gate arms; the caller must request a keyframe from the new source
+ * (sfu_session_request_keyframe) for recovery to actually start. */
+void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_publisher_id) {
+  sfu_subscriber_scheduler_t *sched = session->scheduler;
+  if (!sched) {
+    return;
+  }
 
-    // Request FIR to force a keyframe on the new layer
-    int64_t now = sfu_now_ms();
+  sched->active_publisher_id = new_publisher_id;
+  sched->current_sid = 0;
+  sched->current_tid = 0;
+  sched->needs_keyframe = true;
 
-    // Re-using last_pli_time as the throttle timer (from our previous step)
-    if (now - publisher->last_pli_time > 1000) {
-      publisher->last_pli_time = now;
-      sfu_session_request_keyframe(w, publisher, true);
-    }
+  /* F-10: invalidate all RTX entries cached for the previous source. */
+  atomic_fetch_add_explicit(&session->egress_generation, 1, memory_order_acq_rel);
+
+  /* The delay estimate is path-state; a new source means a new path, so the
+   * estimator restarts from its configured bounds rather than inheriting
+   * the old source's trend. */
+  if (session->gcc_ctx) {
+    uint32_t min_bps = session->gcc_ctx->aimd.min_bitrate_bps;
+    uint32_t max_bps = session->gcc_ctx->aimd.max_bitrate_bps;
+    uint32_t start_bps = session->gcc_ctx->aimd.current_bitrate_bps;
+    gcc_bwe_init(session->gcc_ctx, start_bps, min_bps, max_bps);
   }
 }

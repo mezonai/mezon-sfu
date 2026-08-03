@@ -10,6 +10,7 @@
 #include "runtime/epoch_reclaimer.h"
 
 typedef struct sfu_worker sfu_worker_t;
+typedef struct sfu_peer_session sfu_peer_session_t;
 
 typedef struct sfu_subscriber_scheduler {
   uint32_t active_publisher_id;
@@ -19,6 +20,9 @@ typedef struct sfu_subscriber_scheduler {
   uint8_t current_sid;
   uint8_t current_tid;
   bool needs_keyframe;
+  /* Last time the target layers changed (microseconds); enforces dwell time
+   * between target changes so a jittery GCC estimate cannot flap layers. */
+  int64_t last_target_change_us;
 } sfu_subscriber_scheduler_t;
 
 typedef struct sfu_scheduler {
@@ -48,5 +52,13 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
  * control entry point for GCC output: it writes the scheduler the forwarding
  * hot path actually reads, never the duplicate session-level fields. */
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps);
+
+/* Source-switch transaction (#83): re-aims the selector at a new publisher,
+ * resets layer state with the keyframe gate armed, bumps the session's
+ * egress generation (invalidating stale RTX entries, F-10), and restarts the
+ * GCC estimator from its configured bounds. Call from the session's owning
+ * worker only; the caller is responsible for requesting a keyframe from the
+ * new source. */
+void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_publisher_id);
 
 #endif /* SFU_RUNTIME_SCHEDULER_H */

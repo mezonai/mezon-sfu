@@ -506,6 +506,14 @@ static void test_gcc_estimate_reaches_scheduler(void) {
   assert(f.session->scheduler->target_sid == 2);
   assert(f.session->scheduler->target_tid == 2);
 
+  /* Below the rung's down threshold but within the dwell window: the target
+   * must hold (hysteresis, #83). */
+  sfu_test_svc_update_layers(f.session, 100000);
+  assert(f.session->scheduler->target_sid == 2);
+  assert(f.session->scheduler->target_tid == 2);
+
+  /* After the dwell window, the downshift commits. */
+  f.session->scheduler->last_target_change_us -= 600000;
   sfu_test_svc_update_layers(f.session, 100000);
   assert(f.session->scheduler->target_sid == 0);
   assert(f.session->scheduler->target_tid == 0);

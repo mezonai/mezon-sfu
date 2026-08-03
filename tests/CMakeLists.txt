@@ -98,6 +98,10 @@ add_executable(test_gcc test_gcc.c)
 target_link_libraries(test_gcc PRIVATE sfu_core)
 add_test(NAME gcc COMMAND test_gcc)
 
+add_executable(test_layer_selector test_layer_selector.c)
+target_link_libraries(test_layer_selector PRIVATE sfu_core)
+add_test(NAME layer_selector COMMAND test_layer_selector)
+
 add_executable(test_worker_protocol test_worker_protocol.c)
 target_link_libraries(test_worker_protocol PRIVATE sfu_core)
 add_test(NAME worker_protocol COMMAND test_worker_protocol)
