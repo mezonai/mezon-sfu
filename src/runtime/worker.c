@@ -137,18 +137,17 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
       if (sfu_twcc_parser_init(&parser, pkt->data, pkt->len) == 0) {
         gcc_packet_info_t twcc_pkt;
-        uint32_t estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;  // FIXED: Struct access
-
+        uint32_t estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
         while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
-          if (sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {  // FIXED: Pass by reference
-            estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);                 // FIXED: Pass by reference
+          if (sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
+            estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
           }
         }
         sfu_svc_update_layers(sender_session, estimated_bps);
       }
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
       return;
-    } else if (pt == 205 && fmt == 1) {  // Generic NACK
+    } else if (pt == 205 && fmt == 1) {
       sfu_nack_parser_t nack_parser;
       sfu_nack_parser_init(&nack_parser, pkt->data, pkt->len);
 
@@ -157,8 +156,10 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       while (sfu_nack_parser_next(&nack_parser, &lost_seq)) {
         uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
         uint32_t orig_len = 0;
+        uint32_t rtx_ssrc = 0;
+        uint8_t rtx_pt = 0;
 
-        if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len)) {
+        if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt)) {
           sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
           if (!rtx_enc) {
             continue;
@@ -167,11 +168,11 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
           int rtp_header_len = 12;
           memcpy(rtx_enc->data, orig_pkt, rtp_header_len);
 
-          rtx_enc->data[1] = (rtx_enc->data[1] & 0x80) | (sender_session->rtx_cache->rtx_pt & 0x7F);
+          rtx_enc->data[1] = (rtx_enc->data[1] & 0x80) | (rtx_pt & 0x7F);
 
           uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
           *(uint16_t *)(rtx_enc->data + 2) = htons(next_rtx_seq);
-          *(uint32_t *)(rtx_enc->data + 8) = htonl(sender_session->rtx_cache->rtx_ssrc);
+          *(uint32_t *)(rtx_enc->data + 8) = htonl(rtx_ssrc);
 
           *(uint16_t *)(rtx_enc->data + rtp_header_len) = htons(lost_seq);
           memcpy(rtx_enc->data + rtp_header_len + 2, orig_pkt + rtp_header_len, orig_len - rtp_header_len);
@@ -237,12 +238,12 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
-    if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {  // FIXED: Struct access
+    if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {
       continue;
     }
 
     if (is_vp9 && slot->video) {
-      bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);  // FIXED: Pass by reference
+      bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);
       if (!should_forward) {
         continue;
       }
@@ -270,7 +271,9 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       }
 
       uint16_t subscriber_seq = ntohs(*(uint16_t *)(enc->data + 2));
-      sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len);
+      if (slot->video && incoming_pt == slot->video->payload_type) {
+        sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len, slot->video->rtx_ssrc, slot->video->rtx_payload_type);
+      }
 
       uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
       int64_t now_ms = sfu_now_ms();
