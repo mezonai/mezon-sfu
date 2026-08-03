@@ -15,17 +15,17 @@ typedef enum { GCC_RATE_CTRL_HOLD = 0, GCC_RATE_CTRL_INCREASE, GCC_RATE_CTRL_DEC
 // Represents a packet parsed from TWCC feedback
 typedef struct gcc_packet_info {
   uint16_t sequence_number;
-  int64_t send_time_ms;
-  int64_t receive_time_ms;
+  int64_t send_time_us;
+  int64_t receive_time_us;
   uint32_t size_bytes;
 } gcc_packet_info_t;
 
 // Groups packets that arrived together (bursts)
 typedef struct gcc_arrival_group {
-  int64_t first_send_time_ms;
-  int64_t last_send_time_ms;
-  int64_t first_recv_time_ms;
-  int64_t last_recv_time_ms;
+  int64_t first_send_time_us;
+  int64_t last_send_time_us;
+  int64_t first_recv_time_us;
+  int64_t last_recv_time_us;
   uint32_t total_size;
   int packet_count;
 } gcc_arrival_group_t;

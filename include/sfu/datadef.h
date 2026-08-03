@@ -173,6 +173,9 @@ typedef struct sfu_peer_session {
    * answer). 0 means transport-cc was not negotiated: the egress path must
    * not write a TWCC extension or record send history. */
   uint8_t twcc_extmap_id;
+  /* Reference time (microseconds) of the last processed TWCC feedback; anchors
+   * 24-bit reference-time unwrapping for the next feedback (CC-12). */
+  int64_t twcc_last_feedback_ref_us;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint32_t refcount;
   _Atomic uint8_t lifecycle;

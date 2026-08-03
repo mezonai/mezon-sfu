@@ -9,3 +9,4 @@ uint64_t sfu_now_ns(void) {
 }
 
 uint64_t sfu_now_ms(void) { return sfu_now_ns() / 1000000ULL; }
+uint64_t sfu_now_us(void) { return sfu_now_ns() / 1000ULL; }

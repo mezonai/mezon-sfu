@@ -2,7 +2,7 @@
 #include <math.h>
 #include <string.h>
 
-#define GCC_INTER_GROUP_DELAY_THRESHOLD_MS 5.0
+#define GCC_INTER_GROUP_DELAY_THRESHOLD_US 5000.0
 #define GCC_ALPHA_SMOOTHING 0.9
 
 void gcc_bwe_init(gcc_bwe_context_t *ctx, uint32_t start_bitrate, uint32_t min_bitrate, uint32_t max_bitrate) {
@@ -103,33 +103,33 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt) {
   gcc_arrival_group_t *cg = &ctx->current_group;
 
-  if (cg->packet_count == 0 || (pkt->send_time_ms - cg->first_send_time_ms) <= GCC_INTER_GROUP_DELAY_THRESHOLD_MS) {
+  if (cg->packet_count == 0 || (pkt->send_time_us - cg->first_send_time_us) <= GCC_INTER_GROUP_DELAY_THRESHOLD_US) {
     if (cg->packet_count == 0) {
-      cg->first_send_time_ms = pkt->send_time_ms;
-      cg->first_recv_time_ms = pkt->receive_time_ms;
+      cg->first_send_time_us = pkt->send_time_us;
+      cg->first_recv_time_us = pkt->receive_time_us;
     }
-    cg->last_send_time_ms = pkt->send_time_ms;
-    cg->last_recv_time_ms = pkt->receive_time_ms;
+    cg->last_send_time_us = pkt->send_time_us;
+    cg->last_recv_time_us = pkt->receive_time_us;
     cg->total_size += pkt->size_bytes;
     cg->packet_count++;
   } else {
     // Group complete, compare with previous group
     if (ctx->prev_group.packet_count > 0) {
-      double delta_send = (double)(cg->last_send_time_ms - ctx->prev_group.last_send_time_ms);
-      double delta_recv = (double)(cg->last_recv_time_ms - ctx->prev_group.last_recv_time_ms);
+      double delta_send = (double)(cg->last_send_time_us - ctx->prev_group.last_send_time_us);
+      double delta_recv = (double)(cg->last_recv_time_us - ctx->prev_group.last_recv_time_us);
       double delay_gradient = delta_recv - delta_send;
 
-      update_trendline(&ctx->trendline, delta_recv, delay_gradient, pkt->receive_time_ms);
+      update_trendline(&ctx->trendline, delta_recv, delay_gradient, pkt->receive_time_us);
 
-      update_aimd(&ctx->aimd, ctx->trendline.usage_state, pkt->receive_time_ms);
+      update_aimd(&ctx->aimd, ctx->trendline.usage_state, pkt->receive_time_us);
     }
 
     ctx->prev_group = *cg;
     memset(cg, 0, sizeof(gcc_arrival_group_t));
-    cg->first_send_time_ms = pkt->send_time_ms;
-    cg->first_recv_time_ms = pkt->receive_time_ms;
-    cg->last_send_time_ms = pkt->send_time_ms;
-    cg->last_recv_time_ms = pkt->receive_time_ms;
+    cg->first_send_time_us = pkt->send_time_us;
+    cg->first_recv_time_us = pkt->receive_time_us;
+    cg->last_send_time_us = pkt->send_time_us;
+    cg->last_recv_time_us = pkt->receive_time_us;
     cg->total_size = pkt->size_bytes;
     cg->packet_count = 1;
   }

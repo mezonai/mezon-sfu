@@ -90,6 +90,10 @@ add_executable(test_rtp_ext test_rtp_ext.c)
 target_link_libraries(test_rtp_ext PRIVATE sfu_core)
 add_test(NAME rtp_ext COMMAND test_rtp_ext)
 
+add_executable(test_twcc_parser test_twcc_parser.c)
+target_link_libraries(test_twcc_parser PRIVATE sfu_core)
+add_test(NAME twcc_parser COMMAND test_twcc_parser)
+
 add_executable(test_worker_protocol test_worker_protocol.c)
 target_link_libraries(test_worker_protocol PRIVATE sfu_core)
 add_test(NAME worker_protocol COMMAND test_worker_protocol)

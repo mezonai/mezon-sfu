@@ -185,27 +185,44 @@ static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session
   sfu_session_release(publisher);
 }
 
+/* Upper bound on received packets per TWCC feedback member; bounds the
+ * staging buffer for batch-atomic GCC application (CC-06). */
+#define SFU_WORKER_TWCC_BATCH_CAP 256
+
 static void sfu_worker_handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
   sfu_twcc_parser_t parser;
-  // Bound the parser to this member's logical (unpadded) bytes.
-  if (sfu_twcc_parser_init(&parser, view->member, view->member_len) != 0) {
+  /* Bound the parser to this member's logical (unpadded) bytes, unwrapping
+   * the 24-bit reference time against the previous feedback (CC-12). */
+  if (sfu_twcc_parser_init(&parser, view->member, view->member_len, sender_session->twcc_last_feedback_ref_us) != 0) {
     sfu_metric_inc("rtcp_twcc_bad");
     return;
   }
 
-  gcc_packet_info_t twcc_pkt;
-  uint32_t estimated_bps = 0;
-
-  if (sender_session->gcc_ctx) {
-    estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+  /* Stage the whole batch first: a malformed/truncated tail must not leave a
+   * half-applied feedback in the estimator (CC-06). */
+  gcc_packet_info_t batch[SFU_WORKER_TWCC_BATCH_CAP];
+  size_t batch_count = 0;
+  gcc_packet_info_t item;
+  while (batch_count < SFU_WORKER_TWCC_BATCH_CAP && sfu_twcc_parser_next(&parser, &item)) {
+    batch[batch_count++] = item;
+  }
+  if (parser.packets_processed < parser.packet_status_count) {
+    sfu_metric_inc("rtcp_twcc_bad");
+    return;
   }
 
-  while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
-    if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
+  uint32_t estimated_bps = sender_session->gcc_ctx ? sender_session->gcc_ctx->aimd.current_bitrate_bps : 0;
+
+  for (size_t i = 0; i < batch_count; i++) {
+    if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, batch[i].sequence_number, &batch[i])) {
       if (sender_session->gcc_ctx) {
-        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &batch[i]);
       }
     }
+  }
+
+  if (batch_count > 0) {
+    sender_session->twcc_last_feedback_ref_us = batch[batch_count - 1].receive_time_us;
   }
 
   if (estimated_bps > 0) {
@@ -494,7 +511,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         if (sfu_rtp_ext_write_twcc(enc->data, (size_t)enc_len, enc->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
           enc_len = (int)new_len;
           if (sub_session->twcc_history) {
-            sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, sfu_now_ms(), enc_len);
+            sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, (int64_t)sfu_now_us(), enc_len);
           }
         } else {
           sfu_metric_inc("twcc_write_fail");
