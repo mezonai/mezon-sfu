@@ -242,25 +242,21 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   sfu_session_table_index_addr(t, s);
 
-  /* Allocate GCC context for bandwidth estimation */
   s->gcc_ctx = SFU_CALLOC(1, sizeof(gcc_bwe_context_t));
   if (s->gcc_ctx) {
-    gcc_bwe_init(s->gcc_ctx, 300000, 50000, 5000000);  /* start: 300kbps, min: 50kbps, max: 5Mbps */
+    gcc_bwe_init(s->gcc_ctx, 300000, 50000, 5000000);
   }
 
-  /* Allocate TWCC history for packet tracking */
   s->twcc_history = SFU_CALLOC(1, sizeof(sfu_twcc_history_t));
 
-  /* Allocate subscriber scheduler for SVC layer selection */
   s->scheduler = SFU_CALLOC(1, sizeof(sfu_subscriber_scheduler_t));
   if (s->scheduler) {
     sfu_subscriber_scheduler_init(s->scheduler, 0);
   }
 
-  /* Allocate RTX cache for NACK retransmission */
   s->rtx_cache = SFU_CALLOC(1, sizeof(sfu_rtx_cache_t));
   if (s->rtx_cache) {
-    sfu_rtx_cache_init(s->rtx_cache, 0, 0);  /* Will be configured later with proper SSRC/PT */
+    sfu_rtx_cache_init(s->rtx_cache);
   }
 
   if (sfu_dtls_conn_init(&s->cold->dtls, t->dtls_ctx) != 0) {
@@ -272,7 +268,6 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
       SFU_FREE(s->cold);
     }
 
-    /* Free allocated context pointers on failure */
     if (s->gcc_ctx) {
       SFU_FREE(s->gcc_ctx);
     }
