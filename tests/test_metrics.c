@@ -76,7 +76,11 @@ static void test_snapshot_format(void) {
     p = nl + 1;
     lines++;
   }
-  EXPECT(lines == 2);
+  EXPECT(lines >= 2); /* registry grows as new counters are registered */
+
+  /* New counters render too. */
+  EXPECT(strstr(buf, "rtcp_compound_malformed 0\n") != NULL);
+  EXPECT(strstr(buf, "rtx_build_fail 0\n") != NULL);
 
   /* Truncation: tiny buffer still NUL-terminated; return is full length. */
   char tiny[8];

@@ -8,13 +8,18 @@
 #include "media/svc/vp9_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
+#include "rtcp/rtcp_compound.h"
+#include "rtcp/rtcp_fb.h"
+#include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
+#include "rtp/rtx_build.h"
 #include "runtime/cpu.h"
 #include "runtime/scheduler.h"
 #include "runtime/signal.h"
 #include "runtime/timer.h"
 #include "transport/srtp/srtp.h"
 #include "util/log.h"
+#include "util/metrics.h"
 #include "util/netbytes.h"
 
 #define SFU_WORKER_SEND_SQ_ENTRIES 1024
@@ -64,27 +69,25 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   sfu_spsc_ring_destroy(&w->inbox);
 }
 
+/* Strict RTP header walk via the shared parser. Same accept/reject semantics
+ * as the old inline helper (no version check, extension fully bounded), plus
+ * padding validation, which is behavior-safe here because VP9 media is never
+ * sent padded. Returns payload offset or -1. */
 static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
-  if (len < 12) {
+  sfu_rtp_packet_t packet;
+  if (!sfu_rtp_packet_parse(data, len, &packet)) {
     return -1;
   }
-  uint8_t csrc_count = data[0] & 0x0F;
-  uint32_t offset = 12 + (csrc_count * 4);
-
-  if (len < offset) {
-    return -1;
-  }
-
-  if (data[0] & 0x10) {
-    if (len < offset + 4) {
-      return -1;
-    }
-    uint16_t ext_len = (data[offset + 2] << 8) | data[offset + 3];
-    offset += 4 + (ext_len * 4);
-  }
-
-  return (offset <= len) ? (int)offset : -1;
+  return (int)packet.header_len;
 }
+
+// Cap on distinct lost sequence numbers serviced per NACK member; bounds work
+// per feedback packet and dedups expanded BLP runs.
+#define SFU_WORKER_NACK_REQUEST_CAP 48
+
+// Throttle keyframe requests triggered by feedback to one per second per
+// session, mirroring the pre-Phase-2 behavior.
+#define SFU_WORKER_KF_THROTTLE_MS 1000
 
 static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   // Example VP9 bitrate ladder
@@ -101,6 +104,200 @@ static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_
     session->target_sid = 0;
     session->target_tid = 0;  // Lowest framerate
   }
+}
+
+static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *session) {
+  // NOTE: session here is the session the feedback arrived on. True
+  // Media-SSRC -> publisher session routing lands with the session/stream
+  // lookup rework in the next phase.
+  int64_t now = (int64_t)sfu_now_ms();
+  if (now - session->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
+    session->last_pli_time = now;
+    sfu_session_request_keyframe(w, session, false);  // false = PLI
+  }
+}
+
+static void sfu_worker_handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
+  sfu_twcc_parser_t parser;
+  // Bound the parser to this member's logical (unpadded) bytes.
+  if (sfu_twcc_parser_init(&parser, view->member, view->member_len) != 0) {
+    sfu_metric_inc("rtcp_twcc_bad");
+    return;
+  }
+
+  gcc_packet_info_t twcc_pkt;
+  uint32_t estimated_bps = 0;
+
+  if (sender_session->gcc_ctx) {
+    estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+  }
+
+  while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
+    if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
+      if (sender_session->gcc_ctx) {
+        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+      }
+    }
+  }
+
+  if (estimated_bps > 0) {
+    sfu_svc_update_layers(sender_session, estimated_bps);
+  }
+  (void)w;
+}
+
+static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
+  sfu_nack_parser_t nack_parser;
+  if (!sfu_nack_parser_init(&nack_parser, view->member, view->member_len)) {
+    sfu_metric_inc("rtcp_nack_bad");
+    return;
+  }
+
+  if (!sender_session->rtx_cache) {
+    return;
+  }
+
+  // NOTE: lookup stays on the existing per-session RTX cache regardless of
+  // the NACK media SSRC; stream-scoped RTX caches are a later phase.
+  uint32_t nack_media_ssrc = sfu_nack_parser_media_ssrc(&nack_parser);
+  (void)nack_media_ssrc;
+
+  uint16_t requested[SFU_WORKER_NACK_REQUEST_CAP];
+  uint32_t requested_count = 0;
+  bool capped = false;
+
+  uint16_t lost_seq;
+  bool unrecoverable_loss = false;
+  while (sfu_nack_parser_next(&nack_parser, &lost_seq)) {
+    bool duplicate = false;
+    for (uint32_t i = 0; i < requested_count; i++) {
+      if (requested[i] == lost_seq) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) {
+      continue;
+    }
+    if (requested_count >= SFU_WORKER_NACK_REQUEST_CAP) {
+      capped = true;
+      break;
+    }
+    requested[requested_count++] = lost_seq;
+
+    uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
+    uint32_t orig_len = 0;
+    uint32_t rtx_ssrc = 0;
+    uint8_t rtx_pt = 0;
+
+    if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt)) {
+      sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
+      if (!rtx_enc) {
+        continue;
+      }
+
+      uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
+      size_t rtx_built_len = 0;
+      // sfu_rtx_build conservatively requires orig_len + 2 bytes of output
+      // capacity; the cache only stores packets with len + 2 <=
+      // SFU_MAX_PAYLOAD_SIZE <= pool buffer cap, so a successful get always
+      // fits. On failure the scratch buffer is untouched.
+      if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, next_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
+        sfu_metric_inc("rtx_build_fail");
+        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+        continue;
+      }
+
+      int rtx_enc_len = (int)rtx_built_len;
+      if (sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap)) {
+        rtx_enc->len = (uint32_t)rtx_enc_len;
+        sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
+      }
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+    } else {
+      unrecoverable_loss = true;
+    }
+  }
+
+  if (capped) {
+    sfu_metric_inc("rtcp_nack_dropped");
+  }
+
+  if (unrecoverable_loss) {
+    // On cache miss keep the existing keyframe fallback. Follow-up: route by
+    // media SSRC once stream-scoped lookup lands.
+    sfu_worker_request_keyframe_throttled(w, sender_session);
+  }
+}
+
+static void sfu_worker_handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
+  sfu_rtcp_pli pli;
+  if (!sfu_rtcp_parse_pli(view, &pli)) {
+    sfu_metric_inc("rtcp_pli_bad");
+    return;
+  }
+  // NOTE: pli.media_ssrc is parsed and validated, but the keyframe request is
+  // still issued via the existing session path; Media-SSRC publisher routing
+  // is next phase.
+  sfu_worker_request_keyframe_throttled(w, sender_session);
+}
+
+static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
+  sfu_rtcp_fir fir;
+  if (!sfu_rtcp_parse_fir(view, &fir)) {
+    sfu_metric_inc("rtcp_pli_bad");
+    return;
+  }
+  // Minimal handling: subscribers are not supposed to FIR the SFU; log only.
+  SFU_LOG_DEBUG("worker %u: RTCP FIR from peer %u (media_ssrc=%u, %zu entries) ignored", w->worker_index, sender_session->peer_id, fir.media_ssrc,
+                fir.entry_count);
+}
+
+/* Iterate the (already SRTCP-unprotected) compound RTCP packet and dispatch
+ * every valid member. A malformed member drops the remainder of the compound
+ * and bumps rtcp_compound_malformed. Consumes pkt; never forwards it. */
+static void sfu_worker_handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_packet_t *pkt) {
+  sfu_rtcp_compound_iter iter;
+  sfu_rtcp_compound_iter_init(&iter, pkt->data, pkt->len);
+
+  sfu_rtcp_member_view view;
+  for (;;) {
+    sfu_rtcp_compound_result rc = sfu_rtcp_compound_iter_next(&iter, &view);
+    if (rc == SFU_RTCP_COMPOUND_END) {
+      break;
+    }
+    if (rc == SFU_RTCP_COMPOUND_MALFORMED) {
+      sfu_metric_inc("rtcp_compound_malformed");
+      break;
+    }
+
+    switch (view.pt) {
+      case 205:  // RTPFB
+        if (view.fmt_count == 15) {
+          sfu_worker_handle_twcc_member(w, sender_session, &view);
+        } else if (view.fmt_count == 1) {
+          sfu_worker_handle_nack_member(w, sender_session, &view);
+        } else {
+          sfu_metric_inc("rtcp_member_unknown");
+        }
+        break;
+      case 206:  // PSFB
+        if (view.fmt_count == 1) {
+          sfu_worker_handle_pli_member(w, sender_session, &view);
+        } else if (view.fmt_count == 4) {
+          sfu_worker_handle_fir_member(w, sender_session, &view);
+        } else {
+          sfu_metric_inc("rtcp_member_unknown");
+        }
+        break;
+      default:
+        // SR/RR/SDES/BYE and anything else: no worker action this phase.
+        sfu_metric_inc("rtcp_member_unknown");
+        break;
+    }
+  }
+
+  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
@@ -129,103 +326,9 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
-  if (is_rtcp && pkt->len >= 12) {
-    uint8_t fmt = pkt->data[0] & 0x1F;
-    uint8_t pt = pkt->data[1];
-
-    if (pt == 205 && fmt == 15) {
-      sfu_twcc_parser_t parser;
-
-      if (sfu_twcc_parser_init(&parser, pkt->data, pkt->len) == 0) {
-        gcc_packet_info_t twcc_pkt;
-        uint32_t estimated_bps = 0;
-
-        if (sender_session->gcc_ctx) {
-          estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
-        }
-
-        while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
-          if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
-            if (sender_session->gcc_ctx) {
-              estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
-            }
-          }
-        }
-
-        if (estimated_bps > 0) {
-          sfu_svc_update_layers(sender_session, estimated_bps);
-        }
-      }
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-      return;
-    } else if (pt == 205 && fmt == 1) {
-      if (!sender_session->rtx_cache) {
-        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-        return;
-      }
-
-      sfu_nack_parser_t nack_parser;
-      sfu_nack_parser_init(&nack_parser, pkt->data, pkt->len);
-
-      uint16_t lost_seq;
-      bool unrecoverable_loss = false;
-      while (sfu_nack_parser_next(&nack_parser, &lost_seq)) {
-        uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
-        uint32_t orig_len = 0;
-        uint32_t rtx_ssrc = 0;
-        uint8_t rtx_pt = 0;
-
-        if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt)) {
-          // Fixed 12-byte RTP header for now; variable-header RTX is a later PR.
-          if (orig_len < 12) {
-            continue;
-          }
-
-          sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
-          if (!rtx_enc) {
-            continue;
-          }
-
-          int total = (int)orig_len + 2;
-          if (total > (int)rtx_enc->cap) {
-            sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
-            continue;
-          }
-
-          int rtp_header_len = 12;
-          memcpy(rtx_enc->data, orig_pkt, rtp_header_len);
-
-          rtx_enc->data[1] = (rtx_enc->data[1] & 0x80) | (rtx_pt & 0x7F);
-
-          uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
-          sfu_write_be16(rtx_enc->data + 2, next_rtx_seq);
-          sfu_write_be32(rtx_enc->data + 8, rtx_ssrc);
-
-          sfu_write_be16(rtx_enc->data + rtp_header_len, lost_seq);
-          memcpy(rtx_enc->data + rtp_header_len + 2, orig_pkt + rtp_header_len, orig_len - (uint32_t)rtp_header_len);
-
-          int rtx_enc_len = total;
-          if (sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap)) {
-            rtx_enc->len = (uint32_t)rtx_enc_len;
-            sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
-          }
-          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
-        } else {
-          unrecoverable_loss = true;
-        }
-      }
-      if (unrecoverable_loss) {
-        // Throttle PLIs to prevent flooding the publisher (e.g., max 1 per second)
-        int64_t now = sfu_now_ms();
-        if (now - sender_session->last_pli_time > 1000) {
-          sender_session->last_pli_time = now;
-          sfu_session_request_keyframe(w, sender_session, false);  // false = PLI
-        }
-      }
-
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-      return;
-    }
+  if (is_rtcp) {
+    sfu_worker_handle_rtcp(w, sender_session, pkt);
+    return;
   }
 
   bool is_vp9 = false;

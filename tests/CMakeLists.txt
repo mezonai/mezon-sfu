@@ -82,3 +82,11 @@ add_executable(test_rtx_build test_rtx_build.c)
 target_link_libraries(test_rtx_build PRIVATE sfu_core)
 add_test(NAME rtx_build COMMAND test_rtx_build)
 
+add_executable(test_nack_parser test_nack_parser.c)
+target_link_libraries(test_nack_parser PRIVATE sfu_core)
+add_test(NAME nack_parser COMMAND test_nack_parser)
+
+add_executable(test_worker_protocol test_worker_protocol.c)
+target_link_libraries(test_worker_protocol PRIVATE sfu_core)
+add_test(NAME worker_protocol COMMAND test_worker_protocol)
+
