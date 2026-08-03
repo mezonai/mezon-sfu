@@ -301,6 +301,9 @@ static void sfu_worker_handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_s
 }
 
 void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
+  /* Sender pin (F-01): the acquired reference covers the entire packet path,
+   * so the session (and its SRTP/RTX state) stays valid even if the session
+   * is concurrently closed elsewhere. */
   sfu_peer_session_t *sender_session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
 
   if (!sender_session) {
@@ -311,6 +314,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (sender_session->state != SFU_SESSION_ESTABLISHED) {
     SFU_LOG_WARN("worker %u: [INGRESS DROP] RTP from unestablished session (state=%d)! pkt_len=%u", w->worker_index, sender_session->state, pkt->len);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
     return;
   }
 
@@ -322,12 +326,14 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (!unprotected) {
     SFU_LOG_WARN("worker %u: [INGRESS DROP] SRTP unprotect FAILED (is_rtcp=%d, len=%u). Key mismatch or corrupted packet!", w->worker_index, is_rtcp, pkt->len);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
     return;
   }
   pkt->len = (uint32_t)plain_len;
 
   if (is_rtcp) {
-    sfu_worker_handle_rtcp(w, sender_session, pkt);
+    sfu_worker_handle_rtcp(w, sender_session, pkt); /* consumes pkt */
+    sfu_session_release(sender_session);
     return;
   }
 
@@ -353,17 +359,17 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-  sfu_receiver_slot_t **receivers = __atomic_load_n(&sender_session->receivers, __ATOMIC_ACQUIRE);
-  uint32_t receiver_capacity = __atomic_load_n(&sender_session->receiver_capacity, __ATOMIC_ACQUIRE);
+  /* Immutable receiver snapshot (F-03/F-04): one coherent view of the
+   * subscriber set for the whole packet. Every entry's subscriber session is
+   * retained by the snapshot, so it is safe to use for the full forwarding
+   * path without any additional pinning (F-01). */
+  sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(sender_session);
+  uint32_t receiver_count = snap ? snap->count : 0;
 
-  for (uint32_t i = 0; i < receiver_capacity; i++) {
-    sfu_receiver_slot_t *slot = receivers[i];
+  for (uint32_t i = 0; i < receiver_count; i++) {
+    const sfu_receiver_entry_t *slot = &snap->entries[i];
 
-    if (!slot || (!slot->video && !slot->audio)) {
-      continue;
-    }
-
-    sfu_peer_session_t *sub_session = slot->video ? slot->video->owner : slot->audio->owner;
+    sfu_peer_session_t *sub_session = slot->subscriber;
     if (!sub_session || sub_session->state != SFU_SESSION_ESTABLISHED) {
       continue;
     }
@@ -376,7 +382,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
-    if (is_vp9 && slot->video) {
+    if (is_vp9 && slot->has_video) {
       bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);
       if (!should_forward) {
         continue;
@@ -405,8 +411,8 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       }
 
       uint16_t subscriber_seq = sfu_read_be16(enc->data + 2);
-      if (slot->video && incoming_pt == slot->video->payload_type) {
-        sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len, slot->video->rtx_ssrc, slot->video->rtx_payload_type);
+      if (slot->has_video && incoming_pt == slot->video_pt) {
+        sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len, slot->video_rtx_ssrc, slot->video_rtx_pt);
       }
 
       uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
@@ -439,6 +445,8 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
+  sfu_receiver_snapshot_release(snap);
+  sfu_session_release(sender_session);
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 

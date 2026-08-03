@@ -1,4 +1,5 @@
 #include "peer/session.h"
+#include <assert.h>
 #include <string.h>
 #include "congestion/gcc.h"
 #include "congestion/twcc_history.h"
@@ -73,6 +74,60 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
   return for_insert && first_deleted >= 0 ? (uint32_t)first_deleted : SFU_HASH_EMPTY;
 }
 
+/* ---------------------------------------------------------------------------
+ * Receiver snapshot helpers (F-03/F-04)
+ * ------------------------------------------------------------------------- */
+
+/* Lock-free acquire-with-retain: the pointer is only replaced (release
+ * store) while the outgoing snapshot still holds the writer's reference, so
+ * the CAS below can never resurrect a fully-dead snapshot. Memory-reuse ABA
+ * is impossible while the CAS could succeed, because the outgoing snapshot's
+ * writer reference is only dropped after the replacement store. */
+sfu_receiver_snapshot_t *sfu_session_receivers_acquire(const sfu_peer_session_t *s) {
+  sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
+  while (snap) {
+    uint32_t rc = atomic_load_explicit(&snap->refcount, memory_order_relaxed);
+    if (rc == 0) {
+      /* Being torn down by its last releaser; retry for the replacement. */
+      snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
+      continue;
+    }
+    if (atomic_compare_exchange_weak_explicit(&snap->refcount, &rc, rc + 1, memory_order_acquire, memory_order_relaxed)) {
+      return snap;
+    }
+  }
+  return NULL;
+}
+
+void sfu_receiver_snapshot_release(sfu_receiver_snapshot_t *snap) {
+  if (!snap) {
+    return;
+  }
+  uint32_t prev = atomic_fetch_sub_explicit(&snap->refcount, 1, memory_order_acq_rel);
+  assert(prev != 0 && "snapshot refcount underflow");
+  if (prev == 1) {
+    for (uint32_t i = 0; i < snap->count; i++) {
+      sfu_session_release(snap->entries[i].subscriber);
+    }
+    SFU_FREE(snap);
+  }
+}
+
+/* Publishes a fully-built snapshot on the owning session and retires the old
+ * one by dropping the writer's reference. Call with the room lock held. */
+void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
+  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->receivers, memory_order_acquire);
+  atomic_store_explicit(&owner->receivers, new_snap, memory_order_release);
+  sfu_receiver_snapshot_release(old);
+}
+
+/* ---------------------------------------------------------------------------
+ * Session teardown
+ * ------------------------------------------------------------------------- */
+
+/* Centralized teardown. Runs exactly once, when the last refcount is dropped.
+ * `active` is never cleared before this point (logical close keeps it set),
+ * so initialized DTLS/SRTP state is always destroyed here. */
 static void sfu_session_free_resources(sfu_peer_session_t *s) {
   if (!s) {
     return;
@@ -87,15 +142,11 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     }
   }
 
-  if (s->receivers) {
-    for (uint32_t i = 0; i < s->receiver_capacity; i++) {
-      SFU_FREE(s->receivers[i]);
-      s->receivers[i] = NULL;
-    }
-    SFU_FREE(s->receivers);
-    s->receivers = NULL;
+  sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
+  if (snap) {
+    atomic_store_explicit(&s->receivers, NULL, memory_order_release);
+    sfu_receiver_snapshot_release(snap);
   }
-  s->receiver_capacity = 0;
 
   if (s->rtx_cache) {
     sfu_rtx_cache_destroy(s->rtx_cache);
@@ -120,27 +171,14 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   }
 }
 
-void sfu_session_table_destroy(sfu_session_table_t *t) {
-  pthread_mutex_lock(&t->lock);
-
-  for (uint32_t i = 0; i < t->count; i++) {
-    sfu_peer_session_t *s = t->sessions[i];
-    if (!s) {
-      continue;
-    }
-
+void sfu_session_release(sfu_peer_session_t *s) {
+  if (!s) {
+    return;
+  }
+  if (atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel) == 1) {
     sfu_session_free_resources(s);
     SFU_FREE(s);
-    t->sessions[i] = NULL;
   }
-
-  SFU_FREE(t->sessions);
-  t->sessions = NULL;
-  t->count = 0;
-  t->capacity = 0;
-
-  pthread_mutex_unlock(&t->lock);
-  pthread_mutex_destroy(&t->lock);
 }
 
 static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const struct sockaddr_storage *b, socklen_t b_len) {
@@ -150,27 +188,67 @@ static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const 
   return memcmp(a, b, a_len) == 0;
 }
 
+/* Table-lock-held helpers. */
+
+/* Returns the session's member index, or UINT32_MAX if not a live member. */
+static uint32_t table_member_index(const sfu_session_table_t *t, const sfu_peer_session_t *session) {
+  for (uint32_t i = 0; i < t->count; i++) {
+    if (t->sessions[i] == session) {
+      return i;
+    }
+  }
+  return UINT32_MAX;
+}
+
+/* A hash entry is only matched while the member index it references is still
+ * live; the addr/ufrag bytes are compared against the session's cold data. */
 static bool addr_matches_direct(uint32_t idx, void *ctx_) {
   addr_match_ctx_t *ctx = ctx_;
   if (idx >= ctx->t->count) {
     return false;
   }
   sfu_peer_session_t *s = ctx->t->sessions[idx];
-  return s && s->active && s->cold->addr_len == ctx->addr_len && memcmp(&s->cold->addr, ctx->addr, ctx->addr_len) == 0;
+  return s && s->cold->addr_len == ctx->addr_len && memcmp(&s->cold->addr, ctx->addr, ctx->addr_len) == 0;
 }
 
-void sfu_session_table_index_addr(sfu_session_table_t *t, sfu_peer_session_t *session) {
-  uint32_t idx = UINT32_MAX;
-  for (uint32_t i = 0; i < t->count; i++) {
-    if (t->sessions[i] == session) {
-      idx = i;
-      break;
-    }
+static bool ufrag_matches_direct(uint32_t idx, void *ctx_) {
+  ufrag_match_ctx_t *ctx = ctx_;
+  if (idx >= ctx->t->count) {
+    return false;
   }
-  if (idx == UINT32_MAX) {
+  sfu_peer_session_t *s = ctx->t->sessions[idx];
+  return s && s->cold->ufrag[0] != '\0' && strcmp(s->cold->ufrag, ctx->ufrag) == 0;
+}
+
+/* Removes the addr hash entry referencing member index `idx`, if any. */
+static void table_remove_addr_hash(sfu_session_table_t *t, sfu_peer_session_t *s, uint32_t idx) {
+  if (s->cold->addr_len == 0) {
     return;
   }
+  uint32_t hash = fnv1a(&s->cold->addr, s->cold->addr_len);
+  addr_match_ctx_t ctx = {t, &s->cold->addr, s->cold->addr_len};
+  uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
+  if (slot != SFU_HASH_EMPTY && t->addr_index[slot].index == idx) {
+    t->addr_index[slot].index = SFU_HASH_DELETED;
+  }
+}
 
+/* Removes the ufrag hash entry referencing member index `idx`, if any. */
+static void table_remove_ufrag_hash(sfu_session_table_t *t, sfu_peer_session_t *s, uint32_t idx) {
+  if (s->cold->ufrag[0] == '\0') {
+    return;
+  }
+  uint32_t hash = fnv1a(s->cold->ufrag, strlen(s->cold->ufrag));
+  ufrag_match_ctx_t ctx = {t, s->cold->ufrag};
+  uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches_direct, &ctx, false);
+  if (slot != SFU_HASH_EMPTY && t->ufrag_index[slot].index == idx) {
+    t->ufrag_index[slot].index = SFU_HASH_DELETED;
+  }
+}
+
+/* Indexes the session's current address. Call with the table lock held; the
+ * caller must have verified membership. */
+static void table_index_addr_locked(sfu_session_table_t *t, sfu_peer_session_t *session, uint32_t idx) {
   uint32_t hash = fnv1a(&session->cold->addr, session->cold->addr_len);
   addr_match_ctx_t ctx = {t, &session->cold->addr, session->cold->addr_len};
   uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, true);
@@ -180,7 +258,30 @@ void sfu_session_table_index_addr(sfu_session_table_t *t, sfu_peer_session_t *se
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Creation
+ * ------------------------------------------------------------------------- */
+
+/* Frees a session that failed part-way through construction, before it was
+ * ever published. Safe on partially-initialized sessions: DTLS is destroyed
+ * only when its SSL object exists. */
+static void session_destroy_unpublished(sfu_peer_session_t *s) {
+  if (!s) {
+    return;
+  }
+  if (s->cold && s->cold->dtls.ssl) {
+    sfu_dtls_conn_destroy(&s->cold->dtls);
+  }
+  s->active = false; /* suppress the established-state teardown paths */
+  sfu_session_free_resources(s);
+  SFU_FREE(s);
+}
+
 sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
+  if (!addr || addr_len == 0 || addr_len > sizeof(struct sockaddr_storage)) {
+    return NULL;
+  }
+
   pthread_mutex_lock(&t->lock);
 
   for (uint32_t i = 0; i < t->count; i++) {
@@ -190,46 +291,47 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
       continue;
     }
 
-    if (session->active && addr_equal(&session->cold->addr, session->cold->addr_len, addr, addr_len)) {
+    if (addr_equal(&session->cold->addr, session->cold->addr_len, addr, addr_len)) {
+      /* Caller pin: the table slot keeps the session alive under the lock,
+       * so this increment is safe. */
+      atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
       pthread_mutex_unlock(&t->lock);
       return session;
     }
   }
 
-  uint32_t index;
-
-  if (t->count < t->capacity) {
-    index = t->count++;
-    t->sessions[index] = SFU_CALLOC(1, sizeof(sfu_peer_session_t));
-    if (!t->sessions[index]) {
-      t->count--;
+  /* First NULL hole wins; extend count only when there is no hole. */
+  uint32_t index = UINT32_MAX;
+  for (uint32_t i = 0; i < t->count; i++) {
+    if (!t->sessions[i]) {
+      index = i;
+      break;
+    }
+  }
+  if (index == UINT32_MAX) {
+    if (t->count >= t->capacity) {
+      SFU_LOG_WARN("session table full (%u), rejecting new peer", t->capacity);
       pthread_mutex_unlock(&t->lock);
       return NULL;
     }
-  } else {
-    SFU_LOG_WARN("session table full (%u), rejecting new peer", t->capacity);
+    index = t->count++;
+  }
+
+  sfu_peer_session_t *s = SFU_CALLOC(1, sizeof(sfu_peer_session_t));
+  if (!s) {
+    if (index + 1 == t->count) {
+      t->count--;
+    }
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
-
-  sfu_peer_session_t *s = t->sessions[index];
-
-  memset(s, 0, sizeof(*s));
 
   s->cold = SFU_CALLOC(1, sizeof(sfu_peer_session_cold_t));
   if (!s->cold) {
     SFU_FREE(s);
-    t->sessions[index] = NULL;
-    t->count--;
-    pthread_mutex_unlock(&t->lock);
-    return NULL;
-  }
-
-  if (!addr || addr_len > sizeof(s->cold->addr)) {
-    SFU_FREE(s->cold);
-    SFU_FREE(s);
-    t->sessions[index] = NULL;
-    t->count--;
+    if (index + 1 == t->count) {
+      t->count--;
+    }
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
@@ -248,12 +350,13 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->uplink_video.owner = s;
   s->screen.owner = s;
 
-  s->receiver_capacity = 0;
-  s->receivers = NULL;
+  atomic_store_explicit(&s->receivers, NULL, memory_order_relaxed);
 
   s->next_remote_mid = 2;
 
-  sfu_session_table_index_addr(t, s);
+  /* All fallible initialization happens BEFORE the session is published into
+   * the table or any hash, so a construction failure leaves no observable
+   * trace (no slot, no hash entry, no way for another thread to find it). */
 
   s->gcc_ctx = SFU_CALLOC(1, sizeof(gcc_bwe_context_t));
   if (s->gcc_ctx) {
@@ -261,6 +364,9 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   }
 
   s->twcc_history = SFU_CALLOC(1, sizeof(sfu_twcc_history_t));
+  if (s->twcc_history) {
+    sfu_twcc_history_init(s->twcc_history);
+  }
 
   s->scheduler = SFU_CALLOC(1, sizeof(sfu_subscriber_scheduler_t));
   if (s->scheduler) {
@@ -276,64 +382,57 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   }
   if (!s->rtx_cache) {
     SFU_LOG_ERROR("failed to init RTX cache for new peer session");
-
-    sfu_session_free_resources(s);
-    SFU_FREE(s);
-    t->sessions[index] = NULL;
-
+    session_destroy_unpublished(s);
     if (index + 1 == t->count) {
       t->count--;
     }
-
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
 
   if (sfu_dtls_conn_init(&s->cold->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");
-
-    sfu_session_free_resources(s);
-    SFU_FREE(s);
-    t->sessions[index] = NULL;
-
+    session_destroy_unpublished(s);
     if (index + 1 == t->count) {
       t->count--;
     }
-
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
+
+  /* Publish: table ref = 1, caller pin = 1, OPEN and accepting work. */
+  atomic_store_explicit(&s->refcount, 2, memory_order_relaxed);
+  atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN, memory_order_relaxed);
+  atomic_store_explicit(&s->accepts_work, true, memory_order_relaxed);
+
+  t->sessions[index] = s;
+  table_index_addr_locked(t, s, index);
 
   pthread_mutex_unlock(&t->lock);
   return s;
 }
 
-static bool addr_matches(uint32_t idx, void *ctx_) {
-  addr_match_ctx_t *ctx = ctx_;
-  if (idx >= ctx->t->count) {
-    return false;
-  }
-  sfu_peer_session_t *s = ctx->t->sessions[idx];
-  return s && s->active && s->cold->addr_len == ctx->addr_len && memcmp(&s->cold->addr, ctx->addr, ctx->addr_len) == 0;
-}
+/* ---------------------------------------------------------------------------
+ * Lookups (return a caller pin)
+ * ------------------------------------------------------------------------- */
 
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
+  if (!addr || addr_len == 0) {
+    return NULL;
+  }
   uint32_t hash = fnv1a(addr, addr_len);
   addr_match_ctx_t ctx = {t, addr, addr_len};
   pthread_mutex_lock(&t->lock);
-  uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches, &ctx, false);
-  sfu_peer_session_t *result = (slot != SFU_HASH_EMPTY && t->addr_index[slot].index != SFU_HASH_EMPTY) ? t->sessions[t->addr_index[slot].index] : NULL;
+  uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
+  sfu_peer_session_t *result = NULL;
+  if (slot != SFU_HASH_EMPTY && t->addr_index[slot].index != SFU_HASH_EMPTY && t->addr_index[slot].index < t->count) {
+    result = t->sessions[t->addr_index[slot].index];
+    if (result) {
+      atomic_fetch_add_explicit(&result->refcount, 1, memory_order_relaxed);
+    }
+  }
   pthread_mutex_unlock(&t->lock);
   return result;
-}
-
-static bool ufrag_matches(uint32_t idx, void *ctx_) {
-  ufrag_match_ctx_t *ctx = ctx_;
-  if (idx >= ctx->t->count) {
-    return false;
-  }
-  sfu_peer_session_t *s = ctx->t->sessions[idx];
-  return s && s->active && s->cold->ufrag[0] != '\0' && strcmp(s->cold->ufrag, ctx->ufrag) == 0;
 }
 
 sfu_peer_session_t *sfu_session_table_find_by_ufrag(sfu_session_table_t *t, const char *ufrag) {
@@ -345,86 +444,174 @@ sfu_peer_session_t *sfu_session_table_find_by_ufrag(sfu_session_table_t *t, cons
   ufrag_match_ctx_t ctx = {t, ufrag};
 
   pthread_mutex_lock(&t->lock);
-  uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches, &ctx, false);
-  sfu_peer_session_t *result = (slot != SFU_HASH_EMPTY && t->ufrag_index[slot].index != SFU_HASH_EMPTY) ? t->sessions[t->ufrag_index[slot].index] : NULL;
+  uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches_direct, &ctx, false);
+  sfu_peer_session_t *result = NULL;
+  if (slot != SFU_HASH_EMPTY && t->ufrag_index[slot].index != SFU_HASH_EMPTY && t->ufrag_index[slot].index < t->count) {
+    result = t->sessions[t->ufrag_index[slot].index];
+    if (result) {
+      atomic_fetch_add_explicit(&result->refcount, 1, memory_order_relaxed);
+    }
+  }
   pthread_mutex_unlock(&t->lock);
   return result;
 }
 
-void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) {
-  if (s->room) {
-    room_remove_peer((sfu_room_t *)s->room, s);
+/* ---------------------------------------------------------------------------
+ * Close
+ * ------------------------------------------------------------------------- */
+
+bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
+  if (!t || !s) {
+    return false;
   }
 
   pthread_mutex_lock(&t->lock);
-  if (s->cold->addr_len > 0) {
-    uint32_t hash = fnv1a(&s->cold->addr, s->cold->addr_len);
-    addr_match_ctx_t ctx = {t, &s->cold->addr, s->cold->addr_len};
-    uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
-    if (slot != SFU_HASH_EMPTY) {
-      t->addr_index[slot].index = SFU_HASH_DELETED;
-    }
+
+  if (atomic_load_explicit(&s->lifecycle, memory_order_acquire) != SFU_SESSION_LIFECYCLE_OPEN) {
+    /* Already closing/closed: idempotent no-op. The slot and hash entries
+     * were removed by the first close; nothing to do. */
+    pthread_mutex_unlock(&t->lock);
+    return false;
   }
-  if (s->cold->ufrag[0] != '\0') {
-    uint32_t hash = fnv1a(s->cold->ufrag, strlen(s->cold->ufrag));
-    ufrag_match_ctx_t ctx = {t, s->cold->ufrag};
-    uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches, &ctx, false);
-    if (slot != SFU_HASH_EMPTY) {
-      t->ufrag_index[slot].index = SFU_HASH_DELETED;
-    }
+
+  /* First OPEN -> CLOSING transition. */
+  atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_CLOSING, memory_order_release);
+  atomic_store_explicit(&s->accepts_work, false, memory_order_release);
+
+  /* Remove ALL hash entries referencing this session's member index (scan by
+   * index, not by any active-state predicate) and clear the table slot. The
+   * slot becomes a reusable hole for the next create. `active` deliberately
+   * stays true so final teardown destroys initialized DTLS/SRTP state. */
+  uint32_t idx = table_member_index(t, s);
+  if (idx != UINT32_MAX) {
+    table_remove_addr_hash(t, s, idx);
+    table_remove_ufrag_hash(t, s, idx);
+    t->sessions[idx] = NULL;
   }
-  if (s->active) {
-    sfu_session_free_resources(s);
-    s->active = false;
-    s->state = SFU_SESSION_FAILED;
-  }
+
   pthread_mutex_unlock(&t->lock);
+
+  /* Detach from the room exactly once, outside the table lock. Lock ordering:
+   * the close path never holds the table lock while taking the room lock, and
+   * room_media_graph never takes the table lock. */
+  sfu_room_t *room = (sfu_room_t *)s->room;
+  if (room) {
+    room_remove_peer(room, s);
+  }
+
+  /* Drop the table's reference; remaining caller/snapshot pins keep the
+   * allocation alive. */
+  sfu_session_release(s);
+  return true;
 }
 
-void sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len) {
-  if (!addr || addr_len > sizeof(s->cold->addr)) {
-    return;
+void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s) { (void)sfu_session_begin_close(t, s); }
+
+/* ---------------------------------------------------------------------------
+ * Rebind / ufrag indexing (rejected once closing or not a member)
+ * ------------------------------------------------------------------------- */
+
+bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len) {
+  if (!t || !s || !addr || addr_len == 0 || addr_len > sizeof(s->cold->addr)) {
+    return false;
   }
+
   pthread_mutex_lock(&t->lock);
-  if (s->cold->addr_len > 0) {
-    uint32_t hash = fnv1a(&s->cold->addr, s->cold->addr_len);
-    addr_match_ctx_t ctx = {t, &s->cold->addr, s->cold->addr_len};
-    uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, false);
-    if (slot != SFU_HASH_EMPTY) {
-      t->addr_index[slot].index = SFU_HASH_DELETED;
-    }
+
+  uint32_t idx = table_member_index(t, s);
+  if (idx == UINT32_MAX || atomic_load_explicit(&s->lifecycle, memory_order_acquire) != SFU_SESSION_LIFECYCLE_OPEN ||
+      !atomic_load_explicit(&s->accepts_work, memory_order_acquire)) {
+    pthread_mutex_unlock(&t->lock);
+    return false;
   }
+
+  table_remove_addr_hash(t, s, idx);
   memcpy(&s->cold->addr, addr, addr_len);
   s->cold->addr_len = addr_len;
-  sfu_session_table_index_addr(t, s);
+  table_index_addr_locked(t, s, idx);
+
   pthread_mutex_unlock(&t->lock);
+  return true;
 }
 
-void sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *session) {
+bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *session) {
+  if (!t || !session || session->cold->ufrag[0] == '\0') {
+    return false;
+  }
+
   pthread_mutex_lock(&t->lock);
 
-  uint32_t idx = UINT32_MAX;
-  for (uint32_t i = 0; i < t->count; i++) {
-    if (t->sessions[i] == session) {
-      idx = i;
-      break;
-    }
-  }
-  if (idx == UINT32_MAX) {
+  uint32_t idx = table_member_index(t, session);
+  if (idx == UINT32_MAX || atomic_load_explicit(&session->lifecycle, memory_order_acquire) != SFU_SESSION_LIFECYCLE_OPEN ||
+      !atomic_load_explicit(&session->accepts_work, memory_order_acquire)) {
     pthread_mutex_unlock(&t->lock);
-    return;
+    return false;
   }
 
   uint32_t hash = fnv1a(session->cold->ufrag, strlen(session->cold->ufrag));
   ufrag_match_ctx_t ctx = {t, session->cold->ufrag};
-  uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches, &ctx, true);
+  uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches_direct, &ctx, true);
   if (slot != SFU_HASH_EMPTY) {
     t->ufrag_index[slot].hash = hash;
     t->ufrag_index[slot].index = idx;
   }
 
   pthread_mutex_unlock(&t->lock);
+  return true;
 }
+
+/* ---------------------------------------------------------------------------
+ * Table destroy
+ * ------------------------------------------------------------------------- */
+
+void sfu_session_table_destroy(sfu_session_table_t *t) {
+  /* No concurrent table users may exist here (workers joined, signaling
+   * stopped, all caller pins released); the lock below is defensive. */
+  sfu_peer_session_t **orphans = SFU_CALLOC(t->count ? t->count : 1, sizeof(*orphans));
+  uint32_t orphan_count = 0;
+
+  pthread_mutex_lock(&t->lock);
+
+  for (uint32_t i = 0; i < t->count; i++) {
+    sfu_peer_session_t *s = t->sessions[i];
+    if (!s) {
+      continue;
+    }
+    if (atomic_load_explicit(&s->lifecycle, memory_order_acquire) == SFU_SESSION_LIFECYCLE_OPEN) {
+      atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_CLOSING, memory_order_release);
+      atomic_store_explicit(&s->accepts_work, false, memory_order_release);
+      table_remove_addr_hash(t, s, i);
+      table_remove_ufrag_hash(t, s, i);
+    }
+    t->sessions[i] = NULL;
+    if (orphans) {
+      orphans[orphan_count++] = s;
+    }
+  }
+
+  pthread_mutex_unlock(&t->lock);
+
+  /* Detach rooms and drop table refs outside the lock. */
+  for (uint32_t i = 0; i < orphan_count; i++) {
+    sfu_room_t *room = (sfu_room_t *)orphans[i]->room;
+    if (room) {
+      room_remove_peer(room, orphans[i]);
+    }
+    sfu_session_release(orphans[i]);
+  }
+  SFU_FREE(orphans);
+
+  SFU_FREE(t->sessions);
+  t->sessions = NULL;
+  t->count = 0;
+  t->capacity = 0;
+
+  pthread_mutex_destroy(&t->lock);
+}
+
+/* ---------------------------------------------------------------------------
+ * Keyframe requests
+ * ------------------------------------------------------------------------- */
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
   sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
