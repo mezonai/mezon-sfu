@@ -49,10 +49,10 @@ int main(void) {
   assert(sfu_session_table_find(&table, &addr3, len3) == NULL);
 
   /* 3. Index & Lookup by ufrag */
-  strncpy(s1->ufrag, "ufrag_alice", sizeof(s1->ufrag) - 1);
+  strncpy(s1->cold->ufrag, "ufrag_alice", sizeof(s1->cold->ufrag) - 1);
   sfu_session_table_index_ufrag(&table, s1);
 
-  strncpy(s2->ufrag, "ufrag_bob", sizeof(s2->ufrag) - 1);
+  strncpy(s2->cold->ufrag, "ufrag_bob", sizeof(s2->cold->ufrag) - 1);
   sfu_session_table_index_ufrag(&table, s2);
 
   assert(sfu_session_table_find_by_ufrag(&table, "ufrag_alice") == s1);

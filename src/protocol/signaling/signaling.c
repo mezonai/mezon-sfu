@@ -24,6 +24,11 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
+uint32_t generate_unique_id(void) {
+  static atomic_uint_fast32_t counter = 0;
+  return atomic_fetch_add(&counter, 1) + 1;
+}
+
 static bool build_and_send_joined_response(sfu_client_conn_t *c, uint64_t room_id) {
   if (!c || !c->server) {
     return false;
@@ -191,7 +196,6 @@ static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_s
   }
 }
 
-/* Extracts VP8 and RTX dynamic payload type numbers from an SDP offer */
 static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *video_pt, uint8_t *rtx_pt) {
   *video_pt = 0;
   *rtx_pt = 0;
@@ -227,7 +231,11 @@ static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *vide
       if (endptr > line + 9 && *endptr == ' ' && pt < 128) {
         const char *codec = endptr + 1;
         size_t codec_len = len - (size_t)(codec - line);
-        if (codec_len >= 3 && (memcmp(codec, "VP8", 3) == 0 || memcmp(codec, "vp8", 3) == 0)) {
+        if (codec_len >= 3 && (memcmp(codec, "VP9", 3) == 0 || memcmp(codec, "vp9", 3) == 0)) {
+          *video_pt = (uint8_t)pt;
+        } else if (codec_len >= 3 && (memcmp(codec, "AV1", 3) == 0 || memcmp(codec, "av1", 3) == 0)) {
+          *video_pt = (uint8_t)pt;
+        } else if (codec_len >= 3 && (memcmp(codec, "VP8", 3) == 0 || memcmp(codec, "vp8", 3) == 0)) {
           *video_pt = (uint8_t)pt;
         } else if (codec_len >= 3 && (memcmp(codec, "rtx", 3) == 0 || memcmp(codec, "RTX", 3) == 0)) {
           *rtx_pt = (uint8_t)pt;
@@ -318,7 +326,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
     }
 
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
-      SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->ufrag, session->fd);
+      SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     } else {
       SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
     }
@@ -364,8 +372,8 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
     session->pt_map[97] = rtx_pt;
   }
 
-  SFU_LOG_DEBUG("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt,
-                rtx_pt);
+  SFU_LOG_DEBUG("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->cold->ufrag, audio_ssrc, video_ssrc, rtx_ssrc,
+                video_pt, rtx_pt);
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
@@ -504,11 +512,18 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
         char type[32];
         if (sfu_json_extract_string(buf, (size_t)n, "type", type, sizeof(type)) >= 0) {
           if (strcmp(type, "join") == 0) {
-            char room_str[64] = {0};
+            char room_str[32] = {0};
+            char str_user_id[32] = {0};
             uint64_t room_id = 0;
+            uint64_t user_id = 0;
 
             if (sfu_json_extract_string(buf, (size_t)n, "room", room_str, sizeof(room_str)) >= 0) {
               room_id = (uint64_t)strtoull(room_str, NULL, 10);
+            }
+
+            if (sfu_json_extract_string(buf, (size_t)n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
+              user_id = (uint64_t)strtoull(str_user_id, NULL, 10);
+              c->user_id = user_id;
             }
 
             if (room_id == 0) {
@@ -555,6 +570,8 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
                   c->session = session;
+                  c->session->user_id = c->user_id;
+                  c->session->peer_id = generate_unique_id();
                   handle_answer(session, sdp, sdp_len);
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;

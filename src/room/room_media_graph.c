@@ -74,7 +74,7 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
       slot->audio = &peer->uplink_audio;
       slot->video = &peer->uplink_video;
     } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to allocate receiver slot for peer subscribing to %s", room->room_id, peer->ufrag);
+      SFU_LOG_WARN("room %" PRIu64 ": failed to allocate receiver slot for peer subscribing to %s", room->room_id, peer->cold->ufrag);
     }
 
     slot = alloc_receiver_slot(peer, scheduler);
@@ -82,7 +82,7 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
       slot->audio = &other->uplink_audio;
       slot->video = &other->uplink_video;
     } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to allocate receiver slot for %s subscribing to peer", room->room_id, peer->ufrag);
+      SFU_LOG_WARN("room %" PRIu64 ": failed to allocate receiver slot for %s subscribing to peer", room->room_id, peer->cold->ufrag);
     }
 
     other->negotiation_needed = true;

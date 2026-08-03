@@ -7,8 +7,10 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
-#define SFU_SRTP_KEY_MATERIAL_LEN 60 /* SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt) */
-#define SFU_DTLS_FINGERPRINT_LEN 96  /* "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul */
+// SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt)
+#define SFU_SRTP_KEY_MATERIAL_LEN 60
+// "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul
+#define SFU_DTLS_FINGERPRINT_LEN 96
 #define SFU_SESSION_TABLE_MAX 8192
 #define SFU_ROOM_MAX_PEERS 256
 #define SFU_MAX_REMOTE_SLOTS (SFU_ROOM_MAX_PEERS - 1)
@@ -23,6 +25,8 @@
 #define SFU_SESSION_ADDR_HASH_SLOTS 16384
 #define SFU_SESSION_UFRAG_HASH_SLOTS 16384
 
+#define SFU_MAX_PAYLOAD_SIZE 2048
+
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
 typedef enum { SFU_DIRECTION_INACTIVE = 0, SFU_DIRECTION_SENDONLY, SFU_DIRECTION_RECVONLY, SFU_DIRECTION_SENDRECV } sfu_direction_t;
@@ -35,46 +39,54 @@ typedef enum {
 } sfu_session_state_t;
 
 typedef enum {
-  SFU_DTLS_FEED_ERROR = -1,      /* fatal: drop this connection/session */
-  SFU_DTLS_FEED_IN_PROGRESS = 0, /* handshake continuing; drain output and send it */
-  SFU_DTLS_FEED_ESTABLISHED = 1, /* handshake complete; srtp_keying_material is valid */
+  SFU_DTLS_FEED_ERROR = -1,
+  SFU_DTLS_FEED_IN_PROGRESS = 0,
+  SFU_DTLS_FEED_ESTABLISHED = 1,
 } sfu_dtls_feed_status_t;
 
-struct sfu_peer_session;
-struct sfu_room;
+typedef struct sfu_peer_session sfu_peer_session_t;
+typedef struct sfu_room sfu_room_t;
+typedef struct gcc_bwe_context gcc_bwe_context_t;
+typedef struct sfu_twcc_history sfu_twcc_history_t;
+typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
+typedef struct sfu_rtx_cache sfu_rtx_cache_t;
 
 typedef struct sfu_srtp_ctx {
-  srtp_t inbound;  /* decrypts packets FROM this peer */
-  srtp_t outbound; /* encrypts packets TO this peer   */
+  srtp_t inbound;
+  srtp_t outbound;
 } sfu_srtp_ctx_t;
 
 typedef struct sfu_dtls_ctx {
   SSL_CTX *ssl_ctx;
-  char fingerprint[SFU_DTLS_FINGERPRINT_LEN]; /* certificate SHA-256, colon-hex */
+  char fingerprint[SFU_DTLS_FINGERPRINT_LEN];
 } sfu_dtls_ctx_t;
 
-typedef struct sfu_dtls_conn {
+typedef struct {
   SSL *ssl;
-  BIO *rbio; /* received datagrams get written here before SSL_do_handshake */
-  BIO *wbio; /* OpenSSL writes its desired output here for us to drain+send */
-  bool established;
+  BIO *rbio;
+  BIO *wbio;
   unsigned long srtp_profile_id;
   uint8_t srtp_keying_material[SFU_SRTP_KEY_MATERIAL_LEN];
+  bool established;
 } sfu_dtls_conn_t;
 
-typedef struct sfu_transceiver {
-  uint16_t mid;
-  sfu_media_kind_t kind;
-  sfu_direction_t direction;
-  bool active;
-  uint32_t ssrc;
-  uint32_t rtx_ssrc;
-  uint8_t payload_type;
-  uint8_t rtx_payload_type;
+typedef struct {
   char stream_id[64];
   char track_id[64];
   char cname[64];
-  struct sfu_peer_session *owner;
+} sfu_transceiver_metadata_t;
+
+typedef struct sfu_transceiver {
+  sfu_peer_session_t *owner;
+  uint32_t ssrc;
+  uint32_t rtx_ssrc;
+  uint16_t mid;
+  uint8_t payload_type;
+  uint8_t rtx_payload_type;
+  uint8_t kind;
+  uint8_t direction;
+  bool active;
+  sfu_transceiver_metadata_t *metadata;
 } sfu_transceiver_t;
 
 typedef struct sfu_receiver_slot {
@@ -84,25 +96,41 @@ typedef struct sfu_receiver_slot {
   uint32_t mid_video;
 } sfu_receiver_slot_t;
 
-typedef struct sfu_peer_session {
-  int fd;
+typedef struct {
   struct sockaddr_storage addr;
   socklen_t addr_len;
-  uint16_t worker_id;
-  sfu_session_state_t state;
-  sfu_dtls_conn_t dtls;
-  sfu_srtp_ctx_t srtp;
-  struct sfu_room *room;
-  bool active;
   char ufrag[32];
-  uint8_t pt_map[128];
+  sfu_dtls_conn_t dtls;
+} sfu_peer_session_cold_t;
+
+typedef struct sfu_peer_session {
+  sfu_room_t *room;
+  gcc_bwe_context_t *gcc_ctx;
+  sfu_twcc_history_t *twcc_history;
+  sfu_subscriber_scheduler_t *scheduler;
+  sfu_rtx_cache_t *rtx_cache;
+  sfu_peer_session_cold_t *cold;
+  sfu_receiver_slot_t **receivers;
+  sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
-  sfu_receiver_slot_t **receivers;
-  uint32_t receiver_capacity;
-  bool negotiation_needed;
+  uint8_t pt_map[128];
+  int64_t user_id;
+  int64_t last_pli_time;
+  int64_t last_fir_time;
+  uint32_t peer_id;
   uint32_t next_remote_mid;
+  uint32_t receiver_capacity;
+  int fd;
+  uint16_t worker_id;
+  _Atomic uint16_t next_twcc_seq;
+  uint8_t state;
+  uint8_t target_sid;
+  uint8_t target_tid;
+  uint8_t fir_seq;
+  bool active;
+  bool negotiation_needed;
 } sfu_peer_session_t;
 
 typedef struct sfu_hash_slot {
@@ -112,17 +140,17 @@ typedef struct sfu_hash_slot {
 
 typedef struct sfu_session_table {
   sfu_peer_session_t **sessions;
+  sfu_dtls_ctx_t *dtls_ctx;
   uint32_t capacity;
   uint32_t count;
   pthread_mutex_t lock;
-  sfu_dtls_ctx_t *dtls_ctx;
   sfu_hash_slot_t addr_index[SFU_SESSION_ADDR_HASH_SLOTS];
   sfu_hash_slot_t ufrag_index[SFU_SESSION_UFRAG_HASH_SLOTS];
 } sfu_session_table_t;
 
 typedef struct sfu_room {
-  uint64_t room_id;
   sfu_peer_session_t **peers;
+  uint64_t room_id;
   uint32_t peer_capacity;
   uint32_t peer_count;
   pthread_mutex_t lock;

@@ -15,8 +15,6 @@
 typedef struct sfu_scheduler sfu_scheduler_t;
 
 typedef struct sfu_worker {
-  int core_id;
-  uint32_t worker_index;
   sfu_ring_t send_ring;
   sfu_spsc_ring_t inbox;
   sfu_spsc_ring_t release_to_dispatcher;
@@ -28,8 +26,10 @@ typedef struct sfu_worker {
   const sfu_ice_credentials_t *ice_creds;
   sfu_scheduler_t *scheduler;
   pthread_t thread;
-  int fd;
   _Atomic uint64_t generation;
+  uint32_t worker_index;
+  int core_id;
+  int fd;
 } sfu_worker_t;
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,

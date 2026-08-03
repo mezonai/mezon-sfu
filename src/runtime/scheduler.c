@@ -1,13 +1,16 @@
 #include "runtime/scheduler.h"
-#include "runtime/cpu.h"
-#include "runtime/signal.h"
-#include "util/log.h"
-
 #include <netinet/in.h>
 #include <pthread.h>
 #include <string.h>
 #include <unistd.h>
+#include "peer/session.h"
+#include "runtime/cpu.h"
+#include "runtime/signal.h"
+#include "runtime/timer.h"
+#include "runtime/worker.h"
+#include "sfu/datadef.h"
 #include "util/alloc.h"
+#include "util/log.h"
 
 #define SFU_DISPATCH_SQ_ENTRIES 1024
 #define SFU_DISPATCH_CQ_ENTRIES 4096
@@ -198,3 +201,76 @@ int sfu_scheduler_start(sfu_scheduler_t *s) {
 }
 
 void sfu_scheduler_join(sfu_scheduler_t *s) { pthread_join(s->thread, NULL); }
+
+void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t initial_publisher) {
+  sched->active_publisher_id = initial_publisher;
+  sched->is_pinned = false;
+  sched->target_sid = 0;
+  sched->target_tid = 0;
+  sched->current_sid = 0;
+  sched->current_tid = 0;
+  sched->needs_keyframe = true;
+}
+
+bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe) {
+  if (sched->needs_keyframe) {
+    if (!is_keyframe) {
+      return false;
+    }
+    sched->needs_keyframe = false;
+    sched->current_sid = sched->target_sid;
+    sched->current_tid = sched->target_tid;
+  }
+
+  if (sched->target_sid < sched->current_sid) {
+    sched->current_sid = sched->target_sid;
+  }
+  if (sched->target_tid < sched->current_tid) {
+    sched->current_tid = sched->target_tid;
+  }
+
+  if (sched->current_sid < sched->target_sid) {
+    // In VP9, P=0 means no inter-picture prediction (Keyframe or Spatial Sync)
+    if (desc->p_bit == 0 && desc->sid <= sched->target_sid) {
+      sched->current_sid = desc->sid;  // Upshift progressively
+    }
+  }
+
+  if (sched->current_tid < sched->target_tid) {
+    // In VP9, U=1 means it is a valid switching point for temporal layers
+    if (desc->u_bit == 1 && desc->tid <= sched->target_tid) {
+      sched->current_tid = desc->tid;
+    }
+  }
+
+  if (desc->sid > sched->current_sid) {
+    return false;  // Drop higher spatial layers
+  }
+  if (desc->tid > sched->current_tid) {
+    return false;  // Drop higher temporal layers
+  }
+
+  // Drop inter-layer dependent frames if we aren't subscribing to the base layer they need
+  if (desc->d_bit == 1 && desc->sid > sched->current_sid) {
+    return false;
+  }
+
+  return true;  // Frame is required by this subscriber
+}
+
+void sfu_scheduler_adapt_layer(sfu_worker_t *w, sfu_subscriber_scheduler_t *sched, sfu_peer_session_t *publisher, uint8_t target_spatial_layer) {
+  // Check if the spatial layer (sid) is actually changing
+  if (sched->current_sid != target_spatial_layer) {
+    sched->target_sid = target_spatial_layer;
+    sched->needs_keyframe = true;  // Use your struct's exact boolean name
+
+    // Request FIR to force a keyframe on the new layer
+    int64_t now = sfu_now_ms();
+
+    // Re-using last_pli_time as the throttle timer (from our previous step)
+    if (now - publisher->last_pli_time > 1000) {
+      publisher->last_pli_time = now;
+      sfu_session_request_keyframe(w, publisher, true);
+    }
+  }
+}

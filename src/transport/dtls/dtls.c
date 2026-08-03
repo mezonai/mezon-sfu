@@ -40,11 +40,11 @@ static int generate_self_signed_cert(EVP_PKEY **out_pkey, X509 **out_cert) {
 
   ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
   X509_gmtime_adj(X509_getm_notBefore(cert), 0);
-  X509_gmtime_adj(X509_getm_notAfter(cert), 60L * 60 * 24 * 365); /* 1 year */
+  X509_gmtime_adj(X509_getm_notAfter(cert), 60L * 60 * 24 * 365);
 
   X509_NAME *name = X509_get_subject_name(cert);
   X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char *)"mezon-sfu", -1, -1, 0);
-  X509_set_issuer_name(cert, name); /* self-signed: issuer == subject */
+  X509_set_issuer_name(cert, name);
 
   X509_set_pubkey(cert, pkey);
   if (!X509_sign(cert, pkey, EVP_sha256())) {
@@ -92,8 +92,6 @@ int sfu_dtls_ctx_init(sfu_dtls_ctx_t *ctx) {
   SSL_CTX_set_min_proto_version(ctx->ssl_ctx, DTLS1_2_VERSION);
   SSL_CTX_set_max_proto_version(ctx->ssl_ctx, DTLS1_2_VERSION);
 
-  /* WebRTC pins the cert by SDP fingerprint, not a CA chain -- no
-   * verification here is correct, not a shortcut. */
   SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_NONE, NULL);
   SSL_CTX_set_cipher_list(ctx->ssl_ctx, "DEFAULT:!aNULL:!eNULL");
 
@@ -106,7 +104,6 @@ int sfu_dtls_ctx_init(sfu_dtls_ctx_t *ctx) {
     return -1;
   }
 
-  /* SSL_CTX_use_certificate/PrivateKey take their own reference. */
   X509_free(cert);
   EVP_PKEY_free(pkey);
 
@@ -150,20 +147,17 @@ int sfu_dtls_conn_init(sfu_dtls_conn_t *conn, sfu_dtls_ctx_t *ctx) {
     return -1;
   }
 
-  /* Empty mem BIO normally signals EOF (return 0); we want it to
-   * signal "no data right now, try again" (-1, i.e. WANT_READ)
-   * instead, since more datagrams may arrive later over UDP. */
   BIO_set_mem_eof_return(conn->rbio, -1);
 
-  SSL_set_bio(conn->ssl, conn->rbio, conn->wbio); /* SSL now owns both BIOs */
-  SSL_set_accept_state(conn->ssl);                /* we are always the DTLS server */
+  SSL_set_bio(conn->ssl, conn->rbio, conn->wbio);
+  SSL_set_accept_state(conn->ssl);
 
   return 0;
 }
 
 void sfu_dtls_conn_destroy(sfu_dtls_conn_t *conn) {
   if (conn->ssl) {
-    SSL_free(conn->ssl); /* also frees rbio/wbio via SSL_set_bio ownership */
+    SSL_free(conn->ssl);
     conn->ssl = NULL;
     conn->rbio = NULL;
     conn->wbio = NULL;
@@ -172,7 +166,7 @@ void sfu_dtls_conn_destroy(sfu_dtls_conn_t *conn) {
 
 sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *data, size_t len, void (*on_established_cb)(void *userdata), void *userdata) {
   if (conn->established) {
-    return SFU_DTLS_FEED_ESTABLISHED; /* stray post-handshake DTLS record (rekey, alert) */
+    return SFU_DTLS_FEED_ESTABLISHED;
   }
 
   BIO_write(conn->rbio, data, (int)len);
