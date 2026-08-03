@@ -53,21 +53,36 @@ bool sfu_nack_parser_next(sfu_nack_parser_t *parser, uint16_t *lost_seq) {
   return false;  // No more lost packets in this RTCP message
 }
 
-// Initialize the cache and pre-allocate packet buffers
-void sfu_rtx_cache_init(sfu_rtx_cache_t *cache) {
+// Initialize the cache and pre-allocate packet buffers.
+// Returns 0 on success, -1 if any entry buffer allocation fails (cache left
+// cleaned so the caller can free the cache struct itself).
+int sfu_rtx_cache_init(sfu_rtx_cache_t *cache) {
   memset(cache, 0, sizeof(sfu_rtx_cache_t));
   cache->next_rtx_seq = 0;
 
   // Pre-allocate memory for the packet copies to avoid malloc() in the hot path.
-  // 1024 entries * 1500 bytes = ~1.5MB per subscriber.
+  // 1024 entries * SFU_MAX_PAYLOAD_SIZE bytes per subscriber.
   for (int i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
     cache->entries[i].data = (uint8_t *)SFU_CALLOC(1, SFU_MAX_PAYLOAD_SIZE);
+    if (!cache->entries[i].data) {
+      // Free already-allocated buffers and leave the cache zeroed/invalid.
+      for (int j = 0; j < i; j++) {
+        SFU_FREE(cache->entries[j].data);
+        cache->entries[j].data = NULL;
+      }
+      return -1;
+    }
     cache->entries[i].valid = false;
   }
+  return 0;
 }
 
 void sfu_rtx_cache_put(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt) {
-  if (len > SFU_MAX_PAYLOAD_SIZE) {
+  // RTX rebuild inserts a 2-byte OSN before the original payload, so the
+  // cached packet must leave room for that expansion. SRTP overhead is
+  // bounded separately by the caller's protect call, which already receives
+  // the destination buffer capacity (cap).
+  if (len + 2 > SFU_MAX_PAYLOAD_SIZE) {
     return;
   }
   uint32_t idx = seq & SFU_RTX_CACHE_MASK;

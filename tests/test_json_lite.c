@@ -70,6 +70,43 @@ int main(void) {
     assert(sfu_json_extract_string(json, 10, "sdp", out, sizeof(out)) == -1);
   }
 
+  /* Empty-string field with out_cap=0 must reject before any write. */
+  {
+    unsigned char canary = 0xA5;
+    int n = sfu_json_extract_string("{\"sdp\":\"\"}", strlen("{\"sdp\":\"\"}"), "sdp", (char *)&canary, 0);
+    assert(n == -1);
+    assert(canary == 0xA5);
+  }
+
+  /* out_cap=1 with empty string succeeds with just the trailing NUL. */
+  {
+    char out = 0x5A;
+    int n = sfu_json_extract_string("{\"sdp\":\"\"}", strlen("{\"sdp\":\"\"}"), "sdp", &out, 1);
+    assert(n == 0);
+    assert(out == '\0');
+  }
+
+  /* Normal extraction of a non-empty string field. */
+  {
+    char out[16];
+    int n = sfu_json_extract_string("{\"room\":\"abc\"}", strlen("{\"room\":\"abc\"}"), "room", out, sizeof(out));
+    assert(n == 3);
+    assert(strcmp(out, "abc") == 0);
+  }
+
+  /* Escape with out == NULL must return -1 without writing. */
+  {
+    assert(sfu_json_escape("x", 1, NULL, 8) == -1);
+    assert(sfu_json_escape("", 0, NULL, 1) == -1);
+  }
+
+  /* Escape with out_cap == 0 must return -1 and leave the canary untouched. */
+  {
+    unsigned char canary = 0xA5;
+    assert(sfu_json_escape("", 0, (char *)&canary, 0) == -1);
+    assert(canary == 0xA5);
+  }
+
   printf("test_json_lite: OK\n");
   return 0;
 }

@@ -30,7 +30,7 @@ typedef struct {
   int bit_index;
 } sfu_nack_parser_t;
 
-void sfu_rtx_cache_init(sfu_rtx_cache_t *cache);
+int sfu_rtx_cache_init(sfu_rtx_cache_t *cache);
 void sfu_rtx_cache_put(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt);
 bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc, uint8_t *out_rtx_pt);
 void sfu_rtx_cache_destroy(sfu_rtx_cache_t *cache);

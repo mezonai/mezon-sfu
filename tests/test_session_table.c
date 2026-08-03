@@ -2,10 +2,12 @@
 #include "protocol/signaling/signaling.h"
 #include "runtime/routing_context.h"
 #include "transport/dtls/dtls.h"
+#include "util/alloc.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void make_addr(struct sockaddr_storage *addr, socklen_t *len, const char *ip, uint16_t port) {
@@ -65,6 +67,24 @@ int main(void) {
   assert(sfu_session_table_find(&table, &addr3, len3) == s1);
 
   /* 5. Remove session & tombstone checks */
+  s1->receivers = SFU_CALLOC(2, sizeof(*s1->receivers));
+  assert(s1->receivers != NULL);
+  s1->receiver_capacity = 2;
+  s1->receivers[0] = SFU_CALLOC(1, sizeof(*s1->receivers[0]));
+  assert(s1->receivers[0] != NULL);
+  s1->receivers[1] = SFU_CALLOC(1, sizeof(*s1->receivers[1]));
+  assert(s1->receivers[1] != NULL);
+
+  s2->receivers = SFU_CALLOC(3, sizeof(*s2->receivers));
+  assert(s2->receivers != NULL);
+  s2->receiver_capacity = 3;
+  s2->receivers[0] = SFU_CALLOC(1, sizeof(*s2->receivers[0]));
+  assert(s2->receivers[0] != NULL);
+  s2->receivers[1] = SFU_CALLOC(1, sizeof(*s2->receivers[1]));
+  assert(s2->receivers[1] != NULL);
+  s2->receivers[2] = SFU_CALLOC(1, sizeof(*s2->receivers[2]));
+  assert(s2->receivers[2] != NULL);
+
   sfu_session_table_remove(&table, s1);
   assert(sfu_session_table_find(&table, &addr3, len3) == NULL);
   assert(sfu_session_table_find_by_ufrag(&table, "ufrag_alice") == NULL);

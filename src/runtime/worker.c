@@ -15,6 +15,7 @@
 #include "runtime/timer.h"
 #include "transport/srtp/srtp.h"
 #include "util/log.h"
+#include "util/netbytes.h"
 
 #define SFU_WORKER_SEND_SQ_ENTRIES 1024
 #define SFU_WORKER_SEND_CQ_ENTRIES 2048
@@ -175,8 +176,19 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         uint8_t rtx_pt = 0;
 
         if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt)) {
+          // Fixed 12-byte RTP header for now; variable-header RTX is a later PR.
+          if (orig_len < 12) {
+            continue;
+          }
+
           sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
           if (!rtx_enc) {
+            continue;
+          }
+
+          int total = (int)orig_len + 2;
+          if (total > (int)rtx_enc->cap) {
+            sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
             continue;
           }
 
@@ -186,13 +198,13 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
           rtx_enc->data[1] = (rtx_enc->data[1] & 0x80) | (rtx_pt & 0x7F);
 
           uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
-          *(uint16_t *)(rtx_enc->data + 2) = htons(next_rtx_seq);
-          *(uint32_t *)(rtx_enc->data + 8) = htonl(rtx_ssrc);
+          sfu_write_be16(rtx_enc->data + 2, next_rtx_seq);
+          sfu_write_be32(rtx_enc->data + 8, rtx_ssrc);
 
-          *(uint16_t *)(rtx_enc->data + rtp_header_len) = htons(lost_seq);
-          memcpy(rtx_enc->data + rtp_header_len + 2, orig_pkt + rtp_header_len, orig_len - rtp_header_len);
+          sfu_write_be16(rtx_enc->data + rtp_header_len, lost_seq);
+          memcpy(rtx_enc->data + rtp_header_len + 2, orig_pkt + rtp_header_len, orig_len - (uint32_t)rtp_header_len);
 
-          int rtx_enc_len = orig_len + 2;
+          int rtx_enc_len = total;
           if (sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap)) {
             rtx_enc->len = (uint32_t)rtx_enc_len;
             sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
@@ -289,7 +301,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         enc->data[1] = (enc->data[1] & 0x80) | (expected_pt & 0x7F);
       }
 
-      uint16_t subscriber_seq = ntohs(*(uint16_t *)(enc->data + 2));
+      uint16_t subscriber_seq = sfu_read_be16(enc->data + 2);
       if (slot->video && incoming_pt == slot->video->payload_type) {
         sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len, slot->video->rtx_ssrc, slot->video->rtx_payload_type);
       }

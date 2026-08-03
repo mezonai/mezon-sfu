@@ -58,6 +58,9 @@ add_library(sfu_core STATIC
   src/memory/refcount.c
   src/util/ringbuffer.c
   src/util/log.c
+  src/util/metrics.c
+  src/cache/valkey_queue.c
+
   src/net/socket.c
   src/net/io_uring.c
   src/net/batch.c
@@ -78,13 +81,18 @@ add_library(sfu_core STATIC
   src/runtime/timer.c
   src/runtime/fanout.c
   src/runtime/worker.c
+  src/runtime/epoch_reclaimer.c
   src/runtime/scheduler.c
   src/runtime/signal.c
   src/runtime/routing_context.c
   src/congestion/gcc.c
   src/congestion/twcc_parser.c
+  src/rtp/rtp_packet.c
   src/rtp/rtx.c
+  src/rtp/rtx_build.c
   src/rtcp/rtcp_kf.c
+  src/rtcp/rtcp_compound.c
+  src/rtcp/rtcp_fb.c
 )
 
 target_include_directories(sfu_core PUBLIC
