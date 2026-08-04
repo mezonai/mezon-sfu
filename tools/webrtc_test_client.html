@@ -746,41 +746,45 @@
                         else setConnState(s, "warn");
                     };
 
-                    pc.ontrack = (e) => {
-                        console.log("============== ontrack ==============");
-                        console.log("kind:", e.track.kind);
-                        console.log("id:", e.track.id);
-                        console.log("mid:", e.transceiver.mid);
-                        console.log("streams:", e.streams.length);
+                    pc.ontrack = (event) => {
+                        const track = event.track;
 
-                        e.track.onunmute = () => {
-                            console.log("track unmuted", e.track.kind);
-                        };
+                        console.log('--- ontrack event fired ---');
+                        console.log('Track kind:', track.kind);
+                        console.log('Track ID:', track.id);
+                        console.log('Transceiver MID:', event.transceiver ? event.transceiver.mid : 'none');
 
-                        e.track.onmute = () => {
-                            console.log("track muted", e.track.kind);
-                        };
+                        if (track.kind === "video") {
+                            const id =
+                                event.streams && event.streams.length > 0
+                                    ? event.streams[0].id
+                                    : track.id;
 
-                        e.track.onended = () => {
-                            console.log("track ended", e.track.kind);
-                        };
+                            const label = "Peer " + id.substring(0, 4);
 
-                        const receiver = e.transceiver.receiver;
-
-                        setInterval(async () => {
-                            const stats = await receiver.getStats();
-
-                            stats.forEach(s => {
-                                if (s.type === "inbound-rtp") {
-                                    console.log("Inbound", e.track.kind, {
-                                        packets: s.packetsReceived,
-                                        bytes: s.bytesReceived,
-                                        frames: s.framesDecoded,
-                                        jitter: s.jitter
-                                    });
-                                }
+                            const p = ensureParticipant(id, {
+                                isLocal: false,
+                                label: label,
                             });
-                        }, 1000);
+
+                            const singleVideoStream = new MediaStream([track]);
+                            setTileStream(p, singleVideoStream, true);
+
+                            track.addEventListener("ended", () => {
+                                removeTile(id);
+                            });
+
+                            setConnState("connected", "ok");
+                        } else if (track.kind === "audio") {
+                            const audioEl = document.createElement("audio");
+                            audioEl.autoplay = true;
+                            audioEl.srcObject = new MediaStream([track]);
+                            document.body.appendChild(audioEl);
+
+                            track.addEventListener("ended", () => {
+                                audioEl.remove();
+                            });
+                        }
                     };
 
                     // Local self-tile, shown immediately regardless of connection state.
