@@ -79,7 +79,6 @@ sfu_receiver_snapshot_t *sfu_session_receivers_acquire(const sfu_peer_session_t 
   while (snap) {
     uint32_t rc = atomic_load_explicit(&snap->refcount, memory_order_relaxed);
     if (rc == 0) {
-      /* Being torn down by its last releaser; retry for the replacement. */
       snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
       continue;
     }
@@ -238,7 +237,7 @@ static void session_destroy_unpublished(sfu_peer_session_t *s) {
   if (s->cold && s->cold->dtls.ssl) {
     sfu_dtls_conn_destroy(&s->cold->dtls);
   }
-  s->active = false; /* suppress the established-state teardown paths */
+  s->active = false;
   sfu_session_free_resources(s);
   SFU_FREE(s);
 }
@@ -258,15 +257,12 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     }
 
     if (addr_equal(&session->cold->addr, session->cold->addr_len, addr, addr_len)) {
-      /* Caller pin: the table slot keeps the session alive under the lock,
-       * so this increment is safe. */
       atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
       pthread_mutex_unlock(&t->lock);
       return session;
     }
   }
 
-  /* First NULL hole wins; extend count only when there is no hole. */
   uint32_t index = UINT32_MAX;
   for (uint32_t i = 0; i < t->count; i++) {
     if (!t->sessions[i]) {
@@ -363,7 +359,6 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     return NULL;
   }
 
-  /* Publish: table ref = 1, caller pin = 1, OPEN and accepting work. */
   atomic_store_explicit(&s->refcount, 2, memory_order_relaxed);
   atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN, memory_order_relaxed);
   atomic_store_explicit(&s->accepts_work, true, memory_order_relaxed);
@@ -423,8 +418,6 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
   pthread_mutex_lock(&t->lock);
 
   if (atomic_load_explicit(&s->lifecycle, memory_order_acquire) != SFU_SESSION_LIFECYCLE_OPEN) {
-    /* Already closing/closed: idempotent no-op. The slot and hash entries
-     * were removed by the first close; nothing to do. */
     pthread_mutex_unlock(&t->lock);
     return false;
   }
@@ -441,9 +434,6 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
 
   pthread_mutex_unlock(&t->lock);
 
-  /* Detach from the room exactly once, outside the table lock. Lock ordering:
-   * the close path never holds the table lock while taking the room lock, and
-   * room_media_graph never takes the table lock. */
   sfu_room_t *room = (sfu_room_t *)s->room;
   if (room) {
     room_remove_peer(room, s);
@@ -505,8 +495,6 @@ bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *s
 }
 
 void sfu_session_table_destroy(sfu_session_table_t *t) {
-  /* No concurrent table users may exist here (workers joined, signaling
-   * stopped, all caller pins released); the lock below is defensive. */
   sfu_peer_session_t **orphans = SFU_CALLOC(t->count ? t->count : 1, sizeof(*orphans));
   uint32_t orphan_count = 0;
 
@@ -531,7 +519,6 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
 
   pthread_mutex_unlock(&t->lock);
 
-  /* Detach rooms and drop table refs outside the lock. */
   for (uint32_t i = 0; i < orphan_count; i++) {
     sfu_room_t *room = (sfu_room_t *)orphans[i]->room;
     if (room) {
@@ -557,11 +544,8 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
 
   int rtcp_len = 0;
 
-  // The SFU's identifier in the RTCP packet.
-  // Safely hardcoded to 1 since we are just an intermediate router.
   uint32_t sfu_sender_ssrc = 1;
 
-  // The publisher's media SSRC that we want a keyframe for
   uint32_t media_ssrc = publisher->uplink_video.ssrc;
 
   if (use_fir) {
@@ -574,7 +558,6 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
     if (sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap)) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
 
-      // Send the RTCP packet back to the publisher
       sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
     } else {
       SFU_LOG_WARN("Failed to SRTP protect keyframe request for peer %u", publisher->peer_id);

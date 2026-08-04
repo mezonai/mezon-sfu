@@ -30,10 +30,6 @@ int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count, uint32_
   }
 
   for (uint32_t i = 0; i < cell_count; i++) {
-    /* Diagonal cells (src == dst) are never used -- local fan-out
-     * bypasses the mesh entirely and queues send_zc directly -- but
-     * initializing them uniformly keeps indexing simple and the
-     * memory cost is negligible. */
     if (sfu_spsc_ring_init(&mesh->rings[i], ring_capacity) != 0) {
       SFU_LOG_ERROR("fanout mesh: failed to init ring %u", i);
       for (uint32_t j = 0; j < i; j++) {
@@ -58,7 +54,7 @@ void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh) {
   sfu_pool_destroy(&mesh->job_pool);
 }
 
-static inline sfu_spsc_ring_t *mesh_ring(sfu_fanout_mesh_t *mesh, uint32_t src, uint32_t dst) { return &mesh->rings[src * mesh->worker_count + dst]; }
+static sfu_spsc_ring_t *mesh_ring(sfu_fanout_mesh_t *mesh, uint32_t src, uint32_t dst) { return &mesh->rings[src * mesh->worker_count + dst]; }
 
 bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, const struct sockaddr_storage *dst_addr,
                              socklen_t dst_len) {
@@ -91,10 +87,9 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
   return true;
 }
 
-bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt,
-                                     sfu_peer_session_t *subscriber, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
-                                     uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, bool is_audio,
-                                     uint8_t pacer_class) {
+bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, sfu_peer_session_t *subscriber,
+                                     const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc, uint32_t video_rtx_ssrc, uint8_t video_pt,
+                                     uint8_t video_rtx_pt, bool has_video, bool is_audio, uint8_t pacer_class) {
   uint32_t job_idx;
   sfu_fanout_job_t *job = sfu_pool_alloc(&mesh->job_pool, &job_idx);
   if (!job) {
@@ -129,7 +124,7 @@ unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, uns
 
   for (uint32_t src = 0; src < mesh->worker_count && drained < max_count; src++) {
     if (src == dst_worker) {
-      continue; /* diagonal unused */
+      continue;
     }
 
     sfu_spsc_ring_t *ring = mesh_ring(mesh, src, dst_worker);
@@ -144,9 +139,6 @@ unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, uns
 }
 
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job) {
-  /* Jobs are allocated from a plain sfu_pool_t of fixed-size slots;
-   * recover the slot index from the pointer offset rather than
-   * threading an index through the whole call chain. */
   ptrdiff_t byte_off = (uint8_t *)job - mesh->job_pool.slab;
   uint32_t index = (uint32_t)(byte_off / mesh->job_pool.slot_size);
   sfu_pool_free(&mesh->job_pool, index);

@@ -214,7 +214,6 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
     goto maybe_rearm;
   }
 
-  /* Log raw packet arrival immediately after successful layout validation */
   void *name = io_uring_recvmsg_name(o);
   char peer_ip[64];
   uint16_t peer_port;
