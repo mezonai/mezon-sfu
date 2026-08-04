@@ -18,9 +18,9 @@
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
-#include "room/room_media_graph.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
+#include "runtime/scheduler.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -321,18 +321,64 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *session = room->peers[i];
 
-    if (!session) {
+    if (!session || !sfu_session_accepts_work(session)) {
       continue;
     }
 
+    atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
       SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     } else {
       SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
     }
+    sfu_session_release(session);
   }
   pthread_mutex_unlock(&room->lock);
 }
+
+static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
+  static const char k_extmap[] = "a=extmap:";
+  static const char k_twcc_uri[] = "transport-wide-cc";
+
+  uint8_t id = 0;
+  size_t pos = 0;
+  while (pos < sdp_len) {
+    size_t line_start = pos;
+    while (pos < sdp_len && sdp[pos] != '\n') {
+      pos++;
+    }
+    size_t line_end = pos;
+    if (line_end > line_start && sdp[line_end - 1] == '\r') {
+      line_end--;
+    }
+    if (pos < sdp_len) {
+      pos++;
+    }
+
+    size_t len = line_end - line_start;
+    const char *line = sdp + line_start;
+    if (len < sizeof(k_extmap) - 1 || memcmp(line, k_extmap, sizeof(k_extmap) - 1) != 0) {
+      continue;
+    }
+
+    /* ID may carry a "/recvonly" style direction suffix; strtoul stops at
+     * the '/'. Only IDs 1-14 are valid one-byte-header extmap IDs. */
+    char *endptr;
+    unsigned long parsed = strtoul(line + sizeof(k_extmap) - 1, &endptr, 10);
+    if (endptr == line + sizeof(k_extmap) - 1 || parsed == 0 || parsed > 14) {
+      continue;
+    }
+    if (len - (size_t)(endptr - line) < sizeof(k_twcc_uri) - 1) {
+      continue;
+    }
+    if (memmem(endptr, len - (size_t)(endptr - line), k_twcc_uri, sizeof(k_twcc_uri) - 1)) {
+      id = (uint8_t)parsed;
+    }
+  }
+  return id;
+}
+
+uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len) { return extract_sdp_twcc_extmap_id(sdp, sdp_len); }
 
 static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
   if (!session) {
@@ -359,6 +405,10 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
 
   session->uplink_video.payload_type = video_pt;
   session->uplink_video.rtx_payload_type = rtx_pt;
+
+  /* The client answers extmap for media it receives; persist the accepted
+   * transport-cc ID so the egress path knows where to write TWCC sequences. */
+  session->twcc_extmap_id = extract_sdp_twcc_extmap_id(sdp, (size_t)sdp_len);
 
   for (int i = 0; i < 128; i++) {
     session->pt_map[i] = (uint8_t)i;
@@ -429,20 +479,18 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
 static void on_client_close(uv_handle_t *handle) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
 
-  SFU_LOG_INFO("signaling: on_client_close fired for fd=%d ufrag=%s session=%p", c->fd, c->client_ufrag, (void *)c->session);
-
-  sfu_peer_session_t *session = c->session;
-  if (!session && c->client_ufrag[0] != '\0') {
-    session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
-  }
+  SFU_LOG_INFO("signaling: on_client_close fired for fd=%d ufrag=%s", c->fd, c->client_ufrag);
 
   sfu_routing_table_unregister_fd(c->server->routing_table, c->fd);
 
+  sfu_peer_session_t *session = NULL;
+  if (c->client_ufrag[0] != '\0') {
+    session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
+  }
+
   if (session) {
-    if (session->room) {
-      room_remove_peer(session->room, session);
-    }
-    sfu_session_table_remove(c->server->sessions, session);
+    (void)sfu_session_begin_close(c->server->sessions, session);
+    sfu_session_release(session);
   }
 
   close(c->fd);
@@ -567,19 +615,24 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 } else {
                   c->client_ufrag[0] = '\0';
                 }
+
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
-                  c->session = session;
-                  c->session->user_id = c->user_id;
-                  c->session->peer_id = generate_unique_id();
+                  session->user_id = c->user_id;
+                  session->peer_id = generate_unique_id();
                   handle_answer(session, sdp, sdp_len);
+                  sfu_session_release(session);
+                  if (session->schedulers) {
+                    sfu_layer_selector_switch_source(session, session->peer_id);
+                  }
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
                   uint8_t video_pt = 0, rtx_pt = 0;
                   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &audio_ssrc, &video_ssrc, &rtx_ssrc);
                   extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
 
-                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt, rtx_pt);
+                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt, rtx_pt,
+                                                       generate_unique_id());
                   SFU_LOG_WARN("signaling: answer for ufrag=%s arrived before session was created; stashed parsed SSRCs for apply on bind", c->client_ufrag);
                 }
               }

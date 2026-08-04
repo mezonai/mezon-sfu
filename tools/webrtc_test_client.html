@@ -584,6 +584,175 @@
                 isNegotiating = false;
             }
 
+            // SVC + GCC support
+            // NOTE: the SFU now offers VP9 (preferred), AV1, and VP8
+            // (fallback) in that order. Browsers don't always default to
+            // the offer's listed order when constructing an answer, so we
+            // pin it explicitly here to make sure VP9 (the codec the SFU's
+            // SVC layer-selection logic targets) actually gets chosen when
+            // the local encoder supports it.
+            //
+            // IMPORTANT: none of this activates real congestion control by
+            // itself. GCC bandwidth estimation only runs once the
+            // transport-wide-cc RTP header extension is negotiated in SDP
+            // -- that has to be offered server-side (not yet done as of
+            // this client change) before any of this has an effect beyond
+            // "which codec got picked". Treat this as client-side
+            // groundwork, not confirmation that GCC is active end-to-end.
+
+            function preferSvcVideoCodecs(transceiver) {
+                if (
+                    !transceiver ||
+                    typeof transceiver.setCodecPreferences !== "function"
+                ) {
+                    console.warn(
+                        "setCodecPreferences not supported in this browser -- codec order left to browser default",
+                    );
+                    return;
+                }
+                if (typeof RTCRtpSender.getCapabilities !== "function") {
+                    console.warn(
+                        "RTCRtpSender.getCapabilities not supported -- cannot reorder codecs",
+                    );
+                    return;
+                }
+                const caps = RTCRtpSender.getCapabilities("video");
+                if (!caps || !caps.codecs) {
+                    return;
+                }
+
+                const byName = (name) =>
+                    caps.codecs.filter(
+                        (c) => c.mimeType.toLowerCase() === `video/${name}`,
+                    );
+                const vp9 = byName("vp9");
+                const av1 = byName("av1");
+                const vp8 = byName("vp8");
+                // Everything else (rtx, red, ulpfec, and any codec not in
+                // our preferred set) -- order among these doesn't matter,
+                // the browser matches rtx/red entries to their primary
+                // codec via apt=/etc regardless of list position.
+                const rest = caps.codecs.filter(
+                    (c) =>
+                        !vp9.includes(c) &&
+                        !av1.includes(c) &&
+                        !vp8.includes(c),
+                );
+
+                const ordered = [...vp9, ...av1, ...vp8, ...rest];
+                try {
+                    transceiver.setCodecPreferences(ordered);
+                    console.log(
+                        "Video codec preference set: VP9 > AV1 > VP8 (fallback)",
+                    );
+                } catch (e) {
+                    console.warn(
+                        "setCodecPreferences failed, leaving browser default order:",
+                        e,
+                    );
+                }
+            }
+
+            async function enableSvcForVideoSender(pc, videoTrack) {
+                // The video transceiver already exists at this point --
+                // it was created when setRemoteDescription processed the
+                // server's offer (mid 1, initially recvonly). We attach
+                // our track to that existing transceiver rather than
+                // creating a new one.
+                const transceiver =
+                    pc
+                        .getTransceivers()
+                        .find(
+                            (t) =>
+                                t.receiver &&
+                                t.receiver.track &&
+                                t.receiver.track.kind === "video",
+                        ) ||
+                    pc.getTransceivers().find((t) => t.mid === "1");
+
+                if (!transceiver) {
+                    console.warn(
+                        "No video transceiver found to attach local track/SVC to -- falling back to plain addTrack",
+                    );
+                    pc.addTrack(videoTrack, localStream);
+                    return;
+                }
+
+                preferSvcVideoCodecs(transceiver);
+
+                await transceiver.sender.replaceTrack(videoTrack);
+                if (transceiver.direction !== "sendrecv") {
+                    transceiver.direction = "sendonly";
+                }
+
+                // Request 3 spatial x 3 temporal SVC layers, matching the
+                // SFU's sid 0-2 / tid 0-2 layer-selection ladder. This only
+                // takes effect if the negotiated codec ends up being VP9
+                // or AV1 -- harmless no-op (single layer) on VP8 fallback.
+                // Not all browsers support changing scalabilityMode via
+                // setParameters after the transceiver/sender already
+                // exists (some require it at addTransceiver time) --
+                // failure here is non-fatal, audio/video still work,
+                // just without SVC layering.
+                try {
+                    const params = transceiver.sender.getParameters();
+                    params.encodings = [
+                        {
+                            scalabilityMode: "L3T3",
+                            maxBitrate: 2_500_000,
+                        },
+                    ];
+                    await transceiver.sender.setParameters(params);
+                    console.log("SVC requested: scalabilityMode=L3T3");
+                } catch (e) {
+                    console.warn(
+                        "Could not set SVC scalabilityMode (codec/browser may not support changing it post-creation) -- continuing without SVC layering:",
+                        e,
+                    );
+                }
+            }
+
+            function startGccStatsMonitor(pc) {
+                const interval = setInterval(async () => {
+                    if (
+                        pc.connectionState === "closed" ||
+                        pc.connectionState === "failed"
+                    ) {
+                        clearInterval(interval);
+                        return;
+                    }
+                    let stats;
+                    try {
+                        stats = await pc.getStats();
+                    } catch (e) {
+                        return;
+                    }
+                    stats.forEach((report) => {
+                        if (
+                            report.type === "outbound-rtp" &&
+                            report.kind === "video"
+                        ) {
+                            console.log(
+                                `[GCC] video out: target=${report.targetBitrate ? Math.round(report.targetBitrate / 1000) : "?"}kbps ` +
+                                    `res=${report.frameWidth || "?"}x${report.frameHeight || "?"} ` +
+                                    `fps=${report.framesPerSecond || "?"} ` +
+                                    `scalabilityMode=${report.scalabilityMode || "n/a"} ` +
+                                    `qualityLimitation=${report.qualityLimitationReason || "none"}`,
+                            );
+                        }
+                        if (
+                            report.type === "candidate-pair" &&
+                            report.state === "succeeded" &&
+                            report.availableOutgoingBitrate
+                        ) {
+                            console.log(
+                                `[GCC] path estimate: availableOutgoingBitrate=${Math.round(report.availableOutgoingBitrate / 1000)}kbps`,
+                            );
+                        }
+                    });
+                }, 3000);
+            }
+
             async function connectAndJoin() {
                 const wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
@@ -601,6 +770,7 @@
 
                 try {
                     pc = new RTCPeerConnection({ iceServers: [] });
+                    startGccStatsMonitor(pc);
 
                     pc.oniceconnectionstatechange = () => {
                         const s = pc.iceConnectionState;
@@ -744,7 +914,10 @@
                                     if (audioTrack)
                                         pc.addTrack(audioTrack, localStream);
                                     if (videoTrack)
-                                        pc.addTrack(videoTrack, localStream);
+                                        await enableSvcForVideoSender(
+                                            pc,
+                                            videoTrack,
+                                        );
                                     localTracksAdded = true;
                                 }
 

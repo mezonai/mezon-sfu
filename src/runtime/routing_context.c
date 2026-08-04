@@ -20,7 +20,7 @@ void sfu_routing_table_destroy(sfu_routing_table_t *table) {
 }
 
 void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
-                                          uint8_t video_pt, uint8_t rtx_pt) {
+                                          uint8_t video_pt, uint8_t rtx_pt, uint32_t peer_id) {
   pthread_mutex_lock(&table->mutex);
   for (int i = 0; i < table->count; i++) {
     if (strcmp(table->entries[i].ufrag, client_ufrag) == 0) {
@@ -30,6 +30,7 @@ void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char
       table->entries[i].pending_video_pt = video_pt;
       table->entries[i].pending_rtx_pt = rtx_pt;
       table->entries[i].has_pending_answer = true;
+      table->entries[i].peer_id = peer_id;
       pthread_mutex_unlock(&table->mutex);
       return;
     }

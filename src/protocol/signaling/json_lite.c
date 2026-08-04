@@ -4,6 +4,9 @@
 #include <string.h>
 
 int sfu_json_extract_string(const char *json, size_t json_len, const char *field, char *out, size_t out_cap) {
+  if (out == NULL || out_cap == 0) {
+    return -1;
+  }
   char needle[128];
   int needle_len = snprintf(needle, sizeof(needle), "\"%s\"", field);
   if (needle_len < 0 || (size_t)needle_len >= sizeof(needle) || (size_t)needle_len > json_len) {
@@ -60,6 +63,9 @@ int sfu_json_extract_string(const char *json, size_t json_len, const char *field
 }
 
 int sfu_json_escape(const char *value, size_t value_len, char *out, size_t out_cap) {
+  if (out == NULL || out_cap == 0) {
+    return -1;
+  }
   size_t out_len = 0;
   for (size_t i = 0; i < value_len; i++) {
     char c = value[i];

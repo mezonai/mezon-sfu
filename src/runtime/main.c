@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
   _Static_assert((SFU_SESSION_ADDR_HASH_SLOTS & (SFU_SESSION_ADDR_HASH_SLOTS - 1)) == 0, "addr hash table size must be power of 2");
   _Static_assert((SFU_SESSION_UFRAG_HASH_SLOTS & (SFU_SESSION_UFRAG_HASH_SLOTS - 1)) == 0, "ufrag hash table size must be power of 2");
 
-  sfu_log_set_level(SFU_LOG_LEVEL_INFO);
+  sfu_log_set_level(SFU_LOG_LEVEL_DEBUG);
 
   signal(SIGPIPE, SIG_IGN);
 
@@ -125,6 +125,13 @@ int main(int argc, char **argv) {
   worker_count = (uint32_t)(online > 1 ? online - 1 : 1);
   if (worker_count > SFU_MAX_WORKERS) {
     worker_count = SFU_MAX_WORKERS;
+  }
+  /* Reject impossible worker counts before any io_uring/fanout/scheduler init.
+   * Auto-detect always yields >= 1 and is clamped to SFU_MAX_WORKERS above;
+   * this guard covers future config overrides and defensive invariants. */
+  if (worker_count < 1 || worker_count > SFU_MAX_WORKERS) {
+    SFU_LOG_ERROR("invalid worker_count %u (must be 1..%d)", worker_count, SFU_MAX_WORKERS);
+    goto cleanup;
   }
   SFU_LOG_INFO("detected %d online cpus: 1 dispatcher + %u workers", online, worker_count);
   workers = SFU_CALLOC(worker_count, sizeof(*workers));

@@ -28,7 +28,6 @@ typedef struct sfu_client_conn {
   uv_poll_t poll_handle;
   uv_timer_t answer_retry_timer;
   sfu_signaling_server_t *server;
-  sfu_peer_session_t *session;
   sfu_room_t *joined_room;
   uint64_t joined_room_id;
   int64_t user_id;

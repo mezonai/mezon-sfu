@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <unistd.h>
+#include "congestion/gcc.h"
 #include "peer/session.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
@@ -19,6 +20,11 @@
 
 #define SFU_PENDING_FREE_SWEEP_INTERVAL_SEC 1
 
+static uint64_t scheduler_worker_generation(void *context, uint32_t worker_index) {
+  sfu_worker_t *workers = context;
+  return __atomic_load_n(&workers[worker_index].generation, __ATOMIC_ACQUIRE);
+}
+
 int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count, int recv_bgid,
                        uint32_t buf_count, uint32_t buf_size) {
   memset(s, 0, sizeof(*s));
@@ -33,9 +39,7 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_
     return -1;
   }
 
-  s->pending_free_head = NULL;
-  if (pthread_mutex_init(&s->pending_free_lock, NULL) != 0) {
-    SFU_LOG_ERROR("scheduler: failed to init pending_free_lock");
+  if (sfu_epoch_reclaimer_init(&s->reclaimer, worker_count, scheduler_worker_generation, workers) != 0) {
     sfu_ring_destroy(&s->recv_ring);
     return -1;
   }
@@ -44,97 +48,21 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_
   return 0;
 }
 
+static void scheduler_free(void *ptr) { SFU_FREE(ptr); }
+
 void sfu_scheduler_destroy(sfu_scheduler_t *s) {
   sfu_ring_destroy(&s->recv_ring);
-
-  sfu_deferred_free_t *df = s->pending_free_head;
-  while (df) {
-    sfu_deferred_free_t *next = df->next;
-    SFU_FREE(df->ptr);
-    SFU_FREE(df->worker_generations);
-    SFU_FREE(df);
-    df = next;
-  }
-  s->pending_free_head = NULL;
-  pthread_mutex_destroy(&s->pending_free_lock);
+  /* Main joins workers before this call. No timeout can make reclamation safe;
+   * shutdown drainage relies exclusively on that quiescence invariant. */
+  sfu_epoch_reclaimer_destroy_after_quiescence(&s->reclaimer);
 }
 
-static void sfu_scheduler_sync_reclaim(sfu_scheduler_t *s, void *ptr) {
-  uint64_t fallback_generations[SFU_MAX_WORKERS];
-  for (uint32_t i = 0; i < s->worker_count && i < SFU_MAX_WORKERS; i++) {
-    fallback_generations[i] = __atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE);
+bool sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr) {
+  bool retired = sfu_epoch_reclaimer_retire(&s->reclaimer, ptr, scheduler_free);
+  if (!retired) {
+    SFU_LOG_ERROR("scheduler: retire pool exhausted; caller retains ptr=%p", ptr);
   }
-  for (uint32_t i = 0; i < s->worker_count && i < SFU_MAX_WORKERS; i++) {
-    uint32_t attempts = 0;
-    while (__atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE) == fallback_generations[i]) {
-      usleep(100);
-      if (++attempts >= 10000) {
-        SFU_LOG_ERROR("scheduler: worker %u generation wait timeout during synchronous reclaim", i);
-        break;
-      }
-    }
-  }
-  SFU_FREE(ptr);
-}
-
-void sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr) {
-  sfu_deferred_free_t *df = SFU_CALLOC(1, sizeof(*df));
-  if (!df) {
-    SFU_LOG_WARN("scheduler: deferred-free allocation failed; reclaiming synchronously");
-    sfu_scheduler_sync_reclaim(s, ptr);
-    return;
-  }
-
-  df->ptr = ptr;
-  df->worker_count = s->worker_count;
-  df->worker_generations = SFU_CALLOC(s->worker_count, sizeof(uint64_t));
-  if (!df->worker_generations) {
-    SFU_LOG_WARN("scheduler: generation snapshot allocation failed; reclaiming synchronously");
-    SFU_FREE(df);
-    sfu_scheduler_sync_reclaim(s, ptr);
-    return;
-  }
-  for (uint32_t i = 0; i < s->worker_count; i++) {
-    df->worker_generations[i] = __atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE);
-  }
-
-  pthread_mutex_lock(&s->pending_free_lock);
-  df->next = s->pending_free_head;
-  s->pending_free_head = df;
-  pthread_mutex_unlock(&s->pending_free_lock);
-}
-
-static void sweep_pending_frees(sfu_scheduler_t *s) {
-  if (!s->pending_free_head) {
-    return;
-  }
-
-  pthread_mutex_lock(&s->pending_free_lock);
-
-  sfu_deferred_free_t **cursor = &s->pending_free_head;
-  while (*cursor) {
-    sfu_deferred_free_t *df = *cursor;
-
-    bool safe = true;
-    for (uint32_t i = 0; i < df->worker_count; i++) {
-      uint64_t current = __atomic_load_n(&s->workers[i].generation, __ATOMIC_ACQUIRE);
-      if (current == df->worker_generations[i]) {
-        safe = false;
-        break;
-      }
-    }
-
-    if (safe) {
-      *cursor = df->next;
-      SFU_FREE(df->ptr);
-      SFU_FREE(df->worker_generations);
-      SFU_FREE(df);
-    } else {
-      cursor = &df->next;
-    }
-  }
-
-  pthread_mutex_unlock(&s->pending_free_lock);
+  return retired;
 }
 
 typedef struct {
@@ -143,6 +71,14 @@ typedef struct {
 
 static void on_recv(void *user_data, sfu_packet_t *pkt) {
   sfu_scheduler_t *s = ((recv_ctx_t *)user_data)->s;
+
+  /* Defensive: h % 0 is SIGFPE. Startup must reject worker_count == 0;
+   * if we still land here, drop safely. */
+  if (SFU_UNLIKELY(s->worker_count == 0)) {
+    SFU_LOG_ERROR("scheduler: worker_count is 0; dropping packet (misconfiguration)");
+    sfu_ring_release_packet(&s->recv_ring, s->pp, pkt);
+    return;
+  }
 
   uint32_t h = fnv1a(&pkt->peer_addr, pkt->peer_addr_len);
   uint32_t worker_idx = h % s->worker_count;
@@ -178,7 +114,7 @@ static void *scheduler_thread_main(void *arg) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     if (now.tv_sec - s->last_sweep.tv_sec >= SFU_PENDING_FREE_SWEEP_INTERVAL_SEC) {
-      sweep_pending_frees(s);
+      sfu_epoch_reclaimer_sweep(&s->reclaimer);
       s->last_sweep = now;
     }
 
@@ -203,13 +139,36 @@ int sfu_scheduler_start(sfu_scheduler_t *s) {
 void sfu_scheduler_join(sfu_scheduler_t *s) { pthread_join(s->thread, NULL); }
 
 void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t initial_publisher) {
+  memset(sched, 0, sizeof(*sched));
   sched->active_publisher_id = initial_publisher;
-  sched->is_pinned = false;
-  sched->target_sid = 0;
-  sched->target_tid = 0;
-  sched->current_sid = 0;
-  sched->current_tid = 0;
   sched->needs_keyframe = true;
+}
+
+sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id) {
+  if (!session || !session->schedulers || publisher_id == 0) {
+    return NULL;
+  }
+
+  sfu_session_scheduler_slot_t *free_slot = NULL;
+  for (uint32_t i = 0; i < SFU_SESSION_SCHEDULER_CAP; i++) {
+    sfu_session_scheduler_slot_t *slot = &session->schedulers[i];
+    if (slot->publisher_id == publisher_id) {
+      return &slot->sched;
+    }
+    if (!free_slot && slot->publisher_id == 0) {
+      free_slot = slot;
+    }
+  }
+
+  if (!free_slot) {
+    SFU_LOG_WARN("session %u: scheduler table full (%d publishers); cannot track publisher %u", session->peer_id,
+                 SFU_SESSION_SCHEDULER_CAP, publisher_id);
+    return NULL;
+  }
+
+  free_slot->publisher_id = publisher_id;
+  sfu_subscriber_scheduler_init(&free_slot->sched, publisher_id);
+  return &free_slot->sched;
 }
 
 bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe) {
@@ -258,19 +217,111 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
   return true;  // Frame is required by this subscriber
 }
 
-void sfu_scheduler_adapt_layer(sfu_worker_t *w, sfu_subscriber_scheduler_t *sched, sfu_peer_session_t *publisher, uint8_t target_spatial_layer) {
-  // Check if the spatial layer (sid) is actually changing
-  if (sched->current_sid != target_spatial_layer) {
-    sched->target_sid = target_spatial_layer;
-    sched->needs_keyframe = true;  // Use your struct's exact boolean name
+sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc) {
+  if (desc->sid > 0 || desc->tid > 1) {
+    return SFU_PACER_CLASS_VIDEO_ENH;
+  }
+  (void)sched; /* current layers already bound what reaches here */
+  return SFU_PACER_CLASS_VIDEO_BASE;
+}
 
-    // Request FIR to force a keyframe on the new layer
-    int64_t now = sfu_now_ms();
+/* VP9 bitrate ladder rungs (bits/s). A rung's layer set becomes the target
+ * only when the estimate clears the rung's UP threshold (rung rate + 20%
+ * headroom) and stays until it falls below the rung's DOWN threshold (rung
+ * rate), giving asymmetric up/down hysteresis. */
+typedef struct sfu_layer_rung {
+  uint32_t rate_bps;
+  uint8_t sid;
+  uint8_t tid;
+} sfu_layer_rung_t;
 
-    // Re-using last_pli_time as the throttle timer (from our previous step)
-    if (now - publisher->last_pli_time > 1000) {
-      publisher->last_pli_time = now;
-      sfu_session_request_keyframe(w, publisher, true);
+static const sfu_layer_rung_t k_layer_ladder[] = {
+    {150000, 0, 1},  /* 180p, half framerate */
+    {500000, 1, 2},  /* 360p, full framerate */
+    {1200000, 2, 2}, /* 720p, full framerate */
+};
+#define SFU_LAYER_LADDER_LEN (sizeof(k_layer_ladder) / sizeof(k_layer_ladder[0]))
+#define SFU_LAYER_UP_HEADROOM_NUM 6 /* up threshold = rate * 1.2 */
+#define SFU_LAYER_UP_HEADROOM_DEN 5
+/* Dwell time: target changes no more often than this, so a jittery estimate
+ * cannot flap layers on every feedback. */
+#define SFU_LAYER_DWELL_US 500000LL
+
+/* Updates only the per-track layer targets. The pacer rate is applied
+ * separately by the caller to the session-level pacer. */
+void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps) {
+  /* Map the estimate onto the ladder with hysteresis: walk to the highest
+   * rung whose UP threshold is cleared, but never below the current rung
+   * unless the DOWN threshold is broken. */
+  uint8_t target_sid = 0, target_tid = 0;
+  int chosen = -1;
+
+  for (int i = (int)SFU_LAYER_LADDER_LEN - 1; i >= 0; i--) {
+    uint64_t up = (uint64_t)k_layer_ladder[i].rate_bps * SFU_LAYER_UP_HEADROOM_NUM / SFU_LAYER_UP_HEADROOM_DEN;
+    if (bitrate_bps >= up) {
+      chosen = i;
+      break;
     }
+  }
+  if (chosen >= 0) {
+    target_sid = k_layer_ladder[chosen].sid;
+    target_tid = k_layer_ladder[chosen].tid;
+  }
+
+  /* Hysteresis on the way down: hold the current rung while the estimate
+   * stays at or above its (un-headroomed) rate. Only applies once a target
+   * has actually been committed — before the first climb there is nothing
+   * to hold, and holding the floor rung would mask real climbs. */
+  if (sched->last_target_change_us != 0 && chosen < (int)SFU_LAYER_LADDER_LEN - 1) {
+    int current_rung = -1;
+    for (int i = (int)SFU_LAYER_LADDER_LEN - 1; i >= 0; i--) {
+      if (sched->target_sid >= k_layer_ladder[i].sid && sched->target_tid >= k_layer_ladder[i].tid) {
+        current_rung = i;
+        break;
+      }
+    }
+    if (current_rung > chosen && current_rung >= 0 && bitrate_bps >= k_layer_ladder[current_rung].rate_bps) {
+      chosen = current_rung;
+      target_sid = k_layer_ladder[chosen].sid;
+      target_tid = k_layer_ladder[chosen].tid;
+    }
+  }
+
+  if (target_sid == sched->target_sid && target_tid == sched->target_tid) {
+    return;
+  }
+
+  /* Dwell: suppress target changes that arrive faster than the dwell
+   * window, unless we have never committed a layer yet. */
+  int64_t now = (int64_t)sfu_now_us();
+  if (sched->last_target_change_us != 0 && now - sched->last_target_change_us < SFU_LAYER_DWELL_US) {
+    return;
+  }
+  sched->last_target_change_us = now;
+  sched->target_sid = target_sid;
+  sched->target_tid = target_tid;
+}
+
+void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_publisher_id) {
+  sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(session, new_publisher_id);
+  if (!sched) {
+    return;
+  }
+
+  sched->active_publisher_id = new_publisher_id;
+  sched->current_sid = 0;
+  sched->current_tid = 0;
+  sched->needs_keyframe = true;
+
+  atomic_fetch_add_explicit(&session->egress_generation, 1, memory_order_acq_rel);
+
+  /* The delay estimate is path-state; a new source means a new path, so the
+   * estimator restarts from its configured bounds rather than inheriting
+   * the old source's trend. */
+  if (session->gcc_ctx) {
+    uint32_t min_bps = session->gcc_ctx->aimd.min_bitrate_bps;
+    uint32_t max_bps = session->gcc_ctx->aimd.max_bitrate_bps;
+    uint32_t start_bps = session->gcc_ctx->aimd.current_bitrate_bps;
+    gcc_bwe_init(session->gcc_ctx, start_bps, min_bps, max_bps);
   }
 }

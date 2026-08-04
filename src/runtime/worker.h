@@ -42,4 +42,6 @@ void sfu_worker_destroy(sfu_worker_t *w);
 int sfu_worker_start(sfu_worker_t *w);
 void sfu_worker_join(sfu_worker_t *w);
 
+void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job);
+
 #endif /* SFU_RUNTIME_WORKER_H */

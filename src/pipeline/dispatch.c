@@ -130,6 +130,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   if (have_ufrag) {
     if (room) {
+      /* Both lookups return a caller pin (+1 ref) that this function releases
+       * exactly once on every path below. */
       sfu_peer_session_t *session = NULL;
       if (client_ufrag[0] != '\0') {
         session = sfu_session_table_find_by_ufrag(w->sessions, client_ufrag);
@@ -141,8 +143,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
           if (session->state == SFU_SESSION_ESTABLISHED) {
             SFU_LOG_DEBUG("worker %u: ufrag=%s STUN from alternate candidate %s:%u (session already established at different addr, not rebinding)",
                           w->worker_index, client_ufrag, ip, port);
-          } else {
-            sfu_session_table_rebind_addr(w->sessions, session, &pkt->peer_addr, pkt->peer_addr_len);
+          } else if (!sfu_session_table_rebind_addr(w->sessions, session, &pkt->peer_addr, pkt->peer_addr_len)) {
+            SFU_LOG_DEBUG("worker %u: ufrag=%s rebind rejected (session closing or not a table member)", w->worker_index, client_ufrag);
           }
         }
       } else {
@@ -150,11 +152,16 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
       }
       if (!session) {
         SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
+      } else if (!sfu_session_accepts_work(session)) {
+        /* Session is closing/closed: do not bind, index, or mutate it. */
+        SFU_LOG_DEBUG("worker %u: session for ufrag=%s is closing; skipping room bind", w->worker_index, client_ufrag);
       } else {
         if (session->cold->ufrag[0] == '\0') {
           strncpy(session->cold->ufrag, client_ufrag, sizeof(session->cold->ufrag) - 1);
           session->cold->ufrag[sizeof(session->cold->ufrag) - 1] = '\0';
-          sfu_session_table_index_ufrag(w->sessions, session);
+          if (!sfu_session_table_index_ufrag(w->sessions, session)) {
+            SFU_LOG_WARN("worker %u: ufrag index rejected for closing session %s", w->worker_index, client_ufrag);
+          }
         }
 
         if (!session->room) {
@@ -193,6 +200,9 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
           session->worker_id = w->worker_index;
         }
       }
+      if (session) {
+        sfu_session_release(session);
+      }
     } else {
       SFU_LOG_DEBUG(
           "worker %u: no room registered yet for ufrag=%s (from %s:%u) -- "
@@ -207,9 +217,16 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint16_t port;
   format_peer_endpoint(&pkt->peer_addr, ip, &port);
 
+  /* Caller pin: released at the end of this handler on every path. */
   sfu_peer_session_t *session = sfu_session_table_get_or_create(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
   if (!session) {
     SFU_LOG_ERROR("worker %u: CRITICAL! Session table full or rejected registration for %s:%u", w->worker_index, ip, port);
+    return;
+  }
+
+  if (!sfu_session_accepts_work(session)) {
+    SFU_LOG_DEBUG("worker %u: dropping DTLS for closing session %s:%u", w->worker_index, ip, port);
+    sfu_session_release(session);
     return;
   }
 
@@ -252,14 +269,14 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
       SFU_LOG_WARN("worker %u: DTLS handshake failed for peer %s:%u", w->worker_index, ip, port);
       break;
   }
+
+  sfu_session_release(session);
 }
 
 void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   char ip[64];
   uint16_t port;
   format_peer_endpoint(&pkt->peer_addr, ip, &port);
-
-  SFU_LOG_DEBUG("worker %u: Raw UDP dispatch received %u bytes from %s:%u", w->worker_index, pkt->len, ip, port);
 
   if (sfu_stun_is_stun_packet(pkt->data, pkt->len)) {
     SFU_LOG_DEBUG("worker %u: Identified STUN packet from %s:%u", w->worker_index, ip, port);
@@ -274,8 +291,6 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
-
-  SFU_LOG_DEBUG("worker %u RTP from %s:%u len=%u", w->worker_index, ip, port, pkt->len);
 
   sfu_room_forward_packet(w, pkt);
 }

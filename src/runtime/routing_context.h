@@ -11,15 +11,15 @@ typedef struct {
   char ufrag[32];
   sfu_room_t *room;
   uint32_t worker_index;
-  bool has_owner;
-  int fd;
-
-  bool has_pending_answer;
   uint32_t pending_audio_ssrc;
   uint32_t pending_video_ssrc;
   uint32_t pending_rtx_ssrc;
+  uint32_t peer_id;
+  int fd;
   uint8_t pending_video_pt;
   uint8_t pending_rtx_pt;
+  bool has_owner;
+  bool has_pending_answer;
 } sfu_routing_entry_t;
 
 typedef struct {
@@ -32,7 +32,7 @@ int sfu_routing_table_init(sfu_routing_table_t *table);
 void sfu_routing_table_destroy(sfu_routing_table_t *table);
 void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd);
 void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
-                                          uint8_t video_pt, uint8_t rtx_pt);
+                                          uint8_t video_pt, uint8_t rtx_pt, uint32_t peer_id);
 
 static inline uint32_t fnv1a(const void *data, size_t len) {
   const uint8_t *p = (const uint8_t *)data;

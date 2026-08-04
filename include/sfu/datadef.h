@@ -3,17 +3,24 @@
 
 #include <openssl/ssl.h>
 #include <srtp2/srtp.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
+
+#include "congestion/pacer.h"
 
 // SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt)
 #define SFU_SRTP_KEY_MATERIAL_LEN 60
 // "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul
 #define SFU_DTLS_FINGERPRINT_LEN 96
+
 #define SFU_SESSION_TABLE_MAX 8192
 #define SFU_ROOM_MAX_PEERS 256
 #define SFU_MAX_REMOTE_SLOTS (SFU_ROOM_MAX_PEERS - 1)
+#define SFU_MAX_REMOTE_TRANSCEIVERS (SFU_MAX_REMOTE_SLOTS * SFU_REMOTE_TRANSCEIVERS_PER_SLOT)
+#define SFU_MAX_UPLINK_TRANSCEIVERS 3      /* audio, camera, screen */
+#define SFU_REMOTE_TRANSCEIVERS_PER_SLOT 2 /* audio + video */
 
 #define SFU_SIGNALING_RECV_CAP 16384
 #define SFU_SIGNALING_SDP_CAP 16384
@@ -39,6 +46,11 @@ typedef enum {
 } sfu_session_state_t;
 
 typedef enum {
+  SFU_SESSION_LIFECYCLE_OPEN = 0,
+  SFU_SESSION_LIFECYCLE_CLOSING,
+} sfu_session_lifecycle_t;
+
+typedef enum {
   SFU_DTLS_FEED_ERROR = -1,
   SFU_DTLS_FEED_IN_PROGRESS = 0,
   SFU_DTLS_FEED_ESTABLISHED = 1,
@@ -49,7 +61,9 @@ typedef struct sfu_room sfu_room_t;
 typedef struct gcc_bwe_context gcc_bwe_context_t;
 typedef struct sfu_twcc_history sfu_twcc_history_t;
 typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
+typedef struct sfu_session_scheduler_slot sfu_session_scheduler_slot_t;
 typedef struct sfu_rtx_cache sfu_rtx_cache_t;
+typedef struct sfu_receiver_snapshot sfu_receiver_snapshot_t;
 
 typedef struct sfu_srtp_ctx {
   srtp_t inbound;
@@ -89,12 +103,29 @@ typedef struct sfu_transceiver {
   sfu_transceiver_metadata_t *metadata;
 } sfu_transceiver_t;
 
-typedef struct sfu_receiver_slot {
-  sfu_transceiver_t *video;
-  sfu_transceiver_t *audio;
+typedef struct sfu_receiver_entry {
+  sfu_peer_session_t *subscriber;
+  char subscriber_ufrag[32];
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
   uint32_t mid_audio;
   uint32_t mid_video;
-} sfu_receiver_slot_t;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  bool has_audio;
+  bool has_video;
+  bool audio_active;
+  bool video_active;
+} sfu_receiver_entry_t;
+
+struct sfu_receiver_snapshot {
+  _Atomic uint32_t refcount;
+  uint64_t generation;
+  uint32_t count;
+  uint32_t capacity;
+  sfu_receiver_entry_t entries[];
+};
 
 typedef struct {
   struct sockaddr_storage addr;
@@ -107,10 +138,11 @@ typedef struct sfu_peer_session {
   sfu_room_t *room;
   gcc_bwe_context_t *gcc_ctx;
   sfu_twcc_history_t *twcc_history;
-  sfu_subscriber_scheduler_t *scheduler;
+  sfu_session_scheduler_slot_t *schedulers; /* table of SFU_SESSION_SCHEDULER_CAP slots, keyed by publisher_id */
+  sfu_pacer_t pacer;                       /* session-level egress pacing (one GCC path estimate); per-track layer state is in schedulers[] */
   sfu_rtx_cache_t *rtx_cache;
   sfu_peer_session_cold_t *cold;
-  sfu_receiver_slot_t **receivers;
+  _Atomic(sfu_receiver_snapshot_t *) receivers;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
@@ -121,13 +153,16 @@ typedef struct sfu_peer_session {
   int64_t last_fir_time;
   uint32_t peer_id;
   uint32_t next_remote_mid;
-  uint32_t receiver_capacity;
   int fd;
   uint16_t worker_id;
+  uint8_t twcc_extmap_id;
+  int64_t twcc_last_feedback_ref_us;
+  _Atomic uint32_t egress_generation;
+  _Atomic uint32_t refcount;
   _Atomic uint16_t next_twcc_seq;
+  _Atomic uint8_t lifecycle;
+  _Atomic bool accepts_work;
   uint8_t state;
-  uint8_t target_sid;
-  uint8_t target_tid;
   uint8_t fir_seq;
   bool active;
   bool negotiation_needed;
