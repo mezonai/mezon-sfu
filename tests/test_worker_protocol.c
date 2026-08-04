@@ -904,6 +904,62 @@ static void test_forward_churn_subscriber_disconnect(void) {
   kf_fixture_destroy(&f);
 }
 
+/* #82 acceptance interleaving (#86): source switch with COLLIDING sequence
+ * numbers and a delayed NACK. Publisher A's seq 42 is cached at generation
+ * 0; the source switches (generation bumps); publisher B's stream reuses
+ * seq 42; a delayed NACK for A's seq 42 arrives BEFORE B's 42 is cached.
+ * It must miss (stale generation) and trigger a keyframe — never serve
+ * A's media after the switch. Then B's 42 lands and a fresh NACK is served
+ * from B's entry at the new generation. */
+static void test_source_switch_colliding_seq_delayed_nack(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t pkt_buf[512];
+  size_t pkt_len;
+  /* Publisher A's stream: MEDIA_SSRC, generation 0, seq 42. */
+  build_rtp_video(pkt_buf, 42, 100, &pkt_len);
+  pkt_buf[12] = 0xaa; /* A's payload marker */
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
+
+  /* Source switch: generation 0 -> 1 (sfu_layer_selector_switch_source
+   * bumps this; the new source's stream here reuses the same media SSRC,
+   * so ONLY the generation distinguishes stale from fresh). */
+  atomic_store(&f.session->egress_generation, 1);
+
+  /* Delayed NACK for seq 42 arrives before the new source's 42 is cached:
+   * stale entry must miss -> keyframe fallback, no retransmission. */
+  uint8_t nack[64];
+  size_t nack_len = build_nack(nack, (uint16_t[]){42, 0x0000}, 2);
+  feed_rtcp(&f, nack, nack_len);
+  assert(f.cache->next_rtx_seq == 0);    /* nothing served from stale gen */
+  assert(f.session->last_pli_time != 0); /* miss -> keyframe requested */
+
+  /* New source's seq 42 arrives (colliding sequence number) and is cached
+   * at generation 1 with a different payload. */
+  build_rtp_video(pkt_buf, 42, 100, &pkt_len);
+  pkt_buf[12] = 0xbb; /* B's payload marker */
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 1);
+
+  /* A fresh NACK for 42 is now served from B's entry — verify by the RTX
+   * sequence counter advancing and (through the cache read-back) that the
+   * served bytes are B's, not A's. */
+  f.session->last_pli_time = 0;
+  feed_rtcp(&f, nack, nack_len);
+  assert(f.cache->next_rtx_seq == 1);
+
+  uint8_t readback[512];
+  uint32_t rb_len = 0;
+  uint32_t rb_ssrc = 0;
+  uint8_t rb_pt = 0;
+  assert(sfu_rtx_cache_get_stream(f.cache, 42, readback, &rb_len, &rb_ssrc, &rb_pt, MEDIA_SSRC, 1));
+  assert(readback[12] == 0xbb); /* B's entry, not A's */
+  /* The same lookup at the OLD generation still misses. */
+  assert(!sfu_rtx_cache_get_stream(f.cache, 42, readback, &rb_len, &rb_ssrc, &rb_pt, MEDIA_SSRC, 0));
+
+  fixture_destroy(&f);
+}
+
 int main(void) {
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -925,6 +981,7 @@ int main(void) {
   test_egress_pacer_drops_enhancement_not_audio();
   test_nack_line_rate_throttled_by_rtx_budget();
   test_forward_churn_subscriber_disconnect();
+  test_source_switch_colliding_seq_delayed_nack();
   printf("test_worker_protocol: OK\n");
   return 0;
 }

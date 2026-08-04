@@ -1,5 +1,7 @@
 #include <assert.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -243,10 +245,105 @@ static void test_concurrent_snapshot_read_write(void) {
   sfu_room_destroy(&room);
 }
 
+/* #86: multi-publisher room churn — one stable subscriber, several
+ * publisher threads concurrently add/remove themselves while a reader
+ * thread continuously acquires each publisher's receiver snapshot and
+ * dereferences every entry (the forwarding hot path's access pattern).
+ * Under TSan this witnesses the copy-on-write snapshot contract: entries
+ * are always coherent (retained, non-NULL) no matter how replacement
+ * interleaves with reads. */
+typedef struct {
+  sfu_room_t *room;
+  sfu_peer_session_t **publishers;
+  uint32_t publisher_count;
+  sfu_peer_session_t *subscriber;
+  pthread_barrier_t barrier;
+} churn_ctx_t;
+
+static void *churn_writer(void *arg) {
+  churn_ctx_t *ctx = arg;
+  /* Each writer owns exactly one publisher slot, assigned atomically. */
+  static _Atomic intptr_t next_slot;
+  intptr_t idx = atomic_fetch_add_explicit(&next_slot, 1, memory_order_relaxed);
+
+  sfu_scheduler_t scheduler = {0};
+  pthread_barrier_wait(&ctx->barrier);
+  for (int i = 0; i < 100; i++) {
+    room_add_peer(ctx->room, ctx->publishers[idx], &scheduler);
+    room_remove_peer(ctx->room, ctx->publishers[idx]);
+  }
+  return NULL;
+}
+
+static void *churn_reader(void *arg) {
+  churn_ctx_t *ctx = arg;
+  pthread_barrier_wait(&ctx->barrier);
+  for (int i = 0; i < 2000; i++) {
+    sfu_peer_session_t *pub = ctx->publishers[i % ctx->publisher_count];
+    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(pub);
+    if (snap) {
+      for (uint32_t e = 0; e < snap->count; e++) {
+        /* Coherence: retained subscriber with valid cold, even mid-churn. */
+        assert(snap->entries[e].subscriber != NULL);
+        assert(snap->entries[e].subscriber->cold != NULL);
+      }
+      sfu_receiver_snapshot_release(snap);
+    }
+  }
+  return NULL;
+}
+
+static void test_multi_publisher_concurrent_churn(void) {
+  enum { PUBS = 4, WRITERS = PUBS, READERS = 2 };
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 9) == 0);
+
+  sfu_peer_session_t *pubs[PUBS];
+  for (int i = 0; i < PUBS; i++) {
+    char name[16];
+    snprintf(name, sizeof(name), "pub%d", i);
+    pubs[i] = mock_session(name);
+  }
+  sfu_peer_session_t *sub = mock_session("sub");
+
+  sfu_scheduler_t scheduler = {0};
+  room_add_peer(&room, sub, &scheduler);
+
+  churn_ctx_t ctx = {
+      .room = &room, .publishers = pubs, .publisher_count = PUBS, .subscriber = sub,
+  };
+  pthread_barrier_init(&ctx.barrier, NULL, WRITERS + READERS);
+
+  pthread_t writers[WRITERS], readers[READERS];
+  for (int i = 0; i < WRITERS; i++) {
+    assert(pthread_create(&writers[i], NULL, churn_writer, &ctx) == 0);
+  }
+  for (int i = 0; i < READERS; i++) {
+    assert(pthread_create(&readers[i], NULL, churn_reader, &ctx) == 0);
+  }
+  for (int i = 0; i < WRITERS; i++) {
+    pthread_join(writers[i], NULL);
+  }
+  for (int i = 0; i < READERS; i++) {
+    pthread_join(readers[i], NULL);
+  }
+  pthread_barrier_destroy(&ctx.barrier);
+
+  /* All publishers flapped out; the subscriber's view of the room is
+   * itself only, and each publisher has no receivers left. */
+  for (int i = 0; i < PUBS; i++) {
+    assert(receiver_count(pubs[i]) == 0);
+    sfu_session_release(pubs[i]);
+  }
+  sfu_session_release(sub);
+  sfu_room_destroy(&room);
+}
+
 int main(void) {
   test_add_remove();
   test_snapshot_hold_across_replace();
   test_concurrent_snapshot_read_write();
+  test_multi_publisher_concurrent_churn();
 
   printf("test_room: OK\n");
   return 0;
