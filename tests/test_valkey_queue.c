@@ -131,11 +131,72 @@ static void test_public_wraparound(void) {
   valkey_queue_destroy_after_producers_stopped(&queue);
 }
 
+/* #86: producers racing valkey_queue_close — the shutdown interleaving.
+ * Producers must see exactly one of OK (item queued, drained later),
+ * FULL (saturation backpressure), or CLOSED; every accepted item must be
+ * accounted exactly once between drain and dispose, and every non-OK item
+ * stays with the producer (freed here). Under TSan this witnesses the
+ * close-vs-post mutex contract. */
+typedef struct {
+  valkey_queue_t *queue;
+  size_t accepted;
+  size_t rejected; /* FULL or CLOSED: ownership stayed with producer */
+} race_producer_t;
+
+static void *produce_until_closed(void *arg) {
+  race_producer_t *p = arg;
+  for (size_t i = 0; i < 2000; i++) {
+    void *item = new_item();
+    valkey_queue_post_result_t rc = valkey_queue_post(p->queue, item);
+    if (rc == VALKEY_QUEUE_OK) {
+      p->accepted++;
+    } else {
+      assert(rc == VALKEY_QUEUE_FULL || rc == VALKEY_QUEUE_CLOSED);
+      free(item);
+      p->rejected++;
+    }
+  }
+  return NULL;
+}
+
+static void test_producer_close_race(void) {
+  test_stats_t stats = {0};
+  valkey_queue_t queue;
+  assert(valkey_queue_init(&queue, dispose_pending, &stats) == 0);
+
+  race_producer_t producers[4] = {0};
+  pthread_t threads[4];
+  for (size_t i = 0; i < 4; i++) {
+    producers[i].queue = &queue;
+    assert(pthread_create(&threads[i], NULL, produce_until_closed, &producers[i]) == 0);
+  }
+  /* Close concurrently with the producer storm. */
+  valkey_queue_close(&queue);
+  for (size_t i = 0; i < 4; i++) {
+    pthread_join(threads[i], NULL);
+  }
+
+  size_t accepted = 0;
+  for (size_t i = 0; i < 4; i++) {
+    accepted += producers[i].accepted;
+    assert(producers[i].accepted + producers[i].rejected == 2000);
+  }
+  assert(accepted <= VALKEY_QUEUE_CAPACITY);
+
+  /* Every accepted item is accounted exactly once: drained now, or
+   * disposed at destroy. No leak, no double-free. */
+  size_t drained = valkey_queue_drain(&queue, consume_item, &stats);
+  valkey_queue_destroy_after_producers_stopped(&queue);
+  assert(atomic_load(&stats.consumed) == drained);
+  assert(drained + atomic_load(&stats.disposed) == accepted);
+}
+
 int main(void) {
   test_invalid_arguments();
   test_capacity_and_drain();
   test_concurrent_producers();
   test_close_and_pending();
   test_public_wraparound();
+  test_producer_close_race();
   return 0;
 }
