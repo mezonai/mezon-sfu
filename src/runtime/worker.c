@@ -531,7 +531,14 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
-  if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
+  if (job->kind == SFU_FANOUT_JOB_KEYFRAME_REQUEST) {
+    if (job->publisher) {
+      sfu_session_request_keyframe(w, job->publisher, false);
+      sfu_session_release(job->publisher);
+    }
+    sfu_fanout_mesh_free_job(w->mesh, job);
+    return;
+  } else if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
     sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_ssrc, job->video_pt, job->video_rtx_pt, job->video_rtx_ssrc,
                               job->has_video, job->is_audio, (sfu_pacer_class_t)job->pacer_class);
     sfu_session_release(job->subscriber);

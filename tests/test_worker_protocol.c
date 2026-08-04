@@ -17,18 +17,18 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "memory/packet_pool.h"
 #include "congestion/twcc_history.h"
+#include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"
-#include "util/alloc.h"
 #include "rtp/rtx.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "sfu/datadef.h"
 #include "transport/srtp/srtp.h"
+#include "util/alloc.h"
 #include "util/metrics.h"
 #include "util/netbytes.h"
 
@@ -189,8 +189,8 @@ static void fixture_destroy(fixture_t *f) {
   close(f->send_fds[1]);
   sfu_rtx_cache_destroy(f->cache);
   SFU_FREE(f->cache);
-  f->session->rtx_cache = NULL; /* table teardown must not double-free */
-  sfu_session_release(f->session);   /* drop the caller pin from get_or_create */
+  f->session->rtx_cache = NULL;            /* table teardown must not double-free */
+  sfu_session_release(f->session);         /* drop the caller pin from get_or_create */
   sfu_session_table_destroy(&f->sessions); /* destroys copied SRTP handles */
   f->srtp.inbound = NULL;
   f->srtp.outbound = NULL;
@@ -446,7 +446,7 @@ static void test_pli_routes_to_source_publisher(void) {
   sfu_write_be32(pli + 8, f.pub_video_ssrc);
   feed_rtcp(&f.base, pli, pli_len);
 
-  assert(f.publisher->last_pli_time != 0);   /* publisher got the request */
+  assert(f.publisher->last_pli_time != 0);    /* publisher got the request */
   assert(f.base.session->last_pli_time == 0); /* subscriber did not */
   assert(sfu_metric_get("rtcp_kf_unresolved") == 0);
   kf_fixture_destroy(&f);
@@ -705,7 +705,7 @@ static void test_nack_wrong_stream_misses_cache(void) {
   sfu_write_be16(nack + 14, 0);
   feed_rtcp(&f, nack, hdr);
 
-  assert(f.cache->next_rtx_seq == 0);   /* no retransmission */
+  assert(f.cache->next_rtx_seq == 0);    /* no retransmission */
   assert(f.session->last_pli_time != 0); /* miss -> keyframe fallback */
   fixture_destroy(&f);
 }

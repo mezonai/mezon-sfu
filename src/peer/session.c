@@ -538,12 +538,18 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
   sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
-  if (!rtcp_pkt) {
+  if (!rtcp_pkt || !w || !publisher) {
+    return;
+  }
+
+  if (publisher->worker_id != w->worker_index) {
+    if (w->mesh) {
+      sfu_fanout_mesh_enqueue_keyframe_request(w->mesh, w->worker_index, publisher->worker_id, publisher);
+    }
     return;
   }
 
   int rtcp_len = 0;
-
   uint32_t sfu_sender_ssrc = 1;
 
   uint32_t media_ssrc = publisher->uplink_video.ssrc;

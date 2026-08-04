@@ -138,6 +138,33 @@ unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, uns
   return drained;
 }
 
+bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher) {
+  if (!mesh || dst_worker >= mesh->worker_count || !publisher) {
+    return false;
+  }
+
+  uint32_t job_idx;
+  sfu_fanout_job_t *job = sfu_pool_alloc(&mesh->job_pool, &job_idx);
+  if (!job) {
+    SFU_LOG_WARN("fanout mesh: job pool exhausted (worker %u -> %u)", src_worker, dst_worker);
+    return false;
+  }
+
+  memset(job, 0, sizeof(*job));
+  job->kind = SFU_FANOUT_JOB_KEYFRAME_REQUEST;
+  job->publisher = publisher;
+
+  atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+
+  if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
+    SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
+    sfu_pool_free(&mesh->job_pool, job_idx);
+    return false;
+  }
+
+  return true;
+}
+
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job) {
   ptrdiff_t byte_off = (uint8_t *)job - mesh->job_pool.slab;
   uint32_t index = (uint32_t)(byte_off / mesh->job_pool.slot_size);
