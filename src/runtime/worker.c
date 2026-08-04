@@ -464,6 +464,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 
     if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {
+      SFU_LOG_DEBUG("miss match active_publisher_id=%d, peer_id=%d", sub_session->scheduler->active_publisher_id, sender_session->peer_id);
       continue;
     }
 
