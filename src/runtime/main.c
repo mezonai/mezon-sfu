@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
   _Static_assert((SFU_SESSION_ADDR_HASH_SLOTS & (SFU_SESSION_ADDR_HASH_SLOTS - 1)) == 0, "addr hash table size must be power of 2");
   _Static_assert((SFU_SESSION_UFRAG_HASH_SLOTS & (SFU_SESSION_UFRAG_HASH_SLOTS - 1)) == 0, "ufrag hash table size must be power of 2");
 
-  sfu_log_set_level(SFU_LOG_LEVEL_DEBUG);
+  sfu_log_set_level(SFU_LOG_LEVEL_INFO);
 
   signal(SIGPIPE, SIG_IGN);
 
