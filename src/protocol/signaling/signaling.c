@@ -18,7 +18,6 @@
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
-#include "room/room_media_graph.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
 #include "util/alloc.h"
@@ -325,15 +324,6 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
       continue;
     }
 
-    /* Pin the session for the whole build+send (F-18). The room lock alone
-     * already keeps the session alive here — the room's membership reference
-     * is only dropped by room_remove_peer under this same lock, and teardown
-     * cannot complete before then — but holding an explicit pin means the
-     * safety of the SDP build no longer depends on the room lock never being
-     * released mid-loop; a future restructure that drops the lock while
-     * iterating cannot turn the traversal into a use-after-free. The session
-     * is a live OPEN member (accepts_work above), so its refcount is >= 2
-     * (table + room) and cannot hit zero concurrently. */
     atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
       SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
@@ -345,9 +335,6 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   pthread_mutex_unlock(&room->lock);
 }
 
-/* Extracts the transport-wide CC extmap ID the client accepted for media it
- * RECEIVES from the SFU (CC-11). Scans `a=extmap:<id> ...transport-wide-cc...`
- * lines; the last matching ID wins, 0 means not negotiated. */
 static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
   static const char k_extmap[] = "a=extmap:";
   static const char k_twcc_uri[] = "transport-wide-cc";
@@ -390,8 +377,6 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
   return id;
 }
 
-/* Test hook: exercises the extmap extraction above without a signaling
- * server. */
 uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len) { return extract_sdp_twcc_extmap_id(sdp, sdp_len); }
 
 static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
@@ -497,9 +482,6 @@ static void on_client_close(uv_handle_t *handle) {
 
   sfu_routing_table_unregister_fd(c->server->routing_table, c->fd);
 
-  /* Fresh acquired ufrag lookup (c->session is never a valid reference; the
-   * borrowed pointer was removed in Phase 3). The pin keeps the session alive
-   * across begin_close, which is idempotent and detaches the room itself. */
   sfu_peer_session_t *session = NULL;
   if (c->client_ufrag[0] != '\0') {
     session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
@@ -632,8 +614,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 } else {
                   c->client_ufrag[0] = '\0';
                 }
-                /* Acquired pin, used and released within this callback; the
-                 * borrowed c->session pointer was removed in Phase 3. */
+
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
                   session->user_id = c->user_id;

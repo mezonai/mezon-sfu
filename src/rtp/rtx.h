@@ -15,11 +15,6 @@ typedef struct sfu_rtx_entry {
   uint8_t rtx_pt;
   uint16_t seq;
   bool valid;
-  /* F-10: stream identity of the cached packet — the media SSRC the
-   * subscriber sees (publisher's uplink SSRC, which the SFU forwards
-   * unchanged) and the egress generation at put time. A NACK lookup must
-   * match both, so a source switch (generation bump) or a NACK naming a
-   * different stream can never retransmit the wrong media. */
   uint32_t media_ssrc;
   uint32_t generation;
 } sfu_rtx_entry_t;
@@ -43,15 +38,10 @@ int sfu_rtx_cache_init(sfu_rtx_cache_t *cache);
 void sfu_rtx_cache_put(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt);
 bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc, uint8_t *out_rtx_pt);
 void sfu_rtx_cache_destroy(sfu_rtx_cache_t *cache);
-
-/* Stream-scoped variants (F-10). put tags the entry with the media SSRC the
- * subscriber receives and the current egress generation; get only matches
- * entries whose media SSRC AND generation equal the requested ones — stale
- * or wrong-stream entries are invisible, not merely overwritten. */
-void sfu_rtx_cache_put_stream(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt,
+void sfu_rtx_cache_put_stream(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt, uint32_t media_ssrc,
+                              uint32_t generation);
+bool sfu_rtx_cache_get_stream(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc, uint8_t *out_rtx_pt,
                               uint32_t media_ssrc, uint32_t generation);
-bool sfu_rtx_cache_get_stream(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc,
-                              uint8_t *out_rtx_pt, uint32_t media_ssrc, uint32_t generation);
 
 /* Initialize from one exact, unpadded RTCP RTPFB/NACK member. Returns false
  * unless PT=205/FMT=1 and the FCI is a non-empty multiple of four bytes. */

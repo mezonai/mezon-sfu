@@ -201,9 +201,9 @@ typedef struct sfu_layer_rung {
 } sfu_layer_rung_t;
 
 static const sfu_layer_rung_t k_layer_ladder[] = {
-    {150000, 0, 1},   /* 180p, half framerate */
-    {500000, 1, 2},   /* 360p, full framerate */
-    {1200000, 2, 2},  /* 720p, full framerate */
+    {150000, 0, 1},  /* 180p, half framerate */
+    {500000, 1, 2},  /* 360p, full framerate */
+    {1200000, 2, 2}, /* 720p, full framerate */
 };
 #define SFU_LAYER_LADDER_LEN (sizeof(k_layer_ladder) / sizeof(k_layer_ladder[0]))
 #define SFU_LAYER_UP_HEADROOM_NUM 6 /* up threshold = rate * 1.2 */
@@ -265,12 +265,6 @@ void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uin
   sched->target_tid = target_tid;
 }
 
-/* Source-switch transaction (#83): re-aims the selector at a new publisher
- * and resets every piece of per-stream state so no stale media, stale
- * retransmission cache, or stale estimate leaks across the switch. Call from
- * the session's owning worker only (post-CC-10 single-writer rule). The
- * keyframe gate arms; the caller must request a keyframe from the new source
- * (sfu_session_request_keyframe) for recovery to actually start. */
 void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_publisher_id) {
   sfu_subscriber_scheduler_t *sched = session->scheduler;
   if (!sched) {
@@ -282,7 +276,6 @@ void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_
   sched->current_tid = 0;
   sched->needs_keyframe = true;
 
-  /* F-10: invalidate all RTX entries cached for the previous source. */
   atomic_fetch_add_explicit(&session->egress_generation, 1, memory_order_acq_rel);
 
   /* The delay estimate is path-state; a new source means a new path, so the

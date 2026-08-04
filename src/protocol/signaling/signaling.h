@@ -28,9 +28,6 @@ typedef struct sfu_client_conn {
   uv_poll_t poll_handle;
   uv_timer_t answer_retry_timer;
   sfu_signaling_server_t *server;
-  /* NOTE: no cached session pointer. The borrowed c->session was removed in
-   * Phase 3 (F-01): sessions are refcounted and every use goes through a
-   * fresh acquired lookup (find_by_ufrag) plus sfu_session_release. */
   sfu_room_t *joined_room;
   uint64_t joined_room_id;
   int64_t user_id;
