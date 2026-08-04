@@ -51,16 +51,26 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
 /* Builds "old snapshot + dst appended". MID numbers are preserved across
  * replacements for SDP stability; a brand-new destination consumes fresh MIDs
  * from the owner's counter. Returns NULL on allocation failure, leaving the
- * peer's published snapshot unchanged. Call with the room lock held. */
+ * peer's published snapshot unchanged. Call with the room lock held.
+ *
+ * The room lock serializes writers, NOT readers: a concurrent reader can
+ * still hold (or be releasing) the old snapshot, so the old snapshot must be
+ * retained with sfu_session_receivers_acquire before its entries are read.
+ * Without the retain there is a use-after-free window: the writer loads the
+ * pointer, the last reader releases and frees it, the writer then reads
+ * old->count/old->entries (found by the #86 churn stress test under TSan as
+ * an allocator-recycle race). */
 static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
-  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->receivers, memory_order_acquire);
+  sfu_receiver_snapshot_t *old = sfu_session_receivers_acquire(owner);
   if (snapshot_find(old, dst) != UINT32_MAX) {
+    sfu_receiver_snapshot_release(old);
     return NULL; /* already routed */
   }
 
   uint32_t old_count = old ? old->count : 0;
   sfu_receiver_snapshot_t *snap = snapshot_alloc(old_count + 1);
   if (!snap) {
+    sfu_receiver_snapshot_release(old);
     return NULL;
   }
   snap->generation = (old ? old->generation : 0) + 1;
@@ -81,22 +91,26 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
   e->has_video = true;
 
   snap->count = old_count + 1;
+  sfu_receiver_snapshot_release(old);
   return snap;
 }
 
 /* Builds "old snapshot minus dst". Slot positions and MID numbers of all
  * remaining destinations are preserved. Returns NULL on allocation failure,
- * leaving the peer's published snapshot unchanged. Call with room lock held. */
+ * leaving the peer's published snapshot unchanged. Call with room lock held.
+ * Retains the old snapshot for the same reason as snapshot_build_with. */
 static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner, const sfu_peer_session_t *dst) {
-  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->receivers, memory_order_acquire);
+  sfu_receiver_snapshot_t *old = sfu_session_receivers_acquire(owner);
   uint32_t pos = snapshot_find(old, dst);
   if (pos == UINT32_MAX) {
+    sfu_receiver_snapshot_release(old);
     return NULL; /* dst not routed to owner */
   }
 
   uint32_t old_count = old->count;
   sfu_receiver_snapshot_t *snap = snapshot_alloc(old_count - 1);
   if (!snap) {
+    sfu_receiver_snapshot_release(old);
     return NULL;
   }
   snap->generation = old->generation + 1;
@@ -111,6 +125,7 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
     out++;
   }
   snap->count = out;
+  sfu_receiver_snapshot_release(old);
   return snap;
 }
 

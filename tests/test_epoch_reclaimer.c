@@ -76,6 +76,35 @@ int main(void) {
   sfu_epoch_reclaimer_destroy_after_quiescence(&r);
   assert(atomic_load(&destroyed) == 50000); /* every retired ptr freed once */
 
+  /* #86: forced pool exhaustion with a permanently stalled worker. The
+   * retire side must apply backpressure (return false) forever — sweeps
+   * can never reclaim while one worker's generation never advances, and
+   * no record may be destroyed early or twice. The final quiescent drain
+   * frees exactly the retired set. */
+  atomic_store(&destroyed, 0);
+  assert(sfu_epoch_reclaimer_init(&r, 2, generation, &epochs) == 0);
+
+  uint32_t retired_count = 0;
+  size_t live = 0;
+  for (uint32_t i = 0; i < SFU_EPOCH_RECLAIMER_CAPACITY * 4; i++) {
+    void *ptr = malloc(1);
+    if (sfu_epoch_reclaimer_retire(&r, ptr, destroy)) {
+      retired_count++;
+    } else {
+      free(ptr); /* backpressure: caller keeps and disposes */
+      live++;
+    }
+    /* Only worker 0 advances; worker 1 is stalled for the whole loop. */
+    atomic_fetch_add(&epochs.generations[0], 1);
+    sfu_epoch_reclaimer_sweep(&r);
+  }
+  assert(retired_count == SFU_EPOCH_RECLAIMER_CAPACITY);
+  assert(live == SFU_EPOCH_RECLAIMER_CAPACITY * 3);
+  assert(atomic_load(&destroyed) == 0); /* nothing reclaimable while stalled */
+
+  sfu_epoch_reclaimer_destroy_after_quiescence(&r);
+  assert(atomic_load(&destroyed) == SFU_EPOCH_RECLAIMER_CAPACITY);
+
   printf("test_epoch_reclaimer: OK\n");
   return 0;
 }
