@@ -53,7 +53,7 @@ static void test_snapshot_format(void) {
   sfu_metric_inc("json_reject");
   sfu_metric_inc("json_reject");
 
-  char buf[256];
+  char buf[512]; /* table grows as counters are added */
   size_t n = sfu_metrics_snapshot(buf, sizeof(buf));
   EXPECT(n > 0);
   EXPECT(n < sizeof(buf)); /* fits */

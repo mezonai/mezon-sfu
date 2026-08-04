@@ -142,6 +142,7 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
   memset(sched, 0, sizeof(*sched));
   sched->active_publisher_id = initial_publisher;
   sched->needs_keyframe = true;
+  sfu_pacer_init(&sched->pacer);
 }
 
 bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe) {
@@ -190,6 +191,17 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
   return true;  // Frame is required by this subscriber
 }
 
+sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc) {
+  /* Base = spatial layer 0 at the lowest forwarded temporal rate. Anything
+   * beyond is enhancement: safe to drop under pacing debt because the
+   * decoder can recover without it (up-switch or keyframe). */
+  if (desc->sid > 0 || desc->tid > 1) {
+    return SFU_PACER_CLASS_VIDEO_ENH;
+  }
+  (void)sched; /* current layers already bound what reaches here */
+  return SFU_PACER_CLASS_VIDEO_BASE;
+}
+
 /* VP9 bitrate ladder rungs (bits/s). A rung's layer set becomes the target
  * only when the estimate clears the rung's UP threshold (rung rate + 20%
  * headroom) and stays until it falls below the rung's DOWN threshold (rung
@@ -213,6 +225,11 @@ static const sfu_layer_rung_t k_layer_ladder[] = {
 #define SFU_LAYER_DWELL_US 500000LL
 
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps) {
+  /* CC-15: the estimate also paces egress. Retune on every feedback, not
+   * just on layer changes — the pacer needs a smooth rate even when the
+   * dwell window suppresses a target change. */
+  sfu_pacer_set_rate(&sched->pacer, bitrate_bps, (int64_t)sfu_now_us());
+
   /* Map the estimate onto the ladder with hysteresis: walk to the highest
    * rung whose UP threshold is cleared, but never below the current rung
    * unless the DOWN threshold is broken. */
