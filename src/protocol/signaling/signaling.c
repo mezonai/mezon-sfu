@@ -622,7 +622,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   session->peer_id = generate_unique_id();
                   handle_answer(session, sdp, sdp_len);
                   sfu_session_release(session);
-                  if (session->scheduler) {
+                  if (session->schedulers) {
                     sfu_layer_selector_switch_source(session, session->peer_id);
                   }
                 } else {

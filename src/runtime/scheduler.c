@@ -142,7 +142,33 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
   memset(sched, 0, sizeof(*sched));
   sched->active_publisher_id = initial_publisher;
   sched->needs_keyframe = true;
-  sfu_pacer_init(&sched->pacer);
+}
+
+sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id) {
+  if (!session || !session->schedulers || publisher_id == 0) {
+    return NULL;
+  }
+
+  sfu_session_scheduler_slot_t *free_slot = NULL;
+  for (uint32_t i = 0; i < SFU_SESSION_SCHEDULER_CAP; i++) {
+    sfu_session_scheduler_slot_t *slot = &session->schedulers[i];
+    if (slot->publisher_id == publisher_id) {
+      return &slot->sched;
+    }
+    if (!free_slot && slot->publisher_id == 0) {
+      free_slot = slot;
+    }
+  }
+
+  if (!free_slot) {
+    SFU_LOG_WARN("session %u: scheduler table full (%d publishers); cannot track publisher %u", session->peer_id,
+                 SFU_SESSION_SCHEDULER_CAP, publisher_id);
+    return NULL;
+  }
+
+  free_slot->publisher_id = publisher_id;
+  sfu_subscriber_scheduler_init(&free_slot->sched, publisher_id);
+  return &free_slot->sched;
 }
 
 bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe) {
@@ -221,9 +247,9 @@ static const sfu_layer_rung_t k_layer_ladder[] = {
  * cannot flap layers on every feedback. */
 #define SFU_LAYER_DWELL_US 500000LL
 
+/* Updates only the per-track layer targets. The pacer rate is applied
+ * separately by the caller to the session-level pacer. */
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps) {
-  sfu_pacer_set_rate(&sched->pacer, bitrate_bps, (int64_t)sfu_now_us());
-
   /* Map the estimate onto the ladder with hysteresis: walk to the highest
    * rung whose UP threshold is cleared, but never below the current rung
    * unless the DOWN threshold is broken. */
@@ -277,7 +303,7 @@ void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uin
 }
 
 void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_publisher_id) {
-  sfu_subscriber_scheduler_t *sched = session->scheduler;
+  sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(session, new_publisher_id);
   if (!sched) {
     return;
   }

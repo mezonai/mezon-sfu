@@ -61,14 +61,17 @@ static void test_dwell_blocks_fast_flap(void) {
 static void test_switch_source_transaction(void) {
   sfu_peer_session_t session;
   memset(&session, 0, sizeof(session));
-  sfu_subscriber_scheduler_t sched;
-  sfu_subscriber_scheduler_init(&sched, 1);
-  sched.target_sid = 2;
-  sched.target_tid = 2;
-  sched.current_sid = 2;
-  sched.current_tid = 2;
-  sched.needs_keyframe = false;
-  session.scheduler = &sched;
+  static sfu_session_scheduler_slot_t slots[SFU_SESSION_SCHEDULER_CAP];
+  memset(slots, 0, sizeof(slots));
+  session.schedulers = slots;
+  /* Pre-existing per-publisher state for source 1 (the source being left). */
+  sfu_subscriber_scheduler_t *old = sfu_session_scheduler_for(&session, 1);
+  assert(old != NULL);
+  old->target_sid = 2;
+  old->target_tid = 2;
+  old->current_sid = 2;
+  old->current_tid = 2;
+  old->needs_keyframe = false;
 
   gcc_bwe_context_t gcc;
   gcc_bwe_init(&gcc, 300000, 50000, 5000000);
@@ -79,16 +82,18 @@ static void test_switch_source_transaction(void) {
 
   sfu_layer_selector_switch_source(&session, 42);
 
-  assert(sched.active_publisher_id == 42);
-  assert(sched.needs_keyframe == true);   /* gate armed */
-  assert(sched.current_sid == 0 && sched.current_tid == 0);
+  /* The selector re-aims at the per-publisher scheduler for source 42, reset
+   * with the keyframe gate armed. */
+  sfu_subscriber_scheduler_t *sw = sfu_session_scheduler_for(&session, 42);
+  assert(sw != NULL);
+  assert(sw->active_publisher_id == 42);
+  assert(sw->needs_keyframe == true);   /* gate armed */
+  assert(sw->current_sid == 0 && sw->current_tid == 0);
   assert(atomic_load(&session.egress_generation) == 8); /* stale RTX invalidated */
   /* GCC restarts from the current estimate (2.5M, clamped within bounds) but
    * with trend/history state cleared — not the old source's trendline. */
   assert(gcc.aimd.current_bitrate_bps == 2500000);
   assert(gcc.trendline.history_count == 0);
-  /* Targets survive the switch (the new path starts from the same policy). */
-  assert(sched.target_sid == 2 && sched.target_tid == 2);
 }
 
 int main(void) {
