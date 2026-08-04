@@ -7,12 +7,12 @@
 
 #include "sfu/datadef.h"
 
-#define EXPECT(cond)                                                       \
-  do {                                                                     \
-    if (!(cond)) {                                                         \
-      fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);      \
-      return 1;                                                            \
-    }                                                                      \
+#define EXPECT(cond)                                                  \
+  do {                                                                \
+    if (!(cond)) {                                                    \
+      fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+      return 1;                                                       \
+    }                                                                 \
   } while (0)
 
 /*
@@ -74,11 +74,6 @@ int main(void) {
 
   /* Double-destroy after destroy nulls entry pointers must be safe. */
   sfu_rtx_cache_destroy(&cache);
-
-  /* --- wire boundary (#86): a cached packet at the maximum cacheable
-   * length (SFU_MAX_PAYLOAD_SIZE - 2) must round-trip through
-   * sfu_rtx_build into a pool-sized buffer (SFU_MAX_PAYLOAD_SIZE) exactly,
-   * and must fail cleanly with one byte less. --- */
   {
     sfu_rtx_cache_t c2;
     EXPECT(sfu_rtx_cache_init(&c2) == 0);
@@ -89,8 +84,8 @@ int main(void) {
     wire[0] = 0x80;
     wire[1] = 96;
     wire[2] = 0;
-    wire[3] = 7; /* seq 7 */
-    memset(wire + 4, 0, 8);         /* timestamp + ssrc */
+    wire[3] = 7;            /* seq 7 */
+    memset(wire + 4, 0, 8); /* timestamp + ssrc */
     memset(wire + 12, 0x5a, SFU_MAX_PAYLOAD_SIZE - 12);
 
     const uint32_t max_cached = SFU_MAX_PAYLOAD_SIZE - 2;
@@ -116,7 +111,7 @@ int main(void) {
     memset(outb, 0xa5, SFU_MAX_PAYLOAD_SIZE + 1);
     size_t built2 = 777;
     EXPECT(!sfu_rtx_build(orig, orig_len, rtx_pt, 9000, rtx_ssrc, outb, SFU_MAX_PAYLOAD_SIZE - 1, &built2));
-    EXPECT(built2 == 777);                          /* untouched on failure */
+    EXPECT(built2 == 777); /* untouched on failure */
     EXPECT(outb[0] == 0xa5 && outb[SFU_MAX_PAYLOAD_SIZE] == 0xa5);
 
     free(outb);
