@@ -83,10 +83,6 @@ static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
 #define SFU_WORKER_KF_THROTTLE_MS 1000
 
 static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
-  /* GCC is a per-session (path) estimate. Apply the pacing rate to the
-   * session-level pacer, and the resulting layer target to every per-publisher
-   * scheduler this subscriber is currently tracking, so each forwarded track
-   * follows the same congestion-driven target. */
   sfu_pacer_set_rate(&session->pacer, bitrate_bps, (int64_t)sfu_now_us());
   if (!session->schedulers) {
     return;
@@ -142,7 +138,7 @@ static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_sess
   int64_t now = (int64_t)sfu_now_ms();
   if (now - publisher->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
     publisher->last_pli_time = now;
-    sfu_session_request_keyframe(w, publisher, false);  // false = PLI
+    sfu_session_request_keyframe(w, publisher, false);
   }
 }
 
@@ -471,10 +467,6 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
-    /* Per-(subscriber, publisher) layer-selection state. Frames from distinct
-     * publishers must never be evaluated through the same scheduler, or the
-     * VP9 sid/tid tracking is corrupted. Look up (lazily creating) the
-     * scheduler keyed by this publisher's peer_id. */
     sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(sub_session, sender_session->peer_id);
     if (!sched) {
       continue;
