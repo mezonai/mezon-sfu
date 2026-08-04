@@ -148,6 +148,7 @@ static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session
     sfu_metric_inc("rtcp_kf_unresolved");
     publisher = feedback_session;
     atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+    return;
   }
   sfu_worker_request_keyframe_throttled(w, publisher);
   sfu_session_release(publisher);
@@ -438,8 +439,13 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint8_t incoming_pt = ingress_pt;
     if (incoming_pt == sender_session->uplink_video.payload_type) {
       is_vp9 = true;
-      int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
 
+      uint32_t pkt_ssrc = sfu_read_be32(pkt->data + 8);
+      if (sender_session->uplink_video.ssrc == 0 && pkt_ssrc != 0) {
+        sender_session->uplink_video.ssrc = pkt_ssrc;
+      }
+
+      int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
       if (payload_offset > 0) {
         const uint8_t *payload = pkt->data + payload_offset;
         size_t payload_len = pkt->len - payload_offset;
@@ -474,6 +480,10 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
     sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
     if (is_vp9 && slot->has_video) {
+      if (sched->needs_keyframe) {
+        sfu_worker_request_keyframe_throttled(w, sender_session);
+      }
+
       bool should_forward = sfu_scheduler_evaluate_frame(sched, &vp9_desc, is_keyframe);
       if (!should_forward) {
         continue;
