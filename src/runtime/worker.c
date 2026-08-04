@@ -83,10 +83,20 @@ static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
 #define SFU_WORKER_KF_THROTTLE_MS 1000
 
 static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
-  if (!session->scheduler) {
+  /* GCC is a per-session (path) estimate. Apply the pacing rate to the
+   * session-level pacer, and the resulting layer target to every per-publisher
+   * scheduler this subscriber is currently tracking, so each forwarded track
+   * follows the same congestion-driven target. */
+  sfu_pacer_set_rate(&session->pacer, bitrate_bps, (int64_t)sfu_now_us());
+  if (!session->schedulers) {
     return;
   }
-  sfu_subscriber_scheduler_set_bitrate(session->scheduler, bitrate_bps);
+  for (uint32_t i = 0; i < SFU_SESSION_SCHEDULER_CAP; i++) {
+    sfu_session_scheduler_slot_t *slot = &session->schedulers[i];
+    if (slot->publisher_id != 0) {
+      sfu_subscriber_scheduler_set_bitrate(&slot->sched, bitrate_bps);
+    }
+  }
 }
 
 void sfu_test_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) { sfu_svc_update_layers(session, bitrate_bps); }
@@ -229,7 +239,7 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     }
     requested[requested_count++] = lost_seq;
 
-    if (sender_session->scheduler && !sfu_pacer_rtx_allow(&sender_session->scheduler->pacer, 1200 /* conservative MTU estimate */, (int64_t)sfu_now_us())) {
+    if (!sfu_pacer_rtx_allow(&sender_session->pacer, 1200 /* conservative MTU estimate */, (int64_t)sfu_now_us())) {
       sfu_metric_inc("rtx_dropped_budget");
       continue;
     }
@@ -306,12 +316,10 @@ static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_s
   }
 
   int64_t send_time_us = (int64_t)sfu_now_us();
-  if (sub_session->scheduler) {
-    sfu_pacer_class_t cls = is_audio ? SFU_PACER_CLASS_AUDIO : (has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
-    if (!sfu_pacer_should_send(&sub_session->scheduler->pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
-      sfu_metric_inc("pacer_dropped_enh");
-      return;
-    }
+  sfu_pacer_class_t cls = is_audio ? SFU_PACER_CLASS_AUDIO : (has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
+  if (!sfu_pacer_should_send(&sub_session->pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
+    sfu_metric_inc("pacer_dropped_enh");
+    return;
   }
 
   uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
@@ -459,21 +467,26 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
-    if (!sub_session->scheduler) {
+    if (!sub_session->schedulers) {
       continue;
     }
 
-    if (sub_session->scheduler->active_publisher_id != sender_session->peer_id) {
+    /* Per-(subscriber, publisher) layer-selection state. Frames from distinct
+     * publishers must never be evaluated through the same scheduler, or the
+     * VP9 sid/tid tracking is corrupted. Look up (lazily creating) the
+     * scheduler keyed by this publisher's peer_id. */
+    sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(sub_session, sender_session->peer_id);
+    if (!sched) {
       continue;
     }
 
     sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
     if (is_vp9 && slot->has_video) {
-      bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);
+      bool should_forward = sfu_scheduler_evaluate_frame(sched, &vp9_desc, is_keyframe);
       if (!should_forward) {
         continue;
       }
-      video_class = sfu_scheduler_classify_frame(sub_session->scheduler, &vp9_desc);
+      video_class = sfu_scheduler_classify_frame(sched, &vp9_desc);
     }
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);

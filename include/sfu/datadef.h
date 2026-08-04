@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
+#include "congestion/pacer.h"
+
 // SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt)
 #define SFU_SRTP_KEY_MATERIAL_LEN 60
 // "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul
@@ -59,6 +61,7 @@ typedef struct sfu_room sfu_room_t;
 typedef struct gcc_bwe_context gcc_bwe_context_t;
 typedef struct sfu_twcc_history sfu_twcc_history_t;
 typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
+typedef struct sfu_session_scheduler_slot sfu_session_scheduler_slot_t;
 typedef struct sfu_rtx_cache sfu_rtx_cache_t;
 typedef struct sfu_receiver_snapshot sfu_receiver_snapshot_t;
 
@@ -135,7 +138,8 @@ typedef struct sfu_peer_session {
   sfu_room_t *room;
   gcc_bwe_context_t *gcc_ctx;
   sfu_twcc_history_t *twcc_history;
-  sfu_subscriber_scheduler_t *scheduler;
+  sfu_session_scheduler_slot_t *schedulers; /* table of SFU_SESSION_SCHEDULER_CAP slots, keyed by publisher_id */
+  sfu_pacer_t pacer;                       /* session-level egress pacing (one GCC path estimate); per-track layer state is in schedulers[] */
   sfu_rtx_cache_t *rtx_cache;
   sfu_peer_session_cold_t *cold;
   _Atomic(sfu_receiver_snapshot_t *) receivers;

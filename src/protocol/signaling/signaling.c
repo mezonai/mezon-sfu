@@ -20,6 +20,7 @@
 #include "protocol/websocket/ws.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
+#include "runtime/scheduler.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -621,13 +622,17 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   session->peer_id = generate_unique_id();
                   handle_answer(session, sdp, sdp_len);
                   sfu_session_release(session);
+                  if (session->schedulers) {
+                    sfu_layer_selector_switch_source(session, session->peer_id);
+                  }
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
                   uint8_t video_pt = 0, rtx_pt = 0;
                   extract_sdp_ssrcs(sdp, (size_t)sdp_len, &audio_ssrc, &video_ssrc, &rtx_ssrc);
                   extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
 
-                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt, rtx_pt);
+                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt, rtx_pt,
+                                                       generate_unique_id());
                   SFU_LOG_WARN("signaling: answer for ufrag=%s arrived before session was created; stashed parsed SSRCs for apply on bind", c->client_ufrag);
                 }
               }

@@ -278,8 +278,6 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint16_t port;
   format_peer_endpoint(&pkt->peer_addr, ip, &port);
 
-  SFU_LOG_DEBUG("worker %u: Raw UDP dispatch received %u bytes from %s:%u", w->worker_index, pkt->len, ip, port);
-
   if (sfu_stun_is_stun_packet(pkt->data, pkt->len)) {
     SFU_LOG_DEBUG("worker %u: Identified STUN packet from %s:%u", w->worker_index, ip, port);
     handle_stun(w, pkt);
@@ -293,8 +291,6 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
-
-  SFU_LOG_DEBUG("worker %u RTP from %s:%u len=%u", w->worker_index, ip, port, pkt->len);
 
   sfu_room_forward_packet(w, pkt);
 }

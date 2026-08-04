@@ -168,8 +168,6 @@ static void fixture_init(fixture_t *f) {
   f->session->gcc_ctx = NULL;
   SFU_FREE(f->session->twcc_history);
   f->session->twcc_history = NULL;
-  SFU_FREE(f->session->scheduler);
-  f->session->scheduler = NULL;
 
   f->cache = (sfu_rtx_cache_t *)SFU_CALLOC(1, sizeof(sfu_rtx_cache_t));
   assert(f->cache != NULL);
@@ -404,12 +402,13 @@ static void kf_fixture_init(kf_fixture_t *f) {
   assert(sfu_srtp_ctx_init_from_dtls(&f->publisher->srtp, key_material, 0x0001, false) == 0);
   f->publisher->state = SFU_SESSION_ESTABLISHED;
   f->publisher->worker_id = 0;
+  /* Production peer_ids are always non-zero (generate_unique_id starts at 1);
+   * the scheduler table keys on them and reserves 0 for empty slots. */
+  f->publisher->peer_id = 1001;
   SFU_FREE(f->publisher->gcc_ctx);
   f->publisher->gcc_ctx = NULL;
   SFU_FREE(f->publisher->twcc_history);
   f->publisher->twcc_history = NULL;
-  SFU_FREE(f->publisher->scheduler);
-  f->publisher->scheduler = NULL;
 
   f->pub_video_ssrc = 0xdeadbeefu;
   f->publisher->uplink_video.ssrc = f->pub_video_ssrc;
@@ -495,29 +494,29 @@ static void test_gcc_estimate_reaches_scheduler(void) {
   fixture_t f;
   fixture_init(&f);
 
-  f.session->scheduler = SFU_CALLOC(1, sizeof(*f.session->scheduler));
-  assert(f.session->scheduler != NULL);
-  sfu_subscriber_scheduler_init(f.session->scheduler, 1);
-  assert(f.session->scheduler->target_sid == 0);
-  assert(f.session->scheduler->target_tid == 0);
-
-  /* Exercise the exact TWCC-result path in the worker. */
+  /* A scheduler slot is created lazily for the publisher this subscriber is
+   * receiving. Exercise the exact TWCC-result path in the worker. */
   extern void sfu_test_svc_update_layers(sfu_peer_session_t * session, uint32_t bitrate_bps);
+  sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(f.session, 1);
+  assert(sched != NULL);
+  assert(sched->target_sid == 0);
+  assert(sched->target_tid == 0);
+
   sfu_test_svc_update_layers(f.session, 2000000);
-  assert(f.session->scheduler->target_sid == 2);
-  assert(f.session->scheduler->target_tid == 2);
+  assert(sched->target_sid == 2);
+  assert(sched->target_tid == 2);
 
   /* Below the rung's down threshold but within the dwell window: the target
    * must hold (hysteresis, #83). */
   sfu_test_svc_update_layers(f.session, 100000);
-  assert(f.session->scheduler->target_sid == 2);
-  assert(f.session->scheduler->target_tid == 2);
+  assert(sched->target_sid == 2);
+  assert(sched->target_tid == 2);
 
   /* After the dwell window, the downshift commits. */
-  f.session->scheduler->last_target_change_us -= 600000;
+  sched->last_target_change_us -= 600000;
   sfu_test_svc_update_layers(f.session, 100000);
-  assert(f.session->scheduler->target_sid == 0);
-  assert(f.session->scheduler->target_tid == 0);
+  assert(sched->target_sid == 0);
+  assert(sched->target_tid == 0);
 
   fixture_destroy(&f);
 }
@@ -534,9 +533,6 @@ static void test_egress_writes_twcc_extension(void) {
    * negotiated at extmap id 5, history allocated. An RTX cache is required
    * by the forwarding path (it puts every forwarded video packet). */
   sfu_peer_session_t *sub = f.base.session;
-  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
-  assert(sub->scheduler != NULL);
-  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
   sub->twcc_extmap_id = 5;
   assert(sub->twcc_history == NULL);
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
@@ -588,9 +584,6 @@ static void test_egress_no_twcc_without_negotiation(void) {
   kf_fixture_init(&f);
 
   sfu_peer_session_t *sub = f.base.session;
-  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
-  assert(sub->scheduler != NULL);
-  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
   sub->twcc_extmap_id = 0; /* not negotiated */
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
@@ -647,9 +640,6 @@ static void test_remote_forward_egress_on_owner(void) {
 
   sfu_peer_session_t *sub = f.base.session;
   sub->worker_id = 1; /* owned by the other worker */
-  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
-  assert(sub->scheduler != NULL);
-  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
   sub->twcc_extmap_id = 5;
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
@@ -751,13 +741,10 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
   kf_fixture_init(&f);
 
   sfu_peer_session_t *sub = f.base.session;
-  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
-  assert(sub->scheduler != NULL);
-  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
   sub->twcc_extmap_id = 0; /* pacing does not require TWCC negotiation */
 
   /* Arm the pacer: 1 Mbps estimate -> 2.5 Mbps pacing, 12.5 KB bucket. */
-  sfu_pacer_set_rate(&sub->scheduler->pacer, 1000000, (int64_t)sfu_now_us());
+  sfu_pacer_set_rate(&sub->pacer, 1000000, (int64_t)sfu_now_us());
 
   /* Neither session claims the packet's PT, so no VP9 parsing; the forward
    * path classifies non-audio as video base by default. To exercise the
@@ -773,19 +760,19 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
   /* Burst: 3 x 8 KB "video base" packets through the pacer owned by the
    * subscriber's scheduler. Bucket 12500 - 24030 (incl. 10B tag) < 0. */
   int64_t now = (int64_t)sfu_now_us();
-  uint64_t sent_before = sub->scheduler->pacer.sent[SFU_PACER_CLASS_VIDEO_BASE];
+  uint64_t sent_before = sub->pacer.sent[SFU_PACER_CLASS_VIDEO_BASE];
   for (int i = 0; i < 3; i++) {
-    (void)sfu_pacer_should_send(&sub->scheduler->pacer, SFU_PACER_CLASS_VIDEO_BASE, 8000, &now);
+    (void)sfu_pacer_should_send(&sub->pacer, SFU_PACER_CLASS_VIDEO_BASE, 8000, &now);
   }
-  assert(sub->scheduler->pacer.balance_bytes < 0);
+  assert(sub->pacer.balance_bytes < 0);
 
   /* Enhancement video beyond the debt window drops; audio does not. */
-  bool enh = sfu_pacer_should_send(&sub->scheduler->pacer, SFU_PACER_CLASS_VIDEO_ENH, 8000, &now);
+  bool enh = sfu_pacer_should_send(&sub->pacer, SFU_PACER_CLASS_VIDEO_ENH, 8000, &now);
   assert(!enh);
   assert(sfu_metric_get("pacer_dropped_enh") == 0); /* metric only from egress path */
-  bool audio = sfu_pacer_should_send(&sub->scheduler->pacer, SFU_PACER_CLASS_AUDIO, 300, &now);
+  bool audio = sfu_pacer_should_send(&sub->pacer, SFU_PACER_CLASS_AUDIO, 300, &now);
   assert(audio);
-  assert(sub->scheduler->pacer.sent[SFU_PACER_CLASS_VIDEO_BASE] == sent_before + 3);
+  assert(sub->pacer.sent[SFU_PACER_CLASS_VIDEO_BASE] == sent_before + 3);
 
   kf_fixture_destroy(&f);
 }
@@ -806,7 +793,7 @@ static void test_nack_line_rate_throttled_by_rtx_budget(void) {
     sfu_rtx_cache_put_stream(f.cache, s, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
   }
 
-  /* No scheduler -> no pacer: all 48 (per-member cap) served. */
+  /* Pacer never armed (no estimate) -> inactive: all 48 (per-member cap) served. */
   uint16_t fci[2 * 48];
   for (int i = 0; i < 48; i++) {
     fci[i * 2] = (uint16_t)(i + 1);
@@ -818,12 +805,9 @@ static void test_nack_line_rate_throttled_by_rtx_budget(void) {
   assert(f.cache->next_rtx_seq == 48);
   assert(sfu_metric_get("rtx_dropped_budget") == 0);
 
-  /* Arm the pacer with a small estimate: 1 Mbps -> RTX budget floor cap
-   * 4096 bytes -> 3 retransmissions per 40 ms window, then drops. */
-  f.session->scheduler = SFU_CALLOC(1, sizeof(*f.session->scheduler));
-  assert(f.session->scheduler != NULL);
-  sfu_subscriber_scheduler_init(f.session->scheduler, 0);
-  sfu_pacer_set_rate(&f.session->scheduler->pacer, 1000000, (int64_t)sfu_now_us());
+  /* Arm the session-level pacer with a small estimate: 1 Mbps -> RTX budget
+   * floor cap 4096 bytes -> 3 retransmissions per 40 ms window, then drops. */
+  sfu_pacer_set_rate(&f.session->pacer, 1000000, (int64_t)sfu_now_us());
 
   uint16_t fci2[2 * 12];
   for (int i = 0; i < 12; i++) {
@@ -850,9 +834,6 @@ static void test_forward_churn_subscriber_disconnect(void) {
   kf_fixture_init(&f);
 
   sfu_peer_session_t *sub = f.base.session;
-  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
-  assert(sub->scheduler != NULL);
-  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
   sub->twcc_extmap_id = 5;
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);

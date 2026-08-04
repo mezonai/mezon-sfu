@@ -143,9 +143,9 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     SFU_FREE(s->twcc_history);
     s->twcc_history = NULL;
   }
-  if (s->scheduler) {
-    SFU_FREE(s->scheduler);
-    s->scheduler = NULL;
+  if (s->schedulers) {
+    SFU_FREE(s->schedulers);
+    s->schedulers = NULL;
   }
   if (s->cold) {
     SFU_FREE(s->cold);
@@ -330,10 +330,11 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     sfu_twcc_history_init(s->twcc_history);
   }
 
-  s->scheduler = SFU_CALLOC(1, sizeof(sfu_subscriber_scheduler_t));
-  if (s->scheduler) {
-    sfu_subscriber_scheduler_init(s->scheduler, 0);
+  s->schedulers = SFU_CALLOC(SFU_SESSION_SCHEDULER_CAP, sizeof(sfu_session_scheduler_slot_t));
+  if (!s->schedulers) {
+    SFU_LOG_ERROR("failed to allocate subscriber scheduler table for new peer session");
   }
+  sfu_pacer_init(&s->pacer);
 
   s->rtx_cache = SFU_CALLOC(1, sizeof(sfu_rtx_cache_t));
   if (s->rtx_cache) {
