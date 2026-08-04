@@ -537,22 +537,43 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
 }
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
+  if (!w || !publisher) {
+    SFU_LOG_WARN("[KF-DBG] sfu_session_request_keyframe called with NULL worker or publisher");
+    return;
+  }
+
   sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
-  if (!rtcp_pkt || !w || !publisher) {
+  if (!rtcp_pkt) {
     return;
   }
 
   if (publisher->worker_id != w->worker_index) {
+    SFU_LOG_INFO("[KF-DBG] Offloading KF request: current worker %u -> publisher worker %u (pub peer_id=%u)", w->worker_index, publisher->worker_id,
+                 publisher->peer_id);
     if (w->mesh) {
-      sfu_fanout_mesh_enqueue_keyframe_request(w->mesh, w->worker_index, publisher->worker_id, publisher);
+      bool queued = sfu_fanout_mesh_enqueue_keyframe_request(w->mesh, w->worker_index, publisher->worker_id, publisher);
+      if (!queued) {
+        SFU_LOG_ERROR("[KF-DBG] FAILED to enqueue cross-worker KF request from %u to %u", w->worker_index, publisher->worker_id);
+      }
+    } else {
+      SFU_LOG_ERROR("[KF-DBG] Worker %u mesh is NULL! Cannot dispatch cross-worker KF request", w->worker_index);
     }
     return;
   }
+
+  SFU_LOG_INFO("Worker %u executing PLI output to publisher peer %u SSRC %u", w->worker_index, publisher->peer_id, publisher->uplink_video.ssrc);
 
   int rtcp_len = 0;
   uint32_t sfu_sender_ssrc = 1;
 
   uint32_t media_ssrc = publisher->uplink_video.ssrc;
+
+  SFU_LOG_INFO("[KF-DBG] Executing KF request on owner worker %u for pub peer_id=%u (uplink SSRC=%u)", w->worker_index, publisher->peer_id, media_ssrc);
+
+  if (media_ssrc == 0) {
+    SFU_LOG_WARN("[KF-DBG] Cannot send PLI/FIR: Publisher %u video SSRC is 0", publisher->peer_id);
+    return;
+  }
 
   if (use_fir) {
     rtcp_len = sfu_rtcp_build_fir(sfu_sender_ssrc, media_ssrc, &publisher->fir_seq, rtcp_pkt->data, rtcp_pkt->cap);
@@ -564,7 +585,10 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
     if (sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap)) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
 
-      sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
+      int sent = sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
+      if (sent != 0) {
+        SFU_LOG_ERROR("Failed to enqueue PLI to send_ring for peer %u", publisher->peer_id);
+      }
     } else {
       SFU_LOG_WARN("Failed to SRTP protect keyframe request for peer %u", publisher->peer_id);
     }

@@ -1,14 +1,3 @@
-/*
- * Phase 2 worker protocol integration tests.
- *
- * Exercises sfu_room_forward_packet's compound-RTCP dispatch end to end:
- * plaintext feedback is SRTCP-protected through a real SRTP context, fed
- * through the worker ingress path, and the resulting NACK/PLI effects are
- * observed via counters, cache state and throttling. The io_uring send ring
- * is left zeroed so queued sends fail harmlessly; packet ownership is
- * verified through the pool release path instead.
- */
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
