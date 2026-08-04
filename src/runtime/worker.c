@@ -10,6 +10,7 @@
 #include "pipeline/dispatch.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtcp/rtcp_fb.h"
+#include "rtp/rtp_ext.h"
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
 #include "rtp/rtx_build.h"
@@ -82,51 +83,107 @@ static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
 #define SFU_WORKER_KF_THROTTLE_MS 1000
 
 static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
-  // Example VP9 bitrate ladder
-  if (bitrate_bps > 1200000) {
-    session->target_sid = 2;  // High resolution (e.g., 720p)
-    session->target_tid = 2;  // Full framerate (e.g., 30fps)
-  } else if (bitrate_bps > 500000) {
-    session->target_sid = 1;  // Medium resolution (e.g., 360p)
-    session->target_tid = 2;
-  } else if (bitrate_bps > 150000) {
-    session->target_sid = 0;  // Low resolution (e.g., 180p)
-    session->target_tid = 1;  // Half framerate (e.g., 15fps)
-  } else {
-    session->target_sid = 0;
-    session->target_tid = 0;  // Lowest framerate
+  if (!session->scheduler) {
+    return;
+  }
+  sfu_subscriber_scheduler_set_bitrate(session->scheduler, bitrate_bps);
+}
+
+void sfu_test_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) { sfu_svc_update_layers(session, bitrate_bps); }
+
+static sfu_peer_session_t *sfu_worker_find_publisher_by_media_ssrc(sfu_peer_session_t *subscriber, uint32_t media_ssrc) {
+  sfu_room_t *room = subscriber->room;
+  if (!room) {
+    return NULL;
+  }
+
+  pthread_mutex_lock(&room->lock);
+  sfu_peer_session_t *result = NULL;
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *publisher = room->peers[i];
+    if (publisher == subscriber) {
+      continue;
+    }
+    if (publisher->uplink_video.ssrc != media_ssrc && publisher->uplink_video.rtx_ssrc != media_ssrc) {
+      continue;
+    }
+    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(publisher);
+    if (!snap) {
+      continue;
+    }
+    for (uint32_t j = 0; j < snap->count; j++) {
+      const sfu_receiver_entry_t *e = &snap->entries[j];
+      if (e->subscriber == subscriber && e->has_video) {
+        atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+        result = publisher;
+        break;
+      }
+    }
+    sfu_receiver_snapshot_release(snap);
+    if (result) {
+      break;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+  return result;
+}
+
+static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher) {
+  int64_t now = (int64_t)sfu_now_ms();
+  if (now - publisher->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
+    publisher->last_pli_time = now;
+    sfu_session_request_keyframe(w, publisher, false);  // false = PLI
   }
 }
 
-static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *session) {
-  int64_t now = (int64_t)sfu_now_ms();
-  if (now - session->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
-    session->last_pli_time = now;
-    sfu_session_request_keyframe(w, session, false);  // false = PLI
+static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
+  sfu_peer_session_t *publisher = sfu_worker_find_publisher_by_media_ssrc(feedback_session, media_ssrc);
+  if (!publisher) {
+    sfu_metric_inc("rtcp_kf_unresolved");
+    publisher = feedback_session;
+    atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
   }
+  sfu_worker_request_keyframe_throttled(w, publisher);
+  sfu_session_release(publisher);
 }
+
+#define SFU_WORKER_TWCC_BATCH_CAP 256
 
 static void sfu_worker_handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
   sfu_twcc_parser_t parser;
-  // Bound the parser to this member's logical (unpadded) bytes.
-  if (sfu_twcc_parser_init(&parser, view->member, view->member_len) != 0) {
+  if (sfu_twcc_parser_init(&parser, view->member, view->member_len, sender_session->twcc_last_feedback_ref_us) != 0) {
     sfu_metric_inc("rtcp_twcc_bad");
     return;
   }
 
-  gcc_packet_info_t twcc_pkt;
-  uint32_t estimated_bps = 0;
-
-  if (sender_session->gcc_ctx) {
-    estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+  gcc_packet_info_t batch[SFU_WORKER_TWCC_BATCH_CAP];
+  size_t batch_count = 0;
+  gcc_packet_info_t item;
+  while (batch_count < SFU_WORKER_TWCC_BATCH_CAP && sfu_twcc_parser_next(&parser, &item)) {
+    batch[batch_count++] = item;
+  }
+  if (parser.packets_processed < parser.packet_status_count) {
+    sfu_metric_inc("rtcp_twcc_bad");
+    return;
   }
 
-  while (sfu_twcc_parser_next(&parser, &twcc_pkt)) {
-    if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, twcc_pkt.sequence_number, &twcc_pkt)) {
+  uint32_t estimated_bps = sender_session->gcc_ctx ? sender_session->gcc_ctx->aimd.current_bitrate_bps : 0;
+
+  for (size_t i = 0; i < batch_count; i++) {
+    if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, batch[i].sequence_number, &batch[i])) {
       if (sender_session->gcc_ctx) {
-        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &twcc_pkt);
+        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &batch[i]);
       }
     }
+  }
+
+  if (batch_count > 0) {
+    sender_session->twcc_last_feedback_ref_us = batch[batch_count - 1].receive_time_us;
+  }
+
+  if (sender_session->gcc_ctx && parser.packets_lost > 0) {
+    gcc_bwe_report_loss(sender_session->gcc_ctx, parser.packets_lost, parser.packet_status_count);
+    estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
   }
 
   if (estimated_bps > 0) {
@@ -147,7 +204,7 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
   }
 
   uint32_t nack_media_ssrc = sfu_nack_parser_media_ssrc(&nack_parser);
-  (void)nack_media_ssrc;
+  uint32_t nack_generation = atomic_load_explicit(&sender_session->egress_generation, memory_order_acquire);
 
   uint16_t requested[SFU_WORKER_NACK_REQUEST_CAP];
   uint32_t requested_count = 0;
@@ -177,7 +234,7 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     uint32_t rtx_ssrc = 0;
     uint8_t rtx_pt = 0;
 
-    if (sfu_rtx_cache_get(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt)) {
+    if (sfu_rtx_cache_get_stream(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
       sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
       if (!rtx_enc) {
         continue;
@@ -207,7 +264,8 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
   }
 
   if (unrecoverable_loss) {
-    sfu_worker_request_keyframe_throttled(w, sender_session);
+    // Cache miss: ask the source publisher of the lost stream for a keyframe.
+    sfu_worker_request_source_keyframe(w, sender_session, nack_media_ssrc);
   }
 }
 
@@ -217,7 +275,8 @@ static void sfu_worker_handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *se
     sfu_metric_inc("rtcp_pli_bad");
     return;
   }
-  sfu_worker_request_keyframe_throttled(w, sender_session);
+
+  sfu_worker_request_source_keyframe(w, sender_session, pli.media_ssrc);
 }
 
 static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
@@ -228,6 +287,48 @@ static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *se
   }
   SFU_LOG_DEBUG("worker %u: RTCP FIR from peer %u (media_ssrc=%u, %zu entries) ignored", w->worker_index, sender_session->peer_id, fir.media_ssrc,
                 fir.entry_count);
+}
+
+static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst,
+                                      socklen_t dst_len, uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video) {
+  int enc_len = (int)pkt->len;
+
+  uint8_t incoming_pt = pkt->data[1] & 0x7F;
+  uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
+  if (incoming_pt != expected_pt) {
+    pkt->data[1] = (pkt->data[1] & 0x80) | (expected_pt & 0x7F);
+  }
+
+  uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
+  if (has_video && incoming_pt == video_pt && sub_session->rtx_cache) {
+    sfu_rtx_cache_put_stream(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, video_rtx_ssrc, video_rtx_pt, video_ssrc,
+                             atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
+  }
+
+  if (sub_session->twcc_extmap_id != 0) {
+    uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+    size_t new_len = (size_t)enc_len;
+    if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
+      enc_len = (int)new_len;
+      if (sub_session->twcc_history) {
+        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, (int64_t)sfu_now_us(), (uint32_t)enc_len);
+      }
+    } else {
+      sfu_metric_inc("twcc_write_fail");
+    }
+  }
+
+  if (!sfu_srtp_protect_rtp(&sub_session->srtp, pkt->data, &enc_len, pkt->cap)) {
+    SFU_LOG_WARN("worker %u: [EGRESS DROP] SRTP protect FAILED", w->worker_index);
+    sfu_metric_inc("egress_protect_fail");
+    return;
+  }
+  pkt->len = (uint32_t)enc_len;
+
+  if (sfu_ring_queue_send_zc(&w->send_ring, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
+    SFU_LOG_WARN("worker %u: [EGRESS DROP] send SQ full", w->worker_index);
+    sfu_metric_inc("egress_send_full");
+  }
 }
 
 static void sfu_worker_handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_packet_t *pkt) {
@@ -368,45 +469,19 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 
     memcpy(enc->data, pkt->data, pkt->len);
-    int enc_len = (int)pkt->len;
-
-    if (!is_rtcp) {
-      uint8_t incoming_pt = enc->data[1] & 0x7F;
-      uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
-      if (incoming_pt != expected_pt) {
-        enc->data[1] = (enc->data[1] & 0x80) | (expected_pt & 0x7F);
-      }
-
-      uint16_t subscriber_seq = sfu_read_be16(enc->data + 2);
-      if (slot->has_video && incoming_pt == slot->video_pt) {
-        sfu_rtx_cache_put(sub_session->rtx_cache, subscriber_seq, enc->data, enc_len, slot->video_rtx_ssrc, slot->video_rtx_pt);
-      }
-
-      uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
-      int64_t now_ms = sfu_now_ms();
-      if (sub_session->twcc_history) {
-        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, now_ms, enc_len);
-      }
-    }
-
-    bool protected_ = is_rtcp ? sfu_srtp_protect_rtcp(&sub_session->srtp, enc->data, &enc_len, enc->cap)
-                              : sfu_srtp_protect_rtp(&sub_session->srtp, enc->data, &enc_len, enc->cap);
-
-    if (!protected_) {
-      SFU_LOG_WARN("worker %u: [EGRESS DROP] SRTP protect FAILED", w->worker_index);
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
-      continue;
-    }
-    enc->len = (uint32_t)enc_len;
+    enc->len = pkt->len;
 
     if (sub_session->worker_id == w->worker_index) {
-      if (sfu_ring_queue_send_zc(&w->send_ring, enc, (const struct sockaddr *)&sub_session->cold->addr, sub_session->cold->addr_len) != 0) {
-        SFU_LOG_WARN("worker %u: local send SQ full", w->worker_index);
-      }
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);  // Packet is now handled by io_uring
+      sfu_worker_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt,
+                                slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video);
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
-      if (!sfu_fanout_mesh_enqueue(w->mesh, w->worker_index, sub_session->worker_id, enc, &sub_session->cold->addr, sub_session->cold->addr_len)) {
+      atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
+      if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, enc, sub_session, &sub_session->cold->addr,
+                                           sub_session->cold->addr_len, slot->video_ssrc, slot->video_rtx_ssrc, slot->video_pt, slot->video_rtx_pt,
+                                           slot->has_video)) {
         SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
+        sfu_session_release(sub_session);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
       }
     }
@@ -417,13 +492,17 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 
-static void handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
+void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
-  SFU_LOG_DEBUG("worker %u: [FANOUT DEQUEUE] Sending %u bytes to peer socket via io_uring", w->worker_index, job->pkt->len);
-
-  if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
-    SFU_LOG_WARN("worker %u: [EGRESS DROP] remote-fanout send SQ full, dropping packet", w->worker_index);
+  if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
+    sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_ssrc, job->video_pt, job->video_rtx_pt, job->video_rtx_ssrc,
+                              job->has_video);
+    sfu_session_release(job->subscriber);
+  } else {
+    if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
+      SFU_LOG_WARN("worker %u: [EGRESS DROP] remote-fanout send SQ full, dropping packet", w->worker_index);
+    }
   }
 
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
@@ -447,7 +526,7 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, handle_fanout_job, w);
+    unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, sfu_worker_handle_fanout_job, w);
     if (fanned > 0) {
       did_work = true;
     }
@@ -462,6 +541,37 @@ static void *worker_thread_main(void *arg) {
     }
 
     if (!did_work) {
+      usleep(SFU_WORKER_IDLE_SLEEP_US);
+    }
+
+    __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
+  }
+
+  for (unsigned idle_passes = 0; idle_passes < 32;) {
+    bool did_work = false;
+
+    void *item;
+    while (sfu_spsc_ring_pop(&w->inbox, &item)) {
+      sfu_dispatch_packet(w, (sfu_packet_t *)item);
+      did_work = true;
+    }
+
+    if (sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, sfu_worker_handle_fanout_job, w) > 0) {
+      did_work = true;
+    }
+
+    if (sfu_ring_submit(&w->send_ring) > 0) {
+      did_work = true;
+    }
+
+    if (sfu_ring_reap(&w->send_ring, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w) > 0) {
+      did_work = true;
+    }
+
+    if (did_work) {
+      idle_passes = 0;
+    } else {
+      idle_passes++;
       usleep(SFU_WORKER_IDLE_SLEEP_US);
     }
 

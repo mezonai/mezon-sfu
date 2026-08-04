@@ -2,6 +2,7 @@
 #include "peer/session.h"
 #include "util/log.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -72,6 +73,22 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
   return 0;
 }
 
+/* Appends the transport-wide CC offer/answer contract for one media section:
+ * the extmap mapping the locally-chosen ID plus the transport-cc feedback
+ * capability (CC-11). The SFU always offers ID 5 on its sendonly sections;
+ * the peer answers with the ID it will accept (see handle_answer), which is
+ * what the egress path writes into RTP. */
+#define SFU_TWCC_LOCAL_EXTMAP_ID 5
+
+static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset) {
+  char line[160];
+  int n = snprintf(line, sizeof(line), "a=extmap:%d http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", SFU_TWCC_LOCAL_EXTMAP_ID);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+  return 0;
+}
+
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, uint8_t video_pt, uint8_t rtx_pt) {
   sfu_video_codec_t codec = sfu_video_codec_from_pt(video_pt);
   const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9) ? "VP9" : (codec == SFU_VIDEO_CODEC_AV1) ? "AV1" : "VP8";
@@ -87,6 +104,10 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
     return -1;
   }
   n = snprintf(line, sizeof(line), "a=rtcp-fb:%u nack pli", video_pt);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+  n = snprintf(line, sizeof(line), "a=rtcp-fb:%u transport-cc", video_pt);
   if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
     return -1;
   }
@@ -279,6 +300,12 @@ static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t 
   return true;
 }
 
+/* Lifetime invariant (F-18): the caller keeps `session` alive for the whole
+ * build via a refcounted pin or the room lock (see sdp.h). All receiver-set
+ * traversal below goes through the retained immutable snapshot acquired at
+ * entry; no snapshot entry is ever followed back into a mutable session. The
+ * only mutable session state read is uplink_video PT negotiation, which is a
+ * benign best-effort default. */
 int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
                          const char *pwd, const char *fingerprint, char *out, size_t out_cap) {
   size_t off = 0;
@@ -286,9 +313,12 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
   int saw_media_line = 0;
   int current_media = 0;
 
+  assert(session != NULL);
+
   /* Coherent, immutable view of the receiver set for the whole build (F-03). */
   sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
+  assert(snap != NULL || receiver_count == 0);
 
   uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
   uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
@@ -508,6 +538,9 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
         goto fail;
       }
+      if (append_twcc_attributes(out, out_cap, &off) != 0) {
+        goto fail;
+      }
       if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {
         goto fail;
       }
@@ -525,15 +558,22 @@ fail:
   return -1;
 }
 
+/* Lifetime invariant (F-18): same contract as sfu_sdp_build_answer — the
+ * caller keeps `session` alive via a refcounted pin or the room lock, and
+ * all receiver-set traversal goes through the retained immutable snapshot
+ * acquired here. */
 int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                         char *out, size_t out_cap) {
   size_t off = 0;
   char buf[512];
   int n;
 
+  assert(session != NULL);
+
   /* Coherent, immutable view of the receiver set for the whole build (F-03). */
   sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
+  assert(snap != NULL || receiver_count == 0);
 
   /* Session-level header. Fresh o= line since there is no inbound offer to mirror. */
   if (append_line(out, out_cap, &off, "v=0") != 0) {
@@ -678,6 +718,9 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       goto fail;
     }
     if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+      goto fail;
+    }
+    if (append_twcc_attributes(out, out_cap, &off) != 0) {
       goto fail;
     }
     if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {

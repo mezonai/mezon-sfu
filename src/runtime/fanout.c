@@ -74,6 +74,43 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
   job->pkt = pkt;
   memcpy(&job->dst, dst_addr, dst_len);
   job->dst_len = dst_len;
+  job->subscriber = NULL;
+  job->kind = SFU_FANOUT_JOB_READY;
+  job->has_video = false;
+  job->video_ssrc = 0;
+  job->video_rtx_ssrc = 0;
+  job->video_pt = 0;
+  job->video_rtx_pt = 0;
+
+  if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
+    SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
+    sfu_pool_free(&mesh->job_pool, job_idx);
+    return false;
+  }
+
+  return true;
+}
+
+bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt,
+                                     sfu_peer_session_t *subscriber, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
+                                     uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video) {
+  uint32_t job_idx;
+  sfu_fanout_job_t *job = sfu_pool_alloc(&mesh->job_pool, &job_idx);
+  if (!job) {
+    SFU_LOG_WARN("fanout mesh: job pool exhausted (worker %u -> %u)", src_worker, dst_worker);
+    return false;
+  }
+
+  job->pkt = pkt;
+  memcpy(&job->dst, dst_addr, dst_len);
+  job->dst_len = dst_len;
+  job->kind = SFU_FANOUT_JOB_FORWARD;
+  job->subscriber = subscriber;
+  job->video_ssrc = video_ssrc;
+  job->video_rtx_ssrc = video_rtx_ssrc;
+  job->video_pt = video_pt;
+  job->video_rtx_pt = video_rtx_pt;
+  job->has_video = has_video;
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);

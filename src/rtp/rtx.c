@@ -96,7 +96,8 @@ int sfu_rtx_cache_init(sfu_rtx_cache_t *cache) {
   return 0;
 }
 
-void sfu_rtx_cache_put(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt) {
+void sfu_rtx_cache_put_stream(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt,
+                              uint32_t media_ssrc, uint32_t generation) {
   // RTX rebuild inserts a 2-byte OSN before the original payload, so the
   // cached packet must leave room for that expansion. SRTP overhead is
   // bounded separately by the caller's protect call, which already receives
@@ -110,14 +111,17 @@ void sfu_rtx_cache_put(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data
   entry->len = len;
   entry->rtx_ssrc = rtx_ssrc;
   entry->rtx_pt = rtx_pt;
+  entry->media_ssrc = media_ssrc;
+  entry->generation = generation;
   memcpy(entry->data, data, len);
   entry->valid = true;
 }
 
-bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc, uint8_t *out_rtx_pt) {
+bool sfu_rtx_cache_get_stream(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc,
+                              uint8_t *out_rtx_pt, uint32_t media_ssrc, uint32_t generation) {
   uint32_t idx = seq & SFU_RTX_CACHE_MASK;
   sfu_rtx_entry_t *entry = &cache->entries[idx];
-  if (entry->valid && entry->seq == seq) {
+  if (entry->valid && entry->seq == seq && entry->media_ssrc == media_ssrc && entry->generation == generation) {
     memcpy(out_data, entry->data, entry->len);
     *out_len = entry->len;
     *out_rtx_ssrc = entry->rtx_ssrc;
@@ -125,6 +129,14 @@ bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, 
     return true;
   }
   return false;
+}
+
+void sfu_rtx_cache_put(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_t *data, uint32_t len, uint32_t rtx_ssrc, uint8_t rtx_pt) {
+  sfu_rtx_cache_put_stream(cache, seq, data, len, rtx_ssrc, rtx_pt, 0, 0);
+}
+
+bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc, uint8_t *out_rtx_pt) {
+  return sfu_rtx_cache_get_stream(cache, seq, out_data, out_len, out_rtx_ssrc, out_rtx_pt, 0, 0);
 }
 
 // Cleanup function to free pre-allocated buffers when session closes

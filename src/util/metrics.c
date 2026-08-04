@@ -5,8 +5,8 @@
 #include <string.h>
 
 static const char *const k_metric_names[] = {
-    "msg_trunc_drop", "json_reject",  "rtcp_compound_malformed", "rtcp_member_unknown", "rtcp_twcc_bad",
-    "rtcp_nack_bad",  "rtcp_pli_bad", "rtcp_nack_dropped",       "rtx_build_fail",
+    "msg_trunc_drop",    "json_reject",    "rtcp_compound_malformed", "rtcp_member_unknown", "rtcp_twcc_bad",       "rtcp_nack_bad",    "rtcp_pli_bad",
+    "rtcp_nack_dropped", "rtx_build_fail", "rtcp_kf_unresolved",      "twcc_write_fail",     "egress_protect_fail", "egress_send_full",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

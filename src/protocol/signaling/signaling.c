@@ -325,14 +325,74 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
       continue;
     }
 
+    /* Pin the session for the whole build+send (F-18). The room lock alone
+     * already keeps the session alive here — the room's membership reference
+     * is only dropped by room_remove_peer under this same lock, and teardown
+     * cannot complete before then — but holding an explicit pin means the
+     * safety of the SDP build no longer depends on the room lock never being
+     * released mid-loop; a future restructure that drops the lock while
+     * iterating cannot turn the traversal into a use-after-free. The session
+     * is a live OPEN member (accepts_work above), so its refcount is >= 2
+     * (table + room) and cannot hit zero concurrently. */
+    atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
       SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     } else {
       SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
     }
+    sfu_session_release(session);
   }
   pthread_mutex_unlock(&room->lock);
 }
+
+/* Extracts the transport-wide CC extmap ID the client accepted for media it
+ * RECEIVES from the SFU (CC-11). Scans `a=extmap:<id> ...transport-wide-cc...`
+ * lines; the last matching ID wins, 0 means not negotiated. */
+static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
+  static const char k_extmap[] = "a=extmap:";
+  static const char k_twcc_uri[] = "transport-wide-cc";
+
+  uint8_t id = 0;
+  size_t pos = 0;
+  while (pos < sdp_len) {
+    size_t line_start = pos;
+    while (pos < sdp_len && sdp[pos] != '\n') {
+      pos++;
+    }
+    size_t line_end = pos;
+    if (line_end > line_start && sdp[line_end - 1] == '\r') {
+      line_end--;
+    }
+    if (pos < sdp_len) {
+      pos++;
+    }
+
+    size_t len = line_end - line_start;
+    const char *line = sdp + line_start;
+    if (len < sizeof(k_extmap) - 1 || memcmp(line, k_extmap, sizeof(k_extmap) - 1) != 0) {
+      continue;
+    }
+
+    /* ID may carry a "/recvonly" style direction suffix; strtoul stops at
+     * the '/'. Only IDs 1-14 are valid one-byte-header extmap IDs. */
+    char *endptr;
+    unsigned long parsed = strtoul(line + sizeof(k_extmap) - 1, &endptr, 10);
+    if (endptr == line + sizeof(k_extmap) - 1 || parsed == 0 || parsed > 14) {
+      continue;
+    }
+    if (len - (size_t)(endptr - line) < sizeof(k_twcc_uri) - 1) {
+      continue;
+    }
+    if (memmem(endptr, len - (size_t)(endptr - line), k_twcc_uri, sizeof(k_twcc_uri) - 1)) {
+      id = (uint8_t)parsed;
+    }
+  }
+  return id;
+}
+
+/* Test hook: exercises the extmap extraction above without a signaling
+ * server. */
+uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len) { return extract_sdp_twcc_extmap_id(sdp, sdp_len); }
 
 static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
   if (!session) {
@@ -359,6 +419,10 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
 
   session->uplink_video.payload_type = video_pt;
   session->uplink_video.rtx_payload_type = rtx_pt;
+
+  /* The client answers extmap for media it receives; persist the accepted
+   * transport-cc ID so the egress path knows where to write TWCC sequences. */
+  session->twcc_extmap_id = extract_sdp_twcc_extmap_id(sdp, (size_t)sdp_len);
 
   for (int i = 0; i < 128; i++) {
     session->pt_map[i] = (uint8_t)i;
