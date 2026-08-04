@@ -86,7 +86,27 @@ add_executable(test_nack_parser test_nack_parser.c)
 target_link_libraries(test_nack_parser PRIVATE sfu_core)
 add_test(NAME nack_parser COMMAND test_nack_parser)
 
+add_executable(test_rtp_ext test_rtp_ext.c)
+target_link_libraries(test_rtp_ext PRIVATE sfu_core)
+add_test(NAME rtp_ext COMMAND test_rtp_ext)
+
+add_executable(test_twcc_parser test_twcc_parser.c)
+target_link_libraries(test_twcc_parser PRIVATE sfu_core)
+add_test(NAME twcc_parser COMMAND test_twcc_parser)
+
+add_executable(test_gcc test_gcc.c)
+target_link_libraries(test_gcc PRIVATE sfu_core)
+add_test(NAME gcc COMMAND test_gcc)
+
+add_executable(test_layer_selector test_layer_selector.c)
+target_link_libraries(test_layer_selector PRIVATE sfu_core)
+add_test(NAME layer_selector COMMAND test_layer_selector)
+
 add_executable(test_worker_protocol test_worker_protocol.c)
 target_link_libraries(test_worker_protocol PRIVATE sfu_core)
 add_test(NAME worker_protocol COMMAND test_worker_protocol)
+
+add_executable(test_vp9_parser test_vp9_parser.c)
+target_link_libraries(test_vp9_parser PRIVATE sfu_core)
+add_test(NAME vp9_parser COMMAND test_vp9_parser)
 

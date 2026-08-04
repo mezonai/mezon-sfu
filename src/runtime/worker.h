@@ -42,4 +42,10 @@ void sfu_worker_destroy(sfu_worker_t *w);
 int sfu_worker_start(sfu_worker_t *w);
 void sfu_worker_join(sfu_worker_t *w);
 
+/* Fanout job consumer (CC-10): READY jobs are sent as-is; FORWARD jobs run
+ * the full per-subscriber egress rewrite (PT map, RTX cache, TWCC, SRTP
+ * protect, send) on the subscriber's owning worker, then release the job's
+ * session pin. Exposed for integration tests. */
+void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job);
+
 #endif /* SFU_RUNTIME_WORKER_H */

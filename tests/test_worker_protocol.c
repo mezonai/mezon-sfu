@@ -18,8 +18,11 @@
 #include <unistd.h>
 
 #include "memory/packet_pool.h"
+#include "congestion/twcc_history.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
+#include "room/room.h"
+#include "room/room_media_graph.h"
 #include "util/alloc.h"
 #include "rtp/rtx.h"
 #include "runtime/worker.h"
@@ -206,7 +209,7 @@ static void test_compound_nack_rtx_dispatch(void) {
   uint8_t pkt_buf[512];
   size_t pkt_len;
   build_rtp_video(pkt_buf, 42, 100, &pkt_len);
-  sfu_rtx_cache_put(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT);
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
   assert(f.cache->next_rtx_seq == 0);
 
   uint8_t nack[64];
@@ -248,7 +251,7 @@ static void test_compound_pli_then_nack(void) {
   uint8_t pkt_buf[512];
   size_t pkt_len;
   build_rtp_video(pkt_buf, 7, 60, &pkt_len);
-  sfu_rtx_cache_put(f.cache, 7, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT);
+  sfu_rtx_cache_put_stream(f.cache, 7, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
 
   uint8_t compound[128];
   size_t pli_len = build_pli(compound);
@@ -269,7 +272,7 @@ static void test_malformed_tail_drops_remainder(void) {
   uint8_t pkt_buf[512];
   size_t pkt_len;
   build_rtp_video(pkt_buf, 9, 60, &pkt_len);
-  sfu_rtx_cache_put(f.cache, 9, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT);
+  sfu_rtx_cache_put_stream(f.cache, 9, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
 
   uint8_t compound[128];
   size_t nack_len = build_nack(compound, (uint16_t[]){9, 0x0000}, 2);
@@ -360,6 +363,385 @@ static void test_packet_release_ownership(void) {
   fixture_destroy(&f);
 }
 
+/* ---------------------------------------------------------------------------
+ * CC-03/CC-04: feedback Media SSRC must resolve to the source publisher.
+ *
+ * Two-party room: publisher P forwards to subscriber S. PLI/NACK-miss
+ * feedback arriving on S's session names the outbound video SSRC that P
+ * sends to S; the keyframe request must land on P (throttle timestamp set on
+ * P's session), never on S.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+  fixture_t base; /* base.session acts as the subscriber */
+  sfu_room_t room;
+  sfu_peer_session_t *publisher;
+  uint32_t pub_video_ssrc;
+} kf_fixture_t;
+
+static void kf_fixture_init(kf_fixture_t *f) {
+  fixture_init(&f->base);
+
+  assert(sfu_room_init(&f->room, 42) == 0);
+
+  struct sockaddr_in paddr = {0};
+  paddr.sin_family = AF_INET;
+  paddr.sin_port = htons(6000);
+  paddr.sin_addr.s_addr = htonl(0x7f000002u);
+  f->publisher = sfu_session_table_get_or_create(&f->base.sessions, (const struct sockaddr_storage *)&paddr, sizeof(paddr));
+  assert(f->publisher != NULL);
+  /* Give the publisher its own SRTP context: copying base.srtp by value would
+   * alias the same libsrtp handle into two sessions and double-free it at
+   * teardown. The publisher never sends SRTP in these tests; only the
+   * keyframe throttle timestamp on its session is observed. */
+  uint8_t key_material[SFU_SRTP_KEY_MATERIAL_LEN];
+  for (size_t i = 0; i < sizeof(key_material); i++) {
+    key_material[i] = (uint8_t)(i * 7 + 1);
+  }
+  memcpy(key_material + 16, key_material, 16);
+  memcpy(key_material + 46, key_material + 32, 14);
+  assert(sfu_srtp_ctx_init_from_dtls(&f->publisher->srtp, key_material, 0x0001, false) == 0);
+  f->publisher->state = SFU_SESSION_ESTABLISHED;
+  f->publisher->worker_id = 0;
+  SFU_FREE(f->publisher->gcc_ctx);
+  f->publisher->gcc_ctx = NULL;
+  SFU_FREE(f->publisher->twcc_history);
+  f->publisher->twcc_history = NULL;
+  SFU_FREE(f->publisher->scheduler);
+  f->publisher->scheduler = NULL;
+
+  f->pub_video_ssrc = 0xdeadbeefu;
+  f->publisher->uplink_video.ssrc = f->pub_video_ssrc;
+  f->publisher->uplink_video.rtx_ssrc = 0xbeefdead;
+  f->publisher->uplink_video.active = true;
+  f->publisher->uplink_audio.active = true;
+
+  f->base.session->uplink_video.active = true;
+  f->base.session->uplink_audio.active = true;
+
+  room_add_peer(&f->room, f->publisher, NULL);
+  room_add_peer(&f->room, f->base.session, NULL);
+  /* add order: publisher first, so the subscriber is in the publisher's
+   * receiver snapshot with the publisher's own uplink SSRCs. */
+}
+
+static void kf_fixture_destroy(kf_fixture_t *f) {
+  room_remove_peer(&f->room, f->publisher);
+  room_remove_peer(&f->room, f->base.session);
+  sfu_session_release(f->publisher);
+  pthread_mutex_destroy(&f->room.lock);
+  SFU_FREE(f->room.peers);
+  fixture_destroy(&f->base);
+}
+
+/* PLI from the subscriber names the publisher's outbound SSRC; the throttled
+ * keyframe timestamp must be set on the publisher session, not on the
+ * feedback (subscriber) session. */
+static void test_pli_routes_to_source_publisher(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  uint8_t pli[64];
+  size_t pli_len = rtcp_member_header(pli, 1, 206, MEDIA_SSRC, 4);
+  sfu_write_be32(pli + 8, f.pub_video_ssrc);
+  feed_rtcp(&f.base, pli, pli_len);
+
+  assert(f.publisher->last_pli_time != 0);   /* publisher got the request */
+  assert(f.base.session->last_pli_time == 0); /* subscriber did not */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 0);
+  kf_fixture_destroy(&f);
+}
+
+/* NACK cache miss with a resolvable Media SSRC routes the keyframe request
+ * to the source publisher (CC-04). */
+static void test_nack_miss_routes_to_source_publisher(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  uint8_t nack[64];
+  size_t hdr = rtcp_member_header(nack, 1, 205, MEDIA_SSRC, 8);
+  sfu_write_be32(nack + 8, f.pub_video_ssrc);
+  sfu_write_be16(nack + 12, 4242); /* PID, not in cache */
+  sfu_write_be16(nack + 14, 0);    /* BLP */
+  feed_rtcp(&f.base, nack, hdr);
+
+  assert(f.publisher->last_pli_time != 0);
+  assert(f.base.session->last_pli_time == 0);
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 0);
+  kf_fixture_destroy(&f);
+}
+
+/* PLI naming an SSRC nobody forwards to this subscriber falls back to the
+ * feedback session and bumps rtcp_kf_unresolved. */
+static void test_pli_unknown_ssrc_falls_back(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  uint8_t pli[64];
+  size_t pli_len = rtcp_member_header(pli, 1, 206, MEDIA_SSRC, 4);
+  sfu_write_be32(pli + 8, 0x0bad0badu); /* unknown stream */
+  feed_rtcp(&f.base, pli, pli_len);
+
+  assert(f.publisher->last_pli_time == 0);
+  assert(f.base.session->last_pli_time != 0); /* fallback behavior */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 1);
+  kf_fixture_destroy(&f);
+}
+
+/* GCC output must move the scheduler fields the forwarding hot path reads
+ * (CC-02): a high estimate raises the subscriber scheduler's targets. */
+static void test_gcc_estimate_reaches_scheduler(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  f.session->scheduler = SFU_CALLOC(1, sizeof(*f.session->scheduler));
+  assert(f.session->scheduler != NULL);
+  sfu_subscriber_scheduler_init(f.session->scheduler, 1);
+  assert(f.session->scheduler->target_sid == 0);
+  assert(f.session->scheduler->target_tid == 0);
+
+  /* Exercise the exact TWCC-result path in the worker. */
+  extern void sfu_test_svc_update_layers(sfu_peer_session_t * session, uint32_t bitrate_bps);
+  sfu_test_svc_update_layers(f.session, 2000000);
+  assert(f.session->scheduler->target_sid == 2);
+  assert(f.session->scheduler->target_tid == 2);
+
+  /* Below the rung's down threshold but within the dwell window: the target
+   * must hold (hysteresis, #83). */
+  sfu_test_svc_update_layers(f.session, 100000);
+  assert(f.session->scheduler->target_sid == 2);
+  assert(f.session->scheduler->target_tid == 2);
+
+  /* After the dwell window, the downshift commits. */
+  f.session->scheduler->last_target_change_us -= 600000;
+  sfu_test_svc_update_layers(f.session, 100000);
+  assert(f.session->scheduler->target_sid == 0);
+  assert(f.session->scheduler->target_tid == 0);
+
+  fixture_destroy(&f);
+}
+
+/* CC-01: forwarding to a subscriber with a negotiated transport-cc extmap
+ * writes the per-subscriber TWCC sequence into the packet's RTP extension and
+ * records the same value in send history; a subscriber without negotiation
+ * gets neither. */
+static void test_egress_writes_twcc_extension(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  /* Subscriber (base.session) setup: scheduler selects the publisher, TWCC
+   * negotiated at extmap id 5, history allocated. An RTX cache is required
+   * by the forwarding path (it puts every forwarded video packet). */
+  sfu_peer_session_t *sub = f.base.session;
+  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
+  assert(sub->scheduler != NULL);
+  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
+  sub->twcc_extmap_id = 5;
+  assert(sub->twcc_history == NULL);
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+  assert(sub->rtx_cache != NULL); /* from fixture_init */
+
+  /* Neither session claims the packet's PT as its uplink video PT, so the
+   * packet is not VP9-parsed (VP9 detection keys on the SENDER's uplink PT)
+   * and sfu_scheduler_evaluate_frame — which would drop our synthetic
+   * non-keyframe — never runs. The plain forward path still applies. */
+  f.publisher->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.rtx_payload_type = 0;
+
+  /* Feed one publisher RTP packet through the ingress path. */
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, 1000, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f.publisher->cold->addr;
+  pkt->peer_addr_len = f.publisher->cold->addr_len;
+  sfu_room_forward_packet(&f.base.w, pkt);
+
+  /* The forwarded packet is retained by the send ring (never submitted), so
+   * verify through history + metrics: the first allocated TWCC sequence (0)
+   * must be recorded, and the recorded size must include the extension block
+   * growth over the plaintext RTP length. */
+  gcc_packet_info_t info = {0};
+  assert(sfu_twcc_history_lookup(sub->twcc_history, 0, &info)); /* first seq = 0 */
+  assert(info.size_bytes > plain_len);                          /* grew by the ext block */
+  assert(sfu_metric_get("twcc_write_fail") == 0);
+
+  kf_fixture_destroy(&f);
+}
+
+/* Without a negotiated extmap id, forwarding writes no extension and records
+ * no history. */
+static void test_egress_no_twcc_without_negotiation(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
+  assert(sub->scheduler != NULL);
+  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
+  sub->twcc_extmap_id = 0; /* not negotiated */
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+
+  f.publisher->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.payload_type = 0;
+  f.base.session->uplink_video.rtx_payload_type = 0;
+
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, 1001, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f.publisher->cold->addr;
+  pkt->peer_addr_len = f.publisher->cold->addr_len;
+  sfu_room_forward_packet(&f.base.w, pkt);
+
+  gcc_packet_info_t info = {0};
+  assert(!sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
+
+  kf_fixture_destroy(&f);
+}
+
+/* CC-10: a publisher on worker 0 forwarding to a subscriber owned by worker
+ * 1 must hand a FORWARD job through the fanout mesh; the destination worker
+ * performs the full egress rewrite (TWCC extension + history) there — the
+ * publisher worker touches none of the subscriber's egress state. */
+static void test_remote_forward_egress_on_owner(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_fanout_mesh_t mesh;
+  assert(sfu_fanout_mesh_init(&mesh, 2, 16, 32) == 0);
+  f.base.w.mesh = &mesh;
+  f.base.w.worker_index = 0;
+
+  sfu_worker_t w1;
+  memset(&w1, 0, sizeof(w1));
+  w1.pp = &f.base.pp;
+  w1.sessions = &f.base.sessions;
+  w1.worker_index = 1;
+  w1.mesh = &mesh;
+  int w1_fds[2];
+  assert(pipe(w1_fds) == 0);
+  assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sub->worker_id = 1; /* owned by the other worker */
+  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
+  assert(sub->scheduler != NULL);
+  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
+  sub->twcc_extmap_id = 5;
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+
+  f.publisher->uplink_video.payload_type = 0;
+  sub->uplink_video.payload_type = 0;
+  sub->uplink_video.rtx_payload_type = 0;
+
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, 2000, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f.publisher->cold->addr;
+  pkt->peer_addr_len = f.publisher->cold->addr_len;
+  sfu_room_forward_packet(&f.base.w, pkt);
+
+  /* The publisher worker must NOT have written any TWCC state yet: the job
+   * is queued, not processed. */
+  gcc_packet_info_t info = {0};
+  assert(!sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
+
+  /* Drain on the owning worker: egress rewrite happens there. */
+  unsigned drained = sfu_fanout_mesh_drain(&mesh, 1, 8, sfu_worker_handle_fanout_job, &w1);
+  assert(drained == 1);
+  assert(sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
+  assert(info.size_bytes > plain_len);
+
+  sfu_ring_destroy(&w1.send_ring);
+  close(w1_fds[0]);
+  close(w1_fds[1]);
+  f.base.w.mesh = NULL;
+  sfu_fanout_mesh_destroy(&mesh);
+  kf_fixture_destroy(&f);
+}
+
+/* F-10: a NACK naming a different stream than the cached entry must miss
+ * (and route a keyframe to that stream's publisher), never retransmit the
+ * wrong media. */
+static void test_nack_wrong_stream_misses_cache(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t pkt_buf[512];
+  size_t pkt_len;
+  build_rtp_video(pkt_buf, 42, 100, &pkt_len);
+  /* Cached for stream MEDIA_SSRC... */
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
+
+  /* ...but the NACK names a DIFFERENT media SSRC. */
+  uint8_t nack[64];
+  size_t hdr = rtcp_member_header(nack, 1, 205, MEDIA_SSRC, 8);
+  sfu_write_be32(nack + 8, 0xfeedface);
+  sfu_write_be16(nack + 12, 42);
+  sfu_write_be16(nack + 14, 0);
+  feed_rtcp(&f, nack, hdr);
+
+  assert(f.cache->next_rtx_seq == 0);   /* no retransmission */
+  assert(f.session->last_pli_time != 0); /* miss -> keyframe fallback */
+  fixture_destroy(&f);
+}
+
+/* F-10: bumping the egress generation (source switch) invalidates all
+ * previously cached entries wholesale. */
+static void test_generation_bump_invalidates_cache(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t pkt_buf[512];
+  size_t pkt_len;
+  build_rtp_video(pkt_buf, 42, 100, &pkt_len);
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
+
+  /* Source switch: generation 0 -> 1. */
+  atomic_store(&f.session->egress_generation, 1);
+
+  uint8_t nack[64];
+  size_t nack_len = build_nack(nack, (uint16_t[]){42, 0x0000}, 2);
+  feed_rtcp(&f, nack, nack_len);
+
+  assert(f.cache->next_rtx_seq == 0);    /* stale entry not served */
+  assert(f.session->last_pli_time != 0); /* miss -> keyframe fallback */
+  fixture_destroy(&f);
+}
+
 int main(void) {
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -369,6 +751,15 @@ int main(void) {
   test_bad_pli();
   test_fir_ignored();
   test_packet_release_ownership();
+  test_pli_routes_to_source_publisher();
+  test_nack_miss_routes_to_source_publisher();
+  test_pli_unknown_ssrc_falls_back();
+  test_gcc_estimate_reaches_scheduler();
+  test_egress_writes_twcc_extension();
+  test_egress_no_twcc_without_negotiation();
+  test_remote_forward_egress_on_owner();
+  test_nack_wrong_stream_misses_cache();
+  test_generation_bump_invalidates_cache();
   printf("test_worker_protocol: OK\n");
   return 0;
 }

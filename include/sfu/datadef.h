@@ -151,13 +151,14 @@ typedef struct sfu_peer_session {
   uint32_t next_remote_mid;
   int fd;
   uint16_t worker_id;
+  uint8_t twcc_extmap_id;
+  int64_t twcc_last_feedback_ref_us;
+  _Atomic uint32_t egress_generation;
   _Atomic uint32_t refcount;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t lifecycle;
   _Atomic bool accepts_work;
   uint8_t state;
-  uint8_t target_sid;
-  uint8_t target_tid;
   uint8_t fir_seq;
   bool active;
   bool negotiation_needed;
