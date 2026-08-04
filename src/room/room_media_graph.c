@@ -25,7 +25,6 @@ static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *dst
   e->video_active = dst->uplink_video.active;
 }
 
-/* Finds the slot position of destination `dst` in `old`, or UINT32_MAX. */
 static uint32_t snapshot_find(const sfu_receiver_snapshot_t *old, const sfu_peer_session_t *dst) {
   if (!old) {
     return UINT32_MAX;
@@ -48,23 +47,11 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   return snap;
 }
 
-/* Builds "old snapshot + dst appended". MID numbers are preserved across
- * replacements for SDP stability; a brand-new destination consumes fresh MIDs
- * from the owner's counter. Returns NULL on allocation failure, leaving the
- * peer's published snapshot unchanged. Call with the room lock held.
- *
- * The room lock serializes writers, NOT readers: a concurrent reader can
- * still hold (or be releasing) the old snapshot, so the old snapshot must be
- * retained with sfu_session_receivers_acquire before its entries are read.
- * Without the retain there is a use-after-free window: the writer loads the
- * pointer, the last reader releases and frees it, the writer then reads
- * old->count/old->entries (found by the #86 churn stress test under TSan as
- * an allocator-recycle race). */
 static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
   sfu_receiver_snapshot_t *old = sfu_session_receivers_acquire(owner);
   if (snapshot_find(old, dst) != UINT32_MAX) {
     sfu_receiver_snapshot_release(old);
-    return NULL; /* already routed */
+    return NULL;
   }
 
   uint32_t old_count = old ? old->count : 0;
@@ -76,14 +63,12 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
   snap->generation = (old ? old->generation : 0) + 1;
 
   for (uint32_t i = 0; i < old_count; i++) {
-    snap->entries[i] = old->entries[i]; /* value copy; ref re-taken below */
+    snap->entries[i] = old->entries[i];
     atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
   }
 
   sfu_receiver_entry_t *e = &snap->entries[old_count];
   memset(e, 0, sizeof(*e));
-  /* snapshot_find returned UINT32_MAX above, so dst is a new destination and
-   * consumes fresh MIDs from the owner's monotonic counter. */
   e->mid_audio = owner->next_remote_mid++;
   e->mid_video = owner->next_remote_mid++;
   snapshot_fill_entry(e, dst);
@@ -95,16 +80,12 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
   return snap;
 }
 
-/* Builds "old snapshot minus dst". Slot positions and MID numbers of all
- * remaining destinations are preserved. Returns NULL on allocation failure,
- * leaving the peer's published snapshot unchanged. Call with room lock held.
- * Retains the old snapshot for the same reason as snapshot_build_with. */
 static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner, const sfu_peer_session_t *dst) {
   sfu_receiver_snapshot_t *old = sfu_session_receivers_acquire(owner);
   uint32_t pos = snapshot_find(old, dst);
   if (pos == UINT32_MAX) {
     sfu_receiver_snapshot_release(old);
-    return NULL; /* dst not routed to owner */
+    return NULL;
   }
 
   uint32_t old_count = old->count;
@@ -120,7 +101,7 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
     if (i == pos) {
       continue;
     }
-    snap->entries[out] = old->entries[i]; /* value copy; ref re-taken below */
+    snap->entries[out] = old->entries[i];
     atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
     out++;
   }
@@ -129,15 +110,13 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
   return snap;
 }
 
-/* Replaces `owner`'s published snapshot with `new_snap` (taking ownership of
- * it) and marks the owner for renegotiation. Call with the room lock held. */
 static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
   sfu_session_publish_receivers(owner, new_snap);
   owner->negotiation_needed = true;
 }
 
 void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *scheduler) {
-  (void)scheduler; /* snapshots are self-refcounted; no epoch retirement */
+  (void)scheduler;
 
   pthread_mutex_lock(&room->lock);
 
@@ -160,13 +139,10 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
       continue;
     }
 
-    /* Routing is only wired between peers that both still accept work; a
-     * closing peer is never added as a destination nor given new routes. */
     if (!sfu_session_accepts_work(other) || !sfu_session_accepts_work(peer)) {
       continue;
     }
 
-    /* other subscribes to the new peer's uplink */
     sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer);
     if (snap) {
       snapshot_replace(other, snap);
@@ -174,7 +150,6 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *
       SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for peer subscribing to %s", room->room_id, peer->cold ? peer->cold->ufrag : "?");
     }
 
-    /* the new peer subscribes to other's uplink */
     snap = snapshot_build_with(peer, other);
     if (snap) {
       snapshot_replace(peer, snap);
@@ -190,8 +165,6 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_lock(&room->lock);
 
   if (peer->room != room) {
-    /* Already detached (or never a member): idempotent no-op. peer->room is
-     * only ever written under the room lock, so this check is race-free. */
     pthread_mutex_unlock(&room->lock);
     return;
   }
@@ -205,7 +178,6 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   }
 
   if (idx == UINT32_MAX) {
-    /* Defensive: back-pointer says member but the array disagrees. */
     peer->room = NULL;
     pthread_mutex_unlock(&room->lock);
     return;
@@ -215,7 +187,6 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   room->peers[room->peer_count - 1] = NULL;
   room->peer_count--;
 
-  /* Rebuild every remaining peer's snapshot without the departing peer. */
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *other = room->peers[i];
     if (!other) {
@@ -227,7 +198,6 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     }
   }
 
-  /* The departing peer's own snapshot is dropped entirely. */
   sfu_receiver_snapshot_t *empty = snapshot_alloc(0);
   if (empty) {
     empty->generation = 0;
