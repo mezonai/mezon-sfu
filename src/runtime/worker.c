@@ -278,6 +278,17 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     }
     requested[requested_count++] = lost_seq;
 
+    /* CC-16: time-window RTX budget. Retransmission bytes are capped at a
+     * fraction of the subscriber's paced estimate over time, so a peer
+     * NACKing at line rate cannot force unbounded rebuild/protect/send work
+     * or starve fresh media. Dropped requests are dropped outright (not
+     * queued): the receiver re-NACKs or escalates to PLI on real loss. */
+    if (sender_session->scheduler &&
+        !sfu_pacer_rtx_allow(&sender_session->scheduler->pacer, 1200 /* conservative MTU estimate */, (int64_t)sfu_now_us())) {
+      sfu_metric_inc("rtx_dropped_budget");
+      continue;
+    }
+
     uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
     uint32_t orig_len = 0;
     uint32_t rtx_ssrc = 0;
@@ -354,16 +365,35 @@ static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *se
  * (owned by the caller, released by the caller). `dst`/`dst_len` is a value
  * copy of the subscriber's address; `video_*`/`has_video` are the publisher's
  * routing metadata for this subscriber from the immutable receiver snapshot.
- * The subscriber pin must be held by the caller. */
+ * The subscriber pin must be held by the caller.
+ *
+ * `is_audio` marks the publisher's audio flow and `video_class` the VP9
+ * layer classification for the pacer (CC-15); both come from the admission
+ * side where the VP9 descriptor is still available. */
 static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst,
                                       socklen_t dst_len, uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc,
-                                      bool has_video) {
+                                      bool has_video, bool is_audio, sfu_pacer_class_t video_class) {
   int enc_len = (int)pkt->len;
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
   uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
   if (incoming_pt != expected_pt) {
     pkt->data[1] = (pkt->data[1] & 0x80) | (expected_pt & 0x7F);
+  }
+
+  /* CC-15: pacing admission BEFORE SRTP protect — a dropped packet must not
+   * burn crypto. The pacer admits in strict class priority (audio > RTX >
+   * video base > video enhancement) against one token bucket refilled at the
+   * paced GCC estimate; only enhancement-layer video is droppable, and only
+   * when the admission would exceed one burst window of debt. Inactive
+   * (transport-cc not negotiated) means unpaced, pre-pacer behavior. */
+  int64_t send_time_us = (int64_t)sfu_now_us();
+  if (sub_session->scheduler) {
+    sfu_pacer_class_t cls = is_audio ? SFU_PACER_CLASS_AUDIO : (has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
+    if (!sfu_pacer_should_send(&sub_session->scheduler->pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
+      sfu_metric_inc("pacer_dropped_enh");
+      return;
+    }
   }
 
   /* F-10: cache entries are scoped to the stream the subscriber receives
@@ -379,6 +409,8 @@ static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_s
   /* CC-01: write the per-subscriber transport-wide sequence into the
    * negotiated RTP extension BEFORE protecting/sending, and record history
    * only when the wire packet actually carries that exact value (CC-14).
+   * The recorded send time is the pacer's admission timestamp: with the
+   * pacer active that is the actual send boundary, completing CC-14.
    * twcc_extmap_id == 0 means transport-cc was not negotiated. */
   if (sub_session->twcc_extmap_id != 0) {
     uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
@@ -386,7 +418,7 @@ static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_s
     if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
       enc_len = (int)new_len;
       if (sub_session->twcc_history) {
-        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, (int64_t)sfu_now_us(), (uint32_t)enc_len);
+        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
       }
     } else {
       sfu_metric_inc("twcc_write_fail");
@@ -493,9 +525,14 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool is_vp9 = false;
   sfu_vp9_descriptor_t vp9_desc = {0};
   bool is_keyframe = false;
+  uint8_t ingress_pt = pkt->data[1] & 0x7F;
+  /* Audio classification for the pacer (CC-15): the sender's uplink audio
+   * payload type. Checked before VP9 parsing so a flow is exactly one of
+   * audio / video / unknown. */
+  bool is_audio = sender_session->uplink_audio.active && ingress_pt == sender_session->uplink_audio.payload_type;
 
-  if (!is_rtcp) {
-    uint8_t incoming_pt = pkt->data[1] & 0x7F;
+  if (!is_rtcp && !is_audio) {
+    uint8_t incoming_pt = ingress_pt;
     if (incoming_pt == sender_session->uplink_video.payload_type) {
       is_vp9 = true;
       int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
@@ -535,11 +572,15 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
+    /* Pacer class for video (CC-15): default base; upgraded to enhancement
+     * by the selector's post-evaluate layer state when the frame is VP9. */
+    sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
     if (is_vp9 && slot->has_video) {
       bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);
       if (!should_forward) {
         continue;
       }
+      video_class = sfu_scheduler_classify_frame(sub_session->scheduler, &vp9_desc);
     }
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
@@ -561,7 +602,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     if (sub_session->worker_id == w->worker_index) {
       /* Local subscriber: this worker IS the egress owner. */
       sfu_worker_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt,
-                                slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video);
+                                slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video, is_audio, video_class);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
       /* Remote subscriber: hand the plaintext + immutable routing metadata
@@ -570,7 +611,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
       if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, enc, sub_session, &sub_session->cold->addr,
                                            sub_session->cold->addr_len, slot->video_ssrc, slot->video_rtx_ssrc, slot->video_pt, slot->video_rtx_pt,
-                                           slot->has_video)) {
+                                           slot->has_video, is_audio, (uint8_t)video_class)) {
         SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
         sfu_session_release(sub_session);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
@@ -595,7 +636,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
      * processing is safe; a fully-torn-down SRTP context simply fails
      * protect and drops. */
     sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_ssrc, job->video_pt, job->video_rtx_pt,
-                              job->video_rtx_ssrc, job->has_video);
+                              job->video_rtx_ssrc, job->has_video, job->is_audio, (sfu_pacer_class_t)job->pacer_class);
     sfu_session_release(job->subscriber);
   } else {
     if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {

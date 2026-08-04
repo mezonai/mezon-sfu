@@ -29,6 +29,10 @@ static const char *const k_metric_names[] = {
     /* Egress owner-side failures (CC-10). */
     "egress_protect_fail",
     "egress_send_full",
+    /* Pacer drops of enhancement-layer video under pacing debt (CC-15). */
+    "pacer_dropped_enh",
+    /* Retransmission requests dropped by the time-window RTX budget (CC-16). */
+    "rtx_dropped_budget",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };
