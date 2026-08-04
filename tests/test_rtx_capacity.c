@@ -1,4 +1,5 @@
 #include "rtp/rtx.h"
+#include "rtp/rtx_build.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +74,56 @@ int main(void) {
 
   /* Double-destroy after destroy nulls entry pointers must be safe. */
   sfu_rtx_cache_destroy(&cache);
+
+  /* --- wire boundary (#86): a cached packet at the maximum cacheable
+   * length (SFU_MAX_PAYLOAD_SIZE - 2) must round-trip through
+   * sfu_rtx_build into a pool-sized buffer (SFU_MAX_PAYLOAD_SIZE) exactly,
+   * and must fail cleanly with one byte less. --- */
+  {
+    sfu_rtx_cache_t c2;
+    EXPECT(sfu_rtx_cache_init(&c2) == 0);
+
+    /* Minimal RTP header (12 bytes) + payload to reach the boundary. */
+    uint8_t *wire = (uint8_t *)malloc(SFU_MAX_PAYLOAD_SIZE);
+    EXPECT(wire != NULL);
+    wire[0] = 0x80;
+    wire[1] = 96;
+    wire[2] = 0;
+    wire[3] = 7; /* seq 7 */
+    memset(wire + 4, 0, 8);         /* timestamp + ssrc */
+    memset(wire + 12, 0x5a, SFU_MAX_PAYLOAD_SIZE - 12);
+
+    const uint32_t max_cached = SFU_MAX_PAYLOAD_SIZE - 2;
+    sfu_rtx_cache_put_stream(&c2, 7, wire, max_cached, 0x11223344u, 97, 0xaabbccddu, 0);
+
+    uint8_t *orig = (uint8_t *)malloc(SFU_MAX_PAYLOAD_SIZE);
+    EXPECT(orig != NULL);
+    uint32_t orig_len = 0;
+    uint32_t rtx_ssrc = 0;
+    uint8_t rtx_pt = 0;
+    EXPECT(sfu_rtx_cache_get_stream(&c2, 7, orig, &orig_len, &rtx_ssrc, &rtx_pt, 0xaabbccddu, 0));
+    EXPECT(orig_len == max_cached);
+
+    uint8_t *outb = (uint8_t *)malloc(SFU_MAX_PAYLOAD_SIZE + 1);
+    EXPECT(outb != NULL);
+    memset(outb, 0xa5, SFU_MAX_PAYLOAD_SIZE + 1);
+    size_t built = 0;
+    /* orig_len + 2 == SFU_MAX_PAYLOAD_SIZE == pool buffer cap: fits exactly. */
+    EXPECT(sfu_rtx_build(orig, orig_len, rtx_pt, 9000, rtx_ssrc, outb, SFU_MAX_PAYLOAD_SIZE, &built));
+    EXPECT(built == SFU_MAX_PAYLOAD_SIZE);
+    /* One byte less must fail without touching the buffer. Restore the
+     * canary first (the successful build above already wrote there). */
+    memset(outb, 0xa5, SFU_MAX_PAYLOAD_SIZE + 1);
+    size_t built2 = 777;
+    EXPECT(!sfu_rtx_build(orig, orig_len, rtx_pt, 9000, rtx_ssrc, outb, SFU_MAX_PAYLOAD_SIZE - 1, &built2));
+    EXPECT(built2 == 777);                          /* untouched on failure */
+    EXPECT(outb[0] == 0xa5 && outb[SFU_MAX_PAYLOAD_SIZE] == 0xa5);
+
+    free(outb);
+    free(orig);
+    free(wire);
+    sfu_rtx_cache_destroy(&c2);
+  }
 
   printf("test_rtx_capacity: OK\n");
   return 0;

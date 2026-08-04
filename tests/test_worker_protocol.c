@@ -840,6 +840,70 @@ static void test_nack_line_rate_throttled_by_rtx_budget(void) {
   fixture_destroy(&f);
 }
 
+/* #86 churn: forwarding interleaved with subscriber disconnect. The
+ * snapshot pin keeps in-flight packets safe; after close the subscriber is
+ * removed from the publisher's receiver set so later packets skip it, and
+ * the publisher's own forward path stays healthy throughout. Runs under
+ * ASan/TSan in CI to witness lifetime safety. */
+static void test_forward_churn_subscriber_disconnect(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sub->scheduler = SFU_CALLOC(1, sizeof(*sub->scheduler));
+  assert(sub->scheduler != NULL);
+  sfu_subscriber_scheduler_init(sub->scheduler, f.publisher->peer_id);
+  sub->twcc_extmap_id = 5;
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+
+  f.publisher->uplink_video.payload_type = 0;
+  sub->uplink_video.payload_type = 0;
+  sub->uplink_video.rtx_payload_type = 0;
+
+  uint16_t seq = 5000;
+  for (int round = 0; round < 8; round++) {
+    /* Forward one packet through the publisher ingress path. */
+    uint8_t plain[512];
+    size_t plain_len;
+    build_rtp_video(plain, seq++, 60, &plain_len);
+    uint8_t wire[1024];
+    memcpy(wire, plain, plain_len);
+    int wire_len = (int)plain_len;
+    assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+    sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+    assert(pkt != NULL);
+    memcpy(pkt->data, wire, (size_t)wire_len);
+    pkt->len = (uint32_t)wire_len;
+    pkt->peer_addr = f.publisher->cold->addr;
+    pkt->peer_addr_len = f.publisher->cold->addr_len;
+    sfu_room_forward_packet(&f.base.w, pkt);
+
+    gcc_packet_info_t info = {0};
+    bool recorded = sfu_twcc_history_lookup(sub->twcc_history, (uint16_t)round, &info);
+
+    if (round == 3) {
+      /* Mid-stream disconnect: logical close removes the subscriber from
+       * the table/room; the receiver snapshot the publisher already took
+       * (and any in-flight packet) stays valid via its pin. */
+      room_remove_peer(&f.room, sub);
+      sfu_session_table_remove(&f.base.sessions, sub);
+      assert(sub->state != SFU_SESSION_ESTABLISHED || !sfu_session_accepts_work(sub));
+    } else if (round > 3) {
+      /* After removal the subscriber is no longer in the receiver set:
+       * nothing new is recorded for it. */
+      assert(!recorded);
+    }
+  }
+
+  /* Teardown: room_remove_peer and sfu_session_table_remove are both
+   * idempotent, so the standard fixture teardown is safe even though the
+   * subscriber was already removed mid-test. */
+  kf_fixture_destroy(&f);
+}
+
 int main(void) {
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -860,6 +924,7 @@ int main(void) {
   test_generation_bump_invalidates_cache();
   test_egress_pacer_drops_enhancement_not_audio();
   test_nack_line_rate_throttled_by_rtx_budget();
+  test_forward_churn_subscriber_disconnect();
   printf("test_worker_protocol: OK\n");
   return 0;
 }
