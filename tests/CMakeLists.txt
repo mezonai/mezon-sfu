@@ -94,6 +94,10 @@ add_executable(test_twcc_parser test_twcc_parser.c)
 target_link_libraries(test_twcc_parser PRIVATE sfu_core)
 add_test(NAME twcc_parser COMMAND test_twcc_parser)
 
+add_executable(test_pacer test_pacer.c)
+target_link_libraries(test_pacer PRIVATE sfu_core)
+add_test(NAME pacer COMMAND test_pacer)
+
 add_executable(test_gcc test_gcc.c)
 target_link_libraries(test_gcc PRIVATE sfu_core)
 add_test(NAME gcc COMMAND test_gcc)
@@ -109,4 +113,8 @@ add_test(NAME worker_protocol COMMAND test_worker_protocol)
 add_executable(test_vp9_parser test_vp9_parser.c)
 target_link_libraries(test_vp9_parser PRIVATE sfu_core)
 add_test(NAME vp9_parser COMMAND test_vp9_parser)
+
+add_executable(test_parser_fuzz test_parser_fuzz.c)
+target_link_libraries(test_parser_fuzz PRIVATE sfu_core)
+add_test(NAME parser_fuzz COMMAND test_parser_fuzz)
 

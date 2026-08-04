@@ -25,6 +25,8 @@ typedef struct sfu_fanout_job {
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   bool has_video;
+  bool is_audio;
+  uint8_t pacer_class; /* sfu_pacer_class_t, meaningful when !is_audio */
   uint8_t kind;
 } sfu_fanout_job_t;
 
@@ -41,7 +43,7 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
                              socklen_t dst_len);
 bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, sfu_peer_session_t *subscriber,
                                      const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc, uint32_t video_rtx_ssrc, uint8_t video_pt,
-                                     uint8_t video_rtx_pt, bool has_video);
+                                     uint8_t video_rtx_pt, bool has_video, bool is_audio, uint8_t pacer_class);
 typedef void (*sfu_fanout_job_fn)(void *user_data, sfu_fanout_job_t *job);
 
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data);

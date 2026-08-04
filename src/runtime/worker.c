@@ -229,6 +229,11 @@ static void sfu_worker_handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *s
     }
     requested[requested_count++] = lost_seq;
 
+    if (sender_session->scheduler && !sfu_pacer_rtx_allow(&sender_session->scheduler->pacer, 1200 /* conservative MTU estimate */, (int64_t)sfu_now_us())) {
+      sfu_metric_inc("rtx_dropped_budget");
+      continue;
+    }
+
     uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
     uint32_t orig_len = 0;
     uint32_t rtx_ssrc = 0;
@@ -290,13 +295,23 @@ static void sfu_worker_handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *se
 }
 
 static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst,
-                                      socklen_t dst_len, uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video) {
+                                      socklen_t dst_len, uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video,
+                                      bool is_audio, sfu_pacer_class_t video_class) {
   int enc_len = (int)pkt->len;
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
   uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
   if (incoming_pt != expected_pt) {
     pkt->data[1] = (pkt->data[1] & 0x80) | (expected_pt & 0x7F);
+  }
+
+  int64_t send_time_us = (int64_t)sfu_now_us();
+  if (sub_session->scheduler) {
+    sfu_pacer_class_t cls = is_audio ? SFU_PACER_CLASS_AUDIO : (has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
+    if (!sfu_pacer_should_send(&sub_session->scheduler->pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
+      sfu_metric_inc("pacer_dropped_enh");
+      return;
+    }
   }
 
   uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
@@ -311,7 +326,7 @@ static void sfu_worker_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_s
     if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
       enc_len = (int)new_len;
       if (sub_session->twcc_history) {
-        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, (int64_t)sfu_now_us(), (uint32_t)enc_len);
+        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
       }
     } else {
       sfu_metric_inc("twcc_write_fail");
@@ -412,9 +427,11 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool is_vp9 = false;
   sfu_vp9_descriptor_t vp9_desc = {0};
   bool is_keyframe = false;
+  uint8_t ingress_pt = pkt->data[1] & 0x7F;
+  bool is_audio = sender_session->uplink_audio.active && ingress_pt == sender_session->uplink_audio.payload_type;
 
-  if (!is_rtcp) {
-    uint8_t incoming_pt = pkt->data[1] & 0x7F;
+  if (!is_rtcp && !is_audio) {
+    uint8_t incoming_pt = ingress_pt;
     if (incoming_pt == sender_session->uplink_video.payload_type) {
       is_vp9 = true;
       int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
@@ -450,11 +467,13 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
       continue;
     }
 
+    sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
     if (is_vp9 && slot->has_video) {
       bool should_forward = sfu_scheduler_evaluate_frame(sub_session->scheduler, &vp9_desc, is_keyframe);
       if (!should_forward) {
         continue;
       }
+      video_class = sfu_scheduler_classify_frame(sub_session->scheduler, &vp9_desc);
     }
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
@@ -473,13 +492,13 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
     if (sub_session->worker_id == w->worker_index) {
       sfu_worker_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt,
-                                slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video);
+                                slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video, is_audio, video_class);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
       atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
       if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, enc, sub_session, &sub_session->cold->addr,
                                            sub_session->cold->addr_len, slot->video_ssrc, slot->video_rtx_ssrc, slot->video_pt, slot->video_rtx_pt,
-                                           slot->has_video)) {
+                                           slot->has_video, is_audio, (uint8_t)video_class)) {
         SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
         sfu_session_release(sub_session);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
@@ -497,7 +516,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
 
   if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
     sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_ssrc, job->video_pt, job->video_rtx_pt, job->video_rtx_ssrc,
-                              job->has_video);
+                              job->has_video, job->is_audio, (sfu_pacer_class_t)job->pacer_class);
     sfu_session_release(job->subscriber);
   } else {
     if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
