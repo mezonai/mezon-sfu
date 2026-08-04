@@ -21,10 +21,6 @@ typedef struct sfu_subscriber_scheduler {
   uint8_t current_sid;
   uint8_t current_tid;
   bool needs_keyframe;
-  /* Per-subscriber egress pacer (CC-15). Owned by this scheduler's session
-   * worker (CC-10 single-writer): armed by the GCC estimate via
-   * sfu_subscriber_scheduler_set_bitrate, consulted on every egress packet
-   * before SRTP protect. Inactive when transport-cc was not negotiated. */
   sfu_pacer_t pacer;
   /* Last time the target layers changed (microseconds); enforces dwell time
    * between target changes so a jittery GCC estimate cannot flap layers. */
@@ -53,11 +49,6 @@ bool sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr);
 void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t initial_publisher);
 bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe);
 
-/* Classifies one accepted frame for the pacer using the selector's CURRENT
- * layer state (post-evaluate): anything above the base spatial or base
- * temporal layer is enhancement traffic and droppable under pacing debt.
- * Must be called with the same descriptor right after evaluate_frame
- * returned true. */
 sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc);
 
 /* Maps a congestion-control bitrate estimate onto the exact target SID/TID

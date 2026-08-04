@@ -42,9 +42,6 @@ void sfu_pacer_set_rate(sfu_pacer_t *p, uint32_t bps, int64_t now_us) {
     cap = SFU_PACER_MIN_BUCKET_BYTES;
   }
   p->bucket_cap_bytes = cap;
-  /* CC-16: RTX budget = 25% of the pacing rate, same 40 ms window. A burst
-   * of legitimate loss is served immediately; sustained line-rate NACKs
-   * drain it and further requests drop until it refills. */
   p->rtx_budget_bps = (uint32_t)(paced / 4);
   int64_t rtx_cap = (int64_t)p->rtx_budget_bps / 8 * SFU_PACER_BURST_US / 1000000LL;
   if (rtx_cap < SFU_PACER_MIN_BUCKET_BYTES) {

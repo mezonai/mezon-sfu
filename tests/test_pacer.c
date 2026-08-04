@@ -1,7 +1,3 @@
-/* Pacer unit tests (CC-15, issue #81): token-bucket accounting, class
- * priority vs. debt, enhancement-layer drop policy, retune semantics, and
- * the CC-14 admission-timestamp contract. */
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
