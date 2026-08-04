@@ -8,10 +8,6 @@
 /* 24-bit reference-time range in microseconds (2^24 * 64 ms). */
 #define TWCC_REF_RANGE_US ((1LL << 24) * 64000LL)
 
-/* Validates the chunk run in init (CC-06): every run-length chunk must carry
- * a nonzero run with a non-reserved symbol, and the total status count must
- * not exceed packet_status_count. Returns the delta section offset, or 0 on
- * malformed input. */
 static size_t validate_chunks(const uint8_t *data, size_t len, uint16_t packet_status_count) {
   size_t offset = TWCC_FIXED_LEN;
   uint32_t processed = 0;
@@ -24,7 +20,6 @@ static size_t validate_chunks(const uint8_t *data, size_t len, uint16_t packet_s
     offset += 2;
 
     if ((chunk & 0x8000) == 0) {
-      /* Run length: T=0, symbol in bits 13-14, run length in bits 0-12. */
       uint8_t symbol = (chunk >> 13) & 0x03;
       uint16_t run = chunk & 0x1FFF;
       if (symbol == TWCC_STATUS_RESERVED || run == 0) {
@@ -32,18 +27,11 @@ static size_t validate_chunks(const uint8_t *data, size_t len, uint16_t packet_s
       }
       processed += run;
     } else {
-      /* Status vector: T=1, symbol size in bit 14. Zero statuses are fine
-       * here (a vector of all NOT_RECEIVED is legitimate). */
       bool two_bit = (chunk & 0x4000) != 0;
       processed += two_bit ? 7u : 14u;
     }
   }
 
-  /* Overrun is only legal for the trailing statuses of the final vector
-   * chunk, which simply go unreported... no: draft-ietf-rmcat-02 §3.1.3/3.1.4
-   * requires the chunk run to cover AT LEAST packet_status_count statuses,
-   * and excess statuses in the final chunk are ignored by the receiver.
-   * processed >= packet_status_count holds by loop exit, so accept. */
   return offset;
 }
 
@@ -63,9 +51,6 @@ int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t 
   }
   parser->delta_offset = delta_offset;
 
-  /* Reference time: 24-bit, 64 ms units -> microseconds. Unwrap against the
-   * caller's anchor to the nearest epoch so a wrap does not inject a
-   * ~12.4-day backward jump (CC-12). */
   int64_t ref_us = (int64_t)sfu_read_be24(data + 16) * 64000LL;
   if (unwrap_anchor_us > 0) {
     int64_t delta = ref_us - (unwrap_anchor_us % TWCC_REF_RANGE_US);
@@ -86,10 +71,6 @@ int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t 
   return 0;
 }
 
-/* Reads the next status symbol. Chunks were pre-validated in init, so a
- * structurally impossible state (zero run, reserved run symbol) maps to
- * TWCC_STATUS_RESERVED to signal malformed; chunk overrun maps to
- * NOT_RECEIVED only when the count was honestly exhausted. */
 static uint8_t get_next_status(sfu_twcc_parser_t *parser) {
   if (parser->statuses_left_in_chunk == 0) {
     if (parser->chunk_offset + 2 > parser->delta_offset) {

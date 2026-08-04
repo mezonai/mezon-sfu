@@ -73,11 +73,6 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
   return 0;
 }
 
-/* Appends the transport-wide CC offer/answer contract for one media section:
- * the extmap mapping the locally-chosen ID plus the transport-cc feedback
- * capability (CC-11). The SFU always offers ID 5 on its sendonly sections;
- * the peer answers with the ID it will accept (see handle_answer), which is
- * what the egress path writes into RTP. */
 #define SFU_TWCC_LOCAL_EXTMAP_ID 5
 
 static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset) {
@@ -300,12 +295,6 @@ static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t 
   return true;
 }
 
-/* Lifetime invariant (F-18): the caller keeps `session` alive for the whole
- * build via a refcounted pin or the room lock (see sdp.h). All receiver-set
- * traversal below goes through the retained immutable snapshot acquired at
- * entry; no snapshot entry is ever followed back into a mutable session. The
- * only mutable session state read is uplink_video PT negotiation, which is a
- * benign best-effort default. */
 int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
                          const char *pwd, const char *fingerprint, char *out, size_t out_cap) {
   size_t off = 0;
@@ -558,10 +547,6 @@ fail:
   return -1;
 }
 
-/* Lifetime invariant (F-18): same contract as sfu_sdp_build_answer — the
- * caller keeps `session` alive via a refcounted pin or the room lock, and
- * all receiver-set traversal goes through the retained immutable snapshot
- * acquired here. */
 int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                         char *out, size_t out_cap) {
   size_t off = 0;

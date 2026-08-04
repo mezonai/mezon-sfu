@@ -68,8 +68,7 @@ static bool one_byte_find(const uint8_t *ext, size_t ext_len, uint8_t ext_id, si
   return false;
 }
 
-/* Finds an existing two-byte-header (RFC 8285 §4.3) element with id
- * `ext_id`. */
+/* Finds an existing two-byte-header (RFC 8285 §4.3) element with id `ext_id`. */
 static bool two_byte_find(const uint8_t *ext, size_t ext_len, uint8_t ext_id, size_t *elem_off, size_t *elem_size) {
   size_t pos = 0;
   while (pos < ext_len) {

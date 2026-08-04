@@ -143,8 +143,7 @@ static void update_trendline(gcc_trendline_estimator_t *te, double delay_variati
   }
 
   te->accumulated_delay_ms += delay_variation_ms;
-  te->smoothed_delay_ms =
-      GCC_DELAY_SMOOTHING_ALPHA * te->smoothed_delay_ms + (1.0 - GCC_DELAY_SMOOTHING_ALPHA) * te->accumulated_delay_ms;
+  te->smoothed_delay_ms = GCC_DELAY_SMOOTHING_ALPHA * te->smoothed_delay_ms + (1.0 - GCC_DELAY_SMOOTHING_ALPHA) * te->accumulated_delay_ms;
 
   double rel_arrival_ms = (double)(arrival_time_us - te->first_arrival_time_us) / 1000.0;
 
@@ -161,10 +160,6 @@ static void update_trendline(gcc_trendline_estimator_t *te, double delay_variati
   trendline_detect(te, modified_trend, arrival_time_us);
 }
 
-/* Time-paced AIMD with acknowledged-bitrate anchoring (CC-08). Transitions
- * are total: NORMAL always reaches INCREASE (after one HOLD group following
- * a decrease), and every OVERUSE signal decreases — the old freeze in
- * DECREASE is impossible. */
 static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int64_t now_us) {
   switch (usage) {
     case GCC_BWE_OVERUSE: {
@@ -187,9 +182,6 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
         break;
       }
       aimd->state = GCC_RATE_CTRL_INCREASE;
-      /* Additive increase, paced by elapsed feedback time — never by
-       * callback count (CC-08). Capped at 1.5x the acknowledged bitrate
-       * while probing so the estimate cannot outrun the path. */
       if (aimd->last_increase_us == 0) {
         aimd->last_increase_us = now_us;
       } else if (now_us - aimd->last_increase_us >= GCC_AIMD_MIN_INCREASE_INTERVAL_US) {
@@ -198,8 +190,8 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
         if (add == 0) {
           add = 1000; /* minimum quantum */
         }
-        uint64_t cap = aimd->have_ack_bitrate ? (uint64_t)aimd->ack_bitrate_bps * GCC_AIMD_PROBE_HEADROOM_NUM / GCC_AIMD_PROBE_HEADROOM_DEN
-                                              : (uint64_t)UINT32_MAX;
+        uint64_t cap =
+            aimd->have_ack_bitrate ? (uint64_t)aimd->ack_bitrate_bps * GCC_AIMD_PROBE_HEADROOM_NUM / GCC_AIMD_PROBE_HEADROOM_DEN : (uint64_t)UINT32_MAX;
         uint64_t next = (uint64_t)aimd->current_bitrate_bps + add;
         if (next > cap) {
           next = cap;
