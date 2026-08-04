@@ -680,7 +680,6 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
       }
     }
 
-
     uint8_t remote_video_pt = (video_live && slot.video_pt != 0) ? slot.video_pt : local_video_pt;
     uint8_t remote_rtx_pt = (video_live && slot.video_rtx_pt != 0) ? slot.video_rtx_pt : local_rtx_pt;
 

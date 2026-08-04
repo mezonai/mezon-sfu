@@ -889,6 +889,23 @@
                                     }),
                                 ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
+                                console.log(pc.getTransceivers().map(t => ({
+                                    mid: t.mid,
+                                    kind: t.receiver.track.kind,
+                                    direction: t.direction,
+                                    currentDirection: t.currentDirection
+                                })));
+
+                                setTimeout(() => {
+                                    pc.getReceivers().forEach(r => {
+                                        console.log(
+                                            r.track.kind,
+                                            r.track.readyState,
+                                            r.track.muted
+                                        );
+                                    });
+                                }, 2000);
+
                                 const activeTrackIds = new Set();
                                 pc.getReceivers().forEach(r => {
                                     console.log('collect track state', r.track.readyState);
@@ -902,7 +919,8 @@
                                     if (id === "local") continue;
                                     const track = p.stream ? p.stream.getTracks()[0] : null;
                                     if (!track || !activeTrackIds.has(track.id)) {
-                                        removeTile(id);
+                                        console.log("remove track", id);
+                                        //removeTile(id);
                                     }
                                 }
 
