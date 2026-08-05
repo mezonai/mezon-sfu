@@ -183,7 +183,7 @@ static void exercise_rtp_ext(const uint8_t *d, size_t len) {
 
 static void exercise_vp9(const uint8_t *d, size_t len) {
   sfu_vp9_descriptor_t desc;
-  (void)sfu_parse_codec_descriptor(d, len, &desc);
+  (void)sfu_parse_vp9_descriptor(d, len, &desc);
 }
 
 int main(void) {
