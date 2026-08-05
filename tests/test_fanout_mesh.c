@@ -67,15 +67,22 @@ int main(void) {
   drained = sfu_fanout_mesh_drain(&mesh, 0, 16, collect, &c);
   assert(drained == 0);
 
-  /* Job pool round-trips correctly: having freed every job drained
-   * above, we should be able to allocate the full pool capacity again
-   * without exhaustion. */
-  for (int i = 0; i < 64; i++) {
+  /* Job pool round-trips correctly: partitions are per destination worker
+   * (64 total / 4 workers = 16 slots per dst), so after freeing every job
+   * drained above, dst 1's partition must accept exactly 16 more jobs. */
+  for (int i = 0; i < 16; i++) {
     assert(sfu_fanout_mesh_enqueue(&mesh, 0, 1, &fake_pkt, &s1, sizeof(struct sockaddr_in)));
   }
+  /* 17th job for dst 1: partition exhausted -> enqueue fails cleanly. */
+  assert(!sfu_fanout_mesh_enqueue(&mesh, 0, 1, &fake_pkt, &s1, sizeof(struct sockaddr_in)));
+  /* A different destination's partition is untouched. */
+  assert(sfu_fanout_mesh_enqueue(&mesh, 0, 2, &fake_pkt, &s2, sizeof(struct sockaddr_in)));
   c.count = 0;
   drained = sfu_fanout_mesh_drain(&mesh, 1, 100, collect, &c);
-  assert(drained == 64);
+  assert(drained == 16);
+  c.count = 0;
+  drained = sfu_fanout_mesh_drain(&mesh, 2, 100, collect, &c);
+  assert(drained == 1);
 
   sfu_fanout_mesh_destroy(&mesh);
   printf("test_fanout_mesh: OK\n");
