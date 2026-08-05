@@ -5,7 +5,7 @@
 #include "congestion/gcc.h"
 #include "congestion/twcc_history.h"
 #include "congestion/twcc_parser.h"
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "protocol/signaling/sdp.h"
@@ -454,7 +454,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
         if (payload_offset > 0) {
           const uint8_t *payload = pkt->data + payload_offset;
           size_t payload_len = pkt->len - payload_offset;
-          if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
+          if (sfu_parse_codec_descriptor(payload, payload_len, &vp9_desc) == 0) {
             is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
           } else {
             is_vp9 = false;

@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include "congestion/twcc_parser.h"
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtp/rtp_ext.h"
 #include "rtp/rtx.h"
@@ -94,7 +94,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
     case 4: {
       sfu_vp9_descriptor_t desc;
-      (void)sfu_parse_vp9_descriptor(d, len, &desc);
+      (void)sfu_parse_codec_descriptor(d, len, &desc);
       break;
     }
   }
