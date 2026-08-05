@@ -340,14 +340,30 @@ static void test_packet_release_ownership(void) {
   uint8_t garbage[16] = {0xC1, 206, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   feed_rtcp(&f, garbage, sizeof(garbage));
 
-  /* PLI triggers one throttled keyframe request: the worker's own PLI build
-   * allocs one packet, queues it (retained ref), and drops its own ref. */
+  /* No uplink video SSRC: the keyframe request bail-out path must not
+   * allocate (nor leak) any packet. */
   uint8_t pli[64];
   size_t pli_len = build_pli(pli);
   feed_rtcp(&f, pli, pli_len);
-  feed_rtcp(&f, pli, pli_len); /* throttled: no second keyframe packet */
+  assert(f.session->last_pli_time != 0); /* request throttled/coalesced... */
+  assert(pool_free_count(&f.pp) == POOL_CAPACITY); /* ...but no packet held */
 
+  /* With a video SSRC the PLI is actually built: one packet is allocated,
+   * queued on the send ring (retained ref, never submitted here), and the
+   * builder's own ref is dropped. */
+  f.session->last_pli_time = 0;
+  f.session->uplink_video.ssrc = MEDIA_SSRC;
+  feed_rtcp(&f, pli, pli_len);
   assert(pool_free_count(&f.pp) == POOL_CAPACITY - 1);
+
+  /* Inside the throttle window: coalesced, no second packet. */
+  feed_rtcp(&f, pli, pli_len);
+  assert(pool_free_count(&f.pp) == POOL_CAPACITY - 1);
+
+  /* Outside the window: a new request allocates again. */
+  f.session->last_pli_time -= 2000;
+  feed_rtcp(&f, pli, pli_len);
+  assert(pool_free_count(&f.pp) == POOL_CAPACITY - 2);
   fixture_destroy(&f);
 }
 
@@ -930,6 +946,108 @@ static void test_source_switch_colliding_seq_delayed_nack(void) {
   fixture_destroy(&f);
 }
 
+/* A keyframe request for a publisher owned by another worker must hand a
+ * KEYFRAME_REQUEST job through the mesh without touching the requester's
+ * packet pool (the alloc used to happen before the cross-worker branch and
+ * leak), and it must retain exactly one publisher reference for the job. */
+static void test_kf_request_cross_worker_no_packet_leak(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_fanout_mesh_t mesh;
+  assert(sfu_fanout_mesh_init(&mesh, 2, 16, 32) == 0);
+  f.base.w.mesh = &mesh;
+  f.base.w.worker_index = 0;
+  f.publisher->worker_id = 1; /* owned by the other worker */
+
+  uint32_t before = pool_free_count(&f.base.pp);
+  uint32_t ref_before = atomic_load(&f.publisher->refcount);
+
+  sfu_session_request_keyframe(&f.base.w, f.publisher, false);
+
+  assert(pool_free_count(&f.base.pp) == before); /* no packet allocated/leaked */
+  assert(atomic_load(&f.publisher->refcount) == ref_before + 1);
+  assert(f.publisher->last_pli_time == 0); /* timestamp set by owner on execution */
+
+  /* Draining on the publisher's worker executes the PLI build there and
+   * returns the publisher reference. */
+  sfu_worker_t w1;
+  memset(&w1, 0, sizeof(w1));
+  w1.pp = &f.base.pp;
+  w1.sessions = &f.base.sessions;
+  w1.worker_index = 1;
+  w1.mesh = &mesh;
+  int w1_fds[2];
+  assert(pipe(w1_fds) == 0);
+  assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
+
+  unsigned drained = sfu_fanout_mesh_drain(&mesh, 1, 8, sfu_worker_handle_fanout_job, &w1);
+  assert(drained == 1);
+  assert(atomic_load(&f.publisher->refcount) == ref_before);
+  /* Exactly one PLI packet left the pool (queued on w1's send ring, never
+   * submitted, so its retained ref is still out). */
+  assert(pool_free_count(&f.base.pp) == before - 1);
+
+  sfu_ring_destroy(&w1.send_ring);
+  close(w1_fds[0]);
+  close(w1_fds[1]);
+  f.base.w.mesh = NULL;
+  sfu_fanout_mesh_destroy(&mesh);
+  kf_fixture_destroy(&f);
+}
+
+/* When the cross-worker ring is full, the enqueue must fail cleanly: the
+ * publisher reference taken for the job is dropped again (it used to leak,
+ * pinning the session forever). */
+static void test_kf_enqueue_ring_full_drops_ref(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_fanout_mesh_t mesh;
+  assert(sfu_fanout_mesh_init(&mesh, 2, 4 /* tiny ring */, 32) == 0);
+  f.base.w.mesh = &mesh;
+  f.base.w.worker_index = 0;
+  f.publisher->worker_id = 1;
+
+  uint32_t ref_before = atomic_load(&f.publisher->refcount);
+
+  /* Fill the 0->1 ring (capacity 4) through the public enqueue path. */
+  for (int i = 0; i < 4; i++) {
+    assert(sfu_fanout_mesh_enqueue_keyframe_request(&mesh, 0, 1, f.publisher));
+  }
+  assert(atomic_load(&f.publisher->refcount) == ref_before + 4);
+
+  /* 5th enqueue: ring full -> must fail and drop the reference it took. */
+  assert(!sfu_fanout_mesh_enqueue_keyframe_request(&mesh, 0, 1, f.publisher));
+  assert(atomic_load(&f.publisher->refcount) == ref_before + 4);
+
+  /* Drain the 4 queued jobs on the publisher worker; each releases its ref. */
+  sfu_worker_t w1;
+  memset(&w1, 0, sizeof(w1));
+  w1.pp = &f.base.pp;
+  w1.sessions = &f.base.sessions;
+  w1.worker_index = 1;
+  w1.mesh = &mesh;
+  int w1_fds[2];
+  assert(pipe(w1_fds) == 0);
+  assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
+
+  unsigned drained = sfu_fanout_mesh_drain(&mesh, 1, 8, sfu_worker_handle_fanout_job, &w1);
+  assert(drained == 4);
+  assert(atomic_load(&f.publisher->refcount) == ref_before);
+
+  /* Execution-side coalescing: 4 queued requests collapse into a single PLI
+   * packet; the other three hit the execution throttle and alloc nothing. */
+  assert(pool_free_count(&f.base.pp) == POOL_CAPACITY - 1);
+
+  sfu_ring_destroy(&w1.send_ring);
+  close(w1_fds[0]);
+  close(w1_fds[1]);
+  f.base.w.mesh = NULL;
+  sfu_fanout_mesh_destroy(&mesh);
+  kf_fixture_destroy(&f);
+}
+
 int main(void) {
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -952,6 +1070,8 @@ int main(void) {
   test_nack_line_rate_throttled_by_rtx_budget();
   test_forward_churn_subscriber_disconnect();
   test_source_switch_colliding_seq_delayed_nack();
+  test_kf_request_cross_worker_no_packet_leak();
+  test_kf_enqueue_ring_full_drops_ref();
   printf("test_worker_protocol: OK\n");
   return 0;
 }

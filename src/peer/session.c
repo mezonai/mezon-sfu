@@ -1,5 +1,6 @@
 #include "peer/session.h"
 #include <assert.h>
+#include <inttypes.h>
 #include <string.h>
 #include "congestion/gcc.h"
 #include "congestion/twcc_history.h"
@@ -8,6 +9,7 @@
 #include "rtp/rtx.h"
 #include "runtime/routing_context.h"
 #include "runtime/scheduler.h"
+#include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
@@ -24,6 +26,10 @@ typedef struct {
   sfu_session_table_t *t;
   const char *ufrag;
 } ufrag_match_ctx_t;
+
+/* Mirrors SFU_WORKER_KF_THROTTLE_MS in runtime/worker.c: the request-side
+ * throttle lives there, the execution-side coalescing window lives here. */
+#define SFU_SESSION_KF_THROTTLE_MS 1000
 
 int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
   memset(t, 0, sizeof(*t));
@@ -542,11 +548,6 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
     return;
   }
 
-  sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
-  if (!rtcp_pkt) {
-    return;
-  }
-
   if (publisher->worker_id != w->worker_index) {
     SFU_LOG_INFO("[KF-DBG] Offloading KF request: current worker %u -> publisher worker %u (pub peer_id=%u)", w->worker_index, publisher->worker_id,
                  publisher->peer_id);
@@ -561,19 +562,40 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
     return;
   }
 
-  SFU_LOG_INFO("Worker %u executing PLI output to publisher peer %u SSRC %u", w->worker_index, publisher->peer_id, publisher->uplink_video.ssrc);
-
-  int rtcp_len = 0;
-  uint32_t sfu_sender_ssrc = 1;
-
   uint32_t media_ssrc = publisher->uplink_video.ssrc;
 
   SFU_LOG_INFO("[KF-DBG] Executing KF request on owner worker %u for pub peer_id=%u (uplink SSRC=%u)", w->worker_index, publisher->peer_id, media_ssrc);
+
+  /* Execution-side coalescing: requests are throttled where they originate
+   * (sfu_worker_request_keyframe_throttled), but N subscribers each keep
+   * their own throttle state and can each hand a cross-worker job for the
+   * same publisher. Collapse them here so the publisher receives at most
+   * one PLI per throttle window no matter how many workers asked. */
+  int64_t now = (int64_t)sfu_now_ms();
+  if (publisher->last_pli_time != 0 && now - publisher->last_pli_time < SFU_SESSION_KF_THROTTLE_MS) {
+    SFU_LOG_DEBUG("worker %u: KF request for publisher %u coalesced (last PLI %" PRId64 " ms ago)", w->worker_index, publisher->peer_id,
+                  now - publisher->last_pli_time);
+    return;
+  }
+  publisher->last_pli_time = now;
 
   if (media_ssrc == 0) {
     SFU_LOG_WARN("[KF-DBG] Cannot send PLI/FIR: Publisher %u video SSRC is 0", publisher->peer_id);
     return;
   }
+
+  /* Allocate only after every no-packet branch above; anything allocated
+   * here is always released on the way out below. */
+  sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
+  if (!rtcp_pkt) {
+    return;
+  }
+
+  SFU_LOG_INFO("Worker %u executing PLI output to publisher peer %u SSRC %u", w->worker_index, publisher->peer_id, publisher->uplink_video.ssrc);
+
+  int rtcp_len = 0;
+  uint32_t sfu_sender_ssrc = 1;
+
 
   if (use_fir) {
     rtcp_len = sfu_rtcp_build_fir(sfu_sender_ssrc, media_ssrc, &publisher->fir_seq, rtcp_pkt->data, rtcp_pkt->cap);

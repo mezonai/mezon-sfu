@@ -24,6 +24,8 @@ typedef struct sfu_fanout_job {
   sfu_peer_session_t *publisher;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
+  uint32_t pool_index; /* index within mesh->job_pools[pool_dst] */
+  uint32_t pool_dst;   /* home partition: mesh->job_pools[pool_dst] owns this slot */
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   bool has_video;
@@ -33,9 +35,15 @@ typedef struct sfu_fanout_job {
 } sfu_fanout_job_t;
 
 typedef struct sfu_fanout_mesh {
-  sfu_pool_t job_pool;
+  /* One job-pool partition per destination worker: a dst worker is the only
+   * thread freeing jobs addressed to it, so each partition's free list is
+   * only ever popped by its owner worker (the allocator) and pushed by
+   * that same worker on the free side of other cores' traffic -- the slab
+   * stays mostly on one core's cache instead of bouncing across all of them. */
+  sfu_pool_t *job_pools;
   sfu_spsc_ring_t *rings;
   uint32_t worker_count;
+  uint32_t per_partition_capacity;
 } sfu_fanout_mesh_t;
 
 typedef void (*sfu_fanout_job_fn)(void *user_data, sfu_fanout_job_t *job);
