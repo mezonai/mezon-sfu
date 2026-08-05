@@ -7,6 +7,7 @@
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "pipeline/egress.h"
+#include "pipeline/keyframe.h"
 #include "runtime/fanout.h"
 #include "runtime/scheduler.h"
 #include "runtime/worker.h"

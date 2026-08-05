@@ -10,6 +10,7 @@
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
+#include "pipeline/keyframe.h"
 #include "protocol/signaling/sdp.h"
 #include "room/room.h"
 #include "rtcp/rtcp_compound.h"

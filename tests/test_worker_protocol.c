@@ -12,6 +12,7 @@
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "pipeline/router.h"
+#include "runtime/fanout_job.h"
 #include "rtp/rtp_packet.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"

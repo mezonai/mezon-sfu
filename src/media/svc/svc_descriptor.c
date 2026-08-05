@@ -1,6 +1,6 @@
 #include "media/svc/svc_descriptor.h"
 
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 
 static int parse_vp9(const uint8_t *payload, size_t payload_len, sfu_svc_descriptor_t *out) {
   sfu_vp9_descriptor_t vp9;

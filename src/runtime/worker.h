@@ -41,11 +41,4 @@ void sfu_worker_destroy(sfu_worker_t *w);
 int sfu_worker_start(sfu_worker_t *w);
 void sfu_worker_join(sfu_worker_t *w);
 
-void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job);
-
-/* Request-side keyframe entry point used by the packet router; the actual
- * throttle/coalescing lives in sfu_session_request_keyframe(). Non-static
- * so pipeline modules (and tests) can share it. */
-void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher);
-
 #endif /* SFU_RUNTIME_WORKER_H */
