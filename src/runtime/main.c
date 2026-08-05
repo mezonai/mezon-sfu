@@ -52,7 +52,6 @@ int main(int argc, char **argv) {
   _Static_assert((SFU_SESSION_ADDR_HASH_SLOTS & (SFU_SESSION_ADDR_HASH_SLOTS - 1)) == 0, "addr hash table size must be power of 2");
   _Static_assert((SFU_SESSION_UFRAG_HASH_SLOTS & (SFU_SESSION_UFRAG_HASH_SLOTS - 1)) == 0, "ufrag hash table size must be power of 2");
 
-  sfu_log_set_level(SFU_LOG_LEVEL_DEBUG);
   signal(SIGPIPE, SIG_IGN);
 
   const char *config_file = "config.ini";
@@ -72,12 +71,12 @@ int main(int argc, char **argv) {
 
   SFU_LOG_INFO("mezon-sfu %s starting (unified signaling & media configuration)", SFU_VERSION_STRING);
 
-  sfu_config_t cfg;
-  sfu_config_load_ini(&cfg, config_file);
+  sfu_config_load_ini(config_file);
+  sfu_log_set_level(g_sfu_config.log_level);
 
-  uint16_t port = (positional_count > 0) ? parse_port(argc, argv, positional[0], cfg.media_port) : cfg.media_port;
-  uint16_t signaling_port = (positional_count > 1) ? parse_port(argc, argv, positional[1], cfg.signaling_port) : cfg.signaling_port;
-  const char *public_host = cfg.public_host;
+  uint16_t port = (positional_count > 0) ? parse_port(argc, argv, positional[0], g_sfu_config.media_port) : g_sfu_config.media_port;
+  uint16_t signaling_port = (positional_count > 1) ? parse_port(argc, argv, positional[1], g_sfu_config.signaling_port) : g_sfu_config.signaling_port;
+  const char *public_host = g_sfu_config.public_host;
 
   sfu_install_shutdown_handler();
 
@@ -123,7 +122,7 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
 
-  if (sfu_packet_pool_init(pp, cfg.packet_pool_capacity, cfg.packet_buf_size) != 0) {
+  if (sfu_packet_pool_init(pp, g_sfu_config.packet_pool_capacity, g_sfu_config.packet_buf_size) != 0) {
     SFU_LOG_ERROR("failed to init packet pool");
     goto cleanup;
   }
@@ -158,7 +157,7 @@ int main(int argc, char **argv) {
   }
   room_registry_initialized = true;
 
-  if (sfu_fanout_mesh_init(mesh, worker_count, cfg.fanout_ring_capacity, cfg.fanout_job_pool_capacity) != 0) {
+  if (sfu_fanout_mesh_init(mesh, worker_count, g_sfu_config.fanout_ring_capacity, g_sfu_config.fanout_job_pool_capacity) != 0) {
     goto cleanup;
   }
   mesh_initialized = true;
@@ -168,16 +167,17 @@ int main(int argc, char **argv) {
   }
   sessions_initialized = true;
 
-  if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, cfg.provided_buf_group_id, cfg.provided_buf_count, cfg.packet_buf_size) != 0) {
+  if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, g_sfu_config.provided_buf_group_id, g_sfu_config.provided_buf_count,
+                         g_sfu_config.packet_buf_size) != 0) {
     goto cleanup;
   }
   scheduler_initialized = true;
 
   for (uint32_t i = 0; i < worker_count; i++) {
     int core_id = (int)(i + 1) % (online > 1 ? online : 1);
-    int send_bgid = cfg.provided_buf_group_id + 1 + (int)i;
-    if (sfu_worker_init(&workers[i], core_id, i, fd, pp, room_registry, mesh, sessions, routing_table, &ice_creds, scheduler, cfg.worker_queue_capacity,
-                        send_bgid) != 0) {
+    int send_bgid = g_sfu_config.provided_buf_group_id + 1 + (int)i;
+    if (sfu_worker_init(&workers[i], core_id, i, fd, pp, room_registry, mesh, sessions, routing_table, &ice_creds, scheduler,
+                        g_sfu_config.worker_queue_capacity, send_bgid) != 0) {
       goto cleanup;
     }
     workers_initialized++;
@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
   }
   signaling_started = true;
 
-  if (init_nats_connection(cfg.nats_url, cfg.nats_client_name) != NATS_OK) {
+  if (init_nats_connection(g_sfu_config.nats_url, g_sfu_config.nats_client_name) != NATS_OK) {
     goto cleanup;
   }
   nats_producer_started = true;
