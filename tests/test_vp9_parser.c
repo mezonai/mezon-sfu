@@ -1,5 +1,3 @@
-/* VP9 payload descriptor parser tests (issue #83, RFC 9628). */
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -8,7 +6,6 @@
 
 #include "media/svc/vp9_parser.h"
 
-/* Descriptor bit helpers for the first byte: I P L F | B E V Z. */
 #define VP9_I 0x80
 #define VP9_P 0x40
 #define VP9_L 0x20
@@ -19,7 +16,6 @@
 #define VP9_Z 0x01
 
 static void test_minimal_no_extensions(void) {
-  /* I=0 P=0 L=0 F=0: single-byte descriptor. */
   uint8_t buf[] = {VP9_B | VP9_E, 0xAA};
   sfu_vp9_descriptor_t d;
   assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
@@ -176,11 +172,21 @@ static void test_every_flag_combination(void) {
     size_t n = 0;
     uint8_t first = VP9_B | VP9_E;
     bool i_bit = flags & 1, p_bit = flags & 2, l_bit = flags & 4, f_bit = flags & 8, v_bit = flags & 16;
-    if (i_bit) first |= VP9_I;
-    if (p_bit) first |= VP9_P;
-    if (l_bit) first |= VP9_L;
-    if (f_bit) first |= VP9_F;
-    if (v_bit) first |= VP9_V;
+    if (i_bit) {
+      first |= VP9_I;
+    }
+    if (p_bit) {
+      first |= VP9_P;
+    }
+    if (l_bit) {
+      first |= VP9_L;
+    }
+    if (f_bit) {
+      first |= VP9_F;
+    }
+    if (v_bit) {
+      first |= VP9_V;
+    }
     buf[n++] = first;
     size_t expected = n;
 
@@ -224,17 +230,27 @@ static void test_maximal_descriptor_truncation_sweep(void) {
   /* Maximal descriptor: I=1 (15-bit PID), L=1, F=1, P=1 with 3 P_DIFFs,
    * V=1 with Y=1 (N_S=2), G=1 (N_G=2, R=0 and R=2). */
   uint8_t buf[] = {
-    VP9_I | VP9_P | VP9_L | VP9_F | VP9_B | VP9_E | VP9_V,
-    0x80 | 0x11, 0x22,                                  /* 15-bit picture ID 0x1122 */
-    (uint8_t)((2u << 5) | (1u << 4) | (1u << 1) | 1u),  /* TID=2 U=1 SID=1 D=1 */
-    0x80 | 0x01, 0x80 | 0x02, 0x03,                     /* P_DIFF chain of 3 */
-    (2u << 5) | (1u << 4) | (1u << 3),                  /* N_S=2 Y=1 G=1 */
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06,                 /* 3 resolution pairs */
-    2,                                                  /* N_G=2 */
-    (uint8_t)((1u << 3) | (0u << 1)),                   /* T=1 U=0 R=0 */
-    (uint8_t)((0u << 3) | (2u << 1)),                   /* T=0 U=0 R=2 */
-    0x21, 0x22,                                         /* 2 reference diffs */
-    0xAA, 0xBB                                          /* VP9 bitstream */
+      VP9_I | VP9_P | VP9_L | VP9_F | VP9_B | VP9_E | VP9_V,
+      0x80 | 0x11,
+      0x22,                                              /* 15-bit picture ID 0x1122 */
+      (uint8_t)((2u << 5) | (1u << 4) | (1u << 1) | 1u), /* TID=2 U=1 SID=1 D=1 */
+      0x80 | 0x01,
+      0x80 | 0x02,
+      0x03,                              /* P_DIFF chain of 3 */
+      (2u << 5) | (1u << 4) | (1u << 3), /* N_S=2 Y=1 G=1 */
+      0x01,
+      0x02,
+      0x03,
+      0x04,
+      0x05,
+      0x06,                             /* 3 resolution pairs */
+      2,                                /* N_G=2 */
+      (uint8_t)((1u << 3) | (0u << 1)), /* T=1 U=0 R=0 */
+      (uint8_t)((0u << 3) | (2u << 1)), /* T=0 U=0 R=2 */
+      0x21,
+      0x22, /* 2 reference diffs */
+      0xAA,
+      0xBB /* VP9 bitstream */
   };
   size_t full_len = sizeof(buf) - 2; /* descriptor length */
 

@@ -52,8 +52,6 @@ static void scheduler_free(void *ptr) { SFU_FREE(ptr); }
 
 void sfu_scheduler_destroy(sfu_scheduler_t *s) {
   sfu_ring_destroy(&s->recv_ring);
-  /* Main joins workers before this call. No timeout can make reclamation safe;
-   * shutdown drainage relies exclusively on that quiescence invariant. */
   sfu_epoch_reclaimer_destroy_after_quiescence(&s->reclaimer);
 }
 
@@ -161,8 +159,7 @@ sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *sessio
   }
 
   if (!free_slot) {
-    SFU_LOG_WARN("session %u: scheduler table full (%d publishers); cannot track publisher %u", session->peer_id,
-                 SFU_SESSION_SCHEDULER_CAP, publisher_id);
+    SFU_LOG_WARN("session %u: scheduler table full (%d publishers); cannot track publisher %u", session->peer_id, SFU_SESSION_SCHEDULER_CAP, publisher_id);
     return NULL;
   }
 
@@ -174,6 +171,7 @@ sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *sessio
 bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe) {
   if (sched->needs_keyframe) {
     if (!is_keyframe) {
+      SFU_LOG_DEBUG("DROP frame due to missing keyframe (waiting for keyframe)");
       return false;
     }
     sched->needs_keyframe = false;
@@ -189,46 +187,39 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
   }
 
   if (sched->current_sid < sched->target_sid) {
-    // In VP9, P=0 means no inter-picture prediction (Keyframe or Spatial Sync)
     if (desc->p_bit == 0 && desc->sid <= sched->target_sid) {
-      sched->current_sid = desc->sid;  // Upshift progressively
+      sched->current_sid = desc->sid;
     }
   }
 
   if (sched->current_tid < sched->target_tid) {
-    // In VP9, U=1 means it is a valid switching point for temporal layers
     if (desc->u_bit == 1 && desc->tid <= sched->target_tid) {
       sched->current_tid = desc->tid;
     }
   }
 
   if (desc->sid > sched->current_sid) {
-    return false;  // Drop higher spatial layers
+    return false;
   }
   if (desc->tid > sched->current_tid) {
-    return false;  // Drop higher temporal layers
+    return false;
   }
 
-  // Drop inter-layer dependent frames if we aren't subscribing to the base layer they need
   if (desc->d_bit == 1 && desc->sid > sched->current_sid) {
     return false;
   }
 
-  return true;  // Frame is required by this subscriber
+  return true;
 }
 
 sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc) {
   if (desc->sid > 0 || desc->tid > 1) {
     return SFU_PACER_CLASS_VIDEO_ENH;
   }
-  (void)sched; /* current layers already bound what reaches here */
+  (void)sched;
   return SFU_PACER_CLASS_VIDEO_BASE;
 }
 
-/* VP9 bitrate ladder rungs (bits/s). A rung's layer set becomes the target
- * only when the estimate clears the rung's UP threshold (rung rate + 20%
- * headroom) and stays until it falls below the rung's DOWN threshold (rung
- * rate), giving asymmetric up/down hysteresis. */
 typedef struct sfu_layer_rung {
   uint32_t rate_bps;
   uint8_t sid;
@@ -243,16 +234,9 @@ static const sfu_layer_rung_t k_layer_ladder[] = {
 #define SFU_LAYER_LADDER_LEN (sizeof(k_layer_ladder) / sizeof(k_layer_ladder[0]))
 #define SFU_LAYER_UP_HEADROOM_NUM 6 /* up threshold = rate * 1.2 */
 #define SFU_LAYER_UP_HEADROOM_DEN 5
-/* Dwell time: target changes no more often than this, so a jittery estimate
- * cannot flap layers on every feedback. */
 #define SFU_LAYER_DWELL_US 500000LL
 
-/* Updates only the per-track layer targets. The pacer rate is applied
- * separately by the caller to the session-level pacer. */
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps) {
-  /* Map the estimate onto the ladder with hysteresis: walk to the highest
-   * rung whose UP threshold is cleared, but never below the current rung
-   * unless the DOWN threshold is broken. */
   uint8_t target_sid = 0, target_tid = 0;
   int chosen = -1;
 
@@ -268,10 +252,6 @@ void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uin
     target_tid = k_layer_ladder[chosen].tid;
   }
 
-  /* Hysteresis on the way down: hold the current rung while the estimate
-   * stays at or above its (un-headroomed) rate. Only applies once a target
-   * has actually been committed — before the first climb there is nothing
-   * to hold, and holding the floor rung would mask real climbs. */
   if (sched->last_target_change_us != 0 && chosen < (int)SFU_LAYER_LADDER_LEN - 1) {
     int current_rung = -1;
     for (int i = (int)SFU_LAYER_LADDER_LEN - 1; i >= 0; i--) {
@@ -291,8 +271,6 @@ void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uin
     return;
   }
 
-  /* Dwell: suppress target changes that arrive faster than the dwell
-   * window, unless we have never committed a layer yet. */
   int64_t now = (int64_t)sfu_now_us();
   if (sched->last_target_change_us != 0 && now - sched->last_target_change_us < SFU_LAYER_DWELL_US) {
     return;
@@ -315,9 +293,6 @@ void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_
 
   atomic_fetch_add_explicit(&session->egress_generation, 1, memory_order_acq_rel);
 
-  /* The delay estimate is path-state; a new source means a new path, so the
-   * estimator restarts from its configured bounds rather than inheriting
-   * the old source's trend. */
   if (session->gcc_ctx) {
     uint32_t min_bps = session->gcc_ctx->aimd.min_bitrate_bps;
     uint32_t max_bps = session->gcc_ctx->aimd.max_bitrate_bps;

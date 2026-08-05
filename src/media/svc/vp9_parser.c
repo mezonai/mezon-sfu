@@ -1,23 +1,5 @@
 #include "media/svc/vp9_parser.h"
 
-/* VP9 RTP payload descriptor parser (RFC 9628 / VP9 payload descriptor spec).
- *
- * Descriptor layout, in order:
- *   byte 0: I P L F | B E V Z
- *   Picture ID          (if I=1): 7-bit, or 15-bit when M bit set
- *   Layer indices       (if L=1): TID(2) U(1) | SID(3) D(1),
- *                                 then TL0PICIDX iff F=0
- *   Reference indices   (if P=1 && F=1): up to 3 P_DIFF bytes,
- *                                 7-bit diffs, high bit = another follows
- *   Scalability struct  (if V=1): N_S(3) Y(1) G(1),
- *                                 if Y=1: (N_S+1) x (WIDTH,HEIGHT) pairs
- *                                 if G=1: N_G byte, then N_G x
- *                                   (T(2) U(1) R(2) | R x P_DIFF)
- *
- * Every step bounds-checks against the remaining length before reading; any
- * truncation fails with -1 before an out-of-bounds access. header_length
- * points exactly at the first VP9 bitstream byte after the descriptor. */
-
 int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descriptor_t *out) {
   if (!payload || !out || len == 0) {
     return -1;
@@ -46,8 +28,6 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
   out->p_diff[1] = 0;
   out->p_diff[2] = 0;
 
-  /* Picture ID (I=1): M=1 means a second (low) byte follows, forming a
-   * 15-bit ID; otherwise a 7-bit ID. */
   if (out->i_bit) {
     if (offset >= len) {
       return -1;
@@ -65,10 +45,6 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
     }
   }
 
-  /* Layer indices (L=1): TID(2) U(1) | SID(3) D(1). TL0PICIDX follows only
-   * in non-flexible mode (F=0); in flexible mode it MUST NOT be present.
-   * Per spec, F=1 requires L=1 (TID MUST be present); we do not reject the
-   * L=0/F=1 combination, matching the previous lenient behavior. */
   if (out->l_bit) {
     if (offset >= len) {
       return -1;
@@ -88,9 +64,6 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
     }
   }
 
-  /* Reference indices (P=1 && F=1): P_DIFF bytes, 7-bit diffs, the high bit
-   * signals another P_DIFF follows; at most 3 per spec. A set high bit on
-   * the third byte is malformed. */
   if (out->p_bit && out->f_bit) {
     do {
       if (offset >= len) {
@@ -111,7 +84,6 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
     }
   }
 
-  /* Scalability structure (V=1). */
   if (out->v_bit) {
     if (offset >= len) {
       return -1;
@@ -122,7 +94,6 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
     bool g_bit = (ss_first >> 3) & 0x01;
 
     if (y_bit) {
-      /* WIDTH/HEIGHT (2 bytes each) for each of N_S+1 spatial layers. */
       size_t res_bytes = (size_t)(n_s + 1) * 2;
       if (len - offset < res_bytes) {
         return -1;
@@ -140,7 +111,6 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
           return -1;
         }
         uint8_t pg_byte = payload[offset++];
-        /* T(2) U(1) R(2): R reference diffs follow. */
         uint8_t r = (pg_byte >> 1) & 0x03;
         if (len - offset < r) {
           return -1;

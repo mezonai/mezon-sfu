@@ -8,6 +8,7 @@
 #include "media/svc/vp9_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
+#include "protocol/signaling/sdp.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtcp/rtcp_fb.h"
 #include "rtp/rtp_ext.h"
@@ -136,10 +137,12 @@ static sfu_peer_session_t *sfu_worker_find_publisher_by_media_ssrc(sfu_peer_sess
 
 static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher) {
   int64_t now = (int64_t)sfu_now_ms();
-  if (now - publisher->last_pli_time > SFU_WORKER_KF_THROTTLE_MS) {
-    publisher->last_pli_time = now;
-    sfu_session_request_keyframe(w, publisher, false);
+  if (now - publisher->last_pli_time < SFU_WORKER_KF_THROTTLE_MS) {
+    return;
   }
+  publisher->last_pli_time = now;
+
+  sfu_session_request_keyframe(w, publisher, false);
 }
 
 static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
@@ -148,6 +151,7 @@ static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session
     sfu_metric_inc("rtcp_kf_unresolved");
     publisher = feedback_session;
     atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+    return;
   }
   sfu_worker_request_keyframe_throttled(w, publisher);
   sfu_session_release(publisher);
@@ -437,16 +441,24 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (!is_rtcp && !is_audio) {
     uint8_t incoming_pt = ingress_pt;
     if (incoming_pt == sender_session->uplink_video.payload_type) {
-      is_vp9 = true;
-      int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
+      sfu_video_codec_t codec = sfu_video_codec_from_pt(incoming_pt);
+      if (codec == SFU_VIDEO_CODEC_VP9) {
+        is_vp9 = true;
 
-      if (payload_offset > 0) {
-        const uint8_t *payload = pkt->data + payload_offset;
-        size_t payload_len = pkt->len - payload_offset;
-        if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
-          is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
-        } else {
-          is_vp9 = false;
+        uint32_t pkt_ssrc = sfu_read_be32(pkt->data + 8);
+        if (sender_session->uplink_video.ssrc == 0 && pkt_ssrc != 0) {
+          sender_session->uplink_video.ssrc = pkt_ssrc;
+        }
+
+        int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
+        if (payload_offset > 0) {
+          const uint8_t *payload = pkt->data + payload_offset;
+          size_t payload_len = pkt->len - payload_offset;
+          if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
+            is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
+          } else {
+            is_vp9 = false;
+          }
         }
       }
     }
@@ -474,6 +486,10 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 
     sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
     if (is_vp9 && slot->has_video) {
+      if (sched->needs_keyframe) {
+        sfu_worker_request_keyframe_throttled(w, sender_session);
+      }
+
       bool should_forward = sfu_scheduler_evaluate_frame(sched, &vp9_desc, is_keyframe);
       if (!should_forward) {
         continue;
@@ -519,7 +535,14 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
-  if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
+  if (job->kind == SFU_FANOUT_JOB_KEYFRAME_REQUEST) {
+    if (job->publisher) {
+      sfu_session_request_keyframe(w, job->publisher, false);
+      sfu_session_release(job->publisher);
+    }
+    sfu_fanout_mesh_free_job(w->mesh, job);
+    return;
+  } else if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
     sfu_worker_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_ssrc, job->video_pt, job->video_rtx_pt, job->video_rtx_ssrc,
                               job->has_video, job->is_audio, (sfu_pacer_class_t)job->pacer_class);
     sfu_session_release(job->subscriber);

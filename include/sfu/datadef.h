@@ -138,8 +138,8 @@ typedef struct sfu_peer_session {
   sfu_room_t *room;
   gcc_bwe_context_t *gcc_ctx;
   sfu_twcc_history_t *twcc_history;
-  sfu_session_scheduler_slot_t *schedulers; /* table of SFU_SESSION_SCHEDULER_CAP slots, keyed by publisher_id */
-  sfu_pacer_t pacer;                       /* session-level egress pacing (one GCC path estimate); per-track layer state is in schedulers[] */
+  sfu_session_scheduler_slot_t *schedulers;
+  sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
   sfu_peer_session_cold_t *cold;
   _Atomic(sfu_receiver_snapshot_t *) receivers;

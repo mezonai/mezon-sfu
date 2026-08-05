@@ -26,10 +26,10 @@ Before building, ensure you have the following installed on your system:
 
 To compile the C backend binary, run the following commands from the root directory:
 
-install libuv
+## install libuv
 `sudo apt install libuv1-dev`
 
-build mimalloc
+## build mimalloc
 ```
 git clone https://github.com/microsoft/mimalloc.git
 cd mimalloc
@@ -39,7 +39,7 @@ make -j$(nproc)
 sudo make install
 ```
 
-build liburing
+## build liburing
 ```
 git clone https://github.com/axboe/liburing.git
 cd liburing
@@ -49,7 +49,7 @@ make -j$(nproc)
 sudo make install
 ```
 
-build boringSSL
+## build boringSSL
 ```
 git clone https://boringssl.googlesource.com/boringssl
 cd boringssl
@@ -68,7 +68,7 @@ sudo mkdir /usr/local/lib/boringssl
 sudo cp -rf build/lib* /usr/local/lib/boringssl/
 ```
 
-build  libsrtp
+## build  libsrtp
 ```
 git clone https://github.com/cisco/libsrtp.git
 git checkout 24b3bf8
@@ -80,7 +80,18 @@ cd libsrtp
 make
 ```
 
-build mezon sfu
+# build nats client
+```
+git clone https://github.com/nats-io/nats.c.git
+cd nats.c
+mkdir build && cd build
+cmake .. -DNATS_BUILD_STREAMING=OFF -DNATS_BUILD_EXAMPLES=OFF
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+## build mezon sfu
 ```
 mkdir build && cd build
 cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Debug
