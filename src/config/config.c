@@ -5,6 +5,10 @@
 #include <string.h>
 #include "util/log.h"
 
+sfu_config_t g_sfu_config;
+
+const sfu_config_t *sfu_config_get(void) { return &g_sfu_config; }
+
 static char *trim_whitespace(char *str) {
   while (isspace((unsigned char)*str)) {
     str++;
@@ -19,33 +23,30 @@ static char *trim_whitespace(char *str) {
   end[1] = '\0';
   return str;
 }
+void sfu_config_set_defaults(void) {
+  memset(&g_sfu_config, 0, sizeof(g_sfu_config));
 
-void sfu_config_set_defaults(sfu_config_t *cfg) {
-  if (!cfg) {
-    return;
-  }
-  memset(cfg, 0, sizeof(*cfg));
+  g_sfu_config.log_level = 1;
+  g_sfu_config.media_port = 7000;
+  g_sfu_config.signaling_port = 8000;
+  snprintf(g_sfu_config.public_host, sizeof(g_sfu_config.public_host), "127.0.0.1");
 
-  cfg->media_port = 7000;
-  cfg->signaling_port = 8000;
-  snprintf(cfg->public_host, sizeof(cfg->public_host), "127.0.0.1");
+  snprintf(g_sfu_config.nats_url, sizeof(g_sfu_config.nats_url), "nats://172.16.100.183:4222");
+  snprintf(g_sfu_config.nats_client_name, sizeof(g_sfu_config.nats_client_name), "sfu_nats_client");
 
-  snprintf(cfg->nats_url, sizeof(cfg->nats_url), "nats://172.16.100.183:4222");
-  snprintf(cfg->nats_client_name, sizeof(cfg->nats_client_name), "sfu_nats_client");
+  g_sfu_config.packet_buf_size = 1600;
+  g_sfu_config.packet_pool_capacity = 65536;
+  g_sfu_config.provided_buf_count = 8192;
+  g_sfu_config.provided_buf_group_id = 0;
 
-  cfg->packet_buf_size = 1600;
-  cfg->packet_pool_capacity = 65536;
-  cfg->provided_buf_count = 8192;
-  cfg->provided_buf_group_id = 0;
-
-  cfg->worker_queue_capacity = 16384;
-  cfg->fanout_ring_capacity = 4096;
-  cfg->fanout_job_pool_capacity = 16384;
-  cfg->release_queue_capacity = 8192;
+  g_sfu_config.worker_queue_capacity = 16384;
+  g_sfu_config.fanout_ring_capacity = 4096;
+  g_sfu_config.fanout_job_pool_capacity = 16384;
+  g_sfu_config.release_queue_capacity = 8192;
 }
 
-int sfu_config_load_ini(sfu_config_t *cfg, const char *filepath) {
-  sfu_config_set_defaults(cfg);
+int sfu_config_load_ini(const char *filepath) {
+  sfu_config_set_defaults();
 
   if (!filepath) {
     return 0;
@@ -84,32 +85,34 @@ int sfu_config_load_ini(sfu_config_t *cfg, const char *filepath) {
     char *key = trim_whitespace(p);
     char *val = trim_whitespace(delim + 1);
 
-    if (strcmp(key, "media_port") == 0) {
-      cfg->media_port = (uint16_t)atoi(val);
+    if (strcmp(key, "log_level") == 0) {
+      g_sfu_config.log_level = (uint8_t)atoi(val);
+    } else if (strcmp(key, "media_port") == 0) {
+      g_sfu_config.media_port = (uint16_t)atoi(val);
     } else if (strcmp(key, "signaling_port") == 0) {
-      cfg->signaling_port = (uint16_t)atoi(val);
+      g_sfu_config.signaling_port = (uint16_t)atoi(val);
     } else if (strcmp(key, "public_host") == 0) {
-      snprintf(cfg->public_host, sizeof(cfg->public_host), "%s", val);
+      snprintf(g_sfu_config.public_host, sizeof(g_sfu_config.public_host), "%s", val);
     } else if (strcmp(key, "nats_url") == 0) {
-      snprintf(cfg->nats_url, sizeof(cfg->nats_url), "%s", val);
+      snprintf(g_sfu_config.nats_url, sizeof(g_sfu_config.nats_url), "%s", val);
     } else if (strcmp(key, "nats_client_name") == 0) {
-      snprintf(cfg->nats_client_name, sizeof(cfg->nats_client_name), "%s", val);
+      snprintf(g_sfu_config.nats_client_name, sizeof(g_sfu_config.nats_client_name), "%s", val);
     } else if (strcmp(key, "packet_buf_size") == 0) {
-      cfg->packet_buf_size = (uint32_t)atoi(val);
+      g_sfu_config.packet_buf_size = (uint32_t)atoi(val);
     } else if (strcmp(key, "packet_pool_capacity") == 0) {
-      cfg->packet_pool_capacity = (uint32_t)atoi(val);
+      g_sfu_config.packet_pool_capacity = (uint32_t)atoi(val);
     } else if (strcmp(key, "provided_buf_count") == 0) {
-      cfg->provided_buf_count = (uint32_t)atoi(val);
+      g_sfu_config.provided_buf_count = (uint32_t)atoi(val);
     } else if (strcmp(key, "provided_buf_group_id") == 0) {
-      cfg->provided_buf_group_id = atoi(val);
+      g_sfu_config.provided_buf_group_id = atoi(val);
     } else if (strcmp(key, "worker_queue_capacity") == 0) {
-      cfg->worker_queue_capacity = (uint32_t)atoi(val);
+      g_sfu_config.worker_queue_capacity = (uint32_t)atoi(val);
     } else if (strcmp(key, "fanout_ring_capacity") == 0) {
-      cfg->fanout_ring_capacity = (uint32_t)atoi(val);
+      g_sfu_config.fanout_ring_capacity = (uint32_t)atoi(val);
     } else if (strcmp(key, "fanout_job_pool_capacity") == 0) {
-      cfg->fanout_job_pool_capacity = (uint32_t)atoi(val);
+      g_sfu_config.fanout_job_pool_capacity = (uint32_t)atoi(val);
     } else if (strcmp(key, "release_queue_capacity") == 0) {
-      cfg->release_queue_capacity = (uint32_t)atoi(val);
+      g_sfu_config.release_queue_capacity = (uint32_t)atoi(val);
     }
   }
 

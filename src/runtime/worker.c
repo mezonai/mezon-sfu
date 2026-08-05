@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include "config/config.h"
 #include "congestion/gcc.h"
 #include "congestion/twcc_history.h"
 #include "congestion/twcc_parser.h"
@@ -50,7 +51,7 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
     return -1;
   }
 
-  if (sfu_spsc_ring_init(&w->release_to_dispatcher, SFU_RELEASE_QUEUE_CAPACITY) != 0) {
+  if (sfu_spsc_ring_init(&w->release_to_dispatcher, g_sfu_config.release_queue_capacity) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init release queue", worker_index);
     sfu_spsc_ring_destroy(&w->inbox);
     return -1;
