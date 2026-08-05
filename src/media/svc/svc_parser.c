@@ -1,6 +1,6 @@
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 
-int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descriptor_t *out) {
+int sfu_parse_codec_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descriptor_t *out) {
   if (!payload || !out || len == 0) {
     return -1;
   }

@@ -27,6 +27,6 @@ typedef struct {
   size_t header_length;
 } sfu_vp9_descriptor_t;
 
-int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descriptor_t *out);
+int sfu_parse_codec_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descriptor_t *out);
 
 #endif  // SFU_VP9_PARSER_H
