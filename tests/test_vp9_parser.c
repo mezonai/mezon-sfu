@@ -18,7 +18,7 @@
 static void test_minimal_no_extensions(void) {
   uint8_t buf[] = {VP9_B | VP9_E, 0xAA};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(!d.i_bit && !d.p_bit && !d.l_bit && !d.f_bit && !d.v_bit);
   assert(d.b_bit && d.e_bit && !d.z_bit);
   assert(d.header_length == 1);
@@ -29,7 +29,7 @@ static void test_minimal_no_extensions(void) {
 static void test_picture_id_7bit(void) {
   uint8_t buf[] = {VP9_I | VP9_B | VP9_E, 0x55, 0xAA};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.i_bit);
   assert(d.picture_id == 0x55);
   assert(d.header_length == 2);
@@ -39,7 +39,7 @@ static void test_picture_id_15bit(void) {
   /* M=1: (0x23 << 8) | 0x77 = 0x2377. */
   uint8_t buf[] = {VP9_I | VP9_B | VP9_E, 0x80 | 0x23, 0x77, 0xAA};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.picture_id == 0x2377);
   assert(d.header_length == 3);
 }
@@ -49,7 +49,7 @@ static void test_layer_indices_nonflexible_tl0picidx(void) {
   uint8_t layer = (2u << 5) | (1u << 4) | (1u << 1) | 1u;
   uint8_t buf[] = {VP9_P | VP9_L | VP9_B, layer, 0x42, 0xAA};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.l_bit && !d.f_bit);
   assert(d.tid == 2 && d.u_bit == 1);
   assert(d.sid == 1 && d.d_bit == 1);
@@ -64,7 +64,7 @@ static void test_layer_indices_flexible_no_tl0picidx(void) {
   uint8_t layer = (1u << 5) | (0u << 4) | (2u << 1) | 0u;
   uint8_t buf[] = {VP9_I | VP9_P | VP9_L | VP9_F, 0x10, layer, 0x03, 0xAA};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.f_bit);
   assert(d.tid == 1 && d.sid == 2);
   assert(d.picture_id == 0x10);
@@ -80,7 +80,7 @@ static void test_p_diff_chains(void) {
   /* Chain of 1: high bit clear. */
   {
     uint8_t buf[] = {VP9_P | VP9_L | VP9_F, layer, 0x05, 0xAA};
-    assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+    assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
     assert(d.p_diff_count == 1);
     assert(d.p_diff[0] == 0x05);
     assert(d.header_length == 3);
@@ -89,7 +89,7 @@ static void test_p_diff_chains(void) {
   /* Chain of 2: first has continuation bit. */
   {
     uint8_t buf[] = {VP9_P | VP9_L | VP9_F, layer, 0x80 | 0x01, 0x02, 0xAA};
-    assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+    assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
     assert(d.p_diff_count == 2);
     assert(d.p_diff[0] == 0x01 && d.p_diff[1] == 0x02);
     assert(d.header_length == 4);
@@ -98,7 +98,7 @@ static void test_p_diff_chains(void) {
   /* Chain of 3 (maximum). */
   {
     uint8_t buf[] = {VP9_P | VP9_L | VP9_F, layer, 0x80 | 0x01, 0x80 | 0x02, 0x03, 0xAA};
-    assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+    assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
     assert(d.p_diff_count == 3);
     assert(d.p_diff[0] == 0x01 && d.p_diff[1] == 0x02 && d.p_diff[2] == 0x03);
     assert(d.header_length == 5);
@@ -107,7 +107,7 @@ static void test_p_diff_chains(void) {
   /* Malformed: continuation bit set on the third P_DIFF. */
   {
     uint8_t buf[] = {VP9_P | VP9_L | VP9_F, layer, 0x80 | 0x01, 0x80 | 0x02, 0x80 | 0x03, 0xAA};
-    assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == -1);
+    assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == -1);
   }
 }
 
@@ -116,7 +116,7 @@ static void test_scalability_structure_minimal(void) {
   uint8_t ss = (2u << 5);
   uint8_t buf[] = {VP9_B | VP9_V, ss, 0xAA};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.v_bit);
   assert(d.header_length == 2);
 }
@@ -128,7 +128,7 @@ static void test_scalability_structure_resolutions(void) {
   {
     uint8_t ss = (0u << 5) | (1u << 4);
     uint8_t buf[] = {VP9_B | VP9_V, ss, 0x01, 0x40, 0xAA};
-    assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+    assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
     assert(d.header_length == 4);
   }
 
@@ -136,7 +136,7 @@ static void test_scalability_structure_resolutions(void) {
   {
     uint8_t ss = (2u << 5) | (1u << 4);
     uint8_t buf[] = {VP9_B | VP9_V, ss, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0xAA};
-    assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+    assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
     assert(d.header_length == 8);
   }
 }
@@ -150,7 +150,7 @@ static void test_scalability_structure_group_of_pictures(void) {
   uint8_t pg2 = (0u << 3) | (0u << 2) | (2u << 1);
   uint8_t buf[] = {VP9_B | VP9_V, ss, 2, pg1, pg2, 0x11, 0x22, 0xAA};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.header_length == 8);
 }
 
@@ -160,7 +160,7 @@ static void test_scalability_structure_full(void) {
   uint8_t pg = (0u << 3) | (1u << 2) | (1u << 1); /* T=0 U=1 R=1 */
   uint8_t buf[] = {VP9_B | VP9_V, ss, 0x0A, 0x0B, 0x0C, 0x0D, 1, pg, 0x33, 0xAA, 0xBB};
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.header_length == 11);
 }
 
@@ -216,12 +216,12 @@ static void test_every_flag_combination(void) {
     buf[n++] = 0xAA; /* VP9 bitstream byte */
 
     sfu_vp9_descriptor_t d;
-    assert(sfu_parse_codec_descriptor(buf, n, &d) == 0);
+    assert(sfu_parse_vp9_descriptor(buf, n, &d) == 0);
     assert(d.header_length == expected);
 
     /* Every truncation of this descriptor must fail. */
     for (size_t cut = 0; cut < expected; cut++) {
-      assert(sfu_parse_codec_descriptor(buf, cut, &d) == -1);
+      assert(sfu_parse_vp9_descriptor(buf, cut, &d) == -1);
     }
   }
 }
@@ -255,7 +255,7 @@ static void test_maximal_descriptor_truncation_sweep(void) {
   size_t full_len = sizeof(buf) - 2; /* descriptor length */
 
   sfu_vp9_descriptor_t d;
-  assert(sfu_parse_codec_descriptor(buf, sizeof(buf), &d) == 0);
+  assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
   assert(d.header_length == full_len);
   assert(d.picture_id == 0x1122);
   assert(d.tid == 2 && d.u_bit == 1 && d.sid == 1 && d.d_bit == 1);
@@ -264,19 +264,19 @@ static void test_maximal_descriptor_truncation_sweep(void) {
 
   /* Truncation at every byte boundary of the descriptor must fail. */
   for (size_t cut = 0; cut < full_len; cut++) {
-    assert(sfu_parse_codec_descriptor(buf, cut, &d) == -1);
+    assert(sfu_parse_vp9_descriptor(buf, cut, &d) == -1);
   }
 }
 
 static void test_rejects_bad_input(void) {
   sfu_vp9_descriptor_t d;
   uint8_t buf[] = {VP9_B};
-  assert(sfu_parse_codec_descriptor(NULL, 1, &d) == -1);
-  assert(sfu_parse_codec_descriptor(buf, 0, &d) == -1);
-  assert(sfu_parse_codec_descriptor(buf, 1, NULL) == -1);
+  assert(sfu_parse_vp9_descriptor(NULL, 1, &d) == -1);
+  assert(sfu_parse_vp9_descriptor(buf, 0, &d) == -1);
+  assert(sfu_parse_vp9_descriptor(buf, 1, NULL) == -1);
   /* Empty descriptor field chain: I=1 but no picture ID byte. */
   uint8_t trunc[] = {VP9_I | VP9_B};
-  assert(sfu_parse_codec_descriptor(trunc, sizeof(trunc), &d) == -1);
+  assert(sfu_parse_vp9_descriptor(trunc, sizeof(trunc), &d) == -1);
 }
 
 int main(void) {
