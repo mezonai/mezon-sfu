@@ -113,34 +113,12 @@ The compiled binary will be generated at `./build/mezon-sfu`.
 * Set this to `127.0.0.1` for local testing.
 * Set this to your server's **external public IP** (e.g., `27.72.29.150`) when deploying to a remote host.
 
-### mode options
-
-Use the `--mode` flag to run the server in your preferred distributed architecture:
-
-#### 1. full node (both signaling & media)
+#### running both signaling & media
 
 Best for local development or single-server environments.
 
 ```bash
-SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu --mode both
-
-```
-
-#### 2. standalone signaling node
-
-Runs only the WebSocket gateway to negotiate SDP offers/answers.
-
-```bash
-SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu --mode signaling
-
-```
-
-#### 3. standalone media node
-
-Runs only the UDP engine responsible for routing DTLS, SRTP, and media packets.
-
-```bash
-SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu --mode media
+SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu
 
 ```
 
