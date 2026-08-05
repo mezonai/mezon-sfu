@@ -472,6 +472,7 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
             } else {
               is_vp8 = false;
             }
+            is_keyframe = true;
             break;
           }
           default:
