@@ -191,8 +191,6 @@ bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t 
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
-    /* The retain above is owned by the queued job; if the job never makes
-     * it onto the ring, the reference must be dropped here. */
     sfu_session_release(publisher);
     sfu_fanout_mesh_free_job(mesh, job);
     return false;
@@ -201,6 +199,4 @@ bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t 
   return true;
 }
 
-void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job) {
-  sfu_pool_free(&mesh->job_pools[job->pool_dst], job->pool_index);
-}
+void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job) { sfu_pool_free(&mesh->job_pools[job->pool_dst], job->pool_index); }
