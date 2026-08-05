@@ -135,16 +135,11 @@ static sfu_peer_session_t *sfu_worker_find_publisher_by_media_ssrc(sfu_peer_sess
   return result;
 }
 
-static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher) {
-  sfu_session_request_keyframe(w, publisher, false);
-}
+static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher) { sfu_session_request_keyframe(w, publisher, false); }
 
 static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
   sfu_peer_session_t *publisher = sfu_worker_find_publisher_by_media_ssrc(feedback_session, media_ssrc);
   if (!publisher) {
-    /* The feedback names an SSRC we cannot map to a room publisher (e.g.
-     * stale answer). Fall back to the sender of the feedback so a keyframe
-     * is still requested instead of being silently swallowed. */
     sfu_metric_inc("rtcp_kf_unresolved");
     publisher = feedback_session;
     atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
