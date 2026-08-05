@@ -98,6 +98,7 @@ add_library(sfu_core STATIC
   src/rtcp/rtcp_kf.c
   src/rtcp/rtcp_compound.c
   src/rtcp/rtcp_fb.c
+  src/config/config.c
 )
 
 target_include_directories(sfu_core PUBLIC
