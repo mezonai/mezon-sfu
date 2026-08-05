@@ -201,7 +201,7 @@ If you use the **Zed** editor, you can run and debug your builds directly with C
 
  Core 0 is reserved for the dispatcher; cores 1..N-1 are workers. This is a placeholder policy -- production topology should account for NUMA (Non-Uniform Memory Access) nodes and leave a core free for the kernel's network softirq handling, but the mapping itself is what matters for now: one dispatcher, N workers, no shared mutable state between them beyond the SPSC rings.
 
-Here is how those 11 steps map directly to your codebase's concrete functions and execution units:
+*Here is how those 11 steps map directly to your codebase's concrete functions and execution units:*
 
 | Step | Architecture Layer | Code Base Mapping / Function |
 | --- | --- | --- |
