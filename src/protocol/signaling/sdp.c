@@ -579,13 +579,9 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
 
   char bundle_line[512];
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
-  for (uint32_t i = 0; i < receiver_count; i++) {
-    sfu_sdp_receiver_view_t slot;
-    if (!sfu_sdp_receiver_view(snap, i, &slot)) {
-      continue;
-    }
-
-    n = snprintf(bundle_line + blen, sizeof(bundle_line) - blen, " %u %u", slot.mid_audio, slot.mid_video);
+  for (uint32_t mid_audio = 2; mid_audio < session->next_remote_mid; mid_audio += 2) {
+    uint32_t mid_video = mid_audio + 1;
+    n = snprintf(bundle_line + blen, sizeof(bundle_line) - blen, " %u %u", mid_audio, mid_video);
     if (n < 0 || (size_t)n >= sizeof(bundle_line) - blen) {
       goto fail;
     }
@@ -645,14 +641,25 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     goto fail;
   }
 
-  for (uint32_t i = 0; i < receiver_count; i++) {
+  for (uint32_t mid_audio = 2; mid_audio < session->next_remote_mid; mid_audio += 2) {
+    uint32_t mid_video = mid_audio + 1;
+
     sfu_sdp_receiver_view_t slot;
-    if (!sfu_sdp_receiver_view(snap, i, &slot)) {
-      continue;
+    bool found = false;
+    for (uint32_t i = 0; i < receiver_count; i++) {
+      sfu_sdp_receiver_view_t candidate;
+      if (!sfu_sdp_receiver_view(snap, i, &candidate)) {
+        continue;
+      }
+      if (candidate.mid_audio == mid_audio) {
+        slot = candidate;
+        found = true;
+        break;
+      }
     }
 
-    bool audio_live = slot.has_audio && slot.audio_active && slot.audio_ssrc != 0;
-    bool video_live = slot.has_video && slot.video_active && slot.video_ssrc != 0;
+    bool audio_live = found && slot.has_audio && slot.audio_active && slot.audio_ssrc != 0;
+    bool video_live = found && slot.has_video && slot.video_active && slot.video_ssrc != 0;
 
     n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
     if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
@@ -664,7 +671,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     if (append_line(out, out_cap, &off, audio_live ? "a=sendonly" : "a=inactive") != 0) {
       goto fail;
     }
-    n = snprintf(buf, sizeof(buf), "a=mid:%u", slot.mid_audio);
+    n = snprintf(buf, sizeof(buf), "a=mid:%u", mid_audio);
     if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
       goto fail;
     }
@@ -679,7 +686,6 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
         goto fail;
       }
     }
-
 
     uint8_t remote_video_pt = (video_live && slot.video_pt != 0) ? slot.video_pt : local_video_pt;
     uint8_t remote_rtx_pt = (video_live && slot.video_rtx_pt != 0) ? slot.video_rtx_pt : local_rtx_pt;
@@ -698,7 +704,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     if (append_line(out, out_cap, &off, video_live ? "a=sendonly" : "a=inactive") != 0) {
       goto fail;
     }
-    n = snprintf(buf, sizeof(buf), "a=mid:%u", slot.mid_video);
+    n = snprintf(buf, sizeof(buf), "a=mid:%u", mid_video);
     if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
       goto fail;
     }
@@ -719,6 +725,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   }
 
   sfu_receiver_snapshot_release(snap);
+
   return (int)off;
 
 fail:

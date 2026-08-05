@@ -37,7 +37,8 @@
 
 #define SFU_CACHELINE_SIZE 64
 
-#define DEFAULT_ROOM_NAME "Default Room"
+#define SFU_NATS_URL "nats://172.16.100.183:4222"
+#define SFU_NATS_CLIENT_NAME "sfu_nats_client"
 
 #define SFU_LIKELY(x) __builtin_expect(!!(x), 1)
 #define SFU_UNLIKELY(x) __builtin_expect(!!(x), 0)

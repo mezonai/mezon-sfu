@@ -26,10 +26,10 @@ Before building, ensure you have the following installed on your system:
 
 To compile the C backend binary, run the following commands from the root directory:
 
-install libuv
+## install libuv
 `sudo apt install libuv1-dev`
 
-build mimalloc
+## build mimalloc
 ```
 git clone https://github.com/microsoft/mimalloc.git
 cd mimalloc
@@ -39,7 +39,7 @@ make -j$(nproc)
 sudo make install
 ```
 
-build liburing
+## build liburing
 ```
 git clone https://github.com/axboe/liburing.git
 cd liburing
@@ -49,7 +49,7 @@ make -j$(nproc)
 sudo make install
 ```
 
-build boringSSL
+## build boringSSL
 ```
 git clone https://boringssl.googlesource.com/boringssl
 cd boringssl
@@ -68,7 +68,7 @@ sudo mkdir /usr/local/lib/boringssl
 sudo cp -rf build/lib* /usr/local/lib/boringssl/
 ```
 
-build  libsrtp
+## build  libsrtp
 ```
 git clone https://github.com/cisco/libsrtp.git
 git checkout 24b3bf8
@@ -80,7 +80,18 @@ cd libsrtp
 make
 ```
 
-build mezon sfu
+## build nats client
+```
+git clone https://github.com/nats-io/nats.c.git
+cd nats.c
+mkdir build && cd build
+cmake .. -DNATS_BUILD_STREAMING=OFF -DNATS_BUILD_EXAMPLES=OFF
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+## build mezon sfu
 ```
 mkdir build && cd build
 cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Debug
@@ -102,34 +113,12 @@ The compiled binary will be generated at `./build/mezon-sfu`.
 * Set this to `127.0.0.1` for local testing.
 * Set this to your server's **external public IP** (e.g., `27.72.29.150`) when deploying to a remote host.
 
-### mode options
-
-Use the `--mode` flag to run the server in your preferred distributed architecture:
-
-#### 1. full node (both signaling & media)
+#### running both signaling & media
 
 Best for local development or single-server environments.
 
 ```bash
-SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu --mode both
-
-```
-
-#### 2. standalone signaling node
-
-Runs only the WebSocket gateway to negotiate SDP offers/answers.
-
-```bash
-SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu --mode signaling
-
-```
-
-#### 3. standalone media node
-
-Runs only the UDP engine responsible for routing DTLS, SRTP, and media packets.
-
-```bash
-SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu --mode media
+SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu
 
 ```
 
@@ -189,6 +178,24 @@ If you use the **Zed** editor, you can run and debug your builds directly with C
     [worker core 0..N: pop inbox, forward via send_zc, reap completions]
 
  Core 0 is reserved for the dispatcher; cores 1..N-1 are workers. This is a placeholder policy -- production topology should account for NUMA (Non-Uniform Memory Access) nodes and leave a core free for the kernel's network softirq handling, but the mapping itself is what matters for now: one dispatcher, N workers, no shared mutable state between them beyond the SPSC rings.
+
+*Here is how those 11 steps map directly to your codebase's concrete functions and execution units:*
+
+| Step | Architecture Layer | Code Base Mapping / Function |
+| --- | --- | --- |
+| **1** | UDP Ingress | **`io_uring`** (or socket `recvfrom`/`recvmmsg` ring) |
+| **2** | ICE Layer | **`handle_stun()`** |
+| **3** | DTLS Layer | **`handle_dtls()`** |
+| **4** | SRTP Decryption | **`sfu_srtp_unprotect()`** *(Note: `sfu_srtp_ctx_init_from_dtls` extracts keying material once during handshake; `unprotect` decrypts every packet)* |
+| **5** | RTP Parser | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_rtp_packet_parse()` |
+| **6** | SVC Parser | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_parse_vp9_descriptor()` |
+| **7** | Congestion Control | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_twcc_parser_next()` / `gcc_bwe_process_twcc_packet()` |
+| **8** | Layer Scheduler | **`sfu_room_forward_packet()`** $\rightarrow$ Layer gating / `needs_keyframe` checks |
+| **9** | Packet Router | **Fanout job** / ring buffer cross-thread enqueue to subscriber queues |
+| **10** | Outbound SRTP | Header rewriting (SSRC, sequence/timestamp normalization) $\rightarrow$ **`sfu_srtp_protect()`** |
+| **11** | UDP Egress | **`io_uring`** (or `sendmmsg`/`sendto` write ring) |
+
+Steps **5, 6, 7, and 8** are indeed encapsulated inside **`sfu_room_forward_packet()`** executing on the worker thread, while Step 9 hands off the processed packet to the subscriber egress pipeline where Step 10 (`protect`) and Step 11 (`io_uring` write) take over.
 
 
 ## diagram

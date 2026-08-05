@@ -246,5 +246,3 @@ UDP
 5. **RTX/NACK**
 6. **PLI/FIR**
 7. **Pacing and advanced bandwidth probing**
-
-This order mirrors how modern SFUs achieve high-quality video: first make multiple scalable layers available (SVC), then use congestion control (GCC) to select the appropriate layer dynamically based on each subscriber's network conditions.

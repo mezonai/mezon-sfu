@@ -35,7 +35,6 @@
                 overflow: hidden;
             }
 
-            /* ---------- pre-join screen ---------- */
             #joinScreen {
                 flex: 1;
                 display: flex;
@@ -119,7 +118,6 @@
                 color: var(--err);
             }
 
-            /* ---------- meeting room ---------- */
             #meetingRoom {
                 display: none;
                 flex: 1;
@@ -372,7 +370,6 @@
             let camEnabled = true;
             let audioCtx = null;
 
-            /* participantId -> { tile, videoEl, stream, analyser, rafHandle, hasVideo } */
             const participants = new Map();
 
             const joinPreview = document.getElementById("joinPreview");
@@ -499,6 +496,8 @@
                 p.video.style.display = hasVideo ? "block" : "none";
                 p.avatar.style.display = hasVideo ? "none" : "flex";
                 attachAudioMeter(p, stream);
+
+                console.log(p.video, p.video.srcObject);
             }
 
             function attachAudioMeter(p, stream) {
@@ -584,22 +583,6 @@
                 isNegotiating = false;
             }
 
-            // SVC + GCC support
-            // NOTE: the SFU now offers VP9 (preferred), AV1, and VP8
-            // (fallback) in that order. Browsers don't always default to
-            // the offer's listed order when constructing an answer, so we
-            // pin it explicitly here to make sure VP9 (the codec the SFU's
-            // SVC layer-selection logic targets) actually gets chosen when
-            // the local encoder supports it.
-            //
-            // IMPORTANT: none of this activates real congestion control by
-            // itself. GCC bandwidth estimation only runs once the
-            // transport-wide-cc RTP header extension is negotiated in SDP
-            // -- that has to be offered server-side (not yet done as of
-            // this client change) before any of this has an effect beyond
-            // "which codec got picked". Treat this as client-side
-            // groundwork, not confirmation that GCC is active end-to-end.
-
             function preferSvcVideoCodecs(transceiver) {
                 if (
                     !transceiver ||
@@ -628,10 +611,6 @@
                 const vp9 = byName("vp9");
                 const av1 = byName("av1");
                 const vp8 = byName("vp8");
-                // Everything else (rtx, red, ulpfec, and any codec not in
-                // our preferred set) -- order among these doesn't matter,
-                // the browser matches rtx/red entries to their primary
-                // codec via apt=/etc regardless of list position.
                 const rest = caps.codecs.filter(
                     (c) =>
                         !vp9.includes(c) &&
@@ -654,11 +633,6 @@
             }
 
             async function enableSvcForVideoSender(pc, videoTrack) {
-                // The video transceiver already exists at this point --
-                // it was created when setRemoteDescription processed the
-                // server's offer (mid 1, initially recvonly). We attach
-                // our track to that existing transceiver rather than
-                // creating a new one.
                 const transceiver =
                     pc
                         .getTransceivers()
@@ -685,15 +659,6 @@
                     transceiver.direction = "sendonly";
                 }
 
-                // Request 3 spatial x 3 temporal SVC layers, matching the
-                // SFU's sid 0-2 / tid 0-2 layer-selection ladder. This only
-                // takes effect if the negotiated codec ends up being VP9
-                // or AV1 -- harmless no-op (single layer) on VP8 fallback.
-                // Not all browsers support changing scalabilityMode via
-                // setParameters after the transceiver/sender already
-                // exists (some require it at addTransceiver time) --
-                // failure here is non-fatal, audio/video still work,
-                // just without SVC layering.
                 try {
                     const params = transceiver.sender.getParameters();
                     params.encodings = [
@@ -790,14 +755,11 @@
                         console.log('Transceiver MID:', event.transceiver ? event.transceiver.mid : 'none');
 
                         if (track.kind === "video") {
-                            // Use the stream's unique ID (which the backend set to the remote peer's ufrag)
-                            // instead of track.id (which is hardcoded to "remote-video-track" for everyone)
                             const id =
                                 event.streams && event.streams.length > 0
                                     ? event.streams[0].id
                                     : track.id;
 
-                            // Generate a unique title based on the unique stream ID (e.g., "Peer brow")
                             const label = "Peer " + id.substring(0, 4);
 
                             const p = ensureParticipant(id, {
@@ -805,8 +767,6 @@
                                 label: label,
                             });
 
-                            // Wrap the single track in a brand new MediaStream so the <video> tag
-                            // is forced to render this specific participant's video.
                             const singleVideoStream = new MediaStream([track]);
                             setTileStream(p, singleVideoStream, true);
 
@@ -816,8 +776,6 @@
 
                             setConnState("connected", "ok");
                         } else if (track.kind === "audio") {
-                            // Play incoming audio tracks independently in a hidden audio element.
-                            // This ensures you hear everyone even if the SFU didn't group audio/video perfectly.
                             const audioEl = document.createElement("audio");
                             audioEl.autoplay = true;
                             audioEl.srcObject = new MediaStream([track]);
@@ -889,6 +847,37 @@
                                     }),
                                 ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
+                                console.log("========== REMOTE DESCRIPTION ==========");
+
+                                console.log("Transceivers:");
+                                pc.getTransceivers().forEach((t, i) => {
+                                    console.log(i, {
+                                        mid: t.mid,
+                                        direction: t.direction,
+                                        currentDirection: t.currentDirection,
+                                        receiverTrack: t.receiver.track
+                                            ? {
+                                                kind: t.receiver.track.kind,
+                                                id: t.receiver.track.id,
+                                                readyState: t.receiver.track.readyState,
+                                                enabled: t.receiver.track.enabled,
+                                                muted: t.receiver.track.muted
+                                            }
+                                            : null
+                                    });
+                                });
+
+                                console.log("Receivers:");
+                                pc.getReceivers().forEach((r, i) => {
+                                    console.log(i, {
+                                        kind: r.track.kind,
+                                        id: r.track.id,
+                                        readyState: r.track.readyState,
+                                        muted: r.track.muted,
+                                        enabled: r.track.enabled
+                                    });
+                                });
+
                                 const activeTrackIds = new Set();
                                 pc.getReceivers().forEach(r => {
                                     console.log('collect track state', r.track.readyState);
@@ -942,9 +931,6 @@
                         }
 
                         if (msg.type === "peer-left" && msg.streamId) {
-                            // Speculative: not part of the protocol observed so far, but
-                            // handled defensively in case the server ever sends it --
-                            // harmless no-op if it never arrives.
                             removeTile(msg.streamId);
                         }
                     };

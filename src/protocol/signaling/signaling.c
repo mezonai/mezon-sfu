@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <uv.h>
+#include "api/hook/producer.h"
 #include "peer/session.h"
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
@@ -361,8 +362,6 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
       continue;
     }
 
-    /* ID may carry a "/recvonly" style direction suffix; strtoul stops at
-     * the '/'. Only IDs 1-14 are valid one-byte-header extmap IDs. */
     char *endptr;
     unsigned long parsed = strtoul(line + sizeof(k_extmap) - 1, &endptr, 10);
     if (endptr == line + sizeof(k_extmap) - 1 || parsed == 0 || parsed > 14) {
@@ -432,7 +431,11 @@ static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_
       "INTEGRATION: [NATS Publish] Topic: sfu.room.join | Payload: "
       "{\"room\": %" PRIu64 ", \"ip\": \"%s\"}",
       room_id, peer_ip);
+
+  // TODO: hardcode
+  dispatch_hook_event("{}", 2);
 }
+
 static int extract_header_val(const char *handshake, const char *header_name, char *out_val, size_t out_len) {
   char search_str[128];
   snprintf(search_str, sizeof(search_str), "\r\n%s:", header_name);

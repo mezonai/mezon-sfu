@@ -31,8 +31,8 @@ endif()
 
 find_package(mimalloc REQUIRED)
 
-find_library(URING_LIB uring REQUIRED)
 find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
+find_library(URING_LIB uring REQUIRED)
 
 # Explicitly target the paths provided to avoid picking up system OpenSSL
 set(BORINGSSL_INCLUDE_DIR "/usr/local/include/boringssl")
@@ -51,6 +51,10 @@ if(NOT LIBUV_INCLUDE_DIR OR NOT LIBUV_LIBRARY)
   message(FATAL_ERROR "libuv1-dev not found! Install it using 'sudo apt install libuv1-dev'")
 endif()
 
+# Set nats library
+find_path(NATS_INCLUDE_DIR NAMES nats/nats.h)
+find_library(NATS_LIBRARY NAMES nats)
+
 add_library(sfu_core STATIC
   src/media/svc/vp9_parser.c
   src/memory/pool.c
@@ -59,8 +63,7 @@ add_library(sfu_core STATIC
   src/util/ringbuffer.c
   src/util/log.c
   src/util/metrics.c
-  src/cache/valkey_queue.c
-
+  src/api/hook/producer.c
   src/net/socket.c
   src/net/io_uring.c
   src/net/batch.c
@@ -104,6 +107,7 @@ target_include_directories(sfu_core PUBLIC
   ${BORINGSSL_INCLUDE_DIR}
   ${SRTP_INCLUDE_DIR}
   ${LIBUV_INCLUDE_DIR}
+  ${NATS_INCLUDE_DIR}
 )
 
 # Link directly using resolved absolute library paths
@@ -113,6 +117,7 @@ target_link_libraries(sfu_core PUBLIC
   ${BORINGSSL_CRYPTO_LIB}
   ${SRTP2_LIBRARY}
   ${LIBUV_LIBRARY}
+  ${NATS_LIBRARY}
   mimalloc
   pthread
   m
