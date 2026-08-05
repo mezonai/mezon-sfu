@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <time.h>
 #include "congestion/pacer.h"
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_descriptor.h"
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "runtime/epoch_reclaimer.h"
@@ -52,9 +52,9 @@ int sfu_scheduler_start(sfu_scheduler_t *s);
 void sfu_scheduler_join(sfu_scheduler_t *s);
 bool sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr);
 void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t initial_publisher);
-bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe);
+bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe);
 
-sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc);
+sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc);
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps);
 void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_publisher_id);
 

@@ -57,6 +57,7 @@ find_library(NATS_LIBRARY NAMES nats)
 
 add_library(sfu_core STATIC
   src/media/svc/vp9_parser.c
+  src/media/svc/svc_descriptor.c
   src/memory/pool.c
   src/memory/packet_pool.c
   src/memory/refcount.c
@@ -80,6 +81,9 @@ add_library(sfu_core STATIC
   src/protocol/signaling/sdp.c
   src/protocol/signaling/signaling.c
   src/pipeline/dispatch.c
+  src/pipeline/ingress.c
+  src/pipeline/router.c
+  src/pipeline/egress.c
   src/runtime/cpu.c
   src/runtime/timer.c
   src/runtime/fanout.c

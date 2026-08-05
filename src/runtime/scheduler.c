@@ -168,7 +168,7 @@ sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *sessio
   return &free_slot->sched;
 }
 
-bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc, bool is_keyframe) {
+bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe) {
   if (sched->needs_keyframe) {
     if (!is_keyframe) {
       SFU_LOG_DEBUG("DROP frame due to missing keyframe (waiting for keyframe)");
@@ -212,7 +212,7 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_v
   return true;
 }
 
-sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_vp9_descriptor_t *desc) {
+sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc) {
   if (desc->sid > 0 || desc->tid > 1) {
     return SFU_PACER_CLASS_VIDEO_ENH;
   }

@@ -10,6 +10,9 @@
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
+#include "pipeline/ingress.h"
+#include "pipeline/router.h"
+#include "rtp/rtp_packet.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"
 #include "rtp/rtx.h"
@@ -99,7 +102,7 @@ static void feed_rtcp(fixture_t *f, const uint8_t *plain, size_t plain_len) {
   pkt->peer_addr = f->session->cold->addr;
   pkt->peer_addr_len = f->session->cold->addr_len;
 
-  sfu_room_forward_packet(&f->w, pkt);
+  sfu_ingress_process(&f->w, pkt);
 }
 
 /* Count packets currently held by the pool (capacity minus free slots). */
@@ -190,6 +193,48 @@ static void fixture_destroy(fixture_t *f) {
 
 /* A valid NACK for a cached packet produces an RTX retransmission attempt,
  * which consumes the cache's RTX sequence space. */
+/* The RTP parser is an explicit ingress stage: a packet can pass SRTP
+ * authentication yet still carry a malformed RTP header. It must be dropped
+ * before codec parsing, scheduling, or fanout. */
+static void test_malformed_rtp_dropped_by_ingress_parser(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t plain[2048] = {0};
+  plain[0] = 0x80; /* valid RTP v2, no extensions/CSRC */
+  plain[1] = RTP_PT;
+  size_t plain_len = 12;
+  uint8_t wire[2048];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.srtp, wire, &wire_len, sizeof(wire)));
+
+  /* Decrypt once so libsrtp accepts the authenticated packet, then corrupt
+   * the plaintext RTP header before handing it to ingress. The parser must
+   * reject the malformed CSRC count before any downstream stage runs. */
+  int plain_len2 = wire_len;
+  assert(sfu_srtp_unprotect_rtp(&f.srtp, wire, &plain_len2));
+  wire[0] = 0x81; /* corrupt: CC=1 without a matching CSRC list */
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)plain_len2);
+  pkt->len = (uint32_t)plain_len2;
+  pkt->peer_addr = f.session->cold->addr;
+  pkt->peer_addr_len = f.session->cold->addr_len;
+
+  /* The packet is already plaintext, so bypass SRTP and exercise the parser
+   * stage directly. This keeps the test focused on parser validation. */
+  sfu_ingress_media_t m = {0};
+  m.pkt = pkt;
+  assert(!sfu_rtp_packet_parse(pkt->data, pkt->len, &m.rtp));
+
+  sfu_worker_release_packet(&f.pp, NULL, pkt);
+  assert(pool_free_count(&f.pp) == POOL_CAPACITY);
+
+  fixture_destroy(&f);
+}
+
 static void test_compound_nack_rtx_dispatch(void) {
   fixture_t f;
   fixture_init(&f);
@@ -424,8 +469,8 @@ static void kf_fixture_init(kf_fixture_t *f) {
   f->base.session->uplink_video.active = true;
   f->base.session->uplink_audio.active = true;
 
-  room_add_peer(&f->room, f->publisher, NULL);
-  room_add_peer(&f->room, f->base.session, NULL);
+  room_add_peer(&f->room, f->publisher);
+  room_add_peer(&f->room, f->base.session);
   /* add order: publisher first, so the subscriber is in the publisher's
    * receiver snapshot with the publisher's own uplink SSRCs. */
 }
@@ -501,25 +546,24 @@ static void test_gcc_estimate_reaches_scheduler(void) {
 
   /* A scheduler slot is created lazily for the publisher this subscriber is
    * receiving. Exercise the exact TWCC-result path in the worker. */
-  extern void sfu_test_svc_update_layers(sfu_peer_session_t * session, uint32_t bitrate_bps);
   sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(f.session, 1);
   assert(sched != NULL);
   assert(sched->target_sid == 0);
   assert(sched->target_tid == 0);
 
-  sfu_test_svc_update_layers(f.session, 2000000);
+  sfu_svc_update_layers(f.session, 2000000);
   assert(sched->target_sid == 2);
   assert(sched->target_tid == 2);
 
   /* Below the rung's down threshold but within the dwell window: the target
    * must hold (hysteresis, #83). */
-  sfu_test_svc_update_layers(f.session, 100000);
+  sfu_svc_update_layers(f.session, 100000);
   assert(sched->target_sid == 2);
   assert(sched->target_tid == 2);
 
   /* After the dwell window, the downshift commits. */
   sched->last_target_change_us -= 600000;
-  sfu_test_svc_update_layers(f.session, 100000);
+  sfu_svc_update_layers(f.session, 100000);
   assert(sched->target_sid == 0);
   assert(sched->target_tid == 0);
 
@@ -568,7 +612,7 @@ static void test_egress_writes_twcc_extension(void) {
   pkt->len = (uint32_t)wire_len;
   pkt->peer_addr = f.publisher->cold->addr;
   pkt->peer_addr_len = f.publisher->cold->addr_len;
-  sfu_room_forward_packet(&f.base.w, pkt);
+  sfu_ingress_process(&f.base.w, pkt);
 
   /* The forwarded packet is retained by the send ring (never submitted), so
    * verify through history + metrics: the first allocated TWCC sequence (0)
@@ -612,7 +656,7 @@ static void test_egress_no_twcc_without_negotiation(void) {
   pkt->len = (uint32_t)wire_len;
   pkt->peer_addr = f.publisher->cold->addr;
   pkt->peer_addr_len = f.publisher->cold->addr_len;
-  sfu_room_forward_packet(&f.base.w, pkt);
+  sfu_ingress_process(&f.base.w, pkt);
 
   gcc_packet_info_t info = {0};
   assert(!sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
@@ -668,7 +712,7 @@ static void test_remote_forward_egress_on_owner(void) {
   pkt->len = (uint32_t)wire_len;
   pkt->peer_addr = f.publisher->cold->addr;
   pkt->peer_addr_len = f.publisher->cold->addr_len;
-  sfu_room_forward_packet(&f.base.w, pkt);
+  sfu_ingress_process(&f.base.w, pkt);
 
   /* The publisher worker must NOT have written any TWCC state yet: the job
    * is queued, not processed. */
@@ -865,7 +909,7 @@ static void test_forward_churn_subscriber_disconnect(void) {
     pkt->len = (uint32_t)wire_len;
     pkt->peer_addr = f.publisher->cold->addr;
     pkt->peer_addr_len = f.publisher->cold->addr_len;
-    sfu_room_forward_packet(&f.base.w, pkt);
+    sfu_ingress_process(&f.base.w, pkt);
 
     gcc_packet_info_t info = {0};
     bool recorded = sfu_twcc_history_lookup(sub->twcc_history, (uint16_t)round, &info);
@@ -1049,6 +1093,7 @@ static void test_kf_enqueue_ring_full_drops_ref(void) {
 }
 
 int main(void) {
+  test_malformed_rtp_dropped_by_ingress_parser();
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
   test_compound_pli_then_nack();
