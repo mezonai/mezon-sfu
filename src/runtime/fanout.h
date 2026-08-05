@@ -24,6 +24,8 @@ typedef struct sfu_fanout_job {
   sfu_peer_session_t *publisher;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
+  uint32_t pool_index;
+  uint32_t pool_dst;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   bool has_video;
@@ -33,9 +35,10 @@ typedef struct sfu_fanout_job {
 } sfu_fanout_job_t;
 
 typedef struct sfu_fanout_mesh {
-  sfu_pool_t job_pool;
+  sfu_pool_t *job_pools;
   sfu_spsc_ring_t *rings;
   uint32_t worker_count;
+  uint32_t per_partition_capacity;
 } sfu_fanout_mesh_t;
 
 typedef void (*sfu_fanout_job_fn)(void *user_data, sfu_fanout_job_t *job);

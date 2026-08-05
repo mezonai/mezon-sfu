@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Mezon SFU — Meeting Room</title>
+        <title>Mezon SFU — VP9 SVC Test Client</title>
         <style>
             :root {
                 --bg: #11111b;
@@ -67,7 +67,7 @@
                 color: var(--muted);
                 font-weight: 600;
             }
-            input {
+            input, select {
                 width: 100%;
                 padding: 10px 12px;
                 background: var(--tile);
@@ -76,7 +76,7 @@
                 border-radius: 8px;
                 font-size: 14px;
             }
-            input:focus {
+            input:focus, select:focus {
                 outline: none;
                 border-color: var(--accent);
             }
@@ -233,11 +233,12 @@
                 gap: 4px;
             }
             .tile .badge {
-                background: rgba(17, 17, 27, 0.7);
+                background: rgba(17, 17, 27, 0.75);
                 border-radius: 6px;
                 padding: 3px 7px;
                 font-size: 10px;
-                color: var(--muted);
+                color: var(--accent);
+                font-weight: 600;
             }
 
             #controlBar {
@@ -294,7 +295,7 @@
         <div id="joinScreen">
             <div id="joinCard">
                 <h1>Mezon SFU</h1>
-                <p class="sub">Meeting room test client</p>
+                <p class="sub">VP9 / SVC Test Client</p>
 
                 <video id="joinPreview" autoplay playsinline muted></video>
 
@@ -313,6 +314,17 @@
                 <div class="form-group">
                     <label for="displayName">Your name</label>
                     <input type="text" id="displayName" value="Guest" />
+                </div>
+                <div class="form-group">
+                    <label for="svcMode">SVC Scalability Mode</label>
+                    <select id="svcMode">
+                        <option value="L3T3" selected>L3T3 (3 Spatial, 3 Temporal)</option>
+                        <option value="L3T3_KEY">L3T3_KEY (3 Spatial, Keyframe-based)</option>
+                        <option value="L2T2">L2T2 (2 Spatial, 2 Temporal)</option>
+                        <option value="L1T3">L1T3 (1 Spatial, 3 Temporal)</option>
+                        <option value="L1T2">L1T2 (1 Spatial, 2 Temporal)</option>
+                        <option value="none">Disabled (Simulcast / Single Stream)</option>
+                    </select>
                 </div>
 
                 <button id="joinBtn" onclick="connectAndJoin()">
@@ -360,7 +372,6 @@
         </div>
 
         <script>
-
             let ws = null;
             let pc = null;
             let localStream = null;
@@ -379,7 +390,7 @@
             window.addEventListener("DOMContentLoaded", async () => {
                 try {
                     localStream = await navigator.mediaDevices.getUserMedia({
-                        video: true,
+                        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
                         audio: true,
                     });
                 } catch (e) {
@@ -427,7 +438,7 @@
             }
 
             function updateParticipantCount() {
-                const n = participants.size; // includes local tile
+                const n = participants.size;
                 document.getElementById("participantCount").textContent =
                     `· ${n} participant${n === 1 ? "" : "s"}`;
             }
@@ -440,7 +451,7 @@
                 const video = document.createElement("video");
                 video.autoplay = true;
                 video.playsInline = true;
-                if (isLocal) video.muted = true; // never echo your own mic back to yourself
+                if (isLocal) video.muted = true;
 
                 const avatar = document.createElement("div");
                 avatar.className = "avatar-fallback";
@@ -473,12 +484,13 @@
                 let p = participants.get(id);
                 if (p) return p;
 
-                const { tile, video, avatar, nameLabel } = createTile(id, opts);
+                const { tile, video, avatar, nameLabel, badges } = createTile(id, opts);
                 p = {
                     tile,
                     video,
                     avatar,
                     nameLabel,
+                    badges,
                     stream: null,
                     hasVideo: false,
                     rafHandle: null,
@@ -496,8 +508,6 @@
                 p.video.style.display = hasVideo ? "block" : "none";
                 p.avatar.style.display = hasVideo ? "none" : "flex";
                 attachAudioMeter(p, stream);
-
-                console.log(p.video, p.video.srcObject);
             }
 
             function attachAudioMeter(p, stream) {
@@ -524,7 +534,7 @@
                         analyser.getByteFrequencyData(data);
                         const avg =
                             data.reduce((a, b) => a + b, 0) / data.length;
-                        p.tile.classList.toggle("speaking", avg > 12); // empirical threshold, not calibrated to any spec
+                        p.tile.classList.toggle("speaking", avg > 12);
                         p.rafHandle = requestAnimationFrame(tick);
                     };
                     tick();
@@ -583,97 +593,82 @@
                 isNegotiating = false;
             }
 
-            function preferSvcVideoCodecs(transceiver) {
+            /* Force VP9 codec selection via setCodecPreferences */
+            function forceVp9Codec(transceiver) {
                 if (
                     !transceiver ||
                     typeof transceiver.setCodecPreferences !== "function"
                 ) {
-                    console.warn(
-                        "setCodecPreferences not supported in this browser -- codec order left to browser default",
-                    );
+                    console.warn("setCodecPreferences not supported in this browser.");
                     return;
                 }
                 if (typeof RTCRtpSender.getCapabilities !== "function") {
-                    console.warn(
-                        "RTCRtpSender.getCapabilities not supported -- cannot reorder codecs",
-                    );
+                    console.warn("RTCRtpSender.getCapabilities not supported.");
                     return;
                 }
                 const caps = RTCRtpSender.getCapabilities("video");
-                if (!caps || !caps.codecs) {
-                    return;
-                }
+                if (!caps || !caps.codecs) return;
 
-                const byName = (name) =>
-                    caps.codecs.filter(
-                        (c) => c.mimeType.toLowerCase() === `video/${name}`,
-                    );
-                const vp9 = byName("vp9");
-                const av1 = byName("av1");
-                const vp8 = byName("vp8");
-                const rest = caps.codecs.filter(
-                    (c) =>
-                        !vp9.includes(c) &&
-                        !av1.includes(c) &&
-                        !vp8.includes(c),
+                // Filter specifically for VP9
+                const vp9Codecs = caps.codecs.filter(
+                    (c) => c.mimeType.toLowerCase() === "video/vp9"
                 );
 
-                const ordered = [...vp9, ...av1, ...vp8, ...rest];
-                try {
-                    transceiver.setCodecPreferences(ordered);
-                    console.log(
-                        "Video codec preference set: VP9 > AV1 > VP8 (fallback)",
-                    );
-                } catch (e) {
-                    console.warn(
-                        "setCodecPreferences failed, leaving browser default order:",
-                        e,
-                    );
+                if (vp9Codecs.length > 0) {
+                    try {
+                        transceiver.setCodecPreferences(vp9Codecs);
+                        console.log("Forced VP9 Codec Preference:", vp9Codecs);
+                    } catch (e) {
+                        console.warn("setCodecPreferences for VP9 failed:", e);
+                    }
+                } else {
+                    console.warn("VP9 codec is not supported by this browser.");
                 }
             }
 
+            /* Configure VP9 Transceiver & Apply SVC Scalability Mode */
             async function enableSvcForVideoSender(pc, videoTrack) {
+                const selectedMode = document.getElementById("svcMode").value;
+
                 const transceiver =
-                    pc
-                        .getTransceivers()
-                        .find(
-                            (t) =>
-                                t.receiver &&
-                                t.receiver.track &&
-                                t.receiver.track.kind === "video",
-                        ) ||
-                    pc.getTransceivers().find((t) => t.mid === "1");
+                    pc.getTransceivers().find(
+                        (t) =>
+                            (t.receiver && t.receiver.track && t.receiver.track.kind === "video") ||
+                            t.mid === "1"
+                    );
 
                 if (!transceiver) {
-                    console.warn(
-                        "No video transceiver found to attach local track/SVC to -- falling back to plain addTrack",
-                    );
+                    console.warn("No video transceiver found to attach track/SVC to -- falling back to plain addTrack");
                     pc.addTrack(videoTrack, localStream);
                     return;
                 }
 
-                preferSvcVideoCodecs(transceiver);
+                // Force VP9 Codec Preference
+                forceVp9Codec(transceiver);
 
                 await transceiver.sender.replaceTrack(videoTrack);
-                if (transceiver.direction !== "sendrecv") {
+                if (transceiver.direction !== "sendrecv" && transceiver.direction !== "sendonly") {
                     transceiver.direction = "sendonly";
                 }
 
-                try {
-                    const params = transceiver.sender.getParameters();
-                    params.encodings = [
-                        {
-                            scalabilityMode: "L3T3",
-                            maxBitrate: 2_500_000,
-                        },
-                    ];
-                    await transceiver.sender.setParameters(params);
-                    console.log("SVC requested: scalabilityMode=L3T3");
-                } catch (e) {
-                    console.warn(
-                        "Could not set SVC scalabilityMode (codec/browser may not support changing it post-creation) -- continuing without SVC layering:",
-                        e,
-                    );
+                // Apply SVC mode if selected
+                if (selectedMode !== "none") {
+                    try {
+                        const params = transceiver.sender.getParameters();
+                        if (!params.encodings || params.encodings.length === 0) {
+                            params.encodings = [{}];
+                        }
+                        params.encodings[0].scalabilityMode = selectedMode;
+                        params.encodings[0].maxBitrate = 2_500_000; // Allow sufficient bitrate for spatial layers
+
+                        await transceiver.sender.setParameters(params);
+                        console.log(`SVC requested successfully: scalabilityMode=${selectedMode}`);
+                    } catch (e) {
+                        console.warn(
+                            `Could not set SVC scalabilityMode (${selectedMode}):`,
+                            e
+                        );
+                    }
                 }
             }
 
@@ -692,30 +687,36 @@
                     } catch (e) {
                         return;
                     }
+
                     stats.forEach((report) => {
                         if (
                             report.type === "outbound-rtp" &&
                             report.kind === "video"
                         ) {
+                            const mode = report.scalabilityMode || "N/A";
+                            const res = `${report.frameWidth || 0}x${report.frameHeight || 0}`;
+                            const fps = report.framesPerSecond || 0;
+                            const kbps = report.targetBitrate ? Math.round(report.targetBitrate / 1000) : "?";
+
                             console.log(
-                                `[GCC] video out: target=${report.targetBitrate ? Math.round(report.targetBitrate / 1000) : "?"}kbps ` +
-                                    `res=${report.frameWidth || "?"}x${report.frameHeight || "?"} ` +
-                                    `fps=${report.framesPerSecond || "?"} ` +
-                                    `scalabilityMode=${report.scalabilityMode || "n/a"} ` +
-                                    `qualityLimitation=${report.qualityLimitationReason || "none"}`,
+                                `[VP9 SVC] Outbound: target=${kbps}kbps ` +
+                                    `res=${res} fps=${fps} ` +
+                                    `scalabilityMode=${mode} ` +
+                                    `qualityLimitation=${report.qualityLimitationReason || "none"}`
                             );
-                        }
-                        if (
-                            report.type === "candidate-pair" &&
-                            report.state === "succeeded" &&
-                            report.availableOutgoingBitrate
-                        ) {
-                            console.log(
-                                `[GCC] path estimate: availableOutgoingBitrate=${Math.round(report.availableOutgoingBitrate / 1000)}kbps`,
-                            );
+
+                            // Update live overlay badge on local tile
+                            const localTile = participants.get("local");
+                            if (localTile && localTile.badges) {
+                                localTile.badges.innerHTML = `
+                                    <span class="badge">VP9</span>
+                                    <span class="badge">${mode}</span>
+                                    <span class="badge">${res} @ ${fps}fps</span>
+                                `;
+                            }
                         }
                     });
-                }, 3000);
+                }, 2000);
             }
 
             async function connectAndJoin() {
@@ -749,10 +750,7 @@
                     pc.ontrack = (event) => {
                         const track = event.track;
 
-                        console.log('--- ontrack event fired ---');
-                        console.log('Track kind:', track.kind);
-                        console.log('Track ID:', track.id);
-                        console.log('Transceiver MID:', event.transceiver ? event.transceiver.mid : 'none');
+                        console.log('--- ontrack event fired ---', track.kind, track.id);
 
                         if (track.kind === "video") {
                             const id =
@@ -761,7 +759,6 @@
                                     : track.id;
 
                             const label = "Peer " + id.substring(0, 4);
-
                             const p = ensureParticipant(id, {
                                 isLocal: false,
                                 label: label,
@@ -787,7 +784,6 @@
                         }
                     };
 
-                    // Local self-tile, shown immediately regardless of connection state.
                     const localTile = ensureParticipant("local", {
                         isLocal: true,
                         label: displayName + " (You)",
@@ -833,9 +829,7 @@
 
                         if (msg.type === "offer") {
                             if (isNegotiating) {
-                                console.log(
-                                    "Offer received while already negotiating -- ignoring (a fresh one will follow if this was superseded).",
-                                );
+                                console.log("Offer received while already negotiating -- ignoring.");
                                 return;
                             }
                             isNegotiating = true;
@@ -847,47 +841,14 @@
                                     }),
                                 ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
-                                console.log("========== REMOTE DESCRIPTION ==========");
-
-                                console.log("Transceivers:");
-                                pc.getTransceivers().forEach((t, i) => {
-                                    console.log(i, {
-                                        mid: t.mid,
-                                        direction: t.direction,
-                                        currentDirection: t.currentDirection,
-                                        receiverTrack: t.receiver.track
-                                            ? {
-                                                kind: t.receiver.track.kind,
-                                                id: t.receiver.track.id,
-                                                readyState: t.receiver.track.readyState,
-                                                enabled: t.receiver.track.enabled,
-                                                muted: t.receiver.track.muted
-                                            }
-                                            : null
-                                    });
-                                });
-
-                                console.log("Receivers:");
-                                pc.getReceivers().forEach((r, i) => {
-                                    console.log(i, {
-                                        kind: r.track.kind,
-                                        id: r.track.id,
-                                        readyState: r.track.readyState,
-                                        muted: r.track.muted,
-                                        enabled: r.track.enabled
-                                    });
-                                });
-
                                 const activeTrackIds = new Set();
                                 pc.getReceivers().forEach(r => {
-                                    console.log('collect track state', r.track.readyState);
                                     if (r.track && r.track.readyState === "live") {
                                         activeTrackIds.add(r.track.id);
                                     }
                                 });
 
                                 for (const [id, p] of participants.entries()) {
-                                    console.log('remove track', id, p);
                                     if (id === "local") continue;
                                     const track = p.stream ? p.stream.getTracks()[0] : null;
                                     if (!track || !activeTrackIds.has(track.id)) {

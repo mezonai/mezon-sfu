@@ -83,8 +83,6 @@ static int sfu_rtp_get_payload_offset(const uint8_t *data, uint32_t len) {
 
 #define SFU_WORKER_NACK_REQUEST_CAP 48
 
-#define SFU_WORKER_KF_THROTTLE_MS 1000
-
 static void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   sfu_pacer_set_rate(&session->pacer, bitrate_bps, (int64_t)sfu_now_us());
   if (!session->schedulers) {
@@ -137,15 +135,7 @@ static sfu_peer_session_t *sfu_worker_find_publisher_by_media_ssrc(sfu_peer_sess
   return result;
 }
 
-static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher) {
-  int64_t now = (int64_t)sfu_now_ms();
-  if (now - publisher->last_pli_time < SFU_WORKER_KF_THROTTLE_MS) {
-    return;
-  }
-  publisher->last_pli_time = now;
-
-  sfu_session_request_keyframe(w, publisher, false);
-}
+static void sfu_worker_request_keyframe_throttled(sfu_worker_t *w, sfu_peer_session_t *publisher) { sfu_session_request_keyframe(w, publisher, false); }
 
 static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
   sfu_peer_session_t *publisher = sfu_worker_find_publisher_by_media_ssrc(feedback_session, media_ssrc);
@@ -153,7 +143,6 @@ static void sfu_worker_request_source_keyframe(sfu_worker_t *w, sfu_peer_session
     sfu_metric_inc("rtcp_kf_unresolved");
     publisher = feedback_session;
     atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
-    return;
   }
   sfu_worker_request_keyframe_throttled(w, publisher);
   sfu_session_release(publisher);
