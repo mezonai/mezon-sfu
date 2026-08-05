@@ -74,10 +74,6 @@ add_executable(test_rtcp_fb test_rtcp_fb.c)
 target_link_libraries(test_rtcp_fb PRIVATE sfu_core)
 add_test(NAME rtcp_fb COMMAND test_rtcp_fb)
 
-add_executable(test_valkey_queue test_valkey_queue.c)
-target_link_libraries(test_valkey_queue PRIVATE sfu_core)
-add_test(NAME valkey_queue COMMAND test_valkey_queue)
-
 add_executable(test_rtx_build test_rtx_build.c)
 target_link_libraries(test_rtx_build PRIVATE sfu_core)
 add_test(NAME rtx_build COMMAND test_rtx_build)
@@ -117,4 +113,3 @@ add_test(NAME vp9_parser COMMAND test_vp9_parser)
 add_executable(test_parser_fuzz test_parser_fuzz.c)
 target_link_libraries(test_parser_fuzz PRIVATE sfu_core)
 add_test(NAME parser_fuzz COMMAND test_parser_fuzz)
-

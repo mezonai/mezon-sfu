@@ -1,9 +1,11 @@
+#include <nats/status.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "api/hook/producer.h"
 #include "memory/packet_pool.h"
 #include "net/socket.h"
 #include "peer/session.h"
@@ -79,7 +81,7 @@ int main(int argc, char **argv) {
   bool packet_pool_initialized = false, routing_initialized = false;
   bool room_registry_initialized = false, mesh_initialized = false;
   bool sessions_initialized = false, scheduler_initialized = false;
-  bool scheduler_started = false, signaling_started = false;
+  bool scheduler_started = false, signaling_started = false, nats_producer_started = false;
   sfu_worker_t *workers = NULL;
   sfu_scheduler_t *scheduler = NULL;
   sfu_room_registry_t *room_registry = SFU_CALLOC(1, sizeof(*room_registry));
@@ -126,9 +128,7 @@ int main(int argc, char **argv) {
   if (worker_count > SFU_MAX_WORKERS) {
     worker_count = SFU_MAX_WORKERS;
   }
-  /* Reject impossible worker counts before any io_uring/fanout/scheduler init.
-   * Auto-detect always yields >= 1 and is clamped to SFU_MAX_WORKERS above;
-   * this guard covers future config overrides and defensive invariants. */
+
   if (worker_count < 1 || worker_count > SFU_MAX_WORKERS) {
     SFU_LOG_ERROR("invalid worker_count %u (must be 1..%d)", worker_count, SFU_MAX_WORKERS);
     goto cleanup;
@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
     }
     workers_initialized++;
   }
-  /* Start consumers before the dispatcher can enqueue packets for them. */
+
   for (uint32_t i = 0; i < worker_count; i++) {
     if (sfu_worker_start(&workers[i]) != 0) {
       goto cleanup;
@@ -185,6 +185,10 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   signaling_started = true;
+  if (init_nats_connection(SFU_NATS_URL, SFU_NATS_CLIENT_NAME) != NATS_OK) {
+    goto cleanup;
+  }
+  nats_producer_started = true;
 
   SFU_LOG_INFO("mezon-sfu ready: media UDP port %u, signaling ws://%s:%u (pid=%d)", port, public_host, signaling_port, getpid());
   sfu_scheduler_join(scheduler);
@@ -194,6 +198,9 @@ int main(int argc, char **argv) {
 cleanup:
   if (signaling_started) {
     sfu_signaling_server_stop(&signaling);
+  }
+  if (nats_producer_started) {
+    cleanup_nats_connection();
   }
   if (rc != 0 && (scheduler_started || workers_started)) {
     sfu_request_shutdown();
