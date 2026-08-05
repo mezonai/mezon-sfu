@@ -8,6 +8,7 @@
 #include "media/svc/vp9_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
+#include "protocol/signaling/sdp.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtcp/rtcp_fb.h"
 #include "rtp/rtp_ext.h"
@@ -440,21 +441,24 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (!is_rtcp && !is_audio) {
     uint8_t incoming_pt = ingress_pt;
     if (incoming_pt == sender_session->uplink_video.payload_type) {
-      is_vp9 = true;
+      sfu_video_codec_t codec = sfu_video_codec_from_pt(incoming_pt);
+      if (codec == SFU_VIDEO_CODEC_VP9) {
+        is_vp9 = true;
 
-      uint32_t pkt_ssrc = sfu_read_be32(pkt->data + 8);
-      if (sender_session->uplink_video.ssrc == 0 && pkt_ssrc != 0) {
-        sender_session->uplink_video.ssrc = pkt_ssrc;
-      }
+        uint32_t pkt_ssrc = sfu_read_be32(pkt->data + 8);
+        if (sender_session->uplink_video.ssrc == 0 && pkt_ssrc != 0) {
+          sender_session->uplink_video.ssrc = pkt_ssrc;
+        }
 
-      int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
-      if (payload_offset > 0) {
-        const uint8_t *payload = pkt->data + payload_offset;
-        size_t payload_len = pkt->len - payload_offset;
-        if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
-          is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
-        } else {
-          is_vp9 = false;
+        int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
+        if (payload_offset > 0) {
+          const uint8_t *payload = pkt->data + payload_offset;
+          size_t payload_len = pkt->len - payload_offset;
+          if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
+            is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
+          } else {
+            is_vp9 = false;
+          }
         }
       }
     }
