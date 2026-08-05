@@ -246,21 +246,3 @@ UDP
 5. **RTX/NACK**
 6. **PLI/FIR**
 7. **Pacing and advanced bandwidth probing**
-
-Here is how those 11 steps map directly to your codebase's concrete functions and execution units:
-
-| Step | Architecture Layer | Code Base Mapping / Function |
-| --- | --- | --- |
-| **1** | UDP Ingress | **`io_uring`** (or socket `recvfrom`/`recvmmsg` ring) |
-| **2** | ICE Layer | **`handle_stun()`** |
-| **3** | DTLS Layer | **`handle_dtls()`** |
-| **4** | SRTP Decryption | **`sfu_srtp_unprotect()`** *(Note: `sfu_srtp_ctx_init_from_dtls` extracts keying material once during handshake; `unprotect` decrypts every packet)* |
-| **5** | RTP Parser | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_rtp_parse()` |
-| **6** | SVC Parser | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_svc_parse()` |
-| **7** | Congestion Control | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_twcc_parser_next()` / `gcc_bwe_process_twcc_packet()` |
-| **8** | Layer Scheduler | **`sfu_room_forward_packet()`** $\rightarrow$ Layer gating / `needs_keyframe` checks |
-| **9** | Packet Router | **Fanout job** / ring buffer cross-thread enqueue to subscriber queues |
-| **10** | Outbound SRTP | Header rewriting (SSRC, sequence/timestamp normalization) $\rightarrow$ **`sfu_srtp_protect()`** |
-| **11** | UDP Egress | **`io_uring`** (or `sendmmsg`/`sendto` write ring) |
-
-Steps **5, 6, 7, and 8** are indeed encapsulated inside **`sfu_room_forward_packet()`** executing on the worker thread, while Step 9 hands off the processed packet to the subscriber egress pipeline where Step 10 (`protect`) and Step 11 (`io_uring` write) take over.
