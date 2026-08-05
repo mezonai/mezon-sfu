@@ -1,4 +1,80 @@
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
+#include <string.h>
+
+int sfu_parse_vp8_descriptor(const uint8_t *payload, size_t payload_len, sfu_vp8_descriptor_t *desc) {
+  if (!payload || !desc || payload_len < 1) {
+    return -1;
+  }
+
+  memset(desc, 0, sizeof(sfu_vp8_descriptor_t));
+
+  size_t offset = 0;
+
+  uint8_t b = payload[offset++];
+  desc->x = (b & 0x80) != 0;
+  desc->n = (b & 0x20) != 0;
+  desc->s = (b & 0x10) != 0;
+  desc->part_id = b & 0x0F;
+
+  if (desc->x) {
+    if (offset >= payload_len) {
+      return -1;
+    }
+    uint8_t x_byte = payload[offset++];
+
+    desc->i = (x_byte & 0x80) != 0;
+    desc->l = (x_byte & 0x40) != 0;
+    desc->t = (x_byte & 0x20) != 0;
+    desc->k = (x_byte & 0x10) != 0;
+
+    if (desc->i) {
+      if (offset >= payload_len) {
+        return -1;
+      }
+      uint8_t pid_byte = payload[offset++];
+
+      if (pid_byte & 0x80) {
+        if (offset >= payload_len) {
+          return -1;
+        }
+        desc->picture_id = ((pid_byte & 0x7F) << 8) | payload[offset++];
+      } else {
+        desc->picture_id = pid_byte & 0x7F;
+      }
+    }
+
+    if (desc->l) {
+      if (offset >= payload_len) {
+        return -1;
+      }
+      desc->tl0picidx = payload[offset++];
+    }
+
+    if (desc->t || desc->k) {
+      if (offset >= payload_len) {
+        return -1;
+      }
+      uint8_t t_k_byte = payload[offset++];
+      desc->tid = (t_k_byte & 0xC0) >> 6;
+      desc->y = (t_k_byte & 0x20) != 0;
+      desc->keyidx = t_k_byte & 0x1F;
+    }
+  }
+
+  desc->header_len = offset;
+
+  desc->is_keyframe = false;
+
+  if (desc->s && desc->part_id == 0 && offset < payload_len) {
+    uint8_t vp8_payload_first_byte = payload[offset];
+
+    if ((vp8_payload_first_byte & 0x01) == 0) {
+      desc->is_keyframe = true;
+    }
+  }
+
+  return 0;
+}
 
 int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descriptor_t *out) {
   if (!payload || !out || len == 0) {

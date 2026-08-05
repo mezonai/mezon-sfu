@@ -166,8 +166,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
         if (!session->room) {
           SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
-          room_add_peer(room, session, w->scheduler);
-          session->fd = matched_signaling_fd;
 
           if (has_pending_answer) {
             session->uplink_audio.ssrc = pending_audio_ssrc;
@@ -188,6 +186,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
             }
             SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u", w->worker_index, client_ufrag,
                          pending_audio_ssrc, pending_video_ssrc, pending_rtx_ssrc);
+            room_add_peer(room, session, w->scheduler);
+            session->fd = matched_signaling_fd;
           }
         }
 

@@ -5,7 +5,7 @@
 #include "congestion/gcc.h"
 #include "congestion/twcc_history.h"
 #include "congestion/twcc_parser.h"
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "protocol/signaling/sdp.h"
@@ -19,6 +19,7 @@
 #include "runtime/scheduler.h"
 #include "runtime/signal.h"
 #include "runtime/timer.h"
+#include "sfu/datadef.h"
 #include "transport/srtp/srtp.h"
 #include "util/log.h"
 #include "util/metrics.h"
@@ -432,8 +433,9 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  bool is_vp9 = false;
+  bool is_vp8 = false, is_vp9 = false;
   sfu_vp9_descriptor_t vp9_desc = {0};
+  sfu_vp8_descriptor_t vp8_desc = {0};
   bool is_keyframe = false;
   uint8_t ingress_pt = pkt->data[1] & 0x7F;
   bool is_audio = sender_session->uplink_audio.active && ingress_pt == sender_session->uplink_audio.payload_type;
@@ -442,23 +444,38 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint8_t incoming_pt = ingress_pt;
     if (incoming_pt == sender_session->uplink_video.payload_type) {
       sfu_video_codec_t codec = sfu_video_codec_from_pt(incoming_pt);
-      if (codec == SFU_VIDEO_CODEC_VP9) {
-        is_vp9 = true;
 
-        uint32_t pkt_ssrc = sfu_read_be32(pkt->data + 8);
-        if (sender_session->uplink_video.ssrc == 0 && pkt_ssrc != 0) {
-          sender_session->uplink_video.ssrc = pkt_ssrc;
-        }
+      uint32_t pkt_ssrc = sfu_read_be32(pkt->data + 8);
+      if (sender_session->uplink_video.ssrc == 0 && pkt_ssrc != 0) {
+        sender_session->uplink_video.ssrc = pkt_ssrc;
+      }
 
-        int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
-        if (payload_offset > 0) {
-          const uint8_t *payload = pkt->data + payload_offset;
-          size_t payload_len = pkt->len - payload_offset;
-          if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
-            is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
-          } else {
-            is_vp9 = false;
+      int payload_offset = sfu_rtp_get_payload_offset(pkt->data, pkt->len);
+      if (payload_offset > 0) {
+        const uint8_t *payload = pkt->data + payload_offset;
+        size_t payload_len = pkt->len - payload_offset;
+
+        switch (codec) {
+          case SFU_VIDEO_CODEC_VP9: {
+            is_vp9 = true;
+            if (sfu_parse_vp9_descriptor(payload, payload_len, &vp9_desc) == 0) {
+              is_keyframe = (vp9_desc.p_bit == 0 && vp9_desc.sid == 0);
+            } else {
+              is_vp9 = false;
+            }
+            break;
           }
+          case SFU_VIDEO_CODEC_VP8: {
+            is_vp8 = true;
+            if (sfu_parse_vp8_descriptor(payload, payload_len, &vp8_desc) == 0) {
+              is_keyframe = vp8_desc.is_keyframe;
+            } else {
+              is_vp8 = false;
+            }
+            break;
+          }
+          default:
+            break;
         }
       }
     }
@@ -485,16 +502,27 @@ void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 
     sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
-    if (is_vp9 && slot->has_video) {
+    if ((is_vp9 || is_vp8) && slot->has_video) {
       if (sched->needs_keyframe) {
         sfu_worker_request_keyframe_throttled(w, sender_session);
       }
 
-      bool should_forward = sfu_scheduler_evaluate_frame(sched, &vp9_desc, is_keyframe);
-      if (!should_forward) {
-        continue;
+      if (is_vp9) {
+        bool should_forward = sfu_scheduler_evaluate_frame(sched, &vp9_desc, is_keyframe);
+        if (!should_forward) {
+          continue;
+        }
+        video_class = sfu_scheduler_classify_frame(sched, &vp9_desc);
+      } else if (is_vp8) {
+        if (sched->needs_keyframe) {
+          if (!is_keyframe) {
+            continue;
+          } else {
+            sched->needs_keyframe = false;
+          }
+        }
+        video_class = SFU_PACER_CLASS_VIDEO_BASE;
       }
-      video_class = sfu_scheduler_classify_frame(sched, &vp9_desc);
     }
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);

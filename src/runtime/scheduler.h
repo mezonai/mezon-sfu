@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <time.h>
 #include "congestion/pacer.h"
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "runtime/epoch_reclaimer.h"

@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include "congestion/twcc_parser.h"
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtp/rtp_ext.h"
 #include "rtp/rtx.h"

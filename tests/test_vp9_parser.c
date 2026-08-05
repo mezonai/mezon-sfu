@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 
 #define VP9_I 0x80
 #define VP9_P 0x40

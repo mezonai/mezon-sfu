@@ -5,20 +5,6 @@
 #include <stdint.h>
 #include "sfu/datadef.h"
 
-#define SFU_PT_VP9 98
-#define SFU_PT_VP9_RTX 99
-#define SFU_PT_AV1 100
-#define SFU_PT_AV1_RTX 101
-#define SFU_PT_VP8 96
-#define SFU_PT_VP8_RTX 97
-
-typedef enum {
-  SFU_VIDEO_CODEC_NONE = 0,
-  SFU_VIDEO_CODEC_VP8,
-  SFU_VIDEO_CODEC_VP9,
-  SFU_VIDEO_CODEC_AV1,
-} sfu_video_codec_t;
-
 static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
   switch (pt) {
     case SFU_PT_VP9:
