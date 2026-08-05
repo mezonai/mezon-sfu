@@ -17,7 +17,7 @@
 #include <string.h>
 
 #include "congestion/twcc_parser.h"
-#include "media/svc/vp9_parser.h"
+#include "media/svc/svc_parser.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtp/rtp_ext.h"
 #include "rtp/rtx.h"
@@ -29,53 +29,87 @@
  * received-large), reference time, recv deltas. */
 static size_t seed_twcc(uint8_t *b) {
   size_t n = 0;
-  b[n++] = 0x00; b[n++] = 0x64;             /* base seq = 100 */
-  b[n++] = 0x00; b[n++] = 0x08;             /* status count = 8 */
-  b[n++] = 0x12; b[n++] = 0x34; b[n++] = 0x56; /* reference time 24-bit */
-  b[n++] = 0x00;                            /* fb pkt count */
-  b[n++] = 0x9F; b[n++] = 0xFF;             /* run chunk: large delta x8 (symbol 01111111 -> 0x9F 0xFF?) */
-  for (int i = 0; i < 8; i++) { b[n++] = 0x10; b[n++] = 0x00; } /* large deltas */
-  b[n++] = 0x00; b[n++] = 0x00;             /* padding */
+  b[n++] = 0x00;
+  b[n++] = 0x64; /* base seq = 100 */
+  b[n++] = 0x00;
+  b[n++] = 0x08; /* status count = 8 */
+  b[n++] = 0x12;
+  b[n++] = 0x34;
+  b[n++] = 0x56; /* reference time 24-bit */
+  b[n++] = 0x00; /* fb pkt count */
+  b[n++] = 0x9F;
+  b[n++] = 0xFF; /* run chunk: large delta x8 (symbol 01111111 -> 0x9F 0xFF?) */
+  for (int i = 0; i < 8; i++) {
+    b[n++] = 0x10;
+    b[n++] = 0x00;
+  } /* large deltas */
+  b[n++] = 0x00;
+  b[n++] = 0x00; /* padding */
   return n;
 }
 
 static size_t seed_nack(uint8_t *b) {
   size_t n = 0;
-  b[n++] = 0xDE; b[n++] = 0xAD; b[n++] = 0xBE; b[n++] = 0xEF; /* media ssrc */
-  b[n++] = 0x00; b[n++] = 0x2A;             /* pid 42 */
-  b[n++] = 0xFF; b[n++] = 0xFF;             /* blp */
+  b[n++] = 0xDE;
+  b[n++] = 0xAD;
+  b[n++] = 0xBE;
+  b[n++] = 0xEF; /* media ssrc */
+  b[n++] = 0x00;
+  b[n++] = 0x2A; /* pid 42 */
+  b[n++] = 0xFF;
+  b[n++] = 0xFF; /* blp */
   return n;
 }
 
 static size_t seed_rtcp(uint8_t *b) {
   size_t n = 0;
-  b[n++] = 0x81; b[n++] = 205;              /* V=2, FMT=1, RTPFB */
-  b[n++] = 0x00; b[n++] = 0x03;             /* length: 4 words - 1 */
-  b[n++] = 0x00; b[n++] = 0x00; b[n++] = 0x00; b[n++] = 0x01; /* sender ssrc */
-  b[n++] = 0xDE; b[n++] = 0xAD; b[n++] = 0xBE; b[n++] = 0xEF; /* media ssrc */
-  b[n++] = 0x00; b[n++] = 0x2A; b[n++] = 0x00; b[n++] = 0x01; /* one FCI */
+  b[n++] = 0x81;
+  b[n++] = 205; /* V=2, FMT=1, RTPFB */
+  b[n++] = 0x00;
+  b[n++] = 0x03; /* length: 4 words - 1 */
+  b[n++] = 0x00;
+  b[n++] = 0x00;
+  b[n++] = 0x00;
+  b[n++] = 0x01; /* sender ssrc */
+  b[n++] = 0xDE;
+  b[n++] = 0xAD;
+  b[n++] = 0xBE;
+  b[n++] = 0xEF; /* media ssrc */
+  b[n++] = 0x00;
+  b[n++] = 0x2A;
+  b[n++] = 0x00;
+  b[n++] = 0x01; /* one FCI */
   return n;
 }
 
 static size_t seed_rtp_ext(uint8_t *b) {
   size_t n = 0;
-  b[n++] = 0x90;                            /* V=2, X=1 */
-  b[n++] = 96;                              /* PT */
-  b[n++] = 0x00; b[n++] = 0x01;             /* seq */
-  b[n++] = 0x00; b[n++] = 0x00; b[n++] = 0x10; b[n++] = 0x00; /* ts */
-  b[n++] = 0xAA; b[n++] = 0xBB; b[n++] = 0xCC; b[n++] = 0xDD; /* ssrc */
-  b[n++] = 0xBE; b[n++] = 0xDE;             /* one-byte ext profile */
-  b[n++] = 0x00; b[n++] = 0x00;             /* ext length 0 words */
+  b[n++] = 0x90; /* V=2, X=1 */
+  b[n++] = 96;   /* PT */
+  b[n++] = 0x00;
+  b[n++] = 0x01; /* seq */
+  b[n++] = 0x00;
+  b[n++] = 0x00;
+  b[n++] = 0x10;
+  b[n++] = 0x00; /* ts */
+  b[n++] = 0xAA;
+  b[n++] = 0xBB;
+  b[n++] = 0xCC;
+  b[n++] = 0xDD; /* ssrc */
+  b[n++] = 0xBE;
+  b[n++] = 0xDE; /* one-byte ext profile */
+  b[n++] = 0x00;
+  b[n++] = 0x00; /* ext length 0 words */
   return n;
 }
 
 static size_t seed_vp9(uint8_t *b) {
   /* I=1,P=0,L=0,F=0 | B E | picture id 7-bit | ... minimal flexible */
   size_t n = 0;
-  b[n++] = 0x80;                            /* I=1, P=0 */
-  b[n++] = 0x06;                            /* B=0,E=1 ... actually 0x06 sets B,E? keep arbitrary-but-valid-ish */
-  b[n++] = 0x2A;                            /* picture id 42 */
-  b[n++] = 0x00;                            /* TL0PICIDX if L; harmless extra */
+  b[n++] = 0x80; /* I=1, P=0 */
+  b[n++] = 0x06; /* B=0,E=1 ... actually 0x06 sets B,E? keep arbitrary-but-valid-ish */
+  b[n++] = 0x2A; /* picture id 42 */
+  b[n++] = 0x00; /* TL0PICIDX if L; harmless extra */
   return n;
 }
 

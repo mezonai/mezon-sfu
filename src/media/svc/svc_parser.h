@@ -8,6 +8,24 @@
 #define SFU_VP9_MAX_P_DIFF 3
 
 typedef struct {
+  bool x;
+  bool n;
+  bool s;
+  uint8_t part_id;
+  bool i;
+  bool l;
+  bool t;
+  bool k;
+  uint16_t picture_id;
+  uint8_t tl0picidx;
+  uint8_t tid;
+  bool y;
+  uint8_t keyidx;
+  uint32_t header_len;
+  bool is_keyframe;
+} sfu_vp8_descriptor_t;
+
+typedef struct {
   bool i_bit;
   bool p_bit;
   bool l_bit;
@@ -27,6 +45,7 @@ typedef struct {
   size_t header_length;
 } sfu_vp9_descriptor_t;
 
+int sfu_parse_vp8_descriptor(const uint8_t *payload, size_t len, sfu_vp8_descriptor_t *out);
 int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descriptor_t *out);
 
 #endif  // SFU_VP9_PARSER_H

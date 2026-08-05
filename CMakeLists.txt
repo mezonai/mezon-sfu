@@ -56,7 +56,7 @@ find_path(NATS_INCLUDE_DIR NAMES nats/nats.h)
 find_library(NATS_LIBRARY NAMES nats)
 
 add_library(sfu_core STATIC
-  src/media/svc/vp9_parser.c
+  src/media/svc/svc_parser.c
   src/media/svc/svc_descriptor.c
   src/memory/pool.c
   src/memory/packet_pool.c
@@ -102,6 +102,7 @@ add_library(sfu_core STATIC
   src/rtcp/rtcp_kf.c
   src/rtcp/rtcp_compound.c
   src/rtcp/rtcp_fb.c
+  src/config/config.c
 )
 
 target_include_directories(sfu_core PUBLIC

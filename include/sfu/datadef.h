@@ -34,6 +34,13 @@
 
 #define SFU_MAX_PAYLOAD_SIZE 2048
 
+#define SFU_PT_VP9 98
+#define SFU_PT_VP9_RTX 99
+#define SFU_PT_AV1 100
+#define SFU_PT_AV1_RTX 101
+#define SFU_PT_VP8 96
+#define SFU_PT_VP8_RTX 97
+
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
 typedef enum { SFU_DIRECTION_INACTIVE = 0, SFU_DIRECTION_SENDONLY, SFU_DIRECTION_RECVONLY, SFU_DIRECTION_SENDRECV } sfu_direction_t;
@@ -55,6 +62,13 @@ typedef enum {
   SFU_DTLS_FEED_IN_PROGRESS = 0,
   SFU_DTLS_FEED_ESTABLISHED = 1,
 } sfu_dtls_feed_status_t;
+
+typedef enum {
+  SFU_VIDEO_CODEC_NONE = 0,
+  SFU_VIDEO_CODEC_VP8,
+  SFU_VIDEO_CODEC_VP9,
+  SFU_VIDEO_CODEC_AV1,
+} sfu_video_codec_t;
 
 typedef struct sfu_peer_session sfu_peer_session_t;
 typedef struct sfu_room sfu_room_t;
@@ -92,6 +106,7 @@ typedef struct {
 
 typedef struct sfu_transceiver {
   sfu_peer_session_t *owner;
+  sfu_video_codec_t codec;
   uint32_t ssrc;
   uint32_t rtx_ssrc;
   uint16_t mid;

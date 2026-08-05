@@ -24,7 +24,6 @@ typedef struct sfu_rtp_packet {
 } sfu_rtp_packet_t;
 
 bool sfu_rtp_packet_parse(const uint8_t *data, size_t len, sfu_rtp_packet_t *packet);
-
 bool sfu_rtp_packet_set_pt(uint8_t *data, size_t len, uint8_t payload_type);
 bool sfu_rtp_packet_set_seq(uint8_t *data, size_t len, uint16_t sequence_number);
 bool sfu_rtp_packet_set_ssrc(uint8_t *data, size_t len, uint32_t ssrc);
