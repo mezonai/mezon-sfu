@@ -80,7 +80,7 @@ cd libsrtp
 make
 ```
 
-# build nats client
+## build nats client
 ```
 git clone https://github.com/nats-io/nats.c.git
 cd nats.c
