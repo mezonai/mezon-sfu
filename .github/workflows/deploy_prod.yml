@@ -19,7 +19,7 @@ jobs:
           mkdir build && cd build
           cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
-          if [ -f /opt/mezon-sfu/build/mezon-sfu ]; then
-            cp /opt/mezon-sfu/build/mezon-sfu /opt/mezon-sfu/build/mezon-sfu.bk
+          if [ -f /opt/mezon-sfu/mezon-sfu ]; then
+            cp /opt/mezon-sfu/mezon-sfu /opt/mezon-sfu/mezon-sfu.bk
           fi
-          cp -rf ./* /opt/mezon-sfu/build/
+          cp -rf ./mezon-sfu /opt/mezon-sfu/
