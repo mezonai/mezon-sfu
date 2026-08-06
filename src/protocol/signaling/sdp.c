@@ -305,7 +305,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
   assert(session != NULL);
 
   /* Coherent, immutable view of the receiver set for the whole build (F-03). */
-  sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(session);
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
   assert(snap != NULL || receiver_count == 0);
 
@@ -539,11 +539,11 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
     }
   }
 
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
   return (int)off;
 
 fail:
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
   return -1;
 }
 
@@ -556,7 +556,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   assert(session != NULL);
 
   /* Coherent, immutable view of the receiver set for the whole build (F-03). */
-  sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(session);
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
   assert(snap != NULL || receiver_count == 0);
 
@@ -724,11 +724,11 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     }
   }
 
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
 
   return (int)off;
 
 fail:
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
   return -1;
 }

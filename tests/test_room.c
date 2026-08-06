@@ -31,14 +31,14 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
 }
 
 static uint32_t receiver_count(sfu_peer_session_t *peer) {
-  sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(peer);
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(peer);
   uint32_t n = snap ? snap->count : 0;
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
   return n;
 }
 
 static bool subscribes_to(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
-  sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(peer);
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(peer);
   bool found = false;
   if (snap) {
     for (uint32_t i = 0; i < snap->count; i++) {
@@ -48,7 +48,7 @@ static bool subscribes_to(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
       }
     }
   }
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
   return found;
 }
 
@@ -80,7 +80,7 @@ static void test_add_remove(void) {
   /* MID numbers are stable for surviving entries across a removal. */
   uint32_t a_mid_for_c_audio = 0, a_mid_for_c_video = 0;
   {
-    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(a);
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(a);
     assert(snap != NULL);
     for (uint32_t i = 0; i < snap->count; i++) {
       if (snap->entries[i].subscriber == c) {
@@ -88,7 +88,7 @@ static void test_add_remove(void) {
         a_mid_for_c_video = snap->entries[i].mid_video;
       }
     }
-    sfu_receiver_snapshot_release(snap);
+    sfu_subscriptions_snapshot_release(snap);
   }
   assert(a_mid_for_c_audio != 0 || a_mid_for_c_video != 0);
 
@@ -102,12 +102,12 @@ static void test_add_remove(void) {
 
   /* c's MIDs inside a's snapshot survived the rebuild. */
   {
-    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(a);
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(a);
     assert(snap != NULL && snap->count == 1);
     assert(snap->entries[0].subscriber == c);
     assert(snap->entries[0].mid_audio == a_mid_for_c_audio);
     assert(snap->entries[0].mid_video == a_mid_for_c_video);
-    sfu_receiver_snapshot_release(snap);
+    sfu_subscriptions_snapshot_release(snap);
   }
 
   /* Removing a non-member is a safe no-op. */
@@ -143,7 +143,7 @@ static void test_snapshot_hold_across_replace(void) {
   room_add_peer(&room, b);
 
   /* Hold the current snapshot of a. */
-  sfu_receiver_snapshot_t *held = sfu_session_receivers_acquire(a);
+  sfu_receiver_snapshot_t *held = sfu_session_subscriptions_acquire(a);
   assert(held != NULL && held->count == 1);
   assert(held->entries[0].subscriber == b);
 
@@ -156,15 +156,15 @@ static void test_snapshot_hold_across_replace(void) {
   assert(held->entries[0].subscriber->cold != NULL);
 
   /* New acquisitions see the replacement. */
-  sfu_receiver_snapshot_t *fresh = sfu_session_receivers_acquire(a);
+  sfu_receiver_snapshot_t *fresh = sfu_session_subscriptions_acquire(a);
   assert(fresh != NULL && fresh->count == 2);
   assert(fresh != held);
   assert(fresh->generation == held->generation + 1);
-  sfu_receiver_snapshot_release(fresh);
+  sfu_subscriptions_snapshot_release(fresh);
 
   /* Releasing the held snapshot must not free b (still referenced by the new
    * snapshot and by our own pin). */
-  sfu_receiver_snapshot_release(held);
+  sfu_subscriptions_snapshot_release(held);
   assert(b->cold != NULL);
   assert(subscribes_to(a, b));
 
@@ -185,14 +185,14 @@ static void *snap_reader(void *arg) {
   snap_race_ctx_t *ctx = arg;
   pthread_barrier_wait(&ctx->barrier);
   for (int i = 0; i < 500; i++) {
-    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(ctx->peers[0]);
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(ctx->peers[0]);
     if (snap) {
       for (uint32_t e = 0; e < snap->count; e++) {
         /* Entries must be coherent: retained subscriber with valid cold. */
         assert(snap->entries[e].subscriber != NULL);
         assert(snap->entries[e].subscriber->cold != NULL);
       }
-      sfu_receiver_snapshot_release(snap);
+      sfu_subscriptions_snapshot_release(snap);
     }
   }
   return NULL;
@@ -218,7 +218,9 @@ static void test_concurrent_snapshot_read_write(void) {
   peers[1] = mock_session("flapper");
 
   snap_race_ctx_t ctx = {
-      .room = &room, .peers = peers, .peer_count = 2,
+      .room = &room,
+      .peers = peers,
+      .peer_count = 2,
   };
   pthread_barrier_init(&ctx.barrier, NULL, 2);
 
@@ -274,14 +276,14 @@ static void *churn_reader(void *arg) {
   pthread_barrier_wait(&ctx->barrier);
   for (int i = 0; i < 2000; i++) {
     sfu_peer_session_t *pub = ctx->publishers[i % ctx->publisher_count];
-    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(pub);
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(pub);
     if (snap) {
       for (uint32_t e = 0; e < snap->count; e++) {
         /* Coherence: retained subscriber with valid cold, even mid-churn. */
         assert(snap->entries[e].subscriber != NULL);
         assert(snap->entries[e].subscriber->cold != NULL);
       }
-      sfu_receiver_snapshot_release(snap);
+      sfu_subscriptions_snapshot_release(snap);
     }
   }
   return NULL;
@@ -303,7 +305,10 @@ static void test_multi_publisher_concurrent_churn(void) {
   room_add_peer(&room, sub);
 
   churn_ctx_t ctx = {
-      .room = &room, .publishers = pubs, .publisher_count = PUBS, .subscriber = sub,
+      .room = &room,
+      .publishers = pubs,
+      .publisher_count = PUBS,
+      .subscriber = sub,
   };
   pthread_barrier_init(&ctx.barrier, NULL, WRITERS + READERS);
 

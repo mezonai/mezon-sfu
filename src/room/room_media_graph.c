@@ -48,16 +48,16 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
 }
 
 static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
-  sfu_receiver_snapshot_t *old = sfu_session_receivers_acquire(owner);
+  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
   if (snapshot_find(old, dst) != UINT32_MAX) {
-    sfu_receiver_snapshot_release(old);
+    sfu_subscriptions_snapshot_release(old);
     return NULL;
   }
 
   uint32_t old_count = old ? old->count : 0;
   sfu_receiver_snapshot_t *snap = snapshot_alloc(old_count + 1);
   if (!snap) {
-    sfu_receiver_snapshot_release(old);
+    sfu_subscriptions_snapshot_release(old);
     return NULL;
   }
   snap->generation = (old ? old->generation : 0) + 1;
@@ -76,22 +76,22 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
   e->has_video = true;
 
   snap->count = old_count + 1;
-  sfu_receiver_snapshot_release(old);
+  sfu_subscriptions_snapshot_release(old);
   return snap;
 }
 
 static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner, const sfu_peer_session_t *dst) {
-  sfu_receiver_snapshot_t *old = sfu_session_receivers_acquire(owner);
+  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
   uint32_t pos = snapshot_find(old, dst);
   if (pos == UINT32_MAX) {
-    sfu_receiver_snapshot_release(old);
+    sfu_subscriptions_snapshot_release(old);
     return NULL;
   }
 
   uint32_t old_count = old->count;
   sfu_receiver_snapshot_t *snap = snapshot_alloc(old_count - 1);
   if (!snap) {
-    sfu_receiver_snapshot_release(old);
+    sfu_subscriptions_snapshot_release(old);
     return NULL;
   }
   snap->generation = old->generation + 1;
@@ -106,7 +106,7 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
     out++;
   }
   snap->count = out;
-  sfu_receiver_snapshot_release(old);
+  sfu_subscriptions_snapshot_release(old);
   return snap;
 }
 
