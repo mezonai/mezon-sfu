@@ -178,7 +178,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
             session->uplink_video.active = (pending_video_ssrc != 0);
             session->uplink_video.payload_type = pending_video_pt;
             session->uplink_video.rtx_payload_type = pending_rtx_pt;
-            session->is_audience = pending_is_audience;
+            atomic_store_explicit(&session->is_audience, pending_is_audience, memory_order_release);
             for (int pi = 0; pi < 128; pi++) {
               session->pt_map[pi] = (uint8_t)pi;
             }

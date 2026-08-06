@@ -19,6 +19,7 @@
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
+#include "room/room_media_graph.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
 #include "runtime/scheduler.h"
@@ -246,11 +247,11 @@ static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *vide
   }
 }
 
-static bool build_and_send_initial_offer(int fd, sfu_signaling_server_t *s) {
+static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_signaling_server_t *s) {
   char offer[SFU_SIGNALING_SDP_CAP];
 
-  int offer_len =
-      sfu_sdp_build_initial_offer(s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, offer, sizeof(offer));
+  int offer_len = sfu_sdp_build_initial_offer(s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint,
+                                              is_audience, offer, sizeof(offer));
 
   if (offer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build initial SDP offer (fd=%d)", fd);
@@ -609,7 +610,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
                 sfu_ws_send_text(c->fd, response, strlen(response));
 
-                if (!build_and_send_initial_offer(c->fd, s)) {
+                if (!build_and_send_initial_offer(c->fd, c->is_audience, s)) {
                   SFU_LOG_WARN("signaling: failed to send initial offer (fd=%d)", c->fd);
                 }
               }
@@ -634,12 +635,20 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 if (session) {
                   session->user_id = c->user_id;
                   session->peer_id = generate_unique_id();
-                  session->is_audience = c->is_audience;
+                  bool role_changed = false;
+                  if (session->room) {
+                    role_changed = room_update_peer_role((sfu_room_t *)session->room, session, c->is_audience);
+                  } else {
+                    atomic_store_explicit(&session->is_audience, c->is_audience, memory_order_release);
+                  }
                   handle_answer(session, sdp, sdp_len);
-                  sfu_session_release(session);
+                  if (role_changed) {
+                    sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+                  }
                   if (session->schedulers) {
                     sfu_layer_selector_switch_source(session, session->peer_id);
                   }
+                  sfu_session_release(session);
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
                   uint8_t video_pt = 0, rtx_pt = 0;
@@ -650,6 +659,37 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                                                        generate_unique_id(), c->is_audience);
                   SFU_LOG_WARN("signaling: answer for ufrag=%s arrived before session was created; stashed parsed SSRCs for apply on bind", c->client_ufrag);
                 }
+              }
+            }
+          } else if (strcmp(type, "raise_hand") == 0 || strcmp(type, "role_change") == 0) {
+            char role_str[16] = {0};
+            bool raise_hand = strcmp(type, "raise_hand") == 0;
+            if (raise_hand) {
+              snprintf(role_str, sizeof(role_str), "speaker");
+            }
+            if (!c->joined_room || c->client_ufrag[0] == '\0' ||
+                (!raise_hand && sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) < 0) ||
+                (strcmp(role_str, "speaker") != 0 && strcmp(role_str, "audience") != 0)) {
+              static const char invalid_role_change[] = "{\"type\":\"error\",\"message\":\"invalid_role_change\"}";
+              sfu_ws_send_text(c->fd, invalid_role_change, sizeof(invalid_role_change) - 1);
+            } else {
+              bool is_audience = strcmp(role_str, "audience") == 0;
+              sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
+              if (!session || session->room != c->joined_room || !room_update_peer_role(c->joined_room, session, is_audience)) {
+                static const char role_change_rejected[] = "{\"type\":\"error\",\"message\":\"role_change_rejected\"}";
+                sfu_ws_send_text(c->fd, role_change_rejected, sizeof(role_change_rejected) - 1);
+              } else {
+                c->is_audience = is_audience;
+                char response[128];
+                int response_len = snprintf(response, sizeof(response), "{\"type\":\"role_changed\",\"user_id\":\"%" PRIu64 "\",\"role\":\"%s\"}",
+                                            c->user_id, role_str);
+                if (response_len > 0 && (size_t)response_len < sizeof(response)) {
+                  sfu_ws_send_text(c->fd, response, (size_t)response_len);
+                }
+                sfu_signaling_trigger_renegotiation(c->joined_room);
+              }
+              if (session) {
+                sfu_session_release(session);
               }
             }
           } else {
