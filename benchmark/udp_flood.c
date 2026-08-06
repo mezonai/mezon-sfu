@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
   while (now_ns() < deadline) {
     ssize_t rc = sendto(fd, buf, pkt_size, 0, (struct sockaddr *)&dst, sizeof(dst));
     if (rc < 0) {
-      continue; /* backpressure/EAGAIN on a busy loop: skip */
+      continue;
     }
     sent++;
   }

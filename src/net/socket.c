@@ -7,9 +7,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* Generous fixed sizes; media bursts (keyframe requests, NACK-triggered
- * retransmit storms) spike well above steady-state throughput. Tune with
- * real traffic once congestion control is in place. */
 #define SFU_SO_RCVBUF_BYTES (8 * 1024 * 1024)
 #define SFU_SO_SNDBUF_BYTES (8 * 1024 * 1024)
 
