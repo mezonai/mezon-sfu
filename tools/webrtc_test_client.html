@@ -472,7 +472,6 @@
             }
 
             function removeTile(id) {
-                console.log("removeTile", id);
                 const p = participants.get(id);
                 if (!p) return;
                 if (p.rafHandle) cancelAnimationFrame(p.rafHandle);
@@ -751,7 +750,7 @@
                     pc.ontrack = (event) => {
                         const track = event.track;
 
-                        console.log('--- ontrack event fired ---', track.kind, track.id);
+                        console.log('ontrack event fired', track.kind, track.id);
 
                         if (track.kind === "video") {
                           const id = event.streams && event.streams.length > 0
