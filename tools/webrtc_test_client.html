@@ -843,12 +843,16 @@
                                 ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
                                 const activeTrackIds = new Set();
-                                pc.getReceivers().forEach(r => {
-                                    if (r.track && r.track.readyState === "live") {
-                                        activeTrackIds.add(r.track.id);
+                                pc.getTransceivers().forEach((t) => {
+                                    if (
+                                        t.receiver &&
+                                        t.receiver.track &&
+                                        (t.currentDirection === "recvonly" ||
+                                            t.currentDirection === "sendrecv")
+                                    ) {
+                                        activeTrackIds.add(t.receiver.track.id);
                                     }
                                 });
-
                                 for (const [id, p] of participants.entries()) {
                                     if (id === "local") continue;
                                     const track = p.stream ? p.stream.getTracks()[0] : null;
