@@ -1,0 +1,25 @@
+name: Deploy Mezon Sfu Prod
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: mezon-sfu-prod
+    name: Deploy Mezon Sfu
+    environment: prod
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and Deploy BE
+        run: |
+          rm -rf build
+          mkdir build && cd build
+          cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+          if [ -f /opt/mezon-sfu/mezon-sfu ]; then
+            cp /opt/mezon-sfu/mezon-sfu /opt/mezon-sfu/mezon-sfu.bk
+          fi
+          cp -rf ./mezon-sfu /opt/mezon-sfu/
