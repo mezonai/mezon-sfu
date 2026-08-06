@@ -25,6 +25,7 @@ typedef struct sfu_signaling_server {
 } sfu_signaling_server_t;
 
 typedef struct sfu_client_conn {
+  char pending_answer_sdp[SFU_SIGNALING_SDP_CAP];
   uv_poll_t poll_handle;
   uv_timer_t answer_retry_timer;
   sfu_signaling_server_t *server;
@@ -34,11 +35,11 @@ typedef struct sfu_client_conn {
   int fd;
   int pending_answer_sdp_len;
   int answer_retry_count;
-  bool handshake_done;
   uint8_t ip_detected_from_header;
   char peer_ip[64];
   char client_ufrag[32];
-  char pending_answer_sdp[SFU_SIGNALING_SDP_CAP];
+  bool handshake_done;
+  bool is_audience;
 } sfu_client_conn_t;
 
 int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, const char *media_host, uint16_t media_port,
