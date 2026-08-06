@@ -472,6 +472,7 @@
             }
 
             function removeTile(id) {
+                console.log("removeTile", id);
                 const p = participants.get(id);
                 if (!p) return;
                 if (p.rafHandle) cancelAnimationFrame(p.rafHandle);
