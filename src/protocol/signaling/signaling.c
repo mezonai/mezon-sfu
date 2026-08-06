@@ -405,8 +405,6 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
   session->uplink_video.payload_type = video_pt;
   session->uplink_video.rtx_payload_type = rtx_pt;
 
-  /* The client answers extmap for media it receives; persist the accepted
-   * transport-cc ID so the egress path knows where to write TWCC sequences. */
   session->twcc_extmap_id = extract_sdp_twcc_extmap_id(sdp, (size_t)sdp_len);
 
   for (int i = 0; i < 128; i++) {
@@ -492,8 +490,13 @@ static void on_client_close(uv_handle_t *handle) {
   }
 
   if (session) {
+    sfu_room_t *room = (sfu_room_t *)session->room;
     (void)sfu_session_begin_close(c->server->sessions, session);
     sfu_session_release(session);
+
+    if (room) {
+      sfu_signaling_trigger_renegotiation(room);
+    }
   }
 
   close(c->fd);

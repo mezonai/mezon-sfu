@@ -547,8 +547,8 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
   }
 
   if (publisher->worker_id != w->worker_index) {
-    SFU_LOG_INFO("[KF-DBG] Offloading KF request: current worker %u -> publisher worker %u (pub peer_id=%u)", w->worker_index, publisher->worker_id,
-                 publisher->peer_id);
+    SFU_LOG_DEBUG("[KF-DBG] Offloading KF request: current worker %u -> publisher worker %u (pub peer_id=%u)", w->worker_index, publisher->worker_id,
+                  publisher->peer_id);
     if (w->mesh) {
       bool queued = sfu_fanout_mesh_enqueue_keyframe_request(w->mesh, w->worker_index, publisher->worker_id, publisher);
       if (!queued) {
@@ -562,7 +562,7 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
 
   uint32_t media_ssrc = publisher->uplink_video.ssrc;
 
-  SFU_LOG_INFO("[KF-DBG] Executing KF request on owner worker %u for pub peer_id=%u (uplink SSRC=%u)", w->worker_index, publisher->peer_id, media_ssrc);
+  SFU_LOG_DEBUG("[KF-DBG] Executing KF request on owner worker %u for pub peer_id=%u (uplink SSRC=%u)", w->worker_index, publisher->peer_id, media_ssrc);
 
   int64_t now = (int64_t)sfu_now_ms();
   if (publisher->last_pli_time != 0 && now - publisher->last_pli_time < SFU_SESSION_KF_THROTTLE_MS) {
