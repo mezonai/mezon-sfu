@@ -2,7 +2,6 @@
 
 #include <string.h>
 
-#include "media/svc/svc_descriptor.h"
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
@@ -11,7 +10,6 @@
 #include "runtime/fanout.h"
 #include "runtime/scheduler.h"
 #include "runtime/worker.h"
-#include "rtp/rtp_packet.h"
 #include "util/log.h"
 
 void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_ingress_media_t *m) {
@@ -65,8 +63,8 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     enc->len = pkt->len;
 
     if (sub_session->worker_id == w->worker_index) {
-      sfu_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt,
-                         slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video, m->is_audio, video_class);
+      sfu_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt, slot->video_rtx_pt,
+                         slot->video_rtx_ssrc, slot->has_video, m->is_audio, video_class);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     } else {
       atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);

@@ -20,8 +20,6 @@ int sfu_svc_parse_descriptor(sfu_video_codec_t codec, const uint8_t *payload, si
   switch (codec) {
     case SFU_VIDEO_CODEC_VP9:
       return parse_vp9(payload, payload_len, out);
-    /* VP8 has no in-payload SVC structure; AV1's Dependency Descriptor
-     * rides an RTP header extension and is not wired up yet. */
     case SFU_VIDEO_CODEC_VP8:
     case SFU_VIDEO_CODEC_AV1:
     case SFU_VIDEO_CODEC_NONE:

@@ -12,7 +12,6 @@
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
 #include "protocol/signaling/sdp.h"
-#include "room/room.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtcp/rtcp_fb.h"
 #include "rtp/rtp_packet.h"
@@ -24,7 +23,6 @@
 #include "transport/srtp/srtp.h"
 #include "util/log.h"
 #include "util/metrics.h"
-#include "util/netbytes.h"
 
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
@@ -82,9 +80,6 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
 static void request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
   sfu_peer_session_t *publisher = find_publisher_by_media_ssrc(feedback_session, media_ssrc);
   if (!publisher) {
-    /* The feedback names an SSRC we cannot map to a room publisher (e.g.
-     * stale answer). Fall back to the sender of the feedback so a keyframe
-     * is still requested instead of being silently swallowed. */
     sfu_metric_inc("rtcp_kf_unresolved");
     publisher = feedback_session;
     atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
@@ -282,9 +277,6 @@ static void handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 
-/* Fills the SVC fields of `m` when the sender's uplink codec carries a
- * scalability structure. Also adopts the video SSRC lazily for publishers
- * whose SDP answer raced ahead of their first media packet. */
 static void extract_svc_metadata(sfu_peer_session_t *sender_session, sfu_ingress_media_t *m) {
   m->has_svc = false;
   m->is_keyframe = false;
@@ -329,8 +321,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       is_rtcp ? sfu_srtp_unprotect_rtcp(&sender_session->srtp, pkt->data, &plain_len) : sfu_srtp_unprotect_rtp(&sender_session->srtp, pkt->data, &plain_len);
 
   if (!unprotected) {
-    SFU_LOG_WARN("worker %u: [INGRESS DROP] SRTP unprotect FAILED (is_rtcp=%d, len=%u). Key mismatch or corrupted packet!", w->worker_index, is_rtcp,
-                 pkt->len);
+    SFU_LOG_WARN("worker %u: [INGRESS DROP] SRTP unprotect FAILED (is_rtcp=%d, len=%u). Key mismatch or corrupted packet!", w->worker_index, is_rtcp, pkt->len);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
     return;
@@ -338,13 +329,11 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   pkt->len = (uint32_t)plain_len;
 
   if (is_rtcp) {
-    handle_rtcp(w, sender_session, pkt); /* consumes pkt */
+    handle_rtcp(w, sender_session, pkt);
     sfu_session_release(sender_session);
     return;
   }
 
-  /* RTP parser stage: every forwarded packet must have a valid header;
-   * downstream stages only ever touch the parsed view. */
   sfu_ingress_media_t m;
   m.pkt = pkt;
   if (!sfu_rtp_packet_parse(pkt->data, pkt->len, &m.rtp)) {
@@ -358,6 +347,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   m.is_audio = sender_session->uplink_audio.active && m.rtp.payload_type == sender_session->uplink_audio.payload_type;
   extract_svc_metadata(sender_session, &m);
 
-  sfu_router_forward(w, sender_session, &m); /* consumes pkt */
+  sfu_router_forward(w, sender_session, &m);
   sfu_session_release(sender_session);
 }
