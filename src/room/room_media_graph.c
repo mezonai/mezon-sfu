@@ -115,9 +115,7 @@ static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t 
   owner->negotiation_needed = true;
 }
 
-void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer, sfu_scheduler_t *scheduler) {
-  (void)scheduler;
-
+void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_lock(&room->lock);
 
   if (peer->room == room) {

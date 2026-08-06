@@ -36,12 +36,9 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
                     sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions, sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds,
                     sfu_scheduler_t *scheduler, uint32_t inbox_capacity, int send_bgid);
 
-void sfu_room_forward_packet(sfu_worker_t *w, sfu_packet_t *pkt);
 void sfu_worker_destroy(sfu_worker_t *w);
 
 int sfu_worker_start(sfu_worker_t *w);
 void sfu_worker_join(sfu_worker_t *w);
-
-void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job);
 
 #endif /* SFU_RUNTIME_WORKER_H */
