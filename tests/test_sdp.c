@@ -1,5 +1,5 @@
-#include "protocol/signaling/sdp.h"
 #include "peer/session.h"
+#include "protocol/signaling/sdp.h"
 #include "room/room.h"
 #include "util/alloc.h"
 
@@ -151,7 +151,7 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
   if (snap) {
     atomic_store(&session->receivers, NULL);
     /* Free the snapshot directly: the mock remotes are stack-allocated, so
-     * sfu_receiver_snapshot_release (which would sfu_session_release and
+     * sfu_subscriptions_snapshot_release (which would sfu_session_release and
      * ultimately free them) cannot be used here. */
     free(snap);
   }
@@ -167,8 +167,9 @@ static void test_twcc_extmap_extraction(void) {
   extern uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len);
 
   /* Chrome-style answer: numeric ID with the draft URI. */
-  const char *chrome = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
-                       "a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
+  const char *chrome =
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+      "a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
   assert(sfu_test_extract_twcc_extmap_id(chrome, strlen(chrome)) == 5);
 
   /* Direction suffix must still parse. */
@@ -176,8 +177,9 @@ static void test_twcc_extmap_extraction(void) {
   assert(sfu_test_extract_twcc_extmap_id(with_dir, strlen(with_dir)) == 3);
 
   /* Non-TWCC extmap lines are ignored. */
-  const char *other = "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
-                      "a=extmap:2 urn:ietf:params:rtp-hdrext:toffset\r\n";
+  const char *other =
+      "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
+      "a=extmap:2 urn:ietf:params:rtp-hdrext:toffset\r\n";
   assert(sfu_test_extract_twcc_extmap_id(other, strlen(other)) == 0);
 
   /* Invalid IDs are rejected: 0, 15 (reserved in one-byte form), non-numeric. */
@@ -208,7 +210,7 @@ static void test_twcc_extmap_extraction(void) {
 #define SDP_RACE_PUB_ITERS 200
 #define SDP_RACE_BUILD_ITERS 400
 
-/* TSan found that sfu_session_receivers_acquire can race with
+/* TSan found that sfu_session_subscriptions_acquire can race with
  * sfu_session_publish_receivers: a reader may load the old snapshot pointer
  * before the writer replaces it and drops the writer ref, then CAS the freed
  * refcount. That race lives in the Phase 3 snapshot reclamation protocol
@@ -299,14 +301,12 @@ static void *sdp_race_builder(void *arg) {
      * snapshot holds many entries (output buffer exhaustion); only memory
      * safety and snapshot coherence are asserted here. */
     int len = sfu_sdp_build_offer(ctx->subscriber, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
-                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out,
-                                  SFU_SIGNALING_SDP_CAP);
+                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out, SFU_SIGNALING_SDP_CAP);
     if (len < 0) {
       atomic_fetch_add(&ctx->build_failures, 1);
     }
     len = sfu_sdp_build_answer(ctx->subscriber, SAMPLE_OFFER, strlen(SAMPLE_OFFER), "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
-                               "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out,
-                               SFU_SIGNALING_SDP_CAP);
+                               "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out, SFU_SIGNALING_SDP_CAP);
     if (len < 0) {
       atomic_fetch_add(&ctx->build_failures, 1);
     }
@@ -334,15 +334,15 @@ static void test_concurrent_build_vs_teardown(void) {
   pthread_barrier_destroy(&ctx.barrier);
 
   /* Final state: the last published snapshot is still on the subscriber. */
-  sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(ctx.subscriber);
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(ctx.subscriber);
   assert(snap != NULL && snap->count == 1);
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
 
   /* Release every snapshot we stashed; all builders are done, so no one can
    * still be holding one. */
   uint32_t n = atomic_load(&ctx.published_count);
   for (uint32_t i = 0; i < n; i++) {
-    sfu_receiver_snapshot_release(ctx.published[i]);
+    sfu_subscriptions_snapshot_release(ctx.published[i]);
   }
 
   sfu_session_release(ctx.subscriber);

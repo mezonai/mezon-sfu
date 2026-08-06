@@ -56,7 +56,7 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
     if (publisher->uplink_video.ssrc != media_ssrc && publisher->uplink_video.rtx_ssrc != media_ssrc) {
       continue;
     }
-    sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(publisher);
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(publisher);
     if (!snap) {
       continue;
     }
@@ -68,7 +68,7 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
         break;
       }
     }
-    sfu_receiver_snapshot_release(snap);
+    sfu_subscriptions_snapshot_release(snap);
     if (result) {
       break;
     }
