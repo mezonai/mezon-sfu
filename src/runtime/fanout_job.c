@@ -17,9 +17,6 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
     sfu_fanout_mesh_free_job(w->mesh, job);
     return;
   } else if (job->kind == SFU_FANOUT_JOB_FORWARD && job->subscriber) {
-    /* The job always lands on the subscriber's owning worker (see
-     * sfu_fanout_mesh_enqueue_forward), so this runs the local path.
-     * sfu_egress_process consumes job->pkt. */
     sfu_egress_process(w, job->subscriber, job->pkt, &job->dst, job->dst_len, job->video_ssrc, job->video_pt, job->video_rtx_pt, job->video_rtx_ssrc,
                        job->has_video, job->is_audio, (sfu_pacer_class_t)job->pacer_class);
     sfu_session_release(job->subscriber);

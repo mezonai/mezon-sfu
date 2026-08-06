@@ -1,5 +1,6 @@
 #include "pipeline/egress.h"
 
+#include "congestion/pacer.h"
 #include "congestion/twcc_history.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
@@ -13,11 +14,9 @@
 #include "util/metrics.h"
 #include "util/netbytes.h"
 
-/* Local egress: runs on the worker that owns `sub_session` (its SRTP context,
- * pacer and TWCC sequence are not thread-safe across workers). */
-static void sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst,
-                                     socklen_t dst_len, uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc,
-                                     bool has_video, bool is_audio, sfu_pacer_class_t video_class) {
+static void sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
+                                     uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video, bool is_audio,
+                                     sfu_pacer_class_t video_class) {
   int enc_len = (int)pkt->len;
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
@@ -69,15 +68,14 @@ void sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
                         uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video, bool is_audio,
                         sfu_pacer_class_t video_class) {
   if (sub_session->worker_id == w->worker_index) {
-    sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, video_ssrc, video_pt, video_rtx_pt, video_rtx_ssrc, has_video, is_audio,
-                             video_class);
+    sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, video_ssrc, video_pt, video_rtx_pt, video_rtx_ssrc, has_video, is_audio, video_class);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
 
   atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
-  if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, pkt, sub_session, dst, dst_len, video_ssrc, video_rtx_ssrc,
-                                       video_pt, video_rtx_pt, has_video, is_audio, (uint8_t)video_class)) {
+  if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, pkt, sub_session, dst, dst_len, video_ssrc, video_rtx_ssrc, video_pt,
+                                       video_rtx_pt, has_video, is_audio, (uint8_t)video_class)) {
     SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
     sfu_session_release(sub_session);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
