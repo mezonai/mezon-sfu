@@ -568,6 +568,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
           if (strcmp(type, "join") == 0) {
             char room_str[32] = {0};
             char str_user_id[32] = {0};
+            char role_str[16] = {0};
             uint64_t room_id = 0;
             uint64_t user_id = 0;
 
@@ -578,6 +579,13 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
             if (sfu_json_extract_string(buf, (size_t)n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
               user_id = (uint64_t)strtoull(str_user_id, NULL, 10);
               c->user_id = user_id;
+            }
+
+            c->is_audience = false;
+            if (sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) >= 0) {
+              if (strcmp(role_str, "audience") == 0) {
+                c->is_audience = true;
+              }
             }
 
             if (room_id == 0) {
@@ -626,6 +634,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 if (session) {
                   session->user_id = c->user_id;
                   session->peer_id = generate_unique_id();
+                  session->is_audience = c->is_audience;
                   handle_answer(session, sdp, sdp_len);
                   sfu_session_release(session);
                   if (session->schedulers) {
@@ -638,7 +647,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
 
                   sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt, rtx_pt,
-                                                       generate_unique_id());
+                                                       generate_unique_id(), c->is_audience);
                   SFU_LOG_WARN("signaling: answer for ufrag=%s arrived before session was created; stashed parsed SSRCs for apply on bind", c->client_ufrag);
                 }
               }

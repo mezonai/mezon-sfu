@@ -69,6 +69,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_room_t *room = NULL;
   int matched_signaling_fd = -1;
   bool has_pending_answer = false;
+  bool pending_is_audience = false;
   uint32_t pending_audio_ssrc = 0, pending_video_ssrc = 0, pending_rtx_ssrc = 0;
   uint8_t pending_video_pt = 0, pending_rtx_pt = 0;
 
@@ -104,6 +105,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         pending_rtx_ssrc = match->pending_rtx_ssrc;
         pending_video_pt = match->pending_video_pt;
         pending_rtx_pt = match->pending_rtx_pt;
+        pending_is_audience = match->is_audience;
         match->has_pending_answer = false;
       }
     }
@@ -176,6 +178,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
             session->uplink_video.active = (pending_video_ssrc != 0);
             session->uplink_video.payload_type = pending_video_pt;
             session->uplink_video.rtx_payload_type = pending_rtx_pt;
+            session->is_audience = pending_is_audience;
             for (int pi = 0; pi < 128; pi++) {
               session->pt_map[pi] = (uint8_t)pi;
             }
