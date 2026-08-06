@@ -195,6 +195,7 @@ typedef struct sfu_peer_session {
   _Atomic bool accepts_work;
   uint8_t state;
   uint8_t fir_seq;
+  bool is_audience;
   bool active;
   bool negotiation_needed;
 } sfu_peer_session_t;
