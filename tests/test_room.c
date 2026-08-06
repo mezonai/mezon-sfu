@@ -8,7 +8,6 @@
 #include "peer/session.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"
-#include "runtime/scheduler.h"
 #include "util/alloc.h"
 
 /* Heap-allocated refcounted mock session (no DTLS/RTX; construction bypasses
@@ -55,7 +54,6 @@ static bool subscribes_to(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
 
 static void test_add_remove(void) {
   sfu_room_t room;
-  sfu_scheduler_t scheduler = {0};
 
   assert(sfu_room_init(&room, 1) == 0);
 
@@ -63,16 +61,16 @@ static void test_add_remove(void) {
   sfu_peer_session_t *b = mock_session("b");
   sfu_peer_session_t *c = mock_session("c");
 
-  room_add_peer(&room, a, &scheduler);
+  room_add_peer(&room, a);
   assert(receiver_count(a) == 0);
 
-  room_add_peer(&room, b, &scheduler);
+  room_add_peer(&room, b);
   assert(receiver_count(a) == 1);
   assert(receiver_count(b) == 1);
   assert(subscribes_to(a, b));
   assert(subscribes_to(b, a));
 
-  room_add_peer(&room, c, &scheduler);
+  room_add_peer(&room, c);
   assert(receiver_count(a) == 2);
   assert(receiver_count(b) == 2);
   assert(receiver_count(c) == 2);
@@ -118,7 +116,7 @@ static void test_add_remove(void) {
 
   /* Closing peer c (accepts_work=false) keeps it out of future snapshots. */
   atomic_store(&c->accepts_work, false);
-  room_add_peer(&room, b, &scheduler);
+  room_add_peer(&room, b);
   /* re-add is a no-op: b is still a member from the rejoin above */
   assert(receiver_count(b) == 1); /* b sees a only */
   assert(!subscribes_to(b, c));
@@ -135,15 +133,14 @@ static void test_add_remove(void) {
 /* Old snapshot stays valid for a holder across a concurrent replacement. */
 static void test_snapshot_hold_across_replace(void) {
   sfu_room_t room;
-  sfu_scheduler_t scheduler = {0};
   assert(sfu_room_init(&room, 2) == 0);
 
   sfu_peer_session_t *a = mock_session("a");
   sfu_peer_session_t *b = mock_session("b");
   sfu_peer_session_t *c = mock_session("c");
 
-  room_add_peer(&room, a, &scheduler);
-  room_add_peer(&room, b, &scheduler);
+  room_add_peer(&room, a);
+  room_add_peer(&room, b);
 
   /* Hold the current snapshot of a. */
   sfu_receiver_snapshot_t *held = sfu_session_receivers_acquire(a);
@@ -151,7 +148,7 @@ static void test_snapshot_hold_across_replace(void) {
   assert(held->entries[0].subscriber == b);
 
   /* Writer publishes a replacement while we hold the old one. */
-  room_add_peer(&room, c, &scheduler);
+  room_add_peer(&room, c);
 
   /* The held (old) snapshot is unchanged and its entries are still valid. */
   assert(held->count == 1);
@@ -203,10 +200,9 @@ static void *snap_reader(void *arg) {
 
 static void *snap_writer(void *arg) {
   snap_race_ctx_t *ctx = arg;
-  sfu_scheduler_t scheduler = {0};
   pthread_barrier_wait(&ctx->barrier);
   for (int i = 0; i < 50; i++) {
-    room_add_peer(ctx->room, ctx->peers[1], &scheduler);
+    room_add_peer(ctx->room, ctx->peers[1]);
     room_remove_peer(ctx->room, ctx->peers[1]);
   }
   return NULL;
@@ -226,8 +222,7 @@ static void test_concurrent_snapshot_read_write(void) {
   };
   pthread_barrier_init(&ctx.barrier, NULL, 2);
 
-  sfu_scheduler_t scheduler = {0};
-  room_add_peer(&room, peers[0], &scheduler);
+  room_add_peer(&room, peers[0]);
 
   pthread_t reader, writer;
   assert(pthread_create(&reader, NULL, snap_reader, &ctx) == 0);
@@ -266,10 +261,9 @@ static void *churn_writer(void *arg) {
   static _Atomic intptr_t next_slot;
   intptr_t idx = atomic_fetch_add_explicit(&next_slot, 1, memory_order_relaxed);
 
-  sfu_scheduler_t scheduler = {0};
   pthread_barrier_wait(&ctx->barrier);
   for (int i = 0; i < 100; i++) {
-    room_add_peer(ctx->room, ctx->publishers[idx], &scheduler);
+    room_add_peer(ctx->room, ctx->publishers[idx]);
     room_remove_peer(ctx->room, ctx->publishers[idx]);
   }
   return NULL;
@@ -306,8 +300,7 @@ static void test_multi_publisher_concurrent_churn(void) {
   }
   sfu_peer_session_t *sub = mock_session("sub");
 
-  sfu_scheduler_t scheduler = {0};
-  room_add_peer(&room, sub, &scheduler);
+  room_add_peer(&room, sub);
 
   churn_ctx_t ctx = {
       .room = &room, .publishers = pubs, .publisher_count = PUBS, .subscriber = sub,

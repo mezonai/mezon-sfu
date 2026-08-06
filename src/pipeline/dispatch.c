@@ -5,6 +5,7 @@
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
+#include "pipeline/ingress.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room_media_graph.h"
 #include "runtime/routing_context.h"
@@ -186,7 +187,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
             }
             SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u", w->worker_index, client_ufrag,
                          pending_audio_ssrc, pending_video_ssrc, pending_rtx_ssrc);
-            room_add_peer(room, session, w->scheduler);
+            room_add_peer(room, session);
             session->fd = matched_signaling_fd;
           }
         }
@@ -292,5 +293,5 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  sfu_room_forward_packet(w, pkt);
+  sfu_ingress_process(w, pkt);
 }
