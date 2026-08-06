@@ -36,9 +36,7 @@ bool sfu_stun_is_stun_packet(const uint8_t *data, size_t len) {
   if (len < STUN_HEADER_LEN) {
     return false;
   }
-  /* Top two bits of the first byte must be 00 (RFC 7983 demux rule),
-   * and the magic cookie must match -- cheap, effective filter against
-   * DTLS/SRTP packets which never satisfy both. */
+
   if ((data[0] & 0xC0) != 0x00) {
     return false;
   }
@@ -58,10 +56,6 @@ static void write_be32(uint8_t *p, uint32_t v) {
 }
 static uint16_t read_be16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
 
-/* Standard bitwise CRC-32 (IEEE 802.3 polynomial). STUN FINGERPRINT is
- * only ever computed on a handful of ~100-byte messages, so the
- * unrolled table-based version isn't worth the code -- this isn't a
- * hot path. */
 static uint32_t crc32_ieee(const uint8_t *data, size_t len) {
   uint32_t crc = 0xFFFFFFFFu;
   for (size_t i = 0; i < len; i++) {
@@ -77,9 +71,6 @@ static uint32_t crc32_ieee(const uint8_t *data, size_t len) {
   return ~crc;
 }
 
-/* Locates the MESSAGE-INTEGRITY attribute (if present) and returns the
- * byte offset of its TLV header. Returns 0 (never a valid offset, since
- * that's inside the STUN header) if not found. */
 static size_t find_message_integrity(const uint8_t *data, size_t len) {
   size_t off = STUN_HEADER_LEN;
   while (off + 4 <= len) {
@@ -111,12 +102,9 @@ static const uint8_t *find_username(const uint8_t *data, size_t len, uint16_t *o
 
 static bool verify_message_integrity(const uint8_t *data, size_t len, size_t mi_offset, const char *pwd) {
   if (mi_offset == 0 || mi_offset + 24 > len) {
-    return false; /* 4 hdr + 20 value */
+    return false;
   }
 
-  /* HMAC covers bytes [0, mi_offset) with the STUN header's length
-   * field temporarily patched to the length "as if" the message ended
-   * right after this M-I attribute (RFC 5389 15.4). */
   uint8_t scratch[1500];
   if (mi_offset > sizeof(scratch)) {
     return false;
@@ -135,11 +123,7 @@ static bool verify_message_integrity(const uint8_t *data, size_t len, size_t mi_
   return memcmp(computed, data + mi_offset + 4, 20) == 0;
 }
 
-/* Appends MESSAGE-INTEGRITY, then FINGERPRINT, to a response buffer
- * that already has its header + XOR-MAPPED-ADDRESS written. Patches the
- * header length field twice, once for each attribute, per RFC 5389. */
 static size_t append_integrity_and_fingerprint(uint8_t *buf, size_t body_len, const char *pwd) {
-  /* MESSAGE-INTEGRITY: header length must cover up through this attr. */
   write_be16(buf + 2, (uint16_t)((body_len - STUN_HEADER_LEN) + 24));
 
   uint8_t hmac[20];
@@ -151,7 +135,6 @@ static size_t append_integrity_and_fingerprint(uint8_t *buf, size_t body_len, co
   memcpy(buf + body_len + 4, hmac, 20);
   body_len += 4 + 20;
 
-  /* FINGERPRINT: header length now covers up through this attr too. */
   write_be16(buf + 2, (uint16_t)((body_len - STUN_HEADER_LEN) + 8));
   uint32_t crc = crc32_ieee(buf, body_len) ^ 0x5354554Eu;
   write_be16(buf + body_len, ATTR_FINGERPRINT);
@@ -170,7 +153,7 @@ size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len, const sf
 
   uint16_t msg_type = read_be16(data);
   if (msg_type != STUN_TYPE_BINDING_REQ) {
-    return 0; /* only handle requests */
+    return 0;
   }
 
   uint16_t username_len = 0;
@@ -179,8 +162,6 @@ size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len, const sf
     return 0;
   }
 
-  /* USERNAME must be "{our-ufrag}:{their-ufrag}" -- verify the prefix
-   * matches our local ufrag exactly (see file header on credentials). */
   size_t ufrag_len = strlen(local->ufrag);
   if (username_len <= ufrag_len || username[ufrag_len] != ':' || memcmp(username, local->ufrag, ufrag_len) != 0) {
     return 0;
@@ -193,25 +174,22 @@ size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len, const sf
   }
 
   if (src_addr->ss_family != AF_INET || out_buf_cap < STUN_HEADER_LEN + 12 + 24 + 8) {
-    return 0; /* IPv6 XOR-MAPPED-ADDRESS and undersized buffers unsupported here
-               */
+    return 0;
   }
 
-  /* --- Build the Binding Success Response --- */
   write_be16(out_buf, STUN_TYPE_BINDING_RESP);
-  write_be16(out_buf + 2, 0); /* patched below once attributes are known */
+  write_be16(out_buf + 2, 0);
   write_be32(out_buf + 4, STUN_MAGIC_COOKIE);
-  memcpy(out_buf + 8, data + 8, 12); /* echo the transaction ID */
+  memcpy(out_buf + 8, data + 8, 12);
 
   size_t off = STUN_HEADER_LEN;
 
-  /* XOR-MAPPED-ADDRESS (IPv4) */
   const struct sockaddr_in *sin = (const struct sockaddr_in *)src_addr;
   (void)src_addr_len;
   write_be16(out_buf + off, ATTR_XOR_MAPPED_ADDRESS);
   write_be16(out_buf + off + 2, 8);
   out_buf[off + 4] = 0x00;
-  out_buf[off + 5] = 0x01; /* family: IPv4 */
+  out_buf[off + 5] = 0x01;
   uint16_t xport = ntohs(sin->sin_port) ^ (uint16_t)(STUN_MAGIC_COOKIE >> 16);
   write_be16(out_buf + off + 6, xport);
   uint32_t xaddr = ntohl(sin->sin_addr.s_addr) ^ STUN_MAGIC_COOKIE;
@@ -230,7 +208,7 @@ bool sfu_stun_extract_client_ufrag(const uint8_t *data, size_t len, const char *
 
   uint16_t msg_type = read_be16(data);
   if (msg_type != STUN_TYPE_BINDING_REQ) {
-    return false; /* Only look at binding requests */
+    return false;
   }
 
   uint16_t username_len = 0;
@@ -239,17 +217,14 @@ bool sfu_stun_extract_client_ufrag(const uint8_t *data, size_t len, const char *
     return false;
   }
 
-  /* Verify compound username format matches our server's prefix: "{our-ufrag}:{their-ufrag}" */
   size_t local_ufrag_len = strlen(local_ufrag);
   if (username_len <= local_ufrag_len || username[local_ufrag_len] != ':' || memcmp(username, local_ufrag, local_ufrag_len) != 0) {
     return false;
   }
 
-  /* Pinpoint the client ufrag location right after the colon separator */
   const uint8_t *client_ufrag_ptr = username + local_ufrag_len + 1;
   size_t client_ufrag_len = username_len - local_ufrag_len - 1;
 
-  /* Prevent buffer overflows on out_client_ufrag destination */
   if (client_ufrag_len >= max_len || client_ufrag_len == 0) {
     return false;
   }
