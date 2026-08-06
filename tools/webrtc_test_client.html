@@ -839,15 +839,27 @@
                                     }),
                                 ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
+                                if (!localTracksAdded) {
+                                    const audioTrack = localStream.getAudioTracks()[0];
+                                    const videoTrack = localStream.getVideoTracks()[0];
+                                    if (audioTrack) pc.addTrack(audioTrack, localStream);
+                                    if (videoTrack) await enableSvcForVideoSender(pc, videoTrack);
+                                    localTracksAdded = true;
+                                }
+
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
+
                                 const activeTrackIds = new Set();
-                                pc.getReceivers().forEach(r => {
-                                    if (r.track && r.track.readyState === "live") {
-                                        activeTrackIds.add(r.track.id);
+                                pc.getTransceivers().forEach(t => {
+                                    const isReceiving = t.currentDirection === "recvonly" || t.currentDirection === "sendrecv";
+
+                                    if (t.receiver && t.receiver.track && isReceiving) {
+                                        activeTrackIds.add(t.receiver.track.id);
                                     }
                                 });
 
                                 for (const [id, p] of participants.entries()) {
-                                    console.log("paticipants entries", id, p, activeTrackIds);
                                     if (id === "local") continue;
                                     const track = p.stream ? p.stream.getTracks()[0] : null;
                                     if (!track || !activeTrackIds.has(track.id)) {
@@ -855,23 +867,6 @@
                                     }
                                 }
 
-                                if (!localTracksAdded) {
-                                    const audioTrack =
-                                        localStream.getAudioTracks()[0];
-                                    const videoTrack =
-                                        localStream.getVideoTracks()[0];
-                                    if (audioTrack)
-                                        pc.addTrack(audioTrack, localStream);
-                                    if (videoTrack)
-                                        await enableSvcForVideoSender(
-                                            pc,
-                                            videoTrack,
-                                        );
-                                    localTracksAdded = true;
-                                }
-
-                                const answer = await pc.createAnswer();
-                                await pc.setLocalDescription(answer);
                                 ws.send(
                                     JSON.stringify({
                                         type: "answer",
@@ -879,10 +874,7 @@
                                     }),
                                 );
                             } catch (err) {
-                                console.error(
-                                    "Failed to answer server-initiated offer:",
-                                    err,
-                                );
+                                console.error("Failed to answer server-initiated offer:", err);
                                 setConnState("negotiation failed", "err");
                             } finally {
                                 isNegotiating = false;
