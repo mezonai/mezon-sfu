@@ -754,7 +754,9 @@
                         console.log('--- ontrack event fired ---', track.kind, track.id);
 
                         if (track.kind === "video") {
-                            const id = track.id;
+                          const id = event.streams && event.streams.length > 0
+                                                              ? event.streams[0].id
+                                                              : track.id;
 
                             const label = "Peer " + id.substring(0, 4);
                             const p = ensureParticipant(id, {
