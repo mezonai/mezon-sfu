@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
-#include "congestion/pacer.h"
 #include "sfu/datadef.h"
 #include "sfu/packet.h"
 

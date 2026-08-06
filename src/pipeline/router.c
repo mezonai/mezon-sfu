@@ -7,7 +7,6 @@
 #include "peer/session.h"
 #include "pipeline/egress.h"
 #include "pipeline/keyframe.h"
-#include "runtime/fanout.h"
 #include "runtime/scheduler.h"
 #include "runtime/worker.h"
 #include "util/log.h"
@@ -62,20 +61,8 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     memcpy(enc->data, pkt->data, pkt->len);
     enc->len = pkt->len;
 
-    if (sub_session->worker_id == w->worker_index) {
-      sfu_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt, slot->video_rtx_pt,
-                         slot->video_rtx_ssrc, slot->has_video, m->is_audio, video_class);
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
-    } else {
-      atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
-      if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, enc, sub_session, &sub_session->cold->addr,
-                                           sub_session->cold->addr_len, slot->video_ssrc, slot->video_rtx_ssrc, slot->video_pt, slot->video_rtx_pt,
-                                           slot->has_video, m->is_audio, (uint8_t)video_class)) {
-        SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
-        sfu_session_release(sub_session);
-        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
-      }
-    }
+    sfu_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt, slot->video_rtx_pt,
+                       slot->video_rtx_ssrc, slot->has_video, m->is_audio, video_class);
   }
 
   sfu_subscriptions_snapshot_release(snap);
