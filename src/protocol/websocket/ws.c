@@ -20,7 +20,6 @@ static ssize_t read_full_available(int fd, char *buf, size_t cap, const char *te
     ssize_t n = read(fd, buf + total, cap - 1 - total);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        /* If we already read partial HTTP headers, wait briefly for the remaining TCP segment */
         if (total > 0) {
           struct pollfd pfd = {.fd = fd, .events = POLLIN};
           if (poll(&pfd, 1, 100) > 0) {
@@ -39,17 +38,13 @@ static ssize_t read_full_available(int fd, char *buf, size_t cap, const char *te
       return (ssize_t)total;
     }
   }
-  return -1; /* request too large, not a real HTTP upgrade */
+  return -1;
 }
 
-/* Case-insensitive header value extraction from a raw HTTP request
- * buffer. Returns 0 and fills out (NUL-terminated) on success. */
 static int extract_header(const char *req, const char *header_name, char *out, size_t out_cap) {
   size_t name_len = strlen(header_name);
   const char *p = req;
   while ((p = strstr(p, header_name)) != NULL) {
-    /* Ensure this match starts at a line boundary (not a substring
-     * of a longer header name). */
     if (p != req && p[-1] != '\n') {
       p += name_len;
       continue;
@@ -103,8 +98,6 @@ int sfu_ws_handshake(int fd) {
   }
 
   char key[256];
-  /* Case-insensitive search: browsers send "Sec-WebSocket-Key" but be
-   * lenient since HTTP header names are case-insensitive by spec. */
   if (extract_header(req, "Sec-WebSocket-Key:", key, sizeof(key)) != 0 && extract_header(req, "sec-websocket-key:", key, sizeof(key)) != 0) {
     SFU_LOG_WARN("WS handshake: no Sec-WebSocket-Key header found");
     return -1;
@@ -143,11 +136,8 @@ static ssize_t read_exact(int fd, uint8_t *buf, size_t len) {
     ssize_t n = read(fd, buf + total, len - total);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        /* On non-blocking sockets, if a multi-kilobyte WebSocket frame (like an SDP Offer)
-         * spans multiple TCP packets, wait briefly for the next segment to arrive in the
-         * kernel buffer instead of failing and dropping the WebRTC peer. */
         struct pollfd pfd = {.fd = fd, .events = POLLIN};
-        int res = poll(&pfd, 1, 100); /* Wait up to 100ms for packet continuation */
+        int res = poll(&pfd, 1, 100);
         if (res <= 0) {
           return -1;
         }
