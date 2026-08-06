@@ -11,7 +11,6 @@
 #include <string.h>
 #include <sys/socket.h>
 
-/* Helper to safely format address data at the low-level ring layer */
 static void format_ring_peer_addr(const struct sockaddr *addr, char *out_ip, uint16_t *out_port) {
   strcpy(out_ip, "unknown");
   *out_port = 0;
