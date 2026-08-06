@@ -23,4 +23,3 @@ jobs:
             cp /opt/mezon-sfu/mezon-sfu /opt/mezon-sfu/mezon-sfu.bk
           fi
           cp -rf ./mezon-sfu /opt/mezon-sfu/
-          cp -rf ../config.ini /opt/mezon-sfu/
