@@ -141,18 +141,22 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
       continue;
     }
 
-    sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer);
-    if (snap) {
-      snapshot_replace(other, snap);
-    } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for peer subscribing to %s", room->room_id, peer->cold ? peer->cold->ufrag : "?");
+    if (!peer->is_audience) {
+        sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer);
+        if (snap) {
+        snapshot_replace(other, snap);
+        } else {
+        SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for peer subscribing to %s", room->room_id, peer->cold ? peer->cold->ufrag : "?");
+        }
     }
 
-    snap = snapshot_build_with(peer, other);
-    if (snap) {
-      snapshot_replace(peer, snap);
-    } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for %s subscribing to peer", room->room_id, peer->cold ? peer->cold->ufrag : "?");
+    if (!other->is_audience) {
+        snap = snapshot_build_with(peer, other);
+        if (snap) {
+        snapshot_replace(peer, snap);
+        } else {
+        SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for %s subscribing to peer", room->room_id, peer->cold ? peer->cold->ufrag : "?");
+        }
     }
   }
 
