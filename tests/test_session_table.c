@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -239,7 +240,7 @@ static void test_routing_table(void) {
   sfu_register_ufrag_room(&rtable, "ufrag_bob", &dummy_room, 10);
   sfu_register_ufrag_room(&rtable, "ufrag_eve", &dummy_room, 11);
 
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_bob", 111, 222, 333, 96, 97, 0);
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_bob", 111, 222, 333, 96, 97, 0, false);
 
   sfu_routing_table_unregister_fd(&rtable, 10);
   assert(rtable.count == 1);

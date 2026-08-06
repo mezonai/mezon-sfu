@@ -79,6 +79,9 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
 }
 
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s) {
+  if (!s || s->is_audience) {
+    return NULL;
+  }
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
   while (snap) {
     uint32_t rc = atomic_load_explicit(&snap->refcount, memory_order_relaxed);
