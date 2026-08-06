@@ -15,7 +15,7 @@
 void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_ingress_media_t *m) {
   sfu_packet_t *pkt = m->pkt;
 
-  sfu_receiver_snapshot_t *snap = sfu_session_receivers_acquire(sender_session);
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(sender_session);
   uint32_t receiver_count = snap ? snap->count : 0;
 
   for (uint32_t i = 0; i < receiver_count; i++) {
@@ -78,6 +78,6 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     }
   }
 
-  sfu_receiver_snapshot_release(snap);
+  sfu_subscriptions_snapshot_release(snap);
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }

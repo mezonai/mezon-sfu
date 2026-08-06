@@ -78,7 +78,7 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
   return for_insert && first_deleted >= 0 ? (uint32_t)first_deleted : SFU_HASH_EMPTY;
 }
 
-sfu_receiver_snapshot_t *sfu_session_receivers_acquire(const sfu_peer_session_t *s) {
+sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s) {
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
   while (snap) {
     uint32_t rc = atomic_load_explicit(&snap->refcount, memory_order_relaxed);
@@ -93,7 +93,7 @@ sfu_receiver_snapshot_t *sfu_session_receivers_acquire(const sfu_peer_session_t 
   return NULL;
 }
 
-void sfu_receiver_snapshot_release(sfu_receiver_snapshot_t *snap) {
+void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap) {
   if (!snap) {
     return;
   }
@@ -110,7 +110,7 @@ void sfu_receiver_snapshot_release(sfu_receiver_snapshot_t *snap) {
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
   sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->receivers, memory_order_acquire);
   atomic_store_explicit(&owner->receivers, new_snap, memory_order_release);
-  sfu_receiver_snapshot_release(old);
+  sfu_subscriptions_snapshot_release(old);
 }
 
 static void sfu_session_free_resources(sfu_peer_session_t *s) {
@@ -130,7 +130,7 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
   if (snap) {
     atomic_store_explicit(&s->receivers, NULL, memory_order_release);
-    sfu_receiver_snapshot_release(snap);
+    sfu_subscriptions_snapshot_release(snap);
   }
 
   if (s->rtx_cache) {

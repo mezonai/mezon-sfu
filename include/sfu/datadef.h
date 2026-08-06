@@ -8,8 +8,6 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
-#include "congestion/pacer.h"
-
 // SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt)
 #define SFU_SRTP_KEY_MATERIAL_LEN 60
 // "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul
@@ -69,6 +67,9 @@ typedef enum {
   SFU_VIDEO_CODEC_VP9,
   SFU_VIDEO_CODEC_AV1,
 } sfu_video_codec_t;
+
+
+typedef enum { SFU_PACER_CLASS_AUDIO = 0, SFU_PACER_CLASS_RTX, SFU_PACER_CLASS_VIDEO_BASE, SFU_PACER_CLASS_VIDEO_ENH, SFU_PACER_CLASS_COUNT } sfu_pacer_class_t;
 
 typedef struct sfu_peer_session sfu_peer_session_t;
 typedef struct sfu_room sfu_room_t;
@@ -141,6 +142,21 @@ struct sfu_receiver_snapshot {
   uint32_t capacity;
   sfu_receiver_entry_t entries[];
 };
+
+typedef struct sfu_pacer {
+  uint64_t sent[SFU_PACER_CLASS_COUNT];
+  int64_t balance_bytes;
+  int64_t bucket_cap_bytes;
+  int64_t last_refill_us;
+  uint64_t dropped_enh;
+  uint64_t rtx_dropped_budget;
+  int64_t rtx_budget_bytes;
+  int64_t rtx_budget_cap_bytes;
+  int64_t rtx_last_refill_us;
+  uint32_t pacing_bps;
+  uint32_t rtx_budget_bps;
+  bool active;
+} sfu_pacer_t;
 
 typedef struct {
   struct sockaddr_storage addr;
