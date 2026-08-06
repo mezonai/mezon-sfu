@@ -133,11 +133,11 @@ static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, 
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
-    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s remote-audio-track", audio_ssrc, ufrag);
+    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s audio-%s", audio_ssrc, ufrag, ufrag);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
-    n = snprintf(line, sizeof(line), "a=msid:%s remote-audio-track", ufrag);
+    n = snprintf(line, sizeof(line), "a=msid:%s audio-%s", ufrag, ufrag);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
@@ -153,7 +153,7 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
-    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s remote-video-track", video_ssrc, ufrag);
+    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s video-%s", video_ssrc, ufrag, ufrag);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
@@ -162,7 +162,7 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
         return -1;
       }
-      n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s remote-video-track", rtx_ssrc, ufrag);
+      n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s video-%s", rtx_ssrc, ufrag, ufrag);
       if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
         return -1;
       }
@@ -171,7 +171,7 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
         return -1;
       }
     }
-    n = snprintf(line, sizeof(line), "a=msid:%s remote-video-track", ufrag);
+    n = snprintf(line, sizeof(line), "a=msid:%s video-%s", ufrag, ufrag);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }

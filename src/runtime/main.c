@@ -69,10 +69,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  SFU_LOG_INFO("mezon-sfu %s starting (unified signaling & media configuration)", SFU_VERSION_STRING);
-
   sfu_config_load_ini(config_file);
   sfu_log_set_level(g_sfu_config.log_level);
+
+  SFU_LOG_INFO("mezon-sfu %s starting (unified signaling & media configuration)", SFU_VERSION_STRING);
 
   uint16_t port = (positional_count > 0) ? parse_port(argc, argv, positional[0], g_sfu_config.media_port) : g_sfu_config.media_port;
   uint16_t signaling_port = (positional_count > 1) ? parse_port(argc, argv, positional[1], g_sfu_config.signaling_port) : g_sfu_config.signaling_port;
