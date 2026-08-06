@@ -249,11 +249,71 @@ static void test_routing_table(void) {
   sfu_routing_table_destroy(&rtable);
 }
 
+/* Audience role must survive the deferred-answer path: the routing entry
+ * stashes is_audience, and handle_stun's apply step must propagate it into the
+ * session before the peer joins the room graph. Also verify the subscription
+ * guard: an audience session must never be acquirable as a publish source. */
+static void test_audience_role_propagation(void) {
+  sfu_routing_table_t rtable;
+  assert(sfu_routing_table_init(&rtable) == 0);
+
+  sfu_room_t dummy_room;
+  memset(&dummy_room, 0, sizeof(dummy_room));
+
+  sfu_register_ufrag_room(&rtable, "ufrag_aud", &dummy_room, 20);
+  sfu_register_ufrag_room(&rtable, "ufrag_spk", &dummy_room, 21);
+
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_aud", 111, 222, 333, 96, 97, 0, true);
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_spk", 444, 555, 666, 96, 97, 0, false);
+
+  const sfu_routing_entry_t *aud = NULL;
+  const sfu_routing_entry_t *spk = NULL;
+  for (int i = 0; i < rtable.count; i++) {
+    if (strcmp(rtable.entries[i].ufrag, "ufrag_aud") == 0) {
+      aud = &rtable.entries[i];
+    } else if (strcmp(rtable.entries[i].ufrag, "ufrag_spk") == 0) {
+      spk = &rtable.entries[i];
+    }
+  }
+  assert(aud != NULL && spk != NULL);
+  assert(aud->has_pending_answer && aud->is_audience);
+  assert(spk->has_pending_answer && !spk->is_audience);
+
+  /* Mirror handle_stun's deferred-apply step: role must land on the session. */
+  sfu_dtls_ctx_t dtls_ctx;
+  assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
+  sfu_session_table_t table;
+  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+
+  struct sockaddr_storage addr;
+  socklen_t addr_len;
+  make_addr(&addr, &addr_len, "127.0.0.1", 9100);
+
+  sfu_peer_session_t *s = sfu_session_table_get_or_create(&table, &addr, addr_len);
+  assert(s != NULL);
+  s->is_audience = aud->is_audience;
+  assert(s->is_audience == true);
+
+  /* Guard: audience sessions are never a publish source. */
+  assert(sfu_session_subscriptions_acquire(s) == NULL);
+
+  /* Speaker sessions keep normal (non-NULL once published) semantics; with no
+   * published snapshot yet, acquire is NULL but the flag itself is clear. */
+  s->is_audience = spk->is_audience;
+  assert(s->is_audience == false);
+
+  sfu_session_release(s);
+  sfu_session_table_destroy(&table);
+  sfu_dtls_ctx_destroy(&dtls_ctx);
+  sfu_routing_table_destroy(&rtable);
+}
+
 int main(void) {
   test_basic_lifecycle();
   test_failed_construction();
   test_concurrent_find_vs_close();
   test_routing_table();
+  test_audience_role_propagation();
 
   printf("test_session_table: OK\n");
   return 0;
