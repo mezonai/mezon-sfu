@@ -47,6 +47,40 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   return snap;
 }
 
+/* Rebuilds the owner's subscription snapshot, refreshing the media state
+ * (SSRCs, active flags, PTs) of the entry for `dst` in place. Mids are
+ * preserved because the entry keeps its slot. Returns NULL when `dst` is not
+ * in the owner's snapshot. */
+static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
+  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
+  uint32_t pos = snapshot_find(old, dst);
+  if (pos == UINT32_MAX) {
+    sfu_subscriptions_snapshot_release(old);
+    return NULL;
+  }
+
+  uint32_t old_count = old->count;
+  sfu_receiver_snapshot_t *snap = snapshot_alloc(old_count);
+  if (!snap) {
+    sfu_subscriptions_snapshot_release(old);
+    return NULL;
+  }
+  snap->generation = old->generation + 1;
+
+  for (uint32_t i = 0; i < old_count; i++) {
+    snap->entries[i] = old->entries[i];
+    atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
+  }
+  /* snapshot_fill_entry takes one more ref on dst; drop the one we just added
+   * for the slot so the net refcount is unchanged. */
+  snapshot_fill_entry(&snap->entries[pos], dst);
+  sfu_session_release(dst);
+
+  snap->count = old_count;
+  sfu_subscriptions_snapshot_release(old);
+  return snap;
+}
+
 static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst, bool fanout) {
   sfu_receiver_snapshot_t *old = fanout ? sfu_session_fanout_targets_acquire(owner) : sfu_session_subscriptions_acquire(owner);
   if (snapshot_find(old, dst) != UINT32_MAX) {
@@ -284,5 +318,28 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   peer->room = NULL;
   peer->negotiation_needed = false;
 
+  pthread_mutex_unlock(&room->lock);
+}
+
+/* Re-reads `updated_peer`'s current uplink media state into every other
+ * peer's subscription snapshot entry for it. Used after a late answer carries
+ * the real SSRCs for a peer that was added to the room before its media was
+ * known (e.g. an audience that raised hand and only then published). */
+void room_refresh_peer_streams(sfu_room_t *room, sfu_peer_session_t *updated_peer) {
+  if (!room || !updated_peer) {
+    return;
+  }
+
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *other = room->peers[i];
+    if (!other || other == updated_peer || !sfu_session_accepts_work(other)) {
+      continue;
+    }
+    sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, updated_peer);
+    if (snap) {
+      snapshot_replace(other, snap);
+    }
+  }
   pthread_mutex_unlock(&room->lock);
 }

@@ -829,7 +829,7 @@
                 handRaised = !handRaised;
 
                 ws.send(JSON.stringify({
-                    type: handRaised ? "raise_hand" : "lower_hand",
+                    type: handRaised ? "raise_hand" : "role_change",
                     role: handRaised ? "speaker" : "audience",
                 }));
 
@@ -964,10 +964,48 @@
                         }
 
                         if (msg.type === "role_changed" && msg.role === "speaker") {
-                            const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                            localStream.getTracks().forEach(track => {
-                                pc.addTrack(track, localStream);
-                            });
+                            // Attach the pre-captured local tracks to the existing
+                            // transceivers and switch them to send-only. addTrack()
+                            // alone cannot make a recvonly transceiver send, so we
+                            // replaceTrack + set direction on the audio/video senders.
+                            try {
+                                const audioTrack = localStream.getAudioTracks()[0];
+                                const videoTrack = localStream.getVideoTracks()[0];
+
+                                const audioTc = pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === "audio");
+                                const videoTc = pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === "video");
+
+                                if (audioTc && audioTrack) {
+                                    await audioTc.sender.replaceTrack(audioTrack);
+                                    audioTc.direction = "sendonly";
+                                } else if (audioTrack) {
+                                    pc.addTrack(audioTrack, localStream);
+                                }
+
+                                if (videoTc && videoTrack) {
+                                    await videoTc.sender.replaceTrack(videoTrack);
+                                    videoTc.direction = "sendonly";
+                                } else if (videoTrack) {
+                                    await enableSvcForVideoSender(pc, videoTrack);
+                                }
+                                localTracksAdded = true;
+                            } catch (e) {
+                                console.error("Failed to attach tracks on promotion:", e);
+                            }
+                            return;
+                        }
+
+                        if (msg.type === "role_changed" && msg.role === "audience") {
+                            // Demoted: stop sending by detaching our tracks from the
+                            // senders. The next server offer will mark them inactive.
+                            try {
+                                pc.getSenders().forEach(s => {
+                                    if (s.track) s.replaceTrack(null);
+                                });
+                                localTracksAdded = false;
+                            } catch (e) {
+                                console.error("Failed to detach tracks on demotion:", e);
+                            }
                             return;
                         }
 

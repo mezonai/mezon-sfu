@@ -250,8 +250,8 @@ static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *vide
 static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_signaling_server_t *s) {
   char offer[SFU_SIGNALING_SDP_CAP];
 
-  int offer_len = sfu_sdp_build_initial_offer(s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint,
-                                              is_audience, offer, sizeof(offer));
+  int offer_len = sfu_sdp_build_initial_offer(s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, is_audience,
+                                              offer, sizeof(offer));
 
   if (offer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build initial SDP offer (fd=%d)", fd);
@@ -380,9 +380,13 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
 
 uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len) { return extract_sdp_twcc_extmap_id(sdp, sdp_len); }
 
-static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
+/* Returns true when the answer changed the session's published media state
+ * (SSRCs or active flags), which is the only case that warrants refreshing
+ * other peers' snapshots and renegotiating. This keeps the offer/answer
+ * exchange from looping on identical answers. */
+static bool handle_signaling_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
   if (!session) {
-    return;
+    return false;
   }
 
   uint32_t audio_ssrc = 0;
@@ -396,12 +400,18 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
 
   extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
 
+  bool new_audio_active = (audio_ssrc != 0);
+  bool new_video_active = (video_ssrc != 0);
+  bool changed = session->uplink_audio.ssrc != audio_ssrc || session->uplink_audio.active != new_audio_active || session->uplink_video.ssrc != video_ssrc ||
+                 session->uplink_video.rtx_ssrc != rtx_ssrc || session->uplink_video.active != new_video_active ||
+                 session->uplink_video.payload_type != video_pt || session->uplink_video.rtx_payload_type != rtx_pt;
+
   session->uplink_audio.ssrc = audio_ssrc;
-  session->uplink_audio.active = (audio_ssrc != 0);
+  session->uplink_audio.active = new_audio_active;
 
   session->uplink_video.ssrc = video_ssrc;
   session->uplink_video.rtx_ssrc = rtx_ssrc;
-  session->uplink_video.active = (video_ssrc != 0);
+  session->uplink_video.active = new_video_active;
 
   session->uplink_video.payload_type = video_pt;
   session->uplink_video.rtx_payload_type = rtx_pt;
@@ -420,8 +430,9 @@ static void handle_answer(sfu_peer_session_t *session, const char *sdp, int sdp_
     session->pt_map[97] = rtx_pt;
   }
 
-  SFU_LOG_DEBUG("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u", session->cold->ufrag, audio_ssrc, video_ssrc, rtx_ssrc,
-                video_pt, rtx_pt);
+  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u changed=%d", session->cold->ufrag, audio_ssrc, video_ssrc,
+               rtx_ssrc, video_pt, rtx_pt, changed);
+  return changed;
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
@@ -641,8 +652,15 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   } else {
                     atomic_store_explicit(&session->is_audience, c->is_audience, memory_order_release);
                   }
-                  handle_answer(session, sdp, sdp_len);
-                  if (role_changed) {
+                  bool media_changed = handle_signaling_answer(session, sdp, sdp_len);
+                  /* A session already in a room may have just published its
+                   * real SSRCs (e.g. an audience that raised hand). Only
+                   * refresh + renegotiate when the media actually changed,
+                   * otherwise the offer/answer exchange loops forever. */
+                  if (session->room && (media_changed || role_changed)) {
+                    SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d), refreshing + renegotiating", c->client_ufrag, media_changed,
+                                 role_changed);
+                    room_refresh_peer_streams((sfu_room_t *)session->room, session);
                     sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
                   }
                   if (session->schedulers) {
@@ -681,8 +699,8 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
               } else {
                 c->is_audience = is_audience;
                 char response[128];
-                int response_len = snprintf(response, sizeof(response), "{\"type\":\"role_changed\",\"user_id\":\"%" PRIu64 "\",\"role\":\"%s\"}",
-                                            c->user_id, role_str);
+                int response_len =
+                    snprintf(response, sizeof(response), "{\"type\":\"role_changed\",\"user_id\":\"%" PRIu64 "\",\"role\":\"%s\"}", c->user_id, role_str);
                 if (response_len > 0 && (size_t)response_len < sizeof(response)) {
                   sfu_ws_send_text(c->fd, response, (size_t)response_len);
                 }
