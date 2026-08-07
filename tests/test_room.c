@@ -182,7 +182,10 @@ static void test_audience_role_asymmetry_and_transition(void) {
 
   assert(room_update_peer_role(&room, audience, true));
   assert(atomic_load(&audience->is_audience));
-  assert(receiver_count(speaker) == 0);
+  /* Demotion keeps the subscription slot (deactivated) so its mids stay
+   * stable for a later re-promotion; the audience no longer owns fanout
+   * targets but the speaker still receives from it. */
+  assert(receiver_count(speaker) == 1);
   assert(fanout_target_count(audience) == 0);
   assert(fanout_targets(speaker, audience));
 
