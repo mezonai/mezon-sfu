@@ -30,6 +30,7 @@
                 color: var(--text);
                 margin: 0;
                 height: 100vh;
+                height: 100dvh;
                 display: flex;
                 flex-direction: column;
                 overflow: hidden;
@@ -123,6 +124,8 @@
                 flex: 1;
                 flex-direction: column;
                 min-height: 0;
+                height: 100%;
+                overflow: hidden;
             }
             #topBar {
                 display: flex;
@@ -168,6 +171,7 @@
                 overflow-y: auto;
                 grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
                 align-content: start;
+                -webkit-overflow-scrolling: touch;
             }
             .tile {
                 position: relative;
@@ -250,6 +254,7 @@
                 background: var(--panel);
                 border-top: 1px solid var(--border);
                 flex-shrink: 0;
+                z-index: 20;
             }
             .ctrl-btn {
                 width: 46px;
@@ -667,6 +672,7 @@
             }
 
             function leaveMeeting() {
+                handRaised = false;
                 if (ws) {
                     ws.close();
                     ws = null;
@@ -815,16 +821,25 @@
                 }, 2000);
             }
 
-            function raiseHand() {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: "raise_hand",
-                        role: "speaker",
-                    }));
+            let handRaised = false;
 
-                    const btn = document.getElementById("raiseHandBtn");
+            function raiseHand() {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+                handRaised = !handRaised;
+
+                ws.send(JSON.stringify({
+                    type: handRaised ? "raise_hand" : "lower_hand",
+                    role: handRaised ? "speaker" : "audience",
+                }));
+
+                const btn = document.getElementById("raiseHandBtn");
+                if (handRaised) {
                     btn.style.background = "var(--warn)";
                     btn.style.color = "#11111b";
+                } else {
+                    btn.style.background = "var(--tile)";
+                    btn.style.color = "var(--text)";
                 }
             }
 
@@ -945,6 +960,14 @@
 
                         if (msg.type === "joined") {
                             setConnState("awaiting offer…", "warn");
+                            return;
+                        }
+
+                        if (msg.type === "role_changed" && msg.role === "speaker") {
+                            const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                            localStream.getTracks().forEach(track => {
+                                pc.addTrack(track, localStream);
+                            });
                             return;
                         }
 
