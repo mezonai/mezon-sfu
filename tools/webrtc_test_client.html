@@ -819,7 +819,7 @@
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({
                         type: "raise_hand",
-                        role: "speaker"
+                        role: "speaker",
                     }));
 
                     const btn = document.getElementById("raiseHandBtn");
@@ -930,7 +930,7 @@
                         ws.send(JSON.stringify({
                             type: "join",
                             room: roomId,
-                            role: currentJoinMode
+                            role: currentJoinMode,
                         }));
                     };
 

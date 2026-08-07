@@ -46,6 +46,11 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
     return NULL;
   }
 
+  bool sub_is_audience = atomic_load_explicit(&subscriber->is_audience, memory_order_acquire);
+  if (sub_is_audience) {
+    return NULL;
+  }
+
   pthread_mutex_lock(&room->lock);
   sfu_peer_session_t *result = NULL;
   for (uint32_t i = 0; i < room->peer_count; i++) {

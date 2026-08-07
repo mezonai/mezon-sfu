@@ -33,8 +33,8 @@ typedef struct sfu_sdp_receiver_view {
   char owner_ufrag[32];
 } sfu_sdp_receiver_view_t;
 
-int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
-                         const char *pwd, const char *fingerprint, char *out, size_t out_cap);
+int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd,
+                         const char *fingerprint, char *out, size_t out_cap);
 
 int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                         char *out, size_t out_cap);
