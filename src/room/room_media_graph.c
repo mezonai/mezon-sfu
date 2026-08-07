@@ -47,8 +47,6 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   return snap;
 }
 
-/* Source snapshots are subscriber-owned and drive SDP remote-track sections;
- * fanout snapshots are publisher-owned and drive RTP forwarding. */
 static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst, bool fanout) {
   sfu_receiver_snapshot_t *old = fanout ? sfu_session_fanout_targets_acquire(owner) : sfu_session_subscriptions_acquire(owner);
   if (snapshot_find(old, dst) != UINT32_MAX) {
@@ -119,9 +117,7 @@ static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t 
   owner->negotiation_needed = true;
 }
 
-static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
-  sfu_session_publish_fanout_targets(owner, new_snap);
-}
+static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) { sfu_session_publish_fanout_targets(owner, new_snap); }
 
 void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_lock(&room->lock);
@@ -152,7 +148,6 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     bool peer_is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
     bool other_is_audience = atomic_load_explicit(&other->is_audience, memory_order_acquire);
 
-    /* Every participant needs every speaker as an SDP remote source. */
     if (!peer_is_audience) {
       sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, false);
       if (snap) {
@@ -166,7 +161,6 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
       }
     }
 
-    /* A speaker forwards to every participant. Audiences have no fanout view. */
     if (!peer_is_audience) {
       sfu_receiver_snapshot_t *snap = snapshot_build_with(peer, other, true);
       if (snap) {
@@ -203,16 +197,11 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     }
 
     if (is_audience) {
-      /* Demotion removes this speaker from every subscriber's SDP source list.
-       * Existing speakers keep the peer as a fanout target so it still listens. */
       sfu_receiver_snapshot_t *snap = snapshot_build_without(other, peer, false);
       if (snap) {
         snapshot_replace(other, snap);
       }
     } else {
-      /* Promotion exposes the peer as a source and gives it all room members
-       * as fanout targets. The source view already contains existing speakers
-       * from its audience role, so only other peers need the new source. */
       sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, false);
       if (snap) {
         snapshot_replace(other, snap);

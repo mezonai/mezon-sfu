@@ -173,9 +173,7 @@ typedef struct sfu_peer_session {
   sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
   sfu_peer_session_cold_t *cold;
-  /* Remote media sources used by SDP construction. */
   _Atomic(sfu_receiver_snapshot_t *) receivers;
-  /* Local fanout targets used exclusively by the RTP router. */
   _Atomic(sfu_receiver_snapshot_t *) fanout_targets;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
