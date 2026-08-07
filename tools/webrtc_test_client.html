@@ -891,15 +891,17 @@
                     ws = new WebSocket(wsUrl);
 
                     ws.onopen = () => {
-                        document.getElementById("joinScreen").style.display =
-                            "none";
-                        document.getElementById("meetingRoom").style.display =
-                            "flex";
-                        document.getElementById("roomLabel").textContent =
-                            roomId;
+                        document.getElementById("joinScreen").style.display = "none";
+                        document.getElementById("meetingRoom").style.display = "flex";
+                        document.getElementById("roomLabel").textContent = roomId;
                         setConnState("joining…", "warn");
 
-                        ws.send(JSON.stringify({ type: "join", room: roomId }));
+                        // Pass the selected role (speaker or audience) to the SFU
+                        ws.send(JSON.stringify({
+                            type: "join",
+                            room: roomId,
+                            role: currentJoinMode
+                        }));
                     };
 
                     ws.onmessage = async (event) => {
