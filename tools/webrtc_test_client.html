@@ -289,6 +289,57 @@
                 font-size: 12px;
                 margin-right: 6px;
             }
+            .join-btn-group {
+                display: flex;
+                position: relative;
+                width: 100%;
+            }
+            .join-btn-group button {
+                margin: 0;
+            }
+            #joinBtn {
+                border-top-right-radius: 0;
+                border-bottom-right-radius: 0;
+                flex: 1;
+            }
+            #joinDropdownBtn {
+                border-top-left-radius: 0;
+                border-bottom-left-radius: 0;
+                width: 44px;
+                padding: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                border-left: 1px solid rgba(17, 17, 27, 0.3);
+            }
+            .dropdown-menu {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                margin-top: 6px;
+                z-index: 10;
+                overflow: hidden;
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6);
+            }
+            .dropdown-menu.show {
+                display: block;
+            }
+            .dropdown-item {
+                padding: 12px 16px;
+                font-size: 14px;
+                cursor: pointer;
+                color: var(--text);
+                font-weight: 600;
+            }
+            .dropdown-item:hover {
+                background: var(--tile);
+                color: var(--accent);
+            }
         </style>
     </head>
     <body>
@@ -327,9 +378,18 @@
                     </select>
                 </div>
 
-                <button id="joinBtn" onclick="connectAndJoin()">
-                    Join meeting
-                </button>
+                <div class="join-btn-group">
+                    <button id="joinBtn" onclick="connectAndJoin()">Join as speaker</button>
+                    <button id="joinDropdownBtn" onclick="toggleJoinOptions(event)" title="Choose join mode">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="6 9 12 15 18 9"></polyline>
+                        </svg>
+                    </button>
+                    <div id="joinDropdownMenu" class="dropdown-menu">
+                        <div class="dropdown-item" onclick="selectJoinMode('speaker')">Join as speaker</div>
+                        <div class="dropdown-item" onclick="selectJoinMode('audience')">Join as audience</div>
+                    </div>
+                </div>
                 <div id="joinStatus">Requesting camera/microphone…</div>
             </div>
         </div>
@@ -386,6 +446,27 @@
             const joinPreview = document.getElementById("joinPreview");
             const joinStatus = document.getElementById("joinStatus");
             const joinBtn = document.getElementById("joinBtn");
+
+            let currentJoinMode = 'speaker';
+
+            function toggleJoinOptions(event) {
+                event.stopPropagation();
+                document.getElementById('joinDropdownMenu').classList.toggle('show');
+            }
+
+            function selectJoinMode(mode) {
+                currentJoinMode = mode;
+                document.getElementById('joinBtn').textContent = mode === 'speaker' ? 'Join as speaker' : 'Join as audience';
+                document.getElementById('joinDropdownMenu').classList.remove('show');
+            }
+
+            // Close the dropdown if the user clicks anywhere else on the page
+            document.addEventListener('click', () => {
+                const menu = document.getElementById('joinDropdownMenu');
+                if (menu && menu.classList.contains('show')) {
+                    menu.classList.remove('show');
+                }
+            });
 
             window.addEventListener("DOMContentLoaded", async () => {
                 try {
@@ -783,18 +864,27 @@
                         }
                     };
 
-                    const localTile = ensureParticipant("local", {
-                        isLocal: true,
-                        label: displayName + " (You)",
-                    });
-                    const hasLocalVideo =
-                        localStream.getVideoTracks().length > 0;
-                    setTileStream(localTile, localStream, hasLocalVideo);
-                    if (!localStream.getAudioTracks().length) {
-                        document.getElementById("micBtn").disabled = true;
-                    }
-                    if (!hasLocalVideo) {
-                        document.getElementById("camBtn").disabled = true;
+                    if (currentJoinMode === 'speaker') {
+                        const localTile = ensureParticipant("local", {
+                            isLocal: true,
+                            label: displayName + " (You)",
+                        });
+                        const hasLocalVideo = localStream.getVideoTracks().length > 0;
+                        setTileStream(localTile, localStream, hasLocalVideo);
+
+                        document.getElementById("micBtn").style.display = "flex";
+                        document.getElementById("camBtn").style.display = "flex";
+
+                        if (!localStream.getAudioTracks().length) {
+                            document.getElementById("micBtn").disabled = true;
+                        }
+                        if (!hasLocalVideo) {
+                            document.getElementById("camBtn").disabled = true;
+                        }
+                    } else {
+                        // Hide mic/cam controls for audience
+                        document.getElementById("micBtn").style.display = "none";
+                        document.getElementById("camBtn").style.display = "none";
                     }
 
                     setJoinStatus("Connecting to signaling server…");
@@ -840,7 +930,7 @@
                                     }),
                                 ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
 
-                                if (!localTracksAdded) {
+                                if (!localTracksAdded && currentJoinMode === 'speaker') {
                                     const audioTrack = localStream.getAudioTracks()[0];
                                     const videoTrack = localStream.getVideoTracks()[0];
                                     if (audioTrack) pc.addTrack(audioTrack, localStream);
