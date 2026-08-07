@@ -79,7 +79,7 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
 }
 
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s) {
-  if (!s || s->is_audience) {
+  if (!s) {
     return NULL;
   }
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
@@ -116,6 +116,30 @@ void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snaps
   sfu_subscriptions_snapshot_release(old);
 }
 
+sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s) {
+  if (!s) {
+    return NULL;
+  }
+  sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->fanout_targets, memory_order_acquire);
+  while (snap) {
+    uint32_t rc = atomic_load_explicit(&snap->refcount, memory_order_relaxed);
+    if (rc == 0) {
+      snap = atomic_load_explicit(&s->fanout_targets, memory_order_acquire);
+      continue;
+    }
+    if (atomic_compare_exchange_weak_explicit(&snap->refcount, &rc, rc + 1, memory_order_acquire, memory_order_relaxed)) {
+      return snap;
+    }
+  }
+  return NULL;
+}
+
+void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
+  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->fanout_targets, new_snap, memory_order_release);
+  sfu_subscriptions_snapshot_release(old);
+}
+
 static void sfu_session_free_resources(sfu_peer_session_t *s) {
   if (!s) {
     return;
@@ -133,6 +157,11 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
   if (snap) {
     atomic_store_explicit(&s->receivers, NULL, memory_order_release);
+    sfu_subscriptions_snapshot_release(snap);
+  }
+  snap = atomic_load_explicit(&s->fanout_targets, memory_order_acquire);
+  if (snap) {
+    atomic_store_explicit(&s->fanout_targets, NULL, memory_order_release);
     sfu_subscriptions_snapshot_release(snap);
   }
 
@@ -320,6 +349,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->screen.owner = s;
 
   atomic_store_explicit(&s->receivers, NULL, memory_order_relaxed);
+  atomic_store_explicit(&s->fanout_targets, NULL, memory_order_relaxed);
+  atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
 
   s->next_remote_mid = 2;
 

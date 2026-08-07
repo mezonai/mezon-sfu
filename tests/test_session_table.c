@@ -291,16 +291,16 @@ static void test_audience_role_propagation(void) {
 
   sfu_peer_session_t *s = sfu_session_table_get_or_create(&table, &addr, addr_len);
   assert(s != NULL);
-  s->is_audience = aud->is_audience;
-  assert(s->is_audience == true);
+  atomic_store(&s->is_audience, aud->is_audience);
+  assert(atomic_load(&s->is_audience) == true);
 
   /* Guard: audience sessions are never a publish source. */
   assert(sfu_session_subscriptions_acquire(s) == NULL);
 
   /* Speaker sessions keep normal (non-NULL once published) semantics; with no
    * published snapshot yet, acquire is NULL but the flag itself is clear. */
-  s->is_audience = spk->is_audience;
-  assert(s->is_audience == false);
+  atomic_store(&s->is_audience, spk->is_audience);
+  assert(atomic_load(&s->is_audience) == false);
 
   sfu_session_release(s);
   sfu_session_table_destroy(&table);

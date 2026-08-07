@@ -37,6 +37,28 @@ static uint32_t receiver_count(sfu_peer_session_t *peer) {
   return n;
 }
 
+static uint32_t fanout_target_count(sfu_peer_session_t *peer) {
+  sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(peer);
+  uint32_t n = snap ? snap->count : 0;
+  sfu_subscriptions_snapshot_release(snap);
+  return n;
+}
+
+static bool fanout_targets(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
+  sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(peer);
+  bool found = false;
+  if (snap) {
+    for (uint32_t i = 0; i < snap->count; i++) {
+      if (snap->entries[i].subscriber == dest) {
+        found = true;
+        break;
+      }
+    }
+  }
+  sfu_subscriptions_snapshot_release(snap);
+  return found;
+}
+
 static bool subscribes_to(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(peer);
   bool found = false;
@@ -131,6 +153,46 @@ static void test_add_remove(void) {
 }
 
 /* Old snapshot stays valid for a holder across a concurrent replacement. */
+static void test_audience_role_asymmetry_and_transition(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 4) == 0);
+
+  sfu_peer_session_t *speaker = mock_session("speaker");
+  sfu_peer_session_t *audience = mock_session("audience");
+  atomic_store(&audience->is_audience, true);
+
+  room_add_peer(&room, speaker);
+  room_add_peer(&room, audience);
+
+  /* Audience receives the speaker SDP source but never owns an RTP fanout
+   * snapshot. The speaker forwards to the audience. */
+  assert(receiver_count(audience) == 1);
+  assert(subscribes_to(audience, speaker));
+  assert(receiver_count(speaker) == 0);
+  assert(fanout_target_count(speaker) == 1);
+  assert(fanout_targets(speaker, audience));
+  assert(fanout_target_count(audience) == 0);
+
+  assert(room_update_peer_role(&room, audience, false));
+  assert(!atomic_load(&audience->is_audience));
+  assert(receiver_count(speaker) == 1);
+  assert(subscribes_to(speaker, audience));
+  assert(fanout_target_count(audience) == 1);
+  assert(fanout_targets(audience, speaker));
+
+  assert(room_update_peer_role(&room, audience, true));
+  assert(atomic_load(&audience->is_audience));
+  assert(receiver_count(speaker) == 0);
+  assert(fanout_target_count(audience) == 0);
+  assert(fanout_targets(speaker, audience));
+
+  room_remove_peer(&room, audience);
+  room_remove_peer(&room, speaker);
+  sfu_session_release(audience);
+  sfu_session_release(speaker);
+  sfu_room_destroy(&room);
+}
+
 static void test_snapshot_hold_across_replace(void) {
   sfu_room_t room;
   assert(sfu_room_init(&room, 2) == 0);
@@ -339,6 +401,7 @@ static void test_multi_publisher_concurrent_churn(void) {
 
 int main(void) {
   test_add_remove();
+  test_audience_role_asymmetry_and_transition();
   test_snapshot_hold_across_replace();
   test_concurrent_snapshot_read_write();
   test_multi_publisher_concurrent_churn();

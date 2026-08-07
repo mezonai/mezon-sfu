@@ -316,6 +316,13 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
+  if (!is_rtcp && atomic_load_explicit(&sender_session->is_audience, memory_order_acquire)) {
+    sfu_metric_inc("audience_rtp_drop");
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
+
   int plain_len = (int)pkt->len;
   bool unprotected =
       is_rtcp ? sfu_srtp_unprotect_rtcp(&sender_session->srtp, pkt->data, &plain_len) : sfu_srtp_unprotect_rtp(&sender_session->srtp, pkt->data, &plain_len);

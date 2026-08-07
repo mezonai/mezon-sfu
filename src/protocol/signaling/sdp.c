@@ -180,7 +180,8 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
 }
 
 
-int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, char *out, size_t out_cap) {
+int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, bool is_audience, char *out,
+                                size_t out_cap) {
   size_t off = 0;
   char buf[512];
   int n;
@@ -220,7 +221,7 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
     return -1;
   }
 
@@ -248,7 +249,7 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
     return -1;
   }
 
@@ -366,20 +367,21 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
       continue;
     }
 
+    bool audience_local_media = atomic_load_explicit(&session->is_audience, memory_order_acquire) && (current_media == 1 || current_media == 2);
     if (starts_with(line, len, "a=sendonly")) {
-      if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
+      if (append_line(out, out_cap, &off, audience_local_media ? "a=inactive" : "a=recvonly") != 0) {
         goto fail;
       }
       continue;
     }
     if (starts_with(line, len, "a=recvonly")) {
-      if (append_line(out, out_cap, &off, "a=sendonly") != 0) {
+      if (append_line(out, out_cap, &off, audience_local_media ? "a=inactive" : "a=sendonly") != 0) {
         goto fail;
       }
       continue;
     }
     if (starts_with(line, len, "a=sendrecv")) {
-      if (append_line(out, out_cap, &off, "a=sendrecv") != 0) {
+      if (append_line(out, out_cap, &off, audience_local_media ? "a=inactive" : "a=sendrecv") != 0) {
         goto fail;
       }
       continue;
@@ -602,7 +604,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
     goto fail;
   }
-  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, atomic_load_explicit(&session->is_audience, memory_order_acquire) ? "a=inactive" : "a=recvonly") != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=mid:0") != 0) {
@@ -626,7 +628,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
     goto fail;
   }
-  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, atomic_load_explicit(&session->is_audience, memory_order_acquire) ? "a=inactive" : "a=recvonly") != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=mid:1") != 0) {
