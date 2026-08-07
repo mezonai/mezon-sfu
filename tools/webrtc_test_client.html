@@ -425,6 +425,15 @@
                 >
                     📷
                 </button>
+                <button
+                    class="ctrl-btn"
+                    id="raiseHandBtn"
+                    onclick="raiseHand()"
+                    title="Raise hand to become a speaker"
+                    style="display: none;"
+                >
+                    ✋
+                </button>
                 <button class="ctrl-btn leave" onclick="leaveMeeting()">
                     Leave
                 </button>
@@ -672,6 +681,12 @@
                 joinBtn.disabled = false;
                 localTracksAdded = false;
                 isNegotiating = false;
+                const raiseBtn = document.getElementById("raiseHandBtn");
+                if (raiseBtn) {
+                    raiseBtn.style.display = "none";
+                    raiseBtn.style.background = "var(--tile)";
+                    raiseBtn.style.color = "var(--text)";
+                }
             }
 
             /* Force VP9 codec selection via setCodecPreferences */
@@ -800,6 +815,19 @@
                 }, 2000);
             }
 
+            function raiseHand() {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: "raise_hand",
+                        role: "speaker"
+                    }));
+
+                    const btn = document.getElementById("raiseHandBtn");
+                    btn.style.background = "var(--warn)";
+                    btn.style.color = "#11111b";
+                }
+            }
+
             async function connectAndJoin() {
                 const wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
@@ -874,6 +902,7 @@
 
                         document.getElementById("micBtn").style.display = "flex";
                         document.getElementById("camBtn").style.display = "flex";
+                        document.getElementById("raiseHandBtn").style.display = "none";
 
                         if (!localStream.getAudioTracks().length) {
                             document.getElementById("micBtn").disabled = true;
@@ -885,6 +914,7 @@
                         // Hide mic/cam controls for audience
                         document.getElementById("micBtn").style.display = "none";
                         document.getElementById("camBtn").style.display = "none";
+                        document.getElementById("raiseHandBtn").style.display = "flex";
                     }
 
                     setJoinStatus("Connecting to signaling server…");
