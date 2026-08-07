@@ -604,6 +604,7 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
                   now - publisher->last_pli_time);
     return;
   }
+
   publisher->last_pli_time = now;
 
   if (media_ssrc == 0) {

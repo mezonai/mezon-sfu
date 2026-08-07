@@ -199,6 +199,7 @@ typedef struct sfu_peer_session {
   _Atomic bool is_audience;
   bool active;
   bool negotiation_needed;
+  _Atomic bool uplink_ssrc_dirty;
 } sfu_peer_session_t;
 
 typedef struct sfu_hash_slot {

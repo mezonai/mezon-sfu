@@ -30,6 +30,7 @@
                 color: var(--text);
                 margin: 0;
                 height: 100vh;
+                height: 100dvh;
                 display: flex;
                 flex-direction: column;
                 overflow: hidden;
@@ -123,6 +124,8 @@
                 flex: 1;
                 flex-direction: column;
                 min-height: 0;
+                height: 100%;
+                overflow: hidden;
             }
             #topBar {
                 display: flex;
@@ -168,6 +171,7 @@
                 overflow-y: auto;
                 grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
                 align-content: start;
+                -webkit-overflow-scrolling: touch;
             }
             .tile {
                 position: relative;
@@ -250,6 +254,7 @@
                 background: var(--panel);
                 border-top: 1px solid var(--border);
                 flex-shrink: 0;
+                z-index: 20;
             }
             .ctrl-btn {
                 width: 46px;
@@ -595,8 +600,24 @@
                 p.stream = stream;
                 p.hasVideo = hasVideo;
                 p.video.srcObject = stream;
-                p.video.style.display = hasVideo ? "block" : "none";
-                p.avatar.style.display = hasVideo ? "none" : "flex";
+
+                const videoTrack = hasVideo ? stream.getVideoTracks()[0] : null;
+                const showVideo = () => {
+                    const live = hasVideo && videoTrack && !videoTrack.muted && videoTrack.readyState === "live";
+                    p.video.style.display = live ? "block" : "none";
+                    p.avatar.style.display = live ? "none" : "flex";
+                };
+                if (videoTrack) {
+                    // The SFU marks a demoted publisher's m-line inactive instead
+                    // of removing it, so the receiver track mutes (black frame)
+                    // rather than ending. Hide the video while muted so the tile
+                    // falls back to the avatar instead of a black placeholder.
+                    videoTrack.addEventListener("mute", showVideo);
+                    videoTrack.addEventListener("unmute", showVideo);
+                    videoTrack.addEventListener("ended", showVideo);
+                }
+                showVideo();
+
                 attachAudioMeter(p, stream);
             }
 
@@ -667,6 +688,7 @@
             }
 
             function leaveMeeting() {
+                handRaised = false;
                 if (ws) {
                     ws.close();
                     ws = null;
@@ -815,16 +837,25 @@
                 }, 2000);
             }
 
-            function raiseHand() {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: "raise_hand",
-                        role: "speaker"
-                    }));
+            let handRaised = false;
 
-                    const btn = document.getElementById("raiseHandBtn");
+            function raiseHand() {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+                handRaised = !handRaised;
+
+                ws.send(JSON.stringify({
+                    type: handRaised ? "raise_hand" : "role_change",
+                    role: handRaised ? "speaker" : "audience",
+                }));
+
+                const btn = document.getElementById("raiseHandBtn");
+                if (handRaised) {
                     btn.style.background = "var(--warn)";
                     btn.style.color = "#11111b";
+                } else {
+                    btn.style.background = "var(--tile)";
+                    btn.style.color = "var(--text)";
                 }
             }
 
@@ -930,7 +961,7 @@
                         ws.send(JSON.stringify({
                             type: "join",
                             room: roomId,
-                            role: currentJoinMode
+                            role: currentJoinMode,
                         }));
                     };
 
@@ -945,6 +976,52 @@
 
                         if (msg.type === "joined") {
                             setConnState("awaiting offer…", "warn");
+                            return;
+                        }
+
+                        if (msg.type === "role_changed" && msg.role === "speaker") {
+                            // Attach the pre-captured local tracks to the existing
+                            // transceivers and switch them to send-only. addTrack()
+                            // alone cannot make a recvonly transceiver send, so we
+                            // replaceTrack + set direction on the audio/video senders.
+                            try {
+                                const audioTrack = localStream.getAudioTracks()[0];
+                                const videoTrack = localStream.getVideoTracks()[0];
+
+                                const audioTc = pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === "audio");
+                                const videoTc = pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === "video");
+
+                                if (audioTc && audioTrack) {
+                                    await audioTc.sender.replaceTrack(audioTrack);
+                                    audioTc.direction = "sendonly";
+                                } else if (audioTrack) {
+                                    pc.addTrack(audioTrack, localStream);
+                                }
+
+                                if (videoTc && videoTrack) {
+                                    await videoTc.sender.replaceTrack(videoTrack);
+                                    videoTc.direction = "sendonly";
+                                } else if (videoTrack) {
+                                    await enableSvcForVideoSender(pc, videoTrack);
+                                }
+                                localTracksAdded = true;
+                            } catch (e) {
+                                console.error("Failed to attach tracks on promotion:", e);
+                            }
+                            return;
+                        }
+
+                        if (msg.type === "role_changed" && msg.role === "audience") {
+                            // Demoted: stop sending by detaching our tracks from the
+                            // senders. The next server offer will mark them inactive.
+                            try {
+                                pc.getSenders().forEach(s => {
+                                    if (s.track) s.replaceTrack(null);
+                                });
+                                localTracksAdded = false;
+                            } catch (e) {
+                                console.error("Failed to detach tracks on demotion:", e);
+                            }
                             return;
                         }
 
@@ -973,19 +1050,21 @@
                                 const answer = await pc.createAnswer();
                                 await pc.setLocalDescription(answer);
 
-                                const activeTrackIds = new Set();
+                                // Prune tiles whose remote track is gone entirely.
+                                // A track whose m-line went inactive (demoted peer)
+                                // stays bound to its transceiver, so its tile is kept
+                                // and the mute listener swaps it to the avatar fallback.
+                                const liveTrackIds = new Set();
                                 pc.getTransceivers().forEach(t => {
-                                    const isReceiving = t.currentDirection === "recvonly" || t.currentDirection === "sendrecv";
-
-                                    if (t.receiver && t.receiver.track && isReceiving) {
-                                        activeTrackIds.add(t.receiver.track.id);
+                                    if (t.receiver && t.receiver.track && t.receiver.track.readyState === "live") {
+                                        liveTrackIds.add(t.receiver.track.id);
                                     }
                                 });
 
                                 for (const [id, p] of participants.entries()) {
                                     if (id === "local") continue;
                                     const track = p.stream ? p.stream.getTracks()[0] : null;
-                                    if (!track || !activeTrackIds.has(track.id)) {
+                                    if (!track || !liveTrackIds.has(track.id)) {
                                         removeTile(id);
                                     }
                                 }

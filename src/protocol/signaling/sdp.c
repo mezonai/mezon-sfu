@@ -296,8 +296,8 @@ static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t 
   return true;
 }
 
-int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag,
-                         const char *pwd, const char *fingerprint, char *out, size_t out_cap) {
+int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd,
+                         const char *fingerprint, char *out, size_t out_cap) {
   size_t off = 0;
   int in_media = 0;
   int saw_media_line = 0;
@@ -448,6 +448,17 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
         goto fail;
       }
     } else {
+      if (starts_with(line, len, "a=ssrc:")) {
+        uint32_t parsed_ssrc = 0;
+        if (sscanf(line, "a=ssrc:%u", &parsed_ssrc) == 1) {
+          if (current_media == 1 && session->uplink_audio.ssrc == 0) {
+            session->uplink_audio.ssrc = parsed_ssrc;
+          } else if (current_media == 2 && session->uplink_video.ssrc == 0) {
+            session->uplink_video.ssrc = parsed_ssrc;
+          }
+        }
+      }
+
       if (should_skip_line(line, len)) {
         continue;
       }
@@ -467,8 +478,7 @@ int sfu_sdp_build_answer(const sfu_peer_session_t *session, const char *offer, s
     goto fail;
   }
 
-  /* Generate dedicated media sections for all remote publishers at the end of the SDP */
-  uint32_t mid_counter = 100;  // Offset MIDs to prevent clashes with client MIDs
+  uint32_t mid_counter = 100;
   char buf[256];
 
   for (uint32_t i = 0; i < receiver_count; i++) {

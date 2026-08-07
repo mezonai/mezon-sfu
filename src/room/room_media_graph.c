@@ -47,6 +47,68 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   return snap;
 }
 
+static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
+  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
+  uint32_t pos = snapshot_find(old, dst);
+  if (pos == UINT32_MAX) {
+    sfu_subscriptions_snapshot_release(old);
+    return NULL;
+  }
+
+  uint32_t old_count = old->count;
+  sfu_receiver_snapshot_t *snap = snapshot_alloc(old_count);
+  if (!snap) {
+    sfu_subscriptions_snapshot_release(old);
+    return NULL;
+  }
+  snap->generation = old->generation + 1;
+
+  for (uint32_t i = 0; i < old_count; i++) {
+    snap->entries[i] = old->entries[i];
+    atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
+  }
+
+  snapshot_fill_entry(&snap->entries[pos], dst);
+  sfu_session_release(dst);
+
+  snap->count = old_count;
+  sfu_subscriptions_snapshot_release(old);
+  return snap;
+}
+
+static sfu_receiver_snapshot_t *snapshot_deactivate_entry(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
+  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
+  uint32_t pos = snapshot_find(old, dst);
+  if (pos == UINT32_MAX) {
+    sfu_subscriptions_snapshot_release(old);
+    return NULL;
+  }
+
+  uint32_t old_count = old->count;
+  sfu_receiver_snapshot_t *snap = snapshot_alloc(old_count);
+  if (!snap) {
+    sfu_subscriptions_snapshot_release(old);
+    return NULL;
+  }
+  snap->generation = old->generation + 1;
+
+  for (uint32_t i = 0; i < old_count; i++) {
+    snap->entries[i] = old->entries[i];
+    atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
+  }
+
+  sfu_receiver_entry_t *e = &snap->entries[pos];
+  e->audio_ssrc = 0;
+  e->video_ssrc = 0;
+  e->video_rtx_ssrc = 0;
+  e->audio_active = false;
+  e->video_active = false;
+
+  snap->count = old_count;
+  sfu_subscriptions_snapshot_release(old);
+  return snap;
+}
+
 static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst, bool fanout) {
   sfu_receiver_snapshot_t *old = fanout ? sfu_session_fanout_targets_acquire(owner) : sfu_session_subscriptions_acquire(owner);
   if (snapshot_find(old, dst) != UINT32_MAX) {
@@ -197,12 +259,15 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     }
 
     if (is_audience) {
-      sfu_receiver_snapshot_t *snap = snapshot_build_without(other, peer, false);
+      sfu_receiver_snapshot_t *snap = snapshot_deactivate_entry(other, peer);
       if (snap) {
         snapshot_replace(other, snap);
       }
     } else {
-      sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, false);
+      sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, peer);
+      if (!snap) {
+        snap = snapshot_build_with(other, peer, false);
+      }
       if (snap) {
         snapshot_replace(other, snap);
       }
@@ -219,6 +284,12 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
       empty->generation = 0;
     }
     sfu_session_publish_fanout_targets(peer, empty);
+
+    peer->uplink_audio.ssrc = 0;
+    peer->uplink_audio.active = false;
+    peer->uplink_video.ssrc = 0;
+    peer->uplink_video.rtx_ssrc = 0;
+    peer->uplink_video.active = false;
   }
 
   peer->negotiation_needed = true;
@@ -284,5 +355,24 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   peer->room = NULL;
   peer->negotiation_needed = false;
 
+  pthread_mutex_unlock(&room->lock);
+}
+
+void room_refresh_peer_streams(sfu_room_t *room, sfu_peer_session_t *updated_peer) {
+  if (!room || !updated_peer) {
+    return;
+  }
+
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *other = room->peers[i];
+    if (!other || other == updated_peer || !sfu_session_accepts_work(other)) {
+      continue;
+    }
+    sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, updated_peer);
+    if (snap) {
+      snapshot_replace(other, snap);
+    }
+  }
   pthread_mutex_unlock(&room->lock);
 }
