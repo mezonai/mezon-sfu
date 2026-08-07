@@ -47,8 +47,8 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   return snap;
 }
 
-static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
-  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
+static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, sfu_peer_session_t *dst, bool fanout) {
+  sfu_receiver_snapshot_t *old = fanout ? sfu_session_fanout_targets_acquire(owner) : sfu_session_subscriptions_acquire(owner);
   if (snapshot_find(old, dst) != UINT32_MAX) {
     sfu_subscriptions_snapshot_release(old);
     return NULL;
@@ -69,8 +69,10 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
 
   sfu_receiver_entry_t *e = &snap->entries[old_count];
   memset(e, 0, sizeof(*e));
-  e->mid_audio = owner->next_remote_mid++;
-  e->mid_video = owner->next_remote_mid++;
+  if (!fanout) {
+    e->mid_audio = owner->next_remote_mid++;
+    e->mid_video = owner->next_remote_mid++;
+  }
   snapshot_fill_entry(e, dst);
   e->has_audio = true;
   e->has_video = true;
@@ -80,8 +82,8 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
   return snap;
 }
 
-static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner, const sfu_peer_session_t *dst) {
-  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
+static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner, const sfu_peer_session_t *dst, bool fanout) {
+  sfu_receiver_snapshot_t *old = fanout ? sfu_session_fanout_targets_acquire(owner) : sfu_session_subscriptions_acquire(owner);
   uint32_t pos = snapshot_find(old, dst);
   if (pos == UINT32_MAX) {
     sfu_subscriptions_snapshot_release(old);
@@ -115,6 +117,8 @@ static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t 
   owner->negotiation_needed = true;
 }
 
+static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) { sfu_session_publish_fanout_targets(owner, new_snap); }
+
 void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_lock(&room->lock);
 
@@ -141,22 +145,85 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
       continue;
     }
 
-    sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer);
-    if (snap) {
-      snapshot_replace(other, snap);
-    } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for peer subscribing to %s", room->room_id, peer->cold ? peer->cold->ufrag : "?");
+    bool peer_is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
+    bool other_is_audience = atomic_load_explicit(&other->is_audience, memory_order_acquire);
+
+    if (!peer_is_audience) {
+      sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, false);
+      if (snap) {
+        snapshot_replace(other, snap);
+      }
+    }
+    if (!other_is_audience) {
+      sfu_receiver_snapshot_t *snap = snapshot_build_with(peer, other, false);
+      if (snap) {
+        snapshot_replace(peer, snap);
+      }
     }
 
-    snap = snapshot_build_with(peer, other);
-    if (snap) {
-      snapshot_replace(peer, snap);
-    } else {
-      SFU_LOG_WARN("room %" PRIu64 ": failed to build receiver snapshot for %s subscribing to peer", room->room_id, peer->cold ? peer->cold->ufrag : "?");
+    if (!peer_is_audience) {
+      sfu_receiver_snapshot_t *snap = snapshot_build_with(peer, other, true);
+      if (snap) {
+        fanout_snapshot_replace(peer, snap);
+      }
+    }
+    if (!other_is_audience) {
+      sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, true);
+      if (snap) {
+        fanout_snapshot_replace(other, snap);
+      }
     }
   }
 
   pthread_mutex_unlock(&room->lock);
+}
+
+bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_audience) {
+  if (!room || !peer) {
+    return false;
+  }
+
+  pthread_mutex_lock(&room->lock);
+  if (peer->room != room || atomic_load_explicit(&peer->is_audience, memory_order_acquire) == is_audience) {
+    pthread_mutex_unlock(&room->lock);
+    return false;
+  }
+
+  atomic_store_explicit(&peer->is_audience, is_audience, memory_order_release);
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *other = room->peers[i];
+    if (!other || other == peer || !sfu_session_accepts_work(other)) {
+      continue;
+    }
+
+    if (is_audience) {
+      sfu_receiver_snapshot_t *snap = snapshot_build_without(other, peer, false);
+      if (snap) {
+        snapshot_replace(other, snap);
+      }
+    } else {
+      sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, false);
+      if (snap) {
+        snapshot_replace(other, snap);
+      }
+      snap = snapshot_build_with(peer, other, true);
+      if (snap) {
+        fanout_snapshot_replace(peer, snap);
+      }
+    }
+  }
+
+  if (is_audience) {
+    sfu_receiver_snapshot_t *empty = snapshot_alloc(0);
+    if (empty) {
+      empty->generation = 0;
+    }
+    sfu_session_publish_fanout_targets(peer, empty);
+  }
+
+  peer->negotiation_needed = true;
+  pthread_mutex_unlock(&room->lock);
+  return true;
 }
 
 void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
@@ -190,9 +257,13 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     if (!other) {
       continue;
     }
-    sfu_receiver_snapshot_t *snap = snapshot_build_without(other, peer);
+    sfu_receiver_snapshot_t *snap = snapshot_build_without(other, peer, false);
     if (snap) {
       snapshot_replace(other, snap);
+    }
+    snap = snapshot_build_without(other, peer, true);
+    if (snap) {
+      fanout_snapshot_replace(other, snap);
     }
   }
 
@@ -204,6 +275,11 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     SFU_LOG_ERROR("room %" PRIu64 ": failed to allocate empty snapshot; clearing receivers in place", room->room_id);
     sfu_session_publish_receivers(peer, NULL);
   }
+  empty = snapshot_alloc(0);
+  if (empty) {
+    empty->generation = 0;
+  }
+  sfu_session_publish_fanout_targets(peer, empty);
 
   peer->room = NULL;
   peer->negotiation_needed = false;

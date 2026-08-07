@@ -163,6 +163,43 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
 
 /* CC-11: the answer-side extmap negotiation extractor accepts the URI forms
  * browsers emit and rejects garbage. */
+static void test_initial_offer_role_directions(void) {
+  char offer[4096];
+  int len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=recvonly") == 2);
+  assert(!contains(offer, "a=inactive"));
+
+  len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", true, offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=inactive") == 2);
+  assert(!contains(offer, "a=recvonly"));
+}
+
+static void test_renegotiation_offer_role_directions(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  session.cold = calloc(1, sizeof(*session.cold));
+  assert(session.cold != NULL);
+  session.next_remote_mid = 2;
+
+  char offer[4096];
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=recvonly") == 2);
+
+  atomic_store(&session.is_audience, true);
+  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=inactive") == 2);
+
+  free(session.cold);
+}
+
 static void test_twcc_extmap_extraction(void) {
   extern uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len);
 
@@ -464,6 +501,8 @@ int main(void) {
   cleanup_mock_session(&session1, r1);
   cleanup_mock_session(&session2, r2);
 
+  test_initial_offer_role_directions();
+  test_renegotiation_offer_role_directions();
   test_twcc_extmap_extraction();
   test_concurrent_build_vs_teardown();
 

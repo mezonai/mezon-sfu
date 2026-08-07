@@ -24,6 +24,8 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s);
 void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap);
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
+sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s);
+void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
 
 static inline bool sfu_session_accepts_work(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->accepts_work, memory_order_acquire); }
 

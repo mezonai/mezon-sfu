@@ -174,6 +174,7 @@ typedef struct sfu_peer_session {
   sfu_rtx_cache_t *rtx_cache;
   sfu_peer_session_cold_t *cold;
   _Atomic(sfu_receiver_snapshot_t *) receivers;
+  _Atomic(sfu_receiver_snapshot_t *) fanout_targets;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
@@ -195,7 +196,7 @@ typedef struct sfu_peer_session {
   _Atomic bool accepts_work;
   uint8_t state;
   uint8_t fir_seq;
-  bool is_audience;
+  _Atomic bool is_audience;
   bool active;
   bool negotiation_needed;
 } sfu_peer_session_t;
