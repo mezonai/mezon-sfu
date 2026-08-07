@@ -645,7 +645,14 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
                   session->user_id = c->user_id;
-                  session->peer_id = generate_unique_id();
+                  /* peer_id keys each subscriber's scheduler table (capped at
+                   * SFU_SESSION_SCHEDULER_CAP). Assigning a fresh id on every
+                   * answer exhausts those slots after a few renegotiations and
+                   * the router starts dropping every packet, so only assign it
+                   * once. */
+                  if (session->peer_id == 0) {
+                    session->peer_id = generate_unique_id();
+                  }
                   bool role_changed = false;
                   if (session->room) {
                     role_changed = room_update_peer_role((sfu_room_t *)session->room, session, c->is_audience);
