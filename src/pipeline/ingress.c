@@ -354,9 +354,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  /* The client's answer carries no a=ssrc lines (Chrome omits them), so the
-   * uplink SSRCs are unknown until RTP actually arrives. Learn them here and
-   * flag the session so the room can be refreshed + renegotiated once. */
   uint8_t in_pt = m.rtp.payload_type;
   bool is_video_pt = (in_pt == sender_session->uplink_video.payload_type) || (in_pt == sender_session->uplink_video.rtx_payload_type);
   bool learned = false;
@@ -388,8 +385,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   sfu_router_forward(w, sender_session, &m);
 
-  /* After the packet is forwarded, push the newly learned SSRCs to subscribers
-   * and re-offer so their inactive mids go live. Done once per SSRC change. */
   if (atomic_exchange_explicit(&sender_session->uplink_ssrc_dirty, false, memory_order_acq_rel) && sender_session->room) {
     SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u video=%u); refreshing + renegotiating", w->worker_index,
                  sender_session->cold->ufrag, sender_session->uplink_audio.ssrc, sender_session->uplink_video.ssrc);

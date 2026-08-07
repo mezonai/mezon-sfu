@@ -199,9 +199,6 @@ typedef struct sfu_peer_session {
   _Atomic bool is_audience;
   bool active;
   bool negotiation_needed;
-  /* Set when the session's uplink SSRCs were learned from inbound RTP (because
-   * the client's answer carried no a=ssrc lines). Cleared once the room has
-   * been refreshed + renegotiated so the new SSRCs reach subscribers. */
   _Atomic bool uplink_ssrc_dirty;
 } sfu_peer_session_t;
 

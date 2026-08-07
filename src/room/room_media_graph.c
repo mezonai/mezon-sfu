@@ -47,10 +47,6 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   return snap;
 }
 
-/* Rebuilds the owner's subscription snapshot, refreshing the media state
- * (SSRCs, active flags, PTs) of the entry for `dst` in place. Mids are
- * preserved because the entry keeps its slot. Returns NULL when `dst` is not
- * in the owner's snapshot. */
 static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
   sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
   uint32_t pos = snapshot_find(old, dst);
@@ -71,8 +67,7 @@ static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner
     snap->entries[i] = old->entries[i];
     atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
   }
-  /* snapshot_fill_entry takes one more ref on dst; drop the one we just added
-   * for the slot so the net refcount is unchanged. */
+
   snapshot_fill_entry(&snap->entries[pos], dst);
   sfu_session_release(dst);
 
@@ -81,11 +76,6 @@ static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner
   return snap;
 }
 
-/* Rebuilds the owner's subscription snapshot with the entry for `dst` kept in
- * its slot (mids preserved) but its media state cleared, so the corresponding
- * m-lines go inactive. Used when a publisher demotes to audience: keeping the
- * slot means a later re-promotion reuses the same mids instead of allocating a
- * fresh pair, which would confuse the subscriber's already-bound transceivers. */
 static sfu_receiver_snapshot_t *snapshot_deactivate_entry(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
   sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
   uint32_t pos = snapshot_find(old, dst);
@@ -269,15 +259,11 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     }
 
     if (is_audience) {
-      /* Deactivate in place (mids preserved) rather than removing, so a later
-       * re-promotion reuses the same mids. */
       sfu_receiver_snapshot_t *snap = snapshot_deactivate_entry(other, peer);
       if (snap) {
         snapshot_replace(other, snap);
       }
     } else {
-      /* Re-promotion: refresh the existing slot if present (reusing mids),
-       * otherwise add a new one. */
       sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, peer);
       if (!snap) {
         snap = snapshot_build_with(other, peer, false);
@@ -299,9 +285,6 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     }
     sfu_session_publish_fanout_targets(peer, empty);
 
-    /* Demoted peers stop sending; reset the learned uplink SSRCs so that a
-     * later re-promotion (which allocates fresh browser SSRCs) is picked up by
-     * the RTP-based learning path again. */
     peer->uplink_audio.ssrc = 0;
     peer->uplink_audio.active = false;
     peer->uplink_video.ssrc = 0;
@@ -375,10 +358,6 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_unlock(&room->lock);
 }
 
-/* Re-reads `updated_peer`'s current uplink media state into every other
- * peer's subscription snapshot entry for it. Used after a late answer carries
- * the real SSRCs for a peer that was added to the room before its media was
- * known (e.g. an audience that raised hand and only then published). */
 void room_refresh_peer_streams(sfu_room_t *room, sfu_peer_session_t *updated_peer) {
   if (!room || !updated_peer) {
     return;

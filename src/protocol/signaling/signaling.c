@@ -380,10 +380,6 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
 
 uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len) { return extract_sdp_twcc_extmap_id(sdp, sdp_len); }
 
-/* Returns true when the answer changed the session's published media state
- * (SSRCs or active flags), which is the only case that warrants refreshing
- * other peers' snapshots and renegotiating. This keeps the offer/answer
- * exchange from looping on identical answers. */
 static bool handle_signaling_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
   if (!session) {
     return false;
@@ -645,11 +641,6 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
                   session->user_id = c->user_id;
-                  /* peer_id keys each subscriber's scheduler table (capped at
-                   * SFU_SESSION_SCHEDULER_CAP). Assigning a fresh id on every
-                   * answer exhausts those slots after a few renegotiations and
-                   * the router starts dropping every packet, so only assign it
-                   * once. */
                   if (session->peer_id == 0) {
                     session->peer_id = generate_unique_id();
                   }
@@ -660,10 +651,6 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                     atomic_store_explicit(&session->is_audience, c->is_audience, memory_order_release);
                   }
                   bool media_changed = handle_signaling_answer(session, sdp, sdp_len);
-                  /* A session already in a room may have just published its
-                   * real SSRCs (e.g. an audience that raised hand). Only
-                   * refresh + renegotiate when the media actually changed,
-                   * otherwise the offer/answer exchange loops forever. */
                   if (session->room && (media_changed || role_changed)) {
                     SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d), refreshing + renegotiating", c->client_ufrag, media_changed,
                                  role_changed);

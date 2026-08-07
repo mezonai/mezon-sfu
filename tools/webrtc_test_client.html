@@ -600,8 +600,24 @@
                 p.stream = stream;
                 p.hasVideo = hasVideo;
                 p.video.srcObject = stream;
-                p.video.style.display = hasVideo ? "block" : "none";
-                p.avatar.style.display = hasVideo ? "none" : "flex";
+
+                const videoTrack = hasVideo ? stream.getVideoTracks()[0] : null;
+                const showVideo = () => {
+                    const live = hasVideo && videoTrack && !videoTrack.muted && videoTrack.readyState === "live";
+                    p.video.style.display = live ? "block" : "none";
+                    p.avatar.style.display = live ? "none" : "flex";
+                };
+                if (videoTrack) {
+                    // The SFU marks a demoted publisher's m-line inactive instead
+                    // of removing it, so the receiver track mutes (black frame)
+                    // rather than ending. Hide the video while muted so the tile
+                    // falls back to the avatar instead of a black placeholder.
+                    videoTrack.addEventListener("mute", showVideo);
+                    videoTrack.addEventListener("unmute", showVideo);
+                    videoTrack.addEventListener("ended", showVideo);
+                }
+                showVideo();
+
                 attachAudioMeter(p, stream);
             }
 
@@ -1034,19 +1050,21 @@
                                 const answer = await pc.createAnswer();
                                 await pc.setLocalDescription(answer);
 
-                                const activeTrackIds = new Set();
+                                // Prune tiles whose remote track is gone entirely.
+                                // A track whose m-line went inactive (demoted peer)
+                                // stays bound to its transceiver, so its tile is kept
+                                // and the mute listener swaps it to the avatar fallback.
+                                const liveTrackIds = new Set();
                                 pc.getTransceivers().forEach(t => {
-                                    const isReceiving = t.currentDirection === "recvonly" || t.currentDirection === "sendrecv";
-
-                                    if (t.receiver && t.receiver.track && isReceiving) {
-                                        activeTrackIds.add(t.receiver.track.id);
+                                    if (t.receiver && t.receiver.track && t.receiver.track.readyState === "live") {
+                                        liveTrackIds.add(t.receiver.track.id);
                                     }
                                 });
 
                                 for (const [id, p] of participants.entries()) {
                                     if (id === "local") continue;
                                     const track = p.stream ? p.stream.getTracks()[0] : null;
-                                    if (!track || !activeTrackIds.has(track.id)) {
+                                    if (!track || !liveTrackIds.has(track.id)) {
                                         removeTile(id);
                                     }
                                 }
