@@ -182,9 +182,62 @@ static void test_audience_role_asymmetry_and_transition(void) {
 
   assert(room_update_peer_role(&room, audience, true));
   assert(atomic_load(&audience->is_audience));
-  assert(receiver_count(speaker) == 0);
+  /* Demotion keeps the subscription slot (deactivated) so its mids stay
+   * stable for a later re-promotion; the audience no longer owns fanout
+   * targets but the speaker still receives from it. */
+  assert(receiver_count(speaker) == 1);
   assert(fanout_target_count(audience) == 0);
   assert(fanout_targets(speaker, audience));
+
+  /* The deactivated slot has its media state cleared... */
+  uint32_t mid_audio = 0, mid_video = 0;
+  {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
+    assert(snap != NULL && snap->count == 1);
+    assert(snap->entries[0].subscriber == audience);
+    assert(!snap->entries[0].audio_active);
+    assert(!snap->entries[0].video_active);
+    assert(snap->entries[0].audio_ssrc == 0);
+    assert(snap->entries[0].video_ssrc == 0);
+    mid_audio = snap->entries[0].mid_audio;
+    mid_video = snap->entries[0].mid_video;
+    sfu_subscriptions_snapshot_release(snap);
+  }
+  /* ...and the demoted peer's uplink state is reset so a re-promotion with
+   * fresh browser SSRCs is learned from RTP again. */
+  assert(audience->uplink_audio.ssrc == 0);
+  assert(!audience->uplink_audio.active);
+  assert(audience->uplink_video.ssrc == 0);
+  assert(!audience->uplink_video.active);
+
+  /* Re-promotion with fresh uplink SSRCs reuses the same slot: mids are
+   * preserved (the subscriber's transceivers stay bound) while the new
+   * media state is picked up. */
+  audience->uplink_audio.ssrc = 1111;
+  audience->uplink_audio.active = true;
+  audience->uplink_video.ssrc = 2222;
+  audience->uplink_video.rtx_ssrc = 3333;
+  audience->uplink_video.active = true;
+
+  uint32_t speaker_next_mid = speaker->next_remote_mid;
+  assert(room_update_peer_role(&room, audience, false));
+  assert(receiver_count(speaker) == 1);
+  assert(fanout_targets(audience, speaker));
+  {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
+    assert(snap != NULL && snap->count == 1);
+    assert(snap->entries[0].subscriber == audience);
+    assert(snap->entries[0].mid_audio == mid_audio);
+    assert(snap->entries[0].mid_video == mid_video);
+    assert(snap->entries[0].audio_active);
+    assert(snap->entries[0].video_active);
+    assert(snap->entries[0].audio_ssrc == 1111);
+    assert(snap->entries[0].video_ssrc == 2222);
+    assert(snap->entries[0].video_rtx_ssrc == 3333);
+    sfu_subscriptions_snapshot_release(snap);
+  }
+  /* No fresh mid pair was allocated for the re-promoted peer. */
+  assert(speaker->next_remote_mid == speaker_next_mid);
 
   room_remove_peer(&room, audience);
   room_remove_peer(&room, speaker);

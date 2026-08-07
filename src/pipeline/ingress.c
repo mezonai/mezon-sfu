@@ -12,6 +12,8 @@
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
 #include "protocol/signaling/sdp.h"
+#include "protocol/signaling/signaling.h"
+#include "room/room_media_graph.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtcp/rtcp_fb.h"
 #include "rtp/rtp_packet.h"
@@ -43,6 +45,11 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
 static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subscriber, uint32_t media_ssrc) {
   sfu_room_t *room = subscriber->room;
   if (!room) {
+    return NULL;
+  }
+
+  bool sub_is_audience = atomic_load_explicit(&subscriber->is_audience, memory_order_acquire);
+  if (sub_is_audience) {
     return NULL;
   }
 
@@ -290,10 +297,6 @@ static void extract_svc_metadata(sfu_peer_session_t *sender_session, sfu_ingress
     return;
   }
 
-  if (sender_session->uplink_video.ssrc == 0 && m->rtp.ssrc != 0) {
-    sender_session->uplink_video.ssrc = m->rtp.ssrc;
-  }
-
   if (sfu_svc_parse_descriptor(codec, m->rtp.payload, m->rtp.payload_len, &m->svc) == 0) {
     m->has_svc = true;
     m->is_keyframe = sfu_svc_descriptor_is_keyframe(&m->svc);
@@ -351,9 +354,42 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  m.is_audio = sender_session->uplink_audio.active && m.rtp.payload_type == sender_session->uplink_audio.payload_type;
+  uint8_t in_pt = m.rtp.payload_type;
+  bool is_video_pt = (in_pt == sender_session->uplink_video.payload_type) || (in_pt == sender_session->uplink_video.rtx_payload_type);
+  bool learned = false;
+  if (is_video_pt) {
+    if (sender_session->uplink_video.ssrc == 0 && m.rtp.ssrc != 0) {
+      sender_session->uplink_video.ssrc = m.rtp.ssrc;
+      learned = true;
+    }
+    if (!sender_session->uplink_video.active) {
+      sender_session->uplink_video.active = true;
+      learned = true;
+    }
+  } else {
+    if (sender_session->uplink_audio.ssrc == 0 && m.rtp.ssrc != 0) {
+      sender_session->uplink_audio.ssrc = m.rtp.ssrc;
+      learned = true;
+    }
+    if (!sender_session->uplink_audio.active) {
+      sender_session->uplink_audio.active = true;
+      learned = true;
+    }
+  }
+  if (learned) {
+    atomic_store_explicit(&sender_session->uplink_ssrc_dirty, true, memory_order_release);
+  }
+
+  m.is_audio = !is_video_pt;
   extract_svc_metadata(sender_session, &m);
 
   sfu_router_forward(w, sender_session, &m);
+
+  if (atomic_exchange_explicit(&sender_session->uplink_ssrc_dirty, false, memory_order_acq_rel) && sender_session->room) {
+    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u video=%u); refreshing + renegotiating", w->worker_index,
+                 sender_session->cold->ufrag, sender_session->uplink_audio.ssrc, sender_session->uplink_video.ssrc);
+    room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
+    sfu_signaling_trigger_renegotiation((sfu_room_t *)sender_session->room);
+  }
   sfu_session_release(sender_session);
 }
