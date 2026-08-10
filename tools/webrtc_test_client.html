@@ -794,6 +794,17 @@
                                 `encoder now reports scalabilityMode=${applied || "NONE (dropped!)"}, ` +
                                 `encodings=${effective.encodings ? effective.encodings.length : 0}`
                         );
+                        if (!applied) {
+                            const isFirefox = navigator.userAgent.includes("Firefox");
+                            console.warn(
+                                `SVC mode ${selectedMode} was NOT applied by the encoder. ` +
+                                    (isFirefox
+                                        ? "Firefox does not implement scalabilityMode in setParameters -- " +
+                                          "SVC only works in Chrome/Chromium. Test there to see layers."
+                                        : "The VP9 encoder refused the scalability mode. " +
+                                          "Try a lighter mode (e.g. L1T3) or lower the capture resolution.")
+                            );
+                        }
                     } catch (e) {
                         console.warn(
                             `Could not set SVC scalabilityMode (${selectedMode}):`,
