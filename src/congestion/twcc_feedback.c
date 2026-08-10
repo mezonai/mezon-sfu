@@ -99,18 +99,19 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
       break;
     }
   }
+  int64_t ref_floored_us = (ref_us / TWCC_REF_UNIT_US) * TWCC_REF_UNIT_US;
   int64_t ref_quant = (ref_us / TWCC_REF_UNIT_US) & 0xFFFFFF;
 
   int32_t delta_units[SFU_TWCC_FEEDBACK_MAX_PACKETS];
   {
-    int64_t clock_us = ref_quant * TWCC_REF_UNIT_US;
+    int64_t clock_us = ref_floored_us;
     for (uint32_t i = 0; i < window; i++) {
       if (status[i] == TWCC_STATUS_NOT_RECEIVED) {
         delta_units[i] = 0;
         continue;
       }
       int64_t d_us = arrival[i] - clock_us;
-      int64_t units = d_us / TWCC_SMALL_DELTA_UNIT_US;
+      int64_t units = (d_us >= 0) ? (d_us / TWCC_SMALL_DELTA_UNIT_US) : -((-d_us + TWCC_SMALL_DELTA_UNIT_US - 1) / TWCC_SMALL_DELTA_UNIT_US);
       if (units < 0 || units > 255) {
         status[i] = TWCC_STATUS_LARGE_DELTA;
         if (units > 32767) {
@@ -195,13 +196,9 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
       if (d > max_d) {
         max_d = d;
       }
-      if (d > 1000000) {
-        SFU_LOG_WARN("twcc_fb POISON: idx=%u seq=%u arrival=%lld ref_us=%lld delta_units=%d", i, (unsigned)(uint16_t)(base_seq + i), (long long)arrival[i],
-                     (long long)ref_us, delta_units[i]);
-      }
     }
-    SFU_LOG_DEBUG("twcc_fb: base=%u window=%u recv=%u ref=%lld deltas[min=%lldus max=%lldus]", base_seq, window, received_count,
-                  (long long)(ref_quant * TWCC_REF_UNIT_US), (long long)min_d, (long long)max_d);
+    SFU_LOG_DEBUG("twcc_fb: base=%u win=%u recv=%u lost=%u dmin=%lldus dmax=%lldus", base_seq, window, received_count, window - received_count,
+                  (long long)min_d, (long long)max_d);
   }
 
   return (int)packet_len;
