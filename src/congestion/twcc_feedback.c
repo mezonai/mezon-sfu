@@ -195,9 +195,13 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
       if (d > max_d) {
         max_d = d;
       }
+      if (d > 1000000) {
+        SFU_LOG_WARN("twcc_fb POISON: idx=%u seq=%u arrival=%lld ref_us=%lld delta_units=%d", i, (unsigned)(uint16_t)(base_seq + i), (long long)arrival[i],
+                     (long long)ref_us, delta_units[i]);
+      }
     }
-    SFU_LOG_INFO("twcc_fb: base=%u window=%u recv=%u ref=%lld deltas[min=%lldus max=%lldus]",
-                 base_seq, window, received_count, (long long)(ref_quant * TWCC_REF_UNIT_US), (long long)min_d, (long long)max_d);
+    SFU_LOG_DEBUG("twcc_fb: base=%u window=%u recv=%u ref=%lld deltas[min=%lldus max=%lldus]", base_seq, window, received_count,
+                  (long long)(ref_quant * TWCC_REF_UNIT_US), (long long)min_d, (long long)max_d);
   }
 
   return (int)packet_len;
