@@ -3,6 +3,7 @@
 #include "util/log.h"
 
 #include <assert.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -45,9 +46,6 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
   if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
     return -1;
   }
-  // if (append_line(out, out_cap, offset, "a=ice-lite") != 0) {
-  //   return -1;
-  // }
   n = snprintf(attr, sizeof(attr), "a=ice-ufrag:%s", ufrag);
   if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
     return -1;
@@ -74,10 +72,20 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
 }
 
 #define SFU_TWCC_LOCAL_EXTMAP_ID 5
+#define SFU_TWCC_RECV_EXTMAP_ID 6
 
 static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset) {
   char line[160];
   int n = snprintf(line, sizeof(line), "a=extmap:%d http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", SFU_TWCC_LOCAL_EXTMAP_ID);
+  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+    return -1;
+  }
+  return 0;
+}
+
+static int append_twcc_recv_attribute(char *out, size_t out_cap, size_t *offset) {
+  char line[192];
+  int n = snprintf(line, sizeof(line), "a=extmap:%d recvonly http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", SFU_TWCC_RECV_EXTMAP_ID);
   if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
     return -1;
   }
@@ -179,7 +187,6 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
   return 0;
 }
 
-
 int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, bool is_audience, char *out,
                                 size_t out_cap) {
   size_t off = 0;
@@ -212,7 +219,6 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   }
 
   n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
-
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     return -1;
   }
@@ -233,14 +239,13 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_twcc_attributes(out, out_cap, &off) != 0) {
+  if (append_twcc_recv_attribute(out, out_cap, &off) != 0) {
     return -1;
   }
 
   if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
     return -1;
   }
-
 
   n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
                SFU_PT_VP8_RTX);
@@ -265,7 +270,7 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_twcc_attributes(out, out_cap, &off) != 0) {
+  if (append_twcc_recv_attribute(out, out_cap, &off) != 0) {
     return -1;
   }
 
@@ -282,9 +287,10 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   return (int)off;
 }
 
-/* Fills a read-only view of snapshot entry `i`. Returns false when the entry
- * has no routing state. The caller must hold the snapshot. */
 static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t i, sfu_sdp_receiver_view_t *view) {
+  if (!snap) {
+    return false;
+  }
   const sfu_receiver_entry_t *e = &snap->entries[i];
   if (!e->has_audio && !e->has_video) {
     return false;
@@ -315,7 +321,6 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
-  assert(snap != NULL || receiver_count == 0);
 
   uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
   uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
@@ -354,10 +359,12 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
         }
 
         if (slot.has_audio && slot.audio_ssrc != 0) {
-          snprintf(bundle_line + strlen(bundle_line), sizeof(bundle_line) - strlen(bundle_line), " %u", tmp_mid++);
+          size_t curr_len = strlen(bundle_line);
+          snprintf(bundle_line + curr_len, sizeof(bundle_line) - curr_len, " %u", tmp_mid++);
         }
         if (slot.has_video && slot.video_ssrc != 0) {
-          snprintf(bundle_line + strlen(bundle_line), sizeof(bundle_line) - strlen(bundle_line), " %u", tmp_mid++);
+          size_t curr_len = strlen(bundle_line);
+          snprintf(bundle_line + curr_len, sizeof(bundle_line) - curr_len, " %u", tmp_mid++);
         }
       }
       if (append_line(out, out_cap, &off, bundle_line) != 0) {
@@ -558,11 +565,15 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
     }
   }
 
-  sfu_subscriptions_snapshot_release(snap);
+  if (snap) {
+    sfu_subscriptions_snapshot_release(snap);
+  }
   return (int)off;
 
 fail:
-  sfu_subscriptions_snapshot_release(snap);
+  if (snap) {
+    sfu_subscriptions_snapshot_release(snap);
+  }
   return -1;
 }
 
@@ -576,9 +587,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
-  assert(snap != NULL || receiver_count == 0);
 
-  /* Session-level header. Fresh o= line since there is no inbound offer to mirror. */
   if (append_line(out, out_cap, &off, "v=0") != 0) {
     goto fail;
   }
@@ -593,7 +602,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     goto fail;
   }
 
-  SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_count=%u", session->cold->ufrag, receiver_count);
+  SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_count=%u", ufrag ? ufrag : "unknown", receiver_count);
 
   char bundle_line[512];
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
@@ -631,7 +640,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
     goto fail;
   }
-  if (append_twcc_attributes(out, out_cap, &off) != 0) {
+  if (append_twcc_recv_attribute(out, out_cap, &off) != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
@@ -658,7 +667,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
     goto fail;
   }
-  if (append_twcc_attributes(out, out_cap, &off) != 0) {
+  if (append_twcc_recv_attribute(out, out_cap, &off) != 0) {
     goto fail;
   }
   if (append_video_codec_attributes(out, out_cap, &off, local_video_pt, local_rtx_pt) != 0) {
@@ -748,11 +757,15 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     }
   }
 
-  sfu_subscriptions_snapshot_release(snap);
+  if (snap) {
+    sfu_subscriptions_snapshot_release(snap);
+  }
 
   return (int)off;
 
 fail:
-  sfu_subscriptions_snapshot_release(snap);
+  if (snap) {
+    sfu_subscriptions_snapshot_release(snap);
+  }
   return -1;
 }
