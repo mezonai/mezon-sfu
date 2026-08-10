@@ -892,12 +892,18 @@
 
                         console.log('ontrack event fired', track.kind, track.id);
 
-                        if (track.kind === "video") {
-                          const id = event.streams && event.streams.length > 0
-                                                              ? event.streams[0].id
-                                                              : track.id;
+                        // Key remote tiles by transceiver mid: the SFU reuses the
+                        // same msid/stream id when a demoted peer is re-promoted
+                        // with new tracks, so stream id alone cannot tell peers
+                        // (or incarnations of the same peer) apart.
+                        const id = event.transceiver && event.transceiver.mid
+                            ? "mid-" + event.transceiver.mid
+                            : (event.streams && event.streams.length > 0
+                                ? event.streams[0].id
+                                : track.id);
 
-                            const label = "Peer " + id.substring(0, 4);
+                        if (track.kind === "video") {
+                            const label = "Peer " + id.substring(0, 8);
                             const p = ensureParticipant(id, {
                                 isLocal: false,
                                 label: label,
@@ -915,6 +921,7 @@
                             const audioEl = document.createElement("audio");
                             audioEl.autoplay = true;
                             audioEl.srcObject = new MediaStream([track]);
+                            audioEl.dataset.owner = id;
                             document.body.appendChild(audioEl);
 
                             track.addEventListener("ended", () => {
@@ -1050,24 +1057,41 @@
                                 const answer = await pc.createAnswer();
                                 await pc.setLocalDescription(answer);
 
-                                // Prune tiles whose remote track is gone entirely.
-                                // A track whose m-line went inactive (demoted peer)
-                                // stays bound to its transceiver, so its tile is kept
-                                // and the mute listener swaps it to the avatar fallback.
-                                const liveTrackIds = new Set();
-                                pc.getTransceivers().forEach(t => {
-                                    if (t.receiver && t.receiver.track && t.receiver.track.readyState === "live") {
-                                        liveTrackIds.add(t.receiver.track.id);
+                                // Prune tiles whose peer left the room entirely.
+                                // The SFU never removes m-lines: when a peer leaves,
+                                // its mids stay in the offer but become a=inactive
+                                // with no a=ssrc lines (the snapshot entry is dropped
+                                // by room_remove_peer -> snapshot_build_without, and
+                                // sfu_sdp_build_offer only emits a=ssrc for live
+                                // entries). A camera-off speaker keeps their m-line
+                                // a=sendonly, so their tile survives and the track
+                                // mute listener swaps it to the avatar fallback.
+                                const deadMids = new Set();
+                                for (const m of msg.sdp.split(/^m=/m).slice(1)) {
+                                    const midMatch = m.match(/^a=mid:(\S+)\s*$/m);
+                                    if (!midMatch) continue;
+                                    const mid = midMatch[1];
+                                    if (!/^\d+$/.test(mid)) continue; // skip local m-lines (mid 0/1)
+                                    const hasSsrc = /^a=ssrc:/m.test(m) || /^a=msid:\S+ \S+\s*$/m.test(m);
+                                    const isInactive = /^a=inactive\s*$/m.test(m);
+                                    if (isInactive && !hasSsrc) {
+                                        deadMids.add(mid);
                                     }
-                                });
+                                }
 
                                 for (const [id, p] of participants.entries()) {
                                     if (id === "local") continue;
-                                    const track = p.stream ? p.stream.getTracks()[0] : null;
-                                    if (!track || !liveTrackIds.has(track.id)) {
+                                    if (id.startsWith("mid-") && deadMids.has(id.slice(4))) {
                                         removeTile(id);
                                     }
                                 }
+                                // Also drop audio elements belonging to departed peers.
+                                document.querySelectorAll("audio[data-owner]").forEach(el => {
+                                    const owner = el.dataset.owner;
+                                    if (owner.startsWith("mid-") && deadMids.has(owner.slice(4))) {
+                                        el.remove();
+                                    }
+                                });
 
                                 ws.send(
                                     JSON.stringify({
@@ -1082,10 +1106,6 @@
                                 isNegotiating = false;
                             }
                             return;
-                        }
-
-                        if (msg.type === "peer-left" && msg.streamId) {
-                            removeTile(msg.streamId);
                         }
                     };
 
