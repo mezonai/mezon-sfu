@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "util/log.h"
 #include "util/netbytes.h"
 
 #define TWCC_FIXED_LEN 20u
@@ -180,6 +181,24 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
 
   t->report_start_seq = (uint16_t)(base_seq + window);
   t->last_feedback_us = now_us;
+
+  {
+    int64_t min_d = 0, max_d = 0;
+    for (uint32_t i = 0; i < window; i++) {
+      if (status[i] == TWCC_STATUS_NOT_RECEIVED) {
+        continue;
+      }
+      int64_t d = delta_units[i] * TWCC_SMALL_DELTA_UNIT_US;
+      if (d < min_d) {
+        min_d = d;
+      }
+      if (d > max_d) {
+        max_d = d;
+      }
+    }
+    SFU_LOG_INFO("twcc_fb: base=%u window=%u recv=%u ref=%lld deltas[min=%lldus max=%lldus]",
+                 base_seq, window, received_count, (long long)(ref_quant * TWCC_REF_UNIT_US), (long long)min_d, (long long)max_d);
+  }
 
   return (int)packet_len;
 }

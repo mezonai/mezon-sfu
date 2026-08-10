@@ -359,7 +359,8 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (sender_session->twcc_recv && sender_session->twcc_extmap_id != 0 && m.rtp.extension) {
     uint16_t twcc_seq = 0;
     if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, sender_session->twcc_extmap_id, &twcc_seq)) {
-      sfu_twcc_recv_tracker_record(sender_session->twcc_recv, twcc_seq, (int64_t)sfu_now_us());
+      int64_t arrival_us = pkt->recv_ts_ns ? (int64_t)(pkt->recv_ts_ns / 1000ULL) : (int64_t)sfu_now_us();
+      sfu_twcc_recv_tracker_record(sender_session->twcc_recv, twcc_seq, arrival_us);
     }
   }
 
