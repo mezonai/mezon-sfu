@@ -806,6 +806,17 @@
                         return;
                     }
 
+                    // Index codec reports so we can resolve outbound-rtp.codecId
+                    // to the negotiated mimeType (VP8/VP9/AV1/H264...). This is
+                    // what tells us whether the VP9 preference actually won and
+                    // SVC could engage.
+                    const codecsById = new Map();
+                    stats.forEach((report) => {
+                        if (report.type === "codec") {
+                            codecsById.set(report.id, report);
+                        }
+                    });
+
                     stats.forEach((report) => {
                         if (
                             report.type === "outbound-rtp" &&
@@ -816,18 +827,27 @@
                             const fps = report.framesPerSecond || 0;
                             const kbps = report.targetBitrate ? Math.round(report.targetBitrate / 1000) : "?";
 
+                            // Debug: negotiated codec + encoder implementation.
+                            // RTX reports have no framesPerSecond, so fps>0
+                            // identifies the real media stream vs the RTX stream.
+                            const codec = report.codecId ? codecsById.get(report.codecId) : null;
+                            const codecName = codec ? codec.mimeType.split("/")[1] : "unknown";
+                            const encoder = report.encoderImplementation || "unknown";
+                            const isRtx = !report.framesPerSecond && !report.frameWidth ? " [RTX stream]" : "";
+
                             console.log(
-                                `[VP9 SVC] Outbound: target=${kbps}kbps ` +
-                                    `res=${res} fps=${fps} ` +
+                                `[VP9 SVC] Outbound: codec=${codecName} encoder=${encoder} ` +
+                                    `target=${kbps}kbps res=${res} fps=${fps} ` +
                                     `scalabilityMode=${mode} ` +
-                                    `qualityLimitation=${report.qualityLimitationReason || "none"}`
+                                    `qualityLimitation=${report.qualityLimitationReason || "none"}${isRtx}`
                             );
 
-                            // Update live overlay badge on local tile
+                            // Update live overlay badge on local tile (skip RTX reports)
+                            if (isRtx) return;
                             const localTile = participants.get("local");
                             if (localTile && localTile.badges) {
                                 localTile.badges.innerHTML = `
-                                    <span class="badge">VP9</span>
+                                    <span class="badge">${codecName}</span>
                                     <span class="badge">${mode}</span>
                                     <span class="badge">${res} @ ${fps}fps</span>
                                 `;
