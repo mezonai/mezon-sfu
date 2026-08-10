@@ -96,6 +96,7 @@ add_library(sfu_core STATIC
   src/runtime/routing_context.c
   src/congestion/gcc.c
   src/congestion/pacer.c
+  src/congestion/twcc_feedback.c
   src/congestion/twcc_parser.c
   src/rtp/rtp_packet.c
   src/rtp/rtp_ext.c

@@ -8,12 +8,26 @@
 #include "runtime/fanout.h"
 #include "runtime/fanout_job.h"
 #include "runtime/signal.h"
+#include "runtime/timer.h"
 #include "util/log.h"
 
 #define SFU_WORKER_SEND_SQ_ENTRIES 1024
 #define SFU_WORKER_SEND_CQ_ENTRIES 2048
 #define SFU_WORKER_REAP_BATCH 128
 #define SFU_WORKER_IDLE_SLEEP_US 200
+#define SFU_WORKER_TWCC_FLUSH_INTERVAL_US 50000LL
+
+typedef struct {
+  sfu_worker_t *w;
+} twcc_flush_ctx_t;
+
+static void twcc_flush_one(sfu_peer_session_t *s, void *user) {
+  twcc_flush_ctx_t *ctx = (twcc_flush_ctx_t *)user;
+  if (s->worker_id != ctx->w->worker_index) {
+    return;
+  }
+  sfu_session_maybe_send_twcc_feedback(ctx->w, s);
+}
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
                     sfu_fanout_mesh_t *mesh, sfu_session_table_t *sessions, sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds,
@@ -79,7 +93,17 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    if (drained > 0 || fanned > 0) {
+    int64_t now_us = (int64_t)sfu_now_us();
+    bool flushed_twcc = false;
+    if (now_us - w->last_twcc_flush_us >= SFU_WORKER_TWCC_FLUSH_INTERVAL_US) {
+      w->last_twcc_flush_us = now_us;
+      twcc_flush_ctx_t ctx = {w};
+      if (sfu_session_table_foreach(w->sessions, twcc_flush_one, &ctx) > 0) {
+        flushed_twcc = true;
+      }
+    }
+
+    if (drained > 0 || fanned > 0 || flushed_twcc) {
       sfu_ring_submit(&w->send_ring);
     }
 

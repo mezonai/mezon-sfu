@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "congestion/gcc.h"
+#include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "congestion/twcc_parser.h"
 #include "media/svc/svc_descriptor.h"
@@ -16,6 +17,7 @@
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_compound.h"
 #include "rtcp/rtcp_fb.h"
+#include "rtp/rtp_ext.h"
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
 #include "rtp/rtx_build.h"
@@ -352,6 +354,13 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
     return;
+  }
+
+  if (sender_session->twcc_recv && sender_session->twcc_extmap_id != 0 && m.rtp.extension) {
+    uint16_t twcc_seq = 0;
+    if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, sender_session->twcc_extmap_id, &twcc_seq)) {
+      sfu_twcc_recv_tracker_record(sender_session->twcc_recv, twcc_seq, (int64_t)sfu_now_us());
+    }
   }
 
   uint8_t in_pt = m.rtp.payload_type;

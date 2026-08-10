@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include "congestion/gcc.h"
+#include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_kf.h"
@@ -177,6 +178,10 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   if (s->twcc_history) {
     SFU_FREE(s->twcc_history);
     s->twcc_history = NULL;
+  }
+  if (s->twcc_recv) {
+    SFU_FREE(s->twcc_recv);
+    s->twcc_recv = NULL;
   }
   if (s->schedulers) {
     SFU_FREE(s->schedulers);
@@ -364,6 +369,11 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     sfu_twcc_history_init(s->twcc_history);
   }
 
+  s->twcc_recv = SFU_CALLOC(1, sizeof(sfu_twcc_recv_tracker_t));
+  if (s->twcc_recv) {
+    sfu_twcc_recv_tracker_init(s->twcc_recv);
+  }
+
   s->schedulers = SFU_CALLOC(SFU_SESSION_SCHEDULER_CAP, sizeof(sfu_session_scheduler_slot_t));
   if (!s->schedulers) {
     SFU_LOG_ERROR("failed to allocate subscriber scheduler table for new peer session");
@@ -446,6 +456,40 @@ sfu_peer_session_t *sfu_session_table_find_by_ufrag(sfu_session_table_t *t, cons
   }
   pthread_mutex_unlock(&t->lock);
   return result;
+}
+
+uint32_t sfu_session_table_foreach(sfu_session_table_t *t, sfu_session_iter_fn fn, void *user) {
+  if (!t || !fn) {
+    return 0;
+  }
+
+  sfu_peer_session_t **pinned = SFU_CALLOC(t->count ? t->count : 1, sizeof(*pinned));
+  if (!pinned) {
+    return 0;
+  }
+  uint32_t pinned_count = 0;
+
+  pthread_mutex_lock(&t->lock);
+  for (uint32_t i = 0; i < t->count; i++) {
+    sfu_peer_session_t *s = t->sessions[i];
+    if (!s) {
+      continue;
+    }
+    if (atomic_load_explicit(&s->lifecycle, memory_order_acquire) != SFU_SESSION_LIFECYCLE_OPEN) {
+      continue;
+    }
+    atomic_fetch_add_explicit(&s->refcount, 1, memory_order_relaxed);
+    pinned[pinned_count++] = s;
+  }
+  pthread_mutex_unlock(&t->lock);
+
+  for (uint32_t i = 0; i < pinned_count; i++) {
+    fn(pinned[i], user);
+    sfu_session_release(pinned[i]);
+  }
+
+  SFU_FREE(pinned);
+  return pinned_count;
 }
 
 bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
@@ -639,6 +683,48 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
       }
     } else {
       SFU_LOG_WARN("Failed to SRTP protect keyframe request for peer %u", publisher->peer_id);
+    }
+  }
+
+  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+}
+
+void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher) {
+  if (!w || !publisher || !publisher->twcc_recv) {
+    return;
+  }
+  if (publisher->worker_id != w->worker_index) {
+    return;
+  }
+
+  sfu_twcc_recv_tracker_t *t = publisher->twcc_recv;
+  if (!sfu_twcc_recv_tracker_pending(t)) {
+    return;
+  }
+
+  int64_t now_us = (int64_t)sfu_now_us();
+  if (t->last_feedback_us != 0 && now_us - t->last_feedback_us < SFU_TWCC_FEEDBACK_INTERVAL_US) {
+    return;
+  }
+
+  uint32_t media_ssrc = 0;
+
+  sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
+  if (!rtcp_pkt) {
+    return;
+  }
+
+  uint32_t sfu_sender_ssrc = 1;
+  int rtcp_len = sfu_twcc_feedback_build(t, sfu_sender_ssrc, media_ssrc, now_us, rtcp_pkt->data, rtcp_pkt->cap);
+  if (rtcp_len > 0) {
+    if (sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap)) {
+      rtcp_pkt->len = (uint32_t)rtcp_len;
+      int sent = sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
+      if (sent != 0) {
+        SFU_LOG_ERROR("Failed to enqueue TWCC feedback to send_ring for peer %u", publisher->peer_id);
+      }
+    } else {
+      SFU_LOG_WARN("Failed to SRTP protect TWCC feedback for peer %u", publisher->peer_id);
     }
   }
 

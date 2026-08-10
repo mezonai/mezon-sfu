@@ -233,6 +233,10 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
+  if (append_twcc_attributes(out, out_cap, &off) != 0) {
+    return -1;
+  }
+
   if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
     return -1;
   }
@@ -258,6 +262,10 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   }
 
   if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+    return -1;
+  }
+
+  if (append_twcc_attributes(out, out_cap, &off) != 0) {
     return -1;
   }
 
@@ -623,6 +631,9 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
     goto fail;
   }
+  if (append_twcc_attributes(out, out_cap, &off) != 0) {
+    goto fail;
+  }
   if (append_line(out, out_cap, &off, "a=rtpmap:111 opus/48000/2") != 0) {
     goto fail;
   }
@@ -645,6 +656,9 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=rtcp-mux") != 0) {
+    goto fail;
+  }
+  if (append_twcc_attributes(out, out_cap, &off) != 0) {
     goto fail;
   }
   if (append_video_codec_attributes(out, out_cap, &off, local_video_pt, local_rtx_pt) != 0) {
