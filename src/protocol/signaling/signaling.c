@@ -341,8 +341,11 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
 static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
   static const char k_extmap[] = "a=extmap:";
   static const char k_twcc_uri[] = "transport-wide-cc";
+  static const char k_sendonly[] = "a=sendonly";
+  static const char m_prefix[] = "m=";
 
   uint8_t id = 0;
+  int in_sendonly = 0;
   size_t pos = 0;
   while (pos < sdp_len) {
     size_t line_start = pos;
@@ -359,6 +362,16 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
 
     size_t len = line_end - line_start;
     const char *line = sdp + line_start;
+
+    if (len >= sizeof(m_prefix) - 1 && memcmp(line, m_prefix, sizeof(m_prefix) - 1) == 0) {
+      in_sendonly = 0;
+      continue;
+    }
+    if (len == sizeof(k_sendonly) - 1 && memcmp(line, k_sendonly, sizeof(k_sendonly) - 1) == 0) {
+      in_sendonly = 1;
+      continue;
+    }
+
     if (len < sizeof(k_extmap) - 1 || memcmp(line, k_extmap, sizeof(k_extmap) - 1) != 0) {
       continue;
     }
@@ -372,7 +385,12 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
       continue;
     }
     if (memmem(endptr, len - (size_t)(endptr - line), k_twcc_uri, sizeof(k_twcc_uri) - 1)) {
-      id = (uint8_t)parsed;
+      if (in_sendonly) {
+        return (uint8_t)parsed;
+      }
+      if (id == 0) {
+        id = (uint8_t)parsed;
+      }
     }
   }
   return id;

@@ -8,6 +8,69 @@
 #define RTP_EXT_ONE_BYTE_PROFILE 0xBEDEu
 #define RTP_EXT_TWO_BYTE_PROFILE 0x1000u /* 0x100<n>; low nibble is appbits */
 
+bool sfu_rtp_ext_read_twcc(uint16_t extension_profile, const uint8_t *ext, size_t ext_len, uint8_t ext_id, uint16_t *out_seq) {
+  if (!ext || !out_seq || ext_id == 0u || ext_id > 14u) {
+    return false;
+  }
+
+  if (extension_profile == RTP_EXT_ONE_BYTE_PROFILE) {
+    size_t pos = 0;
+    while (pos < ext_len) {
+      uint8_t b = ext[pos];
+      if (b == 0) {
+        pos++;
+        continue;
+      }
+      uint8_t id = b >> 4;
+      size_t data_len = (size_t)(b & 0x0fu) + 1u;
+      if (id == 15u) {
+        return false;
+      }
+      if (pos + 1u + data_len > ext_len) {
+        return false;
+      }
+      if (id == ext_id) {
+        if (data_len < SFU_TWCC_EXT_LEN) {
+          return false;
+        }
+        *out_seq = sfu_read_be16(ext + pos + 1u);
+        return true;
+      }
+      pos += 1u + data_len;
+    }
+    return false;
+  }
+
+  if ((extension_profile & 0xFFF0u) == RTP_EXT_TWO_BYTE_PROFILE) {
+    size_t pos = 0;
+    while (pos < ext_len) {
+      uint8_t id = ext[pos];
+      if (id == 0) {
+        pos++;
+        continue;
+      }
+      if (pos + 2u > ext_len) {
+        return false;
+      }
+      size_t data_len = ext[pos + 1u];
+      if (pos + 2u + data_len > ext_len) {
+        return false;
+      }
+      if (id == ext_id) {
+        if (data_len < SFU_TWCC_EXT_LEN) {
+          return false;
+        }
+        *out_seq = sfu_read_be16(ext + pos + 2u);
+        return true;
+      }
+      pos += 2u + data_len;
+    }
+    return false;
+  }
+
+  return false;
+}
+
 /* Returns the offset of the first byte after the fixed header + CSRC list,
  * or 0 when the packet is malformed. */
 static size_t rtp_csrc_end(const uint8_t *data, size_t len) {

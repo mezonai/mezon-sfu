@@ -75,6 +75,7 @@ typedef struct sfu_peer_session sfu_peer_session_t;
 typedef struct sfu_room sfu_room_t;
 typedef struct gcc_bwe_context gcc_bwe_context_t;
 typedef struct sfu_twcc_history sfu_twcc_history_t;
+typedef struct sfu_twcc_recv_tracker sfu_twcc_recv_tracker_t;
 typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
 typedef struct sfu_session_scheduler_slot sfu_session_scheduler_slot_t;
 typedef struct sfu_rtx_cache sfu_rtx_cache_t;
@@ -189,6 +190,7 @@ typedef struct sfu_peer_session {
   uint16_t worker_id;
   uint8_t twcc_extmap_id;
   int64_t twcc_last_feedback_ref_us;
+  struct sfu_twcc_recv_tracker *twcc_recv;
   _Atomic uint32_t egress_generation;
   _Atomic uint32_t refcount;
   _Atomic uint16_t next_twcc_seq;
