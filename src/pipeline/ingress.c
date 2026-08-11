@@ -356,6 +356,10 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
+  if (sender_session->twcc_recv && sender_session->twcc_extmap_id == 0) {
+    sender_session->twcc_extmap_id = SFU_TWCC_RECV_EXTMAP_ID;
+  }
+
   if (sender_session->twcc_recv && sender_session->twcc_extmap_id != 0 && m.rtp.extension) {
     uint16_t twcc_seq = 0;
     if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, sender_session->twcc_extmap_id, &twcc_seq)) {

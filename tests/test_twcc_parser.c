@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "congestion/twcc_feedback.h"
 #include "congestion/twcc_parser.h"
 #include "util/netbytes.h"
 
@@ -218,6 +219,40 @@ static void test_final_chunk_excess_tolerated(void) {
   assert(p.packets_processed == 3);
 }
 
+static void test_feedback_builder_mixed_deltas(void) {
+  sfu_twcc_recv_tracker_t tracker;
+  uint8_t buf[256];
+  sfu_twcc_recv_tracker_init(&tracker);
+  sfu_twcc_recv_tracker_record(&tracker, 10, 1000100);
+  sfu_twcc_recv_tracker_record(&tracker, 11, 1070130);
+  sfu_twcc_recv_tracker_record(&tracker, 12, 1071240);
+
+  int len = sfu_twcc_feedback_build(&tracker, 1, 0x12345678, 1100000, buf, sizeof(buf));
+  assert(len > 0);
+  assert((buf[0] & 0x20u) != 0);
+  assert(sfu_read_be32(buf + 8) == 0x12345678);
+
+  uint16_t chunk = sfu_read_be16(buf + 20);
+  assert((chunk & 0xc000u) == 0xc000u);
+  assert(((chunk >> 12) & 3u) == TWCC_STATUS_SMALL_DELTA);
+  assert(((chunk >> 10) & 3u) == TWCC_STATUS_LARGE_DELTA);
+  assert(((chunk >> 8) & 3u) == TWCC_STATUS_SMALL_DELTA);
+
+  sfu_twcc_parser_t parser;
+  assert(sfu_twcc_parser_init(&parser, buf, (size_t)len, 0) == 0);
+  gcc_packet_info_t pkt;
+  assert(sfu_twcc_parser_next(&parser, &pkt));
+  assert(pkt.sequence_number == 10);
+  assert(pkt.receive_time_us == 1000000);
+  assert(sfu_twcc_parser_next(&parser, &pkt));
+  assert(pkt.sequence_number == 11);
+  assert(pkt.receive_time_us == 1070250);
+  assert(sfu_twcc_parser_next(&parser, &pkt));
+  assert(pkt.sequence_number == 12);
+  assert(pkt.receive_time_us == 1071250);
+  assert(!sfu_twcc_parser_next(&parser, &pkt));
+}
+
 int main(void) {
   test_small_deltas_microsecond_precision();
   test_large_delta_signed();
@@ -229,6 +264,7 @@ int main(void) {
   test_truncated_delta_aborts();
   test_reference_time_unwrap();
   test_final_chunk_excess_tolerated();
+  test_feedback_builder_mixed_deltas();
   printf("test_twcc_parser: OK\n");
   return 0;
 }

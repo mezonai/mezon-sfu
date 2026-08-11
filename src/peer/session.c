@@ -707,7 +707,7 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
     return;
   }
 
-  uint32_t media_ssrc = 0;
+  uint32_t media_ssrc = publisher->uplink_video.ssrc ? publisher->uplink_video.ssrc : publisher->uplink_audio.ssrc;
 
   sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
   if (!rtcp_pkt) {

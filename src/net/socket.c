@@ -35,6 +35,9 @@ int sfu_udp_socket_create(uint16_t port) {
   if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
     SFU_LOG_WARN("SO_SNDBUF failed: %s", strerror(errno));
   }
+  if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &one, sizeof(one)) < 0) {
+    SFU_LOG_WARN("SO_TIMESTAMPNS failed: %s", strerror(errno));
+  }
 
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));

@@ -72,7 +72,6 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
 }
 
 #define SFU_TWCC_LOCAL_EXTMAP_ID 5
-#define SFU_TWCC_RECV_EXTMAP_ID 6
 
 static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset) {
   char line[160];
@@ -85,8 +84,7 @@ static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset) {
 
 static int append_twcc_recv_attribute(char *out, size_t out_cap, size_t *offset) {
   char line[192];
-  int n =
-      snprintf(line, sizeof(line), "a=extmap:%d recvonly http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", SFU_TWCC_RECV_EXTMAP_ID);
+  int n = snprintf(line, sizeof(line), "a=extmap:%d http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", SFU_TWCC_RECV_EXTMAP_ID);
   if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
     return -1;
   }

@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include "sfu/datadef.h"
 
+#define SFU_TWCC_RECV_EXTMAP_ID 6
+
 static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
   switch (pt) {
     case SFU_PT_VP9:
