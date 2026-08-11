@@ -69,7 +69,14 @@ typedef enum {
 } sfu_video_codec_t;
 
 
-typedef enum { SFU_PACER_CLASS_AUDIO = 0, SFU_PACER_CLASS_RTX, SFU_PACER_CLASS_VIDEO_BASE, SFU_PACER_CLASS_VIDEO_ENH, SFU_PACER_CLASS_COUNT } sfu_pacer_class_t;
+typedef enum {
+  SFU_PACER_CLASS_AUDIO = 0,
+  SFU_PACER_CLASS_RTX,
+  SFU_PACER_CLASS_VIDEO_BASE,
+  SFU_PACER_CLASS_VIDEO_TRANSITION,
+  SFU_PACER_CLASS_VIDEO_ENH,
+  SFU_PACER_CLASS_COUNT
+} sfu_pacer_class_t;
 
 typedef struct sfu_peer_session sfu_peer_session_t;
 typedef struct sfu_room sfu_room_t;

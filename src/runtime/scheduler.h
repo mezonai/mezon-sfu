@@ -16,13 +16,44 @@ typedef struct sfu_peer_session sfu_peer_session_t;
 typedef struct sfu_subscriber_scheduler {
   int64_t last_target_change_us;
   uint32_t active_publisher_id;
+  uint32_t picture_timestamp;
+  uint32_t transition_timestamp;
+  uint32_t temporal_transition_timestamp;
+  uint32_t keyframe_timestamp;
   uint8_t target_sid;
   uint8_t target_tid;
   uint8_t current_sid;
   uint8_t current_tid;
+  uint8_t started_sid_mask;
+  uint8_t completed_sid_mask;
+  uint8_t failed_sid_mask;
+  uint8_t transition_sid;
+  uint8_t temporal_transition_tid;
   bool needs_keyframe;
   bool is_pinned;
+  bool picture_valid;
+  bool transition_active;
+  bool transition_failed;
+  bool temporal_transition_active;
+  bool temporal_transition_failed;
+  bool keyframe_active;
+  bool keyframe_failed;
 } sfu_subscriber_scheduler_t;
+
+typedef struct sfu_scheduler_decision {
+  uint32_t rtp_timestamp;
+  uint8_t sid;
+  uint8_t tid;
+  uint8_t e_bit;
+  bool should_forward;
+  bool start_keyframe;
+  bool keyframe_packet;
+  bool start_transition;
+  bool transition_packet;
+  bool start_temporal_transition;
+  bool temporal_transition_packet;
+  sfu_pacer_class_t pacer_class;
+} sfu_scheduler_decision_t;
 
 #define SFU_SESSION_SCHEDULER_CAP 8
 
@@ -52,7 +83,9 @@ int sfu_scheduler_start(sfu_scheduler_t *s);
 void sfu_scheduler_join(sfu_scheduler_t *s);
 bool sfu_scheduler_retire_ptr(sfu_scheduler_t *s, void *ptr);
 void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t initial_publisher);
-bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe);
+bool sfu_scheduler_prepare_packet(sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe, sfu_scheduler_decision_t *decision);
+void sfu_scheduler_commit_packet(sfu_subscriber_scheduler_t *sched, const sfu_scheduler_decision_t *decision);
+void sfu_scheduler_reject_packet(sfu_subscriber_scheduler_t *sched, const sfu_scheduler_decision_t *decision);
 
 sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc);
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps);

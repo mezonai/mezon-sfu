@@ -29,6 +29,10 @@
 #define GCC_AIMD_PROBE_HEADROOM_DEN 2
 #define GCC_AIMD_DECREASE_FACTOR_NUM 85
 #define GCC_AIMD_DECREASE_FACTOR_DEN 100
+#define GCC_ACK_WINDOW_US 150000LL
+#define GCC_ACK_GAP_RESET_US 300000LL
+#define GCC_ACK_EWMA_OLD_NUM 9
+#define GCC_ACK_EWMA_DEN 10
 
 static double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -163,10 +167,10 @@ static void update_trendline(gcc_trendline_estimator_t *te, double delay_variati
 static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int64_t now_us) {
   switch (usage) {
     case GCC_BWE_OVERUSE: {
-      /* Throughput-anchored multiplicative decrease: 0.85 * ack rate when
-       * known, else 0.85 * current estimate. Applied on EVERY overuse
-       * signal, not just the first. */
-      uint64_t basis = aimd->have_ack_bitrate ? aimd->ack_bitrate_bps : aimd->current_bitrate_bps;
+      uint64_t basis = aimd->current_bitrate_bps;
+      if (aimd->have_ack_bitrate && aimd->ack_bitrate_bps < basis) {
+        basis = aimd->ack_bitrate_bps;
+      }
       uint64_t next = basis * GCC_AIMD_DECREASE_FACTOR_NUM / GCC_AIMD_DECREASE_FACTOR_DEN;
       aimd->current_bitrate_bps = (uint32_t)(next > UINT32_MAX ? UINT32_MAX : next);
       aimd->state = GCC_RATE_CTRL_DECREASE;
@@ -192,11 +196,13 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
         }
         uint64_t cap =
             aimd->have_ack_bitrate ? (uint64_t)aimd->ack_bitrate_bps * GCC_AIMD_PROBE_HEADROOM_NUM / GCC_AIMD_PROBE_HEADROOM_DEN : (uint64_t)UINT32_MAX;
-        uint64_t next = (uint64_t)aimd->current_bitrate_bps + add;
-        if (next > cap) {
-          next = cap;
+        if (cap > aimd->current_bitrate_bps) {
+          uint64_t next = (uint64_t)aimd->current_bitrate_bps + add;
+          if (next > cap) {
+            next = cap;
+          }
+          aimd->current_bitrate_bps = (uint32_t)(next > UINT32_MAX ? UINT32_MAX : next);
         }
-        aimd->current_bitrate_bps = (uint32_t)(next > UINT32_MAX ? UINT32_MAX : next);
         aimd->last_increase_us = now_us;
       }
       break;
@@ -210,15 +216,50 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
   }
 }
 
-/* Acknowledged bitrate from a completed group: bytes over receive span. */
-static void update_ack_bitrate(gcc_aimd_controller_t *aimd, const gcc_arrival_group_t *group) {
-  int64_t span_us = group->last_recv_time_us - group->first_recv_time_us;
-  if (span_us <= 0 || group->total_size == 0) {
+static void update_ack_bitrate(gcc_aimd_controller_t *aimd, const gcc_packet_info_t *pkt) {
+  if (pkt->size_bytes == 0) {
     return;
   }
-  uint64_t bps = (uint64_t)group->total_size * 8ull * 1000000ull / (uint64_t)span_us;
-  aimd->ack_bitrate_bps = (uint32_t)(bps > UINT32_MAX ? UINT32_MAX : bps);
+
+  if (aimd->ack_window_bytes > 0 && pkt->receive_time_us > aimd->ack_window_max_recv_us &&
+      pkt->receive_time_us - aimd->ack_window_max_recv_us > GCC_ACK_GAP_RESET_US) {
+    aimd->ack_window_bytes = 0;
+    aimd->ack_window_min_recv_us = 0;
+    aimd->ack_window_max_recv_us = 0;
+    aimd->ack_bitrate_bps = 0;
+    aimd->have_ack_bitrate = false;
+  }
+
+  if (aimd->ack_window_bytes == 0) {
+    aimd->ack_window_min_recv_us = pkt->receive_time_us;
+    aimd->ack_window_max_recv_us = pkt->receive_time_us;
+  } else {
+    if (pkt->receive_time_us < aimd->ack_window_min_recv_us) {
+      aimd->ack_window_min_recv_us = pkt->receive_time_us;
+    }
+    if (pkt->receive_time_us > aimd->ack_window_max_recv_us) {
+      aimd->ack_window_max_recv_us = pkt->receive_time_us;
+    }
+  }
+  aimd->ack_window_bytes += pkt->size_bytes;
+
+  int64_t span_us = aimd->ack_window_max_recv_us - aimd->ack_window_min_recv_us;
+  if (span_us < GCC_ACK_WINDOW_US) {
+    return;
+  }
+
+  uint64_t sample = aimd->ack_window_bytes * 8ull * 1000000ull / (uint64_t)span_us;
+  if (sample > UINT32_MAX) {
+    sample = UINT32_MAX;
+  }
+  if (aimd->have_ack_bitrate) {
+    sample = ((uint64_t)aimd->ack_bitrate_bps * GCC_ACK_EWMA_OLD_NUM + sample) / GCC_ACK_EWMA_DEN;
+  }
+  aimd->ack_bitrate_bps = (uint32_t)sample;
   aimd->have_ack_bitrate = true;
+  aimd->ack_window_bytes = 0;
+  aimd->ack_window_min_recv_us = 0;
+  aimd->ack_window_max_recv_us = 0;
 }
 
 void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) {
@@ -255,6 +296,8 @@ uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_in
     return ctx->aimd.current_bitrate_bps;
   }
 
+  update_ack_bitrate(&ctx->aimd, pkt);
+
   if (cg->packet_count == 0 || (pkt->send_time_us - cg->first_send_time_us) <= GCC_BURST_GROUPING_THRESHOLD_US) {
     if (cg->packet_count == 0) {
       cg->first_send_time_us = pkt->send_time_us;
@@ -274,7 +317,6 @@ uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_in
     double delay_variation_ms = delta_recv_ms - delta_send_ms;
 
     update_trendline(&ctx->trendline, delay_variation_ms, cg->last_recv_time_us);
-    update_ack_bitrate(&ctx->aimd, cg);
     update_aimd(&ctx->aimd, ctx->trendline.usage_state, cg->last_recv_time_us);
   }
 

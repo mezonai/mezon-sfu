@@ -219,6 +219,32 @@ static void test_final_chunk_excess_tolerated(void) {
   assert(p.packets_processed == 3);
 }
 
+static void test_status_iterator_includes_losses(void) {
+  uint8_t buf[64];
+  uint16_t vec = 0x8000 | (1u << 13) | (1u << 11);
+  uint8_t chunk_bytes[2];
+  sfu_write_be16(chunk_bytes, vec);
+  uint8_t deltas[2] = {4, 8};
+
+  size_t len = build_fb(buf, 20, 3, 100, 0, chunk_bytes, 2, deltas, 2);
+  sfu_twcc_parser_t parser;
+  assert(sfu_twcc_parser_init(&parser, buf, len, 0) == 0);
+
+  sfu_twcc_status_t status;
+  assert(sfu_twcc_parser_next_status(&parser, &status));
+  assert(status.sequence_number == 20);
+  assert(status.status == TWCC_STATUS_SMALL_DELTA);
+  assert(sfu_twcc_parser_next_status(&parser, &status));
+  assert(status.sequence_number == 21);
+  assert(status.status == TWCC_STATUS_NOT_RECEIVED);
+  assert(status.receive_time_us == 0);
+  assert(sfu_twcc_parser_next_status(&parser, &status));
+  assert(status.sequence_number == 22);
+  assert(status.status == TWCC_STATUS_SMALL_DELTA);
+  assert(!sfu_twcc_parser_next_status(&parser, &status));
+  assert(!parser.failed);
+}
+
 static void test_feedback_builder_mixed_deltas(void) {
   sfu_twcc_recv_tracker_t tracker;
   uint8_t buf[256];
@@ -264,6 +290,7 @@ int main(void) {
   test_truncated_delta_aborts();
   test_reference_time_unwrap();
   test_final_chunk_excess_tolerated();
+  test_status_iterator_includes_losses();
   test_feedback_builder_mixed_deltas();
   printf("test_twcc_parser: OK\n");
   return 0;

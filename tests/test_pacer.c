@@ -73,6 +73,19 @@ static void test_audio_never_dropped_under_debt(void) {
   assert(p.sent[SFU_PACER_CLASS_RTX] == 10);
 }
 
+static void test_transition_video_never_dropped_under_debt(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
+  int64_t now = 1000000;
+
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
+  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_TRANSITION, 12000, &now));
+  assert(p.sent[SFU_PACER_CLASS_VIDEO_TRANSITION] == 1);
+}
+
 static void test_refill_restores_budget(void) {
   sfu_pacer_t p;
   sfu_pacer_init(&p);
@@ -164,6 +177,7 @@ int main(void) {
   test_zero_rate_disables();
   test_burst_then_throttle();
   test_audio_never_dropped_under_debt();
+  test_transition_video_never_dropped_under_debt();
   test_refill_restores_budget();
   test_retune_preserves_debt();
   test_admission_timestamp_is_send_time();

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "media/svc/svc_descriptor.h"
 #include "media/svc/svc_parser.h"
 
 #define VP9_I 0x80
@@ -279,6 +280,21 @@ static void test_rejects_bad_input(void) {
   assert(sfu_parse_vp9_descriptor(trunc, sizeof(trunc), &d) == -1);
 }
 
+static void test_generic_descriptor_frame_boundaries(void) {
+  uint8_t start[] = {VP9_B | VP9_E, 0xAA};
+  sfu_svc_descriptor_t desc;
+  assert(sfu_svc_parse_descriptor(SFU_VIDEO_CODEC_VP9, start, sizeof(start), &desc) == 0);
+  assert(desc.b_bit == 1);
+  assert(desc.e_bit == 1);
+  assert(sfu_svc_descriptor_is_keyframe(&desc));
+
+  uint8_t middle[] = {VP9_E, 0xAA};
+  assert(sfu_svc_parse_descriptor(SFU_VIDEO_CODEC_VP9, middle, sizeof(middle), &desc) == 0);
+  assert(desc.b_bit == 0);
+  assert(desc.e_bit == 1);
+  assert(!sfu_svc_descriptor_is_keyframe(&desc));
+}
+
 int main(void) {
   test_minimal_no_extensions();
   test_picture_id_7bit();
@@ -293,6 +309,7 @@ int main(void) {
   test_every_flag_combination();
   test_maximal_descriptor_truncation_sweep();
   test_rejects_bad_input();
+  test_generic_descriptor_frame_boundaries();
   printf("test_vp9_parser: OK\n");
   return 0;
 }
