@@ -14,7 +14,7 @@
 #include "util/metrics.h"
 #include "util/netbytes.h"
 
-static void sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
+static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                                      uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video, bool is_audio,
                                      sfu_pacer_class_t video_class) {
   int enc_len = (int)pkt->len;
@@ -29,7 +29,7 @@ static void sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   sfu_pacer_class_t cls = is_audio ? SFU_PACER_CLASS_AUDIO : (has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
   if (!sfu_pacer_should_send(&sub_session->pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
     sfu_metric_inc("pacer_dropped_enh");
-    return;
+    return false;
   }
 
   uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
@@ -54,23 +54,25 @@ static void sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   if (!sfu_srtp_protect_rtp(&sub_session->srtp, pkt->data, &enc_len, pkt->cap)) {
     SFU_LOG_WARN("worker %u: [EGRESS DROP] SRTP protect FAILED", w->worker_index);
     sfu_metric_inc("egress_protect_fail");
-    return;
+    return false;
   }
   pkt->len = (uint32_t)enc_len;
 
   if (sfu_ring_queue_send_zc(&w->send_ring, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
     SFU_LOG_WARN("worker %u: [EGRESS DROP] send SQ full", w->worker_index);
     sfu_metric_inc("egress_send_full");
+    return false;
   }
+  return true;
 }
 
-void sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
+bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                         uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video, bool is_audio,
                         sfu_pacer_class_t video_class) {
   if (sub_session->worker_id == w->worker_index) {
-    sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, video_ssrc, video_pt, video_rtx_pt, video_rtx_ssrc, has_video, is_audio, video_class);
-    //sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-    return;
+    bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, video_ssrc, video_pt, video_rtx_pt, video_rtx_ssrc, has_video, is_audio, video_class);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    return admitted;
   }
 
   atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
@@ -79,5 +81,7 @@ void sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
     SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
     sfu_session_release(sub_session);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    return false;
   }
+  return true;
 }
