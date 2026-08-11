@@ -883,8 +883,9 @@
             }
 
             function startGccStatsMonitor(pc) {
-                // Per-ssrc last sample for actual media send rate (bytesSent delta).
-                const prevBySsrc = new Map();
+                // Per-ssrc last sample for actual media send/recv rate (bytes delta).
+                const prevOutBySsrc = new Map();
+                const prevInBySsrc = new Map();
                 const interval = setInterval(async () => {
                     if (
                         pc.connectionState === "closed" ||
@@ -928,11 +929,10 @@
                             const mode = report.scalabilityMode || "N/A";
                             const res = `${report.frameWidth || 0}x${report.frameHeight || 0}`;
                             const fps = report.framesPerSecond || 0;
+                            // targetBitrate is often stuck ~150kbps for L3T3 in Chrome
+                            // while the encoder actually sends far more — prefer sent=.
                             const kbps = report.targetBitrate ? Math.round(report.targetBitrate / 1000) : "?";
 
-                            // Debug: negotiated codec + encoder implementation.
-                            // RTX reports have no framesPerSecond, so fps>0
-                            // identifies the real media stream vs the RTX stream.
                             const codec = report.codecId ? codecsById.get(report.codecId) : null;
                             const codecName = codec ? codec.mimeType.split("/")[1] : "unknown";
                             const encoder = report.encoderImplementation || "unknown";
@@ -941,7 +941,7 @@
                             let sentKbps = "?";
                             if (typeof report.bytesSent === "number") {
                                 const key = report.ssrc != null ? String(report.ssrc) : report.id;
-                                const prev = prevBySsrc.get(key);
+                                const prev = prevOutBySsrc.get(key);
                                 if (prev && nowMs > prev.t) {
                                     const dBytes = report.bytesSent - prev.bytes;
                                     const dSec = (nowMs - prev.t) / 1000;
@@ -949,19 +949,18 @@
                                         sentKbps = Math.round((dBytes * 8) / 1000 / dSec);
                                     }
                                 }
-                                prevBySsrc.set(key, { bytes: report.bytesSent, t: nowMs });
+                                prevOutBySsrc.set(key, { bytes: report.bytesSent, t: nowMs });
                             }
 
                             console.log(
                                 `[VP9 SVC] Outbound: codec=${codecName} encoder=${encoder} ` +
-                                    `target=${kbps}kbps sent=${sentKbps}kbps ` +
+                                    `sent=${sentKbps}kbps (target=${kbps} ignore-if-low) ` +
                                     `availableOut=${availableOutKbps != null ? availableOutKbps + "kbps" : "?"} ` +
                                     `res=${res} fps=${fps} ` +
                                     `scalabilityMode=${mode} ` +
                                     `qualityLimitation=${report.qualityLimitationReason || "none"}${isRtx}`
                             );
 
-                            // Update live overlay badge on local tile (skip RTX reports)
                             if (isRtx) return;
                             const localTile = participants.get("local");
                             if (localTile && localTile.badges) {
@@ -972,6 +971,39 @@
                                     <span class="badge">${sentKbps}kbps</span>
                                 `;
                             }
+                        }
+
+                        if (
+                            report.type === "inbound-rtp" &&
+                            report.kind === "video"
+                        ) {
+                            const res = `${report.frameWidth || 0}x${report.frameHeight || 0}`;
+                            const fps = report.framesPerSecond || 0;
+                            const codec = report.codecId ? codecsById.get(report.codecId) : null;
+                            const codecName = codec ? codec.mimeType.split("/")[1] : "unknown";
+                            const decoded = report.framesDecoded || 0;
+                            const lost = report.packetsLost || 0;
+                            const received = report.packetsReceived || 0;
+
+                            let recvKbps = "?";
+                            if (typeof report.bytesReceived === "number") {
+                                const key = report.ssrc != null ? String(report.ssrc) : report.id;
+                                const prev = prevInBySsrc.get(key);
+                                if (prev && nowMs > prev.t) {
+                                    const dBytes = report.bytesReceived - prev.bytes;
+                                    const dSec = (nowMs - prev.t) / 1000;
+                                    if (dBytes >= 0 && dSec > 0) {
+                                        recvKbps = Math.round((dBytes * 8) / 1000 / dSec);
+                                    }
+                                }
+                                prevInBySsrc.set(key, { bytes: report.bytesReceived, t: nowMs });
+                            }
+
+                            console.log(
+                                `[VP9 SVC] Inbound: codec=${codecName} recv=${recvKbps}kbps ` +
+                                    `res=${res} fps=${fps} decoded=${decoded} ` +
+                                    `pkts=${received} lost=${lost} ssrc=${report.ssrc || "?"}`
+                            );
                         }
                     });
                 }, 2000);
