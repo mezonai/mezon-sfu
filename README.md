@@ -179,23 +179,23 @@ If you use the **Zed** editor, you can run and debug your builds directly with C
 
  Core 0 is reserved for the dispatcher; cores 1..N-1 are workers. This is a placeholder policy -- production topology should account for NUMA (Non-Uniform Memory Access) nodes and leave a core free for the kernel's network softirq handling, but the mapping itself is what matters for now: one dispatcher, N workers, no shared mutable state between them beyond the SPSC rings.
 
-*Here is how those 11 steps map directly to your codebase's concrete functions and execution units:*
+*Here is how those 11 steps map directly to the current codebase's functions and execution units:*
 
-| Step | Architecture Layer | Code Base Mapping / Function |
-| --- | --- | --- |
-| **1** | UDP Ingress | **`io_uring`** (or socket `recvfrom`/`recvmmsg` ring) |
-| **2** | ICE Layer | **`handle_stun()`** |
-| **3** | DTLS Layer | **`handle_dtls()`** |
-| **4** | SRTP Decryption | **`sfu_srtp_unprotect()`** *(Note: `sfu_srtp_ctx_init_from_dtls` extracts keying material once during handshake; `unprotect` decrypts every packet)* |
-| **5** | RTP Parser | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_rtp_packet_parse()` |
-| **6** | SVC Parser | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_parse_vp9_descriptor()` |
-| **7** | Congestion Control | **`sfu_room_forward_packet()`** $\rightarrow$ `sfu_twcc_parser_next()` / `gcc_bwe_process_twcc_packet()` |
-| **8** | Layer Scheduler | **`sfu_room_forward_packet()`** $\rightarrow$ Layer gating / `needs_keyframe` checks |
-| **9** | Packet Router | **Fanout job** / ring buffer cross-thread enqueue to subscriber queues |
-| **10** | Outbound SRTP | Header rewriting (SSRC, sequence/timestamp normalization) $\rightarrow$ **`sfu_srtp_protect()`** |
-| **11** | UDP Egress | **`io_uring`** (or `sendmmsg`/`sendto` write ring) |
+| Step | Architecture Layer | Execution Unit | Codebase Mapping |
+| --- | --- | --- | --- |
+| **1** | UDP Ingress | Dispatcher thread | `scheduler_thread_main()` reaps the multishot receive ring; `handle_recv_cqe()` creates the packet; `on_recv()` hashes the remote address and pushes it to a worker inbox (`src/runtime/scheduler.c`, `src/net/io_uring.c`). |
+| **2** | ICE / STUN | Selected worker | `worker_thread_main()` calls `sfu_dispatch_packet()`, which detects STUN and invokes `handle_stun()` → `sfu_stun_extract_client_ufrag()` / `sfu_stun_handle_binding_request()` (`src/runtime/worker.c`, `src/pipeline/dispatch.c`, `src/transport/stun/stun.c`). |
+| **3** | DTLS | Session-owner worker | `sfu_dispatch_packet()` invokes `handle_dtls()` → `sfu_dtls_conn_feed()` / `sfu_dtls_conn_drain_output()`; once established, `sfu_srtp_ctx_init_from_dtls()` initializes SRTP (`src/pipeline/dispatch.c`, `src/transport/dtls/dtls.c`). |
+| **4** | SRTP Decryption | Worker | `sfu_ingress_process()` classifies RTP/RTCP and calls `sfu_srtp_unprotect_rtp()` or `sfu_srtp_unprotect_rtcp()` (`src/pipeline/ingress.c`, `src/transport/srtp/srtp.c`). |
+| **5** | RTP Parsing | Publisher worker | `sfu_ingress_process()` calls `sfu_rtp_packet_parse()` to decode the RTP header, extensions, payload, and padding (`src/pipeline/ingress.c`, `src/rtp/rtp_packet.c`). |
+| **6** | SVC Parsing | Publisher worker | `extract_svc_metadata()` calls `sfu_svc_parse_descriptor()`, which dispatches VP9 packets to `sfu_parse_vp9_descriptor()` (`src/pipeline/ingress.c`, `src/media/svc/svc_descriptor.c`, `src/media/svc/svc_parser.c`). |
+| **7** | Congestion Control / TWCC | Publisher and subscriber workers | **Publisher uplink:** ingress records transport sequence arrivals with `sfu_twcc_recv_tracker_record()`; the worker periodically runs `sfu_session_maybe_send_twcc_feedback()` → `sfu_twcc_feedback_build()`. **Subscriber downlink:** egress records sent TWCC sequences; returned RTCP is parsed by `handle_twcc_member()` / `sfu_twcc_parser_next()` and fed to `gcc_bwe_process_twcc_packet()` (`src/pipeline/ingress.c`, `src/pipeline/egress.c`, `src/peer/session.c`, `src/congestion/`). |
+| **8** | Layer Scheduler / Selector | Subscriber worker sets targets; publisher worker gates frames | `sfu_svc_update_layers()` updates `sfu_subscriber_scheduler_set_bitrate()` from GCC estimates. During routing, `sfu_scheduler_evaluate_frame()` and `sfu_scheduler_classify_frame()` perform per-subscriber SVC gating and keyframe handling (`src/runtime/scheduler.c`, `src/pipeline/router.c`). |
+| **9** | Routing / Fanout | Publisher worker, then subscriber-owner worker when remote | `sfu_router_forward()` walks the receiver snapshot and calls `sfu_egress_process()`. Local subscribers continue directly; remote subscribers cross the worker mesh through `sfu_fanout_mesh_enqueue_forward()` and resume in `sfu_worker_handle_fanout_job()` (`src/pipeline/router.c`, `src/pipeline/egress.c`, `src/runtime/fanout.c`, `src/runtime/fanout_job.c`). |
+| **10** | Packet Rewrite / Outbound SRTP | Subscriber-owner worker | `sfu_egress_process_local()` remaps payload type, applies pacing, caches plaintext for RTX, writes the subscriber TWCC extension, records send history, and calls `sfu_srtp_protect_rtp()` (`src/pipeline/egress.c`, `src/rtp/rtp_ext.c`, `src/transport/srtp/srtp.c`). |
+| **11** | UDP Egress | Per-worker send ring | `sfu_egress_process_local()` queues the protected packet with `sfu_ring_queue_send_zc()`; the worker submits and reaps its `io_uring` send ring through `sfu_ring_submit()` / `sfu_ring_reap()` (`src/pipeline/egress.c`, `src/net/io_uring.c`, `src/runtime/worker.c`). |
 
-Steps **5, 6, 7, and 8** are indeed encapsulated inside **`sfu_room_forward_packet()`** executing on the worker thread, while Step 9 hands off the processed packet to the subscriber egress pipeline where Step 10 (`protect`) and Step 11 (`io_uring` write) take over.
+The dispatcher owns UDP receive completions, packet-to-worker hashing, and worker-inbox delivery. STUN, DTLS, SRTP, RTP/SVC parsing, congestion control, scheduling, routing, protection, and send-ring processing execute on workers. The current media path is `sfu_dispatch_packet()` → `sfu_ingress_process()` → `sfu_router_forward()` → `sfu_egress_process()`. Fanout crosses the worker-to-worker SPSC mesh only when a subscriber is owned by another worker. Publisher-uplink TWCC is generated by the SFU from received publisher RTP, while subscriber-downlink TWCC is parsed and fed into GCC for pacing and layer selection. Ordinary forwarded RTP currently remaps the payload type and transport-wide sequence extension; it does not normalize the RTP SSRC, sequence number, or timestamp.
 
 
 ## diagram
