@@ -6,8 +6,7 @@
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "pipeline/egress.h"
-#include "pipeline/keyframe.h"
-#include "runtime/scheduler.h"
+#include "runtime/fanout.h"
 #include "runtime/worker.h"
 #include "util/log.h"
 
@@ -29,55 +28,49 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       continue;
     }
 
-    sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(sub_session, sender_session->peer_id);
-    if (!sched) {
-      continue;
-    }
-
-    sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
-    sfu_scheduler_decision_t decision;
-    bool has_decision = false;
-    if (m->has_svc && slot->has_video) {
-      if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
-        sfu_worker_request_keyframe_throttled(w, sender_session);
-      }
-
-      has_decision = true;
-      if (!sfu_scheduler_prepare_packet(sched, &m->svc, m->is_keyframe, &decision)) {
-        sfu_scheduler_reject_packet(sched, &decision);
-        continue;
-      }
-      video_class = decision.pacer_class;
-    }
-
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
     if (!enc) {
       SFU_LOG_WARN("worker %u: packet pool exhausted", w->worker_index);
-      if (has_decision) {
-        sfu_scheduler_reject_packet(sched, &decision);
-      }
       continue;
     }
     if (pkt->len > enc->cap) {
       SFU_LOG_WARN("worker %u: plaintext too large", w->worker_index);
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
-      if (has_decision) {
-        sfu_scheduler_reject_packet(sched, &decision);
-      }
       continue;
     }
 
     memcpy(enc->data, pkt->data, pkt->len);
     enc->len = pkt->len;
 
-    bool admitted = sfu_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, slot->video_ssrc, slot->video_pt,
-                                       slot->video_rtx_pt, slot->video_rtx_ssrc, slot->has_video, m->is_audio, video_class);
-    if (has_decision) {
-      if (admitted) {
-        sfu_scheduler_commit_packet(sched, &decision);
-      } else {
-        sfu_scheduler_reject_packet(sched, &decision);
-      }
+    sfu_egress_media_t media = {
+        .publisher = sender_session,
+        .video_ssrc = slot->video_ssrc,
+        .video_rtx_ssrc = slot->video_rtx_ssrc,
+        .video_pt = slot->video_pt,
+        .video_rtx_pt = slot->video_rtx_pt,
+        .has_video = slot->has_video,
+        .is_audio = m->is_audio,
+        .has_svc = m->has_svc,
+        .is_keyframe = m->is_keyframe,
+    };
+    if (m->has_svc) {
+      media.svc = m->svc;
+    }
+
+    if (sub_session->worker_id == w->worker_index) {
+      (void)sfu_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, &media);
+      continue;
+    }
+
+    atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&sender_session->refcount, 1, memory_order_relaxed);
+    if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, enc, sub_session, sender_session, &sub_session->cold->addr,
+                                         sub_session->cold->addr_len, slot->video_ssrc, slot->video_rtx_ssrc, slot->video_pt, slot->video_rtx_pt,
+                                         slot->has_video, m->is_audio, m->has_svc ? &m->svc : NULL, m->has_svc, m->is_keyframe)) {
+      SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
+      sfu_session_release(sender_session);
+      sfu_session_release(sub_session);
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, enc);
     }
   }
 

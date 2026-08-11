@@ -140,6 +140,7 @@ static void sync_mock_snapshot(sfu_peer_session_t *session, sfu_transceiver_t *a
     e->video_rtx_ssrc = video[i].rtx_ssrc;
     e->video_pt = video[i].payload_type;
     e->video_rtx_pt = video[i].rtx_payload_type;
+    e->video_codec = video[i].codec;
     e->audio_active = audio[i].active;
     e->video_active = video[i].active;
     snprintf(e->subscriber_ufrag, sizeof(e->subscriber_ufrag), "%s", audio[i].owner->cold->ufrag);
@@ -230,6 +231,50 @@ static void test_twcc_extmap_extraction(void) {
    * a negotiation. */
   const char *no_prefix = "a=rtcp-fb:96 transport-cc\r\n";
   assert(sfu_test_extract_twcc_extmap_id(no_prefix, strlen(no_prefix)) == 0);
+}
+
+static void test_answer_media_is_scoped_by_mid_and_direction(void) {
+  extern bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc,
+                                          uint8_t *video_pt, uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id,
+                                          uint8_t *twcc_send_extmap_id);
+  const char *answer =
+      "m=audio 7000 UDP/TLS/RTP/SAVPF 111\r\n"
+      "a=mid:0\r\n"
+      "a=sendonly\r\n"
+      "a=ssrc:1273418643 cname:local\r\n"
+      "m=video 7000 UDP/TLS/RTP/SAVPF 98 97\r\n"
+      "a=mid:1\r\n"
+      "a=sendonly\r\n"
+      "a=extmap:6 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
+      "a=rtpmap:98 VP9/90000\r\n"
+      "a=rtpmap:97 rtx/90000\r\n"
+      "a=fmtp:97 apt=98\r\n"
+      "a=ssrc-group:FID 3737458944 3737458945\r\n"
+      "a=ssrc:3737458944 cname:local\r\n"
+      "a=ssrc:3737458945 cname:local\r\n"
+      "m=audio 7000 UDP/TLS/RTP/SAVPF 111\r\n"
+      "a=mid:2\r\n"
+      "a=recvonly\r\n"
+      "a=ssrc:999 cname:remote\r\n"
+      "m=video 7000 UDP/TLS/RTP/SAVPF 120 121\r\n"
+      "a=mid:3\r\n"
+      "a=recvonly\r\n"
+      "a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
+      "a=rtpmap:120 VP8/90000\r\n"
+      "a=rtpmap:121 rtx/90000\r\n"
+      "a=fmtp:121 apt=120\r\n"
+      "a=ssrc:888 cname:remote\r\n";
+
+  uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
+  uint8_t video_pt = 0, rtx_pt = 0, twcc_recv = 0, twcc_send = 0;
+  sfu_video_codec_t codec = SFU_VIDEO_CODEC_NONE;
+  assert(sfu_test_parse_answer_media(answer, strlen(answer), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec, &twcc_recv, &twcc_send));
+  assert(audio_ssrc == 1273418643u);
+  assert(video_ssrc == 3737458944u);
+  assert(rtx_ssrc == 3737458945u);
+  assert(video_pt == 98 && rtx_pt == 97);
+  assert(codec == SFU_VIDEO_CODEC_VP9);
+  assert(twcc_recv == 6 && twcc_send == 5);
 }
 
 /* ---------------------------------------------------------------------------
@@ -504,6 +549,7 @@ int main(void) {
   test_initial_offer_role_directions();
   test_renegotiation_offer_role_directions();
   test_twcc_extmap_extraction();
+  test_answer_media_is_scoped_by_mid_and_direction();
   test_concurrent_build_vs_teardown();
 
   printf("test_sdp: OK\n");

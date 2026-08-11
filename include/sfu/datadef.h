@@ -137,6 +137,7 @@ typedef struct sfu_receiver_entry {
   uint32_t mid_video;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
+  sfu_video_codec_t video_codec;
   bool has_audio;
   bool has_video;
   bool audio_active;
@@ -195,7 +196,8 @@ typedef struct sfu_peer_session {
   uint32_t next_remote_mid;
   int fd;
   uint16_t worker_id;
-  uint8_t twcc_extmap_id;
+  uint8_t twcc_recv_extmap_id;
+  uint8_t twcc_send_extmap_id;
   int64_t twcc_last_feedback_ref_us;
   struct sfu_twcc_recv_tracker *twcc_recv;
   _Atomic uint32_t egress_generation;

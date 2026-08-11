@@ -78,6 +78,18 @@ bool sfu_rtp_packet_set_pt(uint8_t *data, size_t len, uint8_t payload_type) {
   return true;
 }
 
+bool sfu_rtp_packet_set_marker(uint8_t *data, size_t len, bool marker) {
+  if (!data || len < RTP_FIXED_HEADER_LEN) {
+    return false;
+  }
+  if (marker) {
+    data[1] |= 0x80u;
+  } else {
+    data[1] &= 0x7fu;
+  }
+  return true;
+}
+
 bool sfu_rtp_packet_set_seq(uint8_t *data, size_t len, uint16_t sequence_number) {
   if (!data || len < RTP_FIXED_HEADER_LEN) {
     return false;

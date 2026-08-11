@@ -125,20 +125,24 @@ static void test_scalability_structure_minimal(void) {
 static void test_scalability_structure_resolutions(void) {
   sfu_vp9_descriptor_t d;
 
-  /* Y=1, N_S=0: one WIDTH/HEIGHT pair (2 bytes). */
+  /* Y=1, N_S=0: one 16-bit WIDTH and one 16-bit HEIGHT. */
   {
     uint8_t ss = (0u << 5) | (1u << 4);
-    uint8_t buf[] = {VP9_B | VP9_V, ss, 0x01, 0x40, 0xAA};
+    uint8_t buf[] = {VP9_B | VP9_V, ss, 0x01, 0x40, 0x00, 0xB4, 0xAA};
     assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
-    assert(d.header_length == 4);
+    assert(d.header_length == 6);
   }
 
-  /* Y=1, N_S=2: three WIDTH/HEIGHT pairs (6 bytes). */
+  /* Y=1, N_S=2: three WIDTH/HEIGHT pairs (12 bytes). */
   {
     uint8_t ss = (2u << 5) | (1u << 4);
-    uint8_t buf[] = {VP9_B | VP9_V, ss, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0xAA};
+    uint8_t buf[] = {VP9_B | VP9_V, ss,
+                     0x01, 0x40, 0x00, 0xB4,
+                     0x02, 0x80, 0x01, 0x68,
+                     0x05, 0x00, 0x02, 0xD0,
+                     0xAA};
     assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
-    assert(d.header_length == 8);
+    assert(d.header_length == 14);
   }
 }
 
@@ -147,22 +151,25 @@ static void test_scalability_structure_group_of_pictures(void) {
    * PG entry 1: T=1 U=1 R=0 -> no reference diffs.
    * PG entry 2: T=0 U=0 R=2 -> 2 reference diff bytes. */
   uint8_t ss = (0u << 5) | (1u << 3);
-  uint8_t pg1 = (1u << 3) | (1u << 2) | (0u << 1);
-  uint8_t pg2 = (0u << 3) | (0u << 2) | (2u << 1);
+  uint8_t pg1 = (1u << 5) | (1u << 4) | (0u << 2);
+  uint8_t pg2 = (0u << 5) | (0u << 4) | (2u << 2);
   uint8_t buf[] = {VP9_B | VP9_V, ss, 2, pg1, pg2, 0x11, 0x22, 0xAA};
   sfu_vp9_descriptor_t d;
   assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
-  assert(d.header_length == 8);
+  assert(d.header_length == 7);
 }
 
 static void test_scalability_structure_full(void) {
   /* V=1, Y=1, G=1, N_S=1, N_G=1 with R=1. */
   uint8_t ss = (1u << 5) | (1u << 4) | (1u << 3);
-  uint8_t pg = (0u << 3) | (1u << 2) | (1u << 1); /* T=0 U=1 R=1 */
-  uint8_t buf[] = {VP9_B | VP9_V, ss, 0x0A, 0x0B, 0x0C, 0x0D, 1, pg, 0x33, 0xAA, 0xBB};
+  uint8_t pg = (0u << 5) | (1u << 4) | (1u << 2); /* T=0 U=1 R=1 */
+  uint8_t buf[] = {VP9_B | VP9_V, ss,
+                   0x01, 0x40, 0x00, 0xB4,
+                   0x02, 0x80, 0x01, 0x68,
+                   1, pg, 0x33, 0xAA, 0xBB};
   sfu_vp9_descriptor_t d;
   assert(sfu_parse_vp9_descriptor(buf, sizeof(buf), &d) == 0);
-  assert(d.header_length == 11);
+  assert(d.header_length == 13);
 }
 
 static void test_every_flag_combination(void) {
@@ -211,8 +218,10 @@ static void test_every_flag_combination(void) {
     if (v_bit) {
       buf[n++] = (1u << 4); /* N_S=0 Y=1 G=0 */
       buf[n++] = 0x01;
-      buf[n++] = 0x02; /* one resolution pair */
-      expected += 3;
+      buf[n++] = 0x40; /* WIDTH=320 */
+      buf[n++] = 0x00;
+      buf[n++] = 0xB4; /* HEIGHT=180 */
+      expected += 5;
     }
     buf[n++] = 0xAA; /* VP9 bitstream byte */
 
@@ -240,14 +249,20 @@ static void test_maximal_descriptor_truncation_sweep(void) {
       0x03,                              /* P_DIFF chain of 3 */
       (2u << 5) | (1u << 4) | (1u << 3), /* N_S=2 Y=1 G=1 */
       0x01,
+      0x40,
+      0x00,
+      0xB4,
       0x02,
-      0x03,
-      0x04,
+      0x80,
+      0x01,
+      0x68,
       0x05,
-      0x06,                             /* 3 resolution pairs */
+      0x00,
+      0x02,
+      0xD0,                             /* 3 WIDTH/HEIGHT pairs */
       2,                                /* N_G=2 */
-      (uint8_t)((1u << 3) | (0u << 1)), /* T=1 U=0 R=0 */
-      (uint8_t)((0u << 3) | (2u << 1)), /* T=0 U=0 R=2 */
+      (uint8_t)((1u << 5) | (0u << 2)), /* T=1 U=0 R=0 */
+      (uint8_t)((0u << 5) | (2u << 2)), /* T=0 U=0 R=2 */
       0x21,
       0x22, /* 2 reference diffs */
       0xAA,

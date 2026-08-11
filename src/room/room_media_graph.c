@@ -6,23 +6,24 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
-static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *dst) {
-  atomic_fetch_add_explicit(&dst->refcount, 1, memory_order_relaxed);
+static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *target, const sfu_peer_session_t *media_source) {
+  atomic_fetch_add_explicit(&target->refcount, 1, memory_order_relaxed);
 
-  e->subscriber = dst;
-  if (dst->cold) {
-    snprintf(e->subscriber_ufrag, sizeof(e->subscriber_ufrag), "%s", dst->cold->ufrag);
+  e->subscriber = target;
+  if (media_source->cold) {
+    snprintf(e->subscriber_ufrag, sizeof(e->subscriber_ufrag), "%s", media_source->cold->ufrag);
   } else {
     e->subscriber_ufrag[0] = '\0';
   }
 
-  e->audio_ssrc = dst->uplink_audio.ssrc;
-  e->video_ssrc = dst->uplink_video.ssrc;
-  e->video_rtx_ssrc = dst->uplink_video.rtx_ssrc;
-  e->video_pt = dst->uplink_video.payload_type;
-  e->video_rtx_pt = dst->uplink_video.rtx_payload_type;
-  e->audio_active = dst->uplink_audio.active;
-  e->video_active = dst->uplink_video.active;
+  e->audio_ssrc = media_source->uplink_audio.ssrc;
+  e->video_ssrc = media_source->uplink_video.ssrc;
+  e->video_rtx_ssrc = media_source->uplink_video.rtx_ssrc;
+  e->video_pt = media_source->uplink_video.payload_type;
+  e->video_rtx_pt = media_source->uplink_video.rtx_payload_type;
+  e->video_codec = media_source->uplink_video.codec;
+  e->audio_active = media_source->uplink_audio.active;
+  e->video_active = media_source->uplink_video.active;
 }
 
 static uint32_t snapshot_find(const sfu_receiver_snapshot_t *old, const sfu_peer_session_t *dst) {
@@ -47,8 +48,8 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   return snap;
 }
 
-static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner, sfu_peer_session_t *dst) {
-  sfu_receiver_snapshot_t *old = sfu_session_subscriptions_acquire(owner);
+static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner, sfu_peer_session_t *dst, bool fanout) {
+  sfu_receiver_snapshot_t *old = fanout ? sfu_session_fanout_targets_acquire(owner) : sfu_session_subscriptions_acquire(owner);
   uint32_t pos = snapshot_find(old, dst);
   if (pos == UINT32_MAX) {
     sfu_subscriptions_snapshot_release(old);
@@ -68,7 +69,7 @@ static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner
     atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
   }
 
-  snapshot_fill_entry(&snap->entries[pos], dst);
+  snapshot_fill_entry(&snap->entries[pos], dst, fanout ? owner : dst);
   sfu_session_release(dst);
 
   snap->count = old_count;
@@ -135,7 +136,7 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
     e->mid_audio = owner->next_remote_mid++;
     e->mid_video = owner->next_remote_mid++;
   }
-  snapshot_fill_entry(e, dst);
+  snapshot_fill_entry(e, dst, fanout ? owner : dst);
   e->has_audio = true;
   e->has_video = true;
 
@@ -264,7 +265,7 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
         snapshot_replace(other, snap);
       }
     } else {
-      sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, peer);
+      sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, peer, false);
       if (!snap) {
         snap = snapshot_build_with(other, peer, false);
       }
@@ -369,9 +370,13 @@ void room_refresh_peer_streams(sfu_room_t *room, sfu_peer_session_t *updated_pee
     if (!other || other == updated_peer || !sfu_session_accepts_work(other)) {
       continue;
     }
-    sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, updated_peer);
+    sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, updated_peer, false);
     if (snap) {
       snapshot_replace(other, snap);
+    }
+    snap = snapshot_refresh_entry(updated_peer, other, true);
+    if (snap) {
+      fanout_snapshot_replace(updated_peer, snap);
     }
   }
   pthread_mutex_unlock(&room->lock);
