@@ -27,6 +27,7 @@ typedef struct sfu_worker {
   sfu_scheduler_t *scheduler;
   pthread_t thread;
   _Atomic uint64_t generation;
+  int64_t last_twcc_flush_us;
   uint32_t worker_index;
   int core_id;
   int fd;

@@ -70,6 +70,8 @@ typedef struct {
 static void on_recv(void *user_data, sfu_packet_t *pkt) {
   sfu_scheduler_t *s = ((recv_ctx_t *)user_data)->s;
 
+  pkt->recv_ts_ns = sfu_now_ns();
+
   if (SFU_UNLIKELY(s->worker_count == 0)) {
     SFU_LOG_ERROR("scheduler: worker_count is 0; dropping packet (misconfiguration)");
     sfu_ring_release_packet(&s->recv_ring, s->pp, pkt);
