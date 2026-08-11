@@ -8,9 +8,9 @@
 #define SFU_TWCC_RECV_CAPACITY 1024
 #define SFU_TWCC_RECV_MASK (SFU_TWCC_RECV_CAPACITY - 1)
 
-#define SFU_TWCC_FEEDBACK_INTERVAL_US 30000LL
+#define SFU_TWCC_FEEDBACK_INTERVAL_US 20000LL
 
-#define SFU_TWCC_FEEDBACK_MAX_PACKETS 64
+#define SFU_TWCC_FEEDBACK_MAX_PACKETS 256
 
 typedef struct sfu_twcc_recv_entry {
   uint16_t seq;
@@ -25,6 +25,8 @@ typedef struct sfu_twcc_recv_tracker {
   uint16_t latest_seq;
   int64_t last_feedback_us;
   uint8_t fb_pkt_count;
+  bool have_kernel_clock;
+  int64_t last_arrival_us;
 } sfu_twcc_recv_tracker_t;
 
 void sfu_twcc_recv_tracker_init(sfu_twcc_recv_tracker_t *t);
