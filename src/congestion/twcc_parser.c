@@ -68,6 +68,7 @@ int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t 
   parser->current_chunk = 0;
   parser->is_run_length = false;
   parser->run_length_symbol = 0;
+  parser->failed = false;
   return 0;
 }
 
@@ -109,51 +110,64 @@ static uint8_t get_next_status(sfu_twcc_parser_t *parser) {
   return (parser->current_chunk >> shift) & 0x01;
 }
 
+bool sfu_twcc_parser_next_status(sfu_twcc_parser_t *parser, sfu_twcc_status_t *out_status) {
+  if (!parser || !out_status || parser->failed || parser->packets_processed >= parser->packet_status_count) {
+    return false;
+  }
+
+  uint8_t status = get_next_status(parser);
+  uint16_t seq = parser->current_seq++;
+  parser->packets_processed++;
+
+  out_status->sequence_number = seq;
+  out_status->status = status;
+  out_status->receive_time_us = 0;
+
+  if (status == TWCC_STATUS_NOT_RECEIVED) {
+    parser->packets_lost++;
+    return true;
+  }
+  if (status == TWCC_STATUS_RESERVED) {
+    parser->failed = true;
+    return false;
+  }
+
+  int64_t delta_us;
+  if (status == TWCC_STATUS_SMALL_DELTA) {
+    if (parser->delta_offset + 1 > parser->len) {
+      parser->failed = true;
+      return false;
+    }
+    delta_us = (int64_t)parser->data[parser->delta_offset++] * 250LL;
+  } else {
+    if (parser->delta_offset + 2 > parser->len) {
+      parser->failed = true;
+      return false;
+    }
+    delta_us = (int64_t)(int16_t)sfu_read_be16(parser->data + parser->delta_offset) * 250LL;
+    parser->delta_offset += 2;
+  }
+
+  parser->current_time_us += delta_us;
+  out_status->receive_time_us = parser->current_time_us;
+  return true;
+}
+
 bool sfu_twcc_parser_next(sfu_twcc_parser_t *parser, gcc_packet_info_t *out_pkt) {
   if (!parser || !out_pkt) {
     return false;
   }
 
-  while (parser->packets_processed < parser->packet_status_count) {
-    uint8_t status = get_next_status(parser);
-    uint16_t seq = parser->current_seq++;
-    parser->packets_processed++;
-
-    if (status == TWCC_STATUS_NOT_RECEIVED) {
-      parser->packets_lost++;
-      continue; /* lost packet: no receive delta follows */
+  sfu_twcc_status_t status;
+  while (sfu_twcc_parser_next_status(parser, &status)) {
+    if (status.status == TWCC_STATUS_NOT_RECEIVED) {
+      continue;
     }
-    if (status == TWCC_STATUS_RESERVED) {
-      /* Reserved symbol in a vector consumes no delta and desynchronizes the
-       * stream (CC-06); abort the whole feedback batch. */
-      return false;
-    }
-
-    int64_t delta_us;
-    if (status == TWCC_STATUS_SMALL_DELTA) {
-      if (parser->delta_offset + 1 > parser->len) {
-        return false; /* truncated delta section */
-      }
-      delta_us = (int64_t)parser->data[parser->delta_offset++] * 250LL;
-    } else { /* TWCC_STATUS_LARGE_DELTA */
-      if (parser->delta_offset + 2 > parser->len) {
-        return false;
-      }
-      delta_us = (int64_t)(int16_t)sfu_read_be16(parser->data + parser->delta_offset) * 250LL;
-      parser->delta_offset += 2;
-    }
-
-    parser->current_time_us += delta_us;
-
-    out_pkt->sequence_number = seq;
-    out_pkt->receive_time_us = parser->current_time_us;
-
-    /* TWCC feedback carries no send times or sizes; the caller enriches from
-     * local send history keyed by sequence_number. */
+    out_pkt->sequence_number = status.sequence_number;
+    out_pkt->receive_time_us = status.receive_time_us;
     out_pkt->send_time_us = 0;
     out_pkt->size_bytes = 0;
     return true;
   }
-
-  return false; /* all statuses consumed */
+  return false;
 }

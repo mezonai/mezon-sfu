@@ -76,7 +76,13 @@ static void test_switch_source_transaction(void) {
   gcc_bwe_context_t gcc;
   gcc_bwe_init(&gcc, 300000, 50000, 5000000);
   gcc.aimd.current_bitrate_bps = 2500000;
+  gcc.aimd.ack_bitrate_bps = 1800000;
+  gcc.aimd.have_ack_bitrate = true;
+  gcc.aimd.ack_window_bytes = 4096;
+  gcc.trendline.history_count = 3;
+  gcc.current_group.packet_count = 2;
   session.gcc_ctx = &gcc;
+  gcc_bwe_context_t gcc_before = gcc;
 
   atomic_store(&session.egress_generation, 7);
 
@@ -90,10 +96,119 @@ static void test_switch_source_transaction(void) {
   assert(sw->needs_keyframe == true);   /* gate armed */
   assert(sw->current_sid == 0 && sw->current_tid == 0);
   assert(atomic_load(&session.egress_generation) == 8); /* stale RTX invalidated */
-  /* GCC restarts from the current estimate (2.5M, clamped within bounds) but
-   * with trend/history state cleared — not the old source's trendline. */
-  assert(gcc.aimd.current_bitrate_bps == 2500000);
-  assert(gcc.trendline.history_count == 0);
+  assert(memcmp(&gcc, &gcc_before, sizeof(gcc)) == 0);
+}
+
+static sfu_svc_descriptor_t make_desc(uint32_t timestamp, uint8_t sid, uint8_t tid, uint8_t p, uint8_t u, uint8_t d, uint8_t b, uint8_t e) {
+  sfu_svc_descriptor_t desc = {0};
+  desc.rtp_timestamp = timestamp;
+  desc.sid = sid;
+  desc.tid = tid;
+  desc.p_bit = p;
+  desc.u_bit = u;
+  desc.d_bit = d;
+  desc.b_bit = b;
+  desc.e_bit = e;
+  return desc;
+}
+
+static void test_pacer_classification(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sfu_svc_descriptor_t desc = make_desc(1, 0, 0, 1, 0, 0, 1, 1);
+  assert(sfu_scheduler_classify_frame(&sched, &desc) == SFU_PACER_CLASS_VIDEO_BASE);
+  desc.tid = 1;
+  assert(sfu_scheduler_classify_frame(&sched, &desc) == SFU_PACER_CLASS_VIDEO_ENH);
+  desc.tid = 0;
+  desc.sid = 1;
+  assert(sfu_scheduler_classify_frame(&sched, &desc) == SFU_PACER_CLASS_VIDEO_ENH);
+}
+
+static void test_spatial_dependency_requires_completed_lower_layer(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.target_sid = 1;
+  sched.target_tid = 0;
+
+  sfu_scheduler_decision_t decision;
+  sfu_svc_descriptor_t upper = make_desc(100, 1, 0, 0, 0, 1, 1, 1);
+  assert(!sfu_scheduler_prepare_packet(&sched, &upper, false, &decision));
+  assert(sched.current_sid == 0);
+
+  sfu_svc_descriptor_t lower = make_desc(100, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_scheduler_prepare_packet(&sched, &lower, true, &decision));
+  assert(decision.pacer_class == SFU_PACER_CLASS_VIDEO_TRANSITION);
+  sfu_scheduler_commit_packet(&sched, &decision);
+
+  assert(sfu_scheduler_prepare_packet(&sched, &upper, false, &decision));
+  assert(sched.current_sid == 0);
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.current_sid == 1);
+}
+
+static void test_spatial_transition_reject_prevents_promotion(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.target_sid = 1;
+  sched.target_tid = 0;
+
+  sfu_scheduler_decision_t decision;
+  sfu_svc_descriptor_t lower = make_desc(200, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_scheduler_prepare_packet(&sched, &lower, true, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+
+  sfu_svc_descriptor_t start = make_desc(200, 1, 0, 0, 0, 1, 1, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &start, false, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.transition_active);
+
+  sfu_svc_descriptor_t middle = make_desc(200, 1, 0, 0, 0, 1, 0, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &middle, false, &decision));
+  sfu_scheduler_reject_packet(&sched, &decision);
+
+  sfu_svc_descriptor_t end = make_desc(200, 1, 0, 0, 0, 1, 0, 1);
+  assert(!sfu_scheduler_prepare_packet(&sched, &end, false, &decision));
+  assert(sched.current_sid == 0);
+}
+
+static void test_independent_spatial_transition_and_picture_reset(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.target_sid = 1;
+  sched.target_tid = 0;
+
+  sfu_scheduler_decision_t decision;
+  sfu_svc_descriptor_t independent = make_desc(300, 1, 0, 0, 0, 0, 1, 1);
+  assert(sfu_scheduler_prepare_packet(&sched, &independent, false, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.current_sid == 1);
+
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.target_sid = 1;
+  sfu_svc_descriptor_t lower = make_desc(400, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_scheduler_prepare_packet(&sched, &lower, true, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+  sfu_svc_descriptor_t upper_next_picture = make_desc(401, 1, 0, 0, 0, 1, 1, 1);
+  assert(!sfu_scheduler_prepare_packet(&sched, &upper_next_picture, false, &decision));
+}
+
+static void test_keyframe_gate_does_not_jump_to_target(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sched.target_sid = 2;
+  sched.target_tid = 2;
+
+  sfu_scheduler_decision_t decision;
+  sfu_svc_descriptor_t key = make_desc(500, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_scheduler_prepare_packet(&sched, &key, true, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(sched.current_sid == 0);
+  assert(sched.current_tid == 0);
 }
 
 int main(void) {
@@ -101,6 +216,11 @@ int main(void) {
   test_down_holds_at_rung_rate();
   test_dwell_blocks_fast_flap();
   test_switch_source_transaction();
+  test_pacer_classification();
+  test_spatial_dependency_requires_completed_lower_layer();
+  test_spatial_transition_reject_prevents_promotion();
+  test_independent_spatial_transition_and_picture_reset();
+  test_keyframe_gate_does_not_jump_to_target();
   printf("test_layer_selector: OK\n");
   return 0;
 }

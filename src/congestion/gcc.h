@@ -59,6 +59,9 @@ typedef struct gcc_aimd_controller {
 
   int64_t last_increase_us;
   uint32_t ack_bitrate_bps;
+  uint64_t ack_window_bytes;
+  int64_t ack_window_min_recv_us;
+  int64_t ack_window_max_recv_us;
   bool have_ack_bitrate;
 } gcc_aimd_controller_t;
 

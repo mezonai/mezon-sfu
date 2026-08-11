@@ -592,8 +592,8 @@ static void test_egress_writes_twcc_extension(void) {
 
   /* Neither session claims the packet's PT as its uplink video PT, so the
    * packet is not VP9-parsed (VP9 detection keys on the SENDER's uplink PT)
-   * and sfu_scheduler_evaluate_frame — which would drop our synthetic
-   * non-keyframe — never runs. The plain forward path still applies. */
+   * and the SVC scheduler path — which would drop our synthetic non-keyframe
+   * — never runs. The plain forward path still applies. */
   f.publisher->uplink_video.payload_type = 0;
   f.base.session->uplink_video.payload_type = 0;
   f.base.session->uplink_video.rtx_payload_type = 0;
