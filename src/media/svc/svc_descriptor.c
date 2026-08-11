@@ -15,6 +15,7 @@ static int parse_vp9(const uint8_t *payload, size_t payload_len, sfu_svc_descrip
   out->d_bit = vp9.d_bit;
   out->b_bit = vp9.b_bit;
   out->e_bit = vp9.e_bit;
+  out->l_bit = vp9.l_bit;
   return 0;
 }
 

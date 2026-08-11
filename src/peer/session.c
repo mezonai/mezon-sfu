@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include "congestion/gcc.h"
+#include "congestion/pacer.h"
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "room/room_media_graph.h"
@@ -367,9 +368,13 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     s->peer_id = id;
   }
 
+  const uint32_t k_bwe_start_bps = 1500000;
+  const uint32_t k_bwe_min_bps = 100000;
+  const uint32_t k_bwe_max_bps = 5000000;
+
   s->gcc_ctx = SFU_CALLOC(1, sizeof(gcc_bwe_context_t));
   if (s->gcc_ctx) {
-    gcc_bwe_init(s->gcc_ctx, 300000, 50000, 5000000);
+    gcc_bwe_init(s->gcc_ctx, k_bwe_start_bps, k_bwe_min_bps, k_bwe_max_bps);
   }
 
   s->twcc_history = SFU_CALLOC(1, sizeof(sfu_twcc_history_t));
@@ -387,6 +392,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     SFU_LOG_ERROR("failed to allocate subscriber scheduler table for new peer session");
   }
   sfu_pacer_init(&s->pacer);
+  sfu_pacer_set_rate(&s->pacer, k_bwe_start_bps, (int64_t)sfu_now_us());
 
   s->rtx_cache = SFU_CALLOC(1, sizeof(sfu_rtx_cache_t));
   if (s->rtx_cache) {
@@ -716,15 +722,27 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
   }
 
   uint32_t media_ssrc = publisher->uplink_video.ssrc ? publisher->uplink_video.ssrc : publisher->uplink_audio.ssrc;
-
-  sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
-  if (!rtcp_pkt) {
-    return;
-  }
-
   uint32_t sfu_sender_ssrc = 1;
-  int rtcp_len = sfu_twcc_feedback_build(t, sfu_sender_ssrc, media_ssrc, now_us, rtcp_pkt->data, rtcp_pkt->cap);
-  if (rtcp_len > 0) {
+
+  for (int burst = 0; burst < 8; burst++) {
+    if (!sfu_twcc_recv_tracker_pending(t)) {
+      break;
+    }
+
+    sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
+    if (!rtcp_pkt) {
+      break;
+    }
+
+    int rtcp_len = sfu_twcc_feedback_build(t, sfu_sender_ssrc, media_ssrc, now_us, rtcp_pkt->data, rtcp_pkt->cap);
+    if (rtcp_len <= 0) {
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+      if (rtcp_len < 0) {
+        break;
+      }
+      continue;
+    }
+
     if (sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap)) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
       int sent = sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
@@ -734,7 +752,7 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
     } else {
       SFU_LOG_WARN("Failed to SRTP protect TWCC feedback for peer %u", publisher->peer_id);
     }
-  }
 
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+  }
 }

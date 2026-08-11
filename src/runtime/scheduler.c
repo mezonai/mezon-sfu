@@ -141,6 +141,8 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
   memset(sched, 0, sizeof(*sched));
   sched->active_publisher_id = initial_publisher;
   sched->needs_keyframe = true;
+  sched->target_sid = 2;
+  sched->target_tid = 2;
 }
 
 sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id) {
@@ -298,15 +300,19 @@ bool sfu_scheduler_prepare_packet(sfu_subscriber_scheduler_t *sched, const sfu_s
     decision->pacer_class = SFU_PACER_CLASS_VIDEO_TRANSITION;
   }
 
-  uint8_t output_sid = sched->current_sid;
-  if (sched->transition_active && !sched->transition_failed && sched->transition_timestamp == desc->rtp_timestamp) {
-    output_sid = sched->transition_sid;
-  } else if (decision->start_transition) {
-    output_sid = desc->sid;
-  } else if (sched->target_sid > sched->current_sid && desc->p_bit == 0) {
-    output_sid = (uint8_t)(sched->current_sid + 1);
+  if (desc->l_bit == 0) {
+    decision->set_marker = desc->e_bit != 0;
+  } else {
+    uint8_t output_sid = sched->current_sid;
+    if (sched->transition_active && !sched->transition_failed && sched->transition_timestamp == desc->rtp_timestamp) {
+      output_sid = sched->transition_sid;
+    } else if (decision->start_transition) {
+      output_sid = desc->sid;
+    } else if (sched->target_sid > sched->current_sid && desc->p_bit == 0) {
+      output_sid = sched->target_sid;
+    }
+    decision->set_marker = desc->e_bit != 0 && desc->sid == output_sid;
   }
-  decision->set_marker = desc->e_bit != 0 && desc->sid == output_sid;
   decision->should_forward = true;
   return true;
 }
@@ -407,9 +413,9 @@ typedef struct sfu_layer_rung {
 } sfu_layer_rung_t;
 
 static const sfu_layer_rung_t k_layer_ladder[] = {
-    {150000, 0, 1},  /* 180p, half framerate */
-    {500000, 1, 2},  /* 360p, full framerate */
-    {1200000, 2, 2}, /* 720p, full framerate */
+    {200000, 0, 1},  /* base spatial, half temporal */
+    {600000, 1, 2},  /* mid spatial, full temporal */
+    {1200000, 2, 2}, /* top spatial, full temporal */
 };
 #define SFU_LAYER_LADDER_LEN (sizeof(k_layer_ladder) / sizeof(k_layer_ladder[0]))
 #define SFU_LAYER_UP_HEADROOM_NUM 6 /* up threshold = rate * 1.2 */

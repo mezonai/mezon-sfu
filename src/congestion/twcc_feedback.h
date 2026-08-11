@@ -25,6 +25,8 @@ typedef struct sfu_twcc_recv_tracker {
   uint16_t latest_seq;
   int64_t last_feedback_us;
   uint8_t fb_pkt_count;
+  bool have_kernel_clock;
+  int64_t last_arrival_us;
 } sfu_twcc_recv_tracker_t;
 
 void sfu_twcc_recv_tracker_init(sfu_twcc_recv_tracker_t *t);
