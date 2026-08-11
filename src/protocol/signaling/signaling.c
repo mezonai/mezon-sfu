@@ -675,9 +675,6 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                     room_refresh_peer_streams((sfu_room_t *)session->room, session);
                     sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
                   }
-                  if (session->schedulers) {
-                    sfu_layer_selector_switch_source(session, session->peer_id);
-                  }
                   sfu_session_release(session);
                 } else {
                   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;

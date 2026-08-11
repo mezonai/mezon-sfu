@@ -104,33 +104,55 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     return;
   }
 
-  gcc_packet_info_t batch[SFU_INGRESS_TWCC_BATCH_CAP];
-  size_t batch_count = 0;
-  gcc_packet_info_t item;
-  while (batch_count < SFU_INGRESS_TWCC_BATCH_CAP && sfu_twcc_parser_next(&parser, &item)) {
-    batch[batch_count++] = item;
+  if (parser.packet_status_count > SFU_INGRESS_TWCC_BATCH_CAP) {
+    sfu_metric_inc("rtcp_twcc_bad");
+    return;
   }
-  if (parser.packets_processed < parser.packet_status_count) {
+
+  sfu_twcc_status_t batch[SFU_INGRESS_TWCC_BATCH_CAP];
+  size_t batch_count = 0;
+  while (batch_count < parser.packet_status_count && sfu_twcc_parser_next_status(&parser, &batch[batch_count])) {
+    batch_count++;
+  }
+  if (parser.failed || parser.packets_processed != parser.packet_status_count || batch_count != parser.packet_status_count) {
     sfu_metric_inc("rtcp_twcc_bad");
     return;
   }
 
   uint32_t estimated_bps = sender_session->gcc_ctx ? sender_session->gcc_ctx->aimd.current_bitrate_bps : 0;
+  uint32_t fresh_lost = 0;
+  uint32_t fresh_total = 0;
 
   for (size_t i = 0; i < batch_count; i++) {
-    if (sender_session->twcc_history && sfu_twcc_history_lookup(sender_session->twcc_history, batch[i].sequence_number, &batch[i])) {
+    if (!sender_session->twcc_history) {
+      break;
+    }
+    if (batch[i].status == TWCC_STATUS_NOT_RECEIVED) {
+      if (sfu_twcc_history_report_loss_once(sender_session->twcc_history, batch[i].sequence_number)) {
+        fresh_lost++;
+        fresh_total++;
+      }
+      continue;
+    }
+
+    gcc_packet_info_t item = {.sequence_number = batch[i].sequence_number, .receive_time_us = batch[i].receive_time_us};
+    bool was_loss_reported = false;
+    if (sfu_twcc_history_consume_received(sender_session->twcc_history, item.sequence_number, &item, &was_loss_reported)) {
       if (sender_session->gcc_ctx) {
-        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &batch[i]);
+        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &item);
+      }
+      if (!was_loss_reported) {
+        fresh_total++;
       }
     }
   }
 
-  if (batch_count > 0) {
-    sender_session->twcc_last_feedback_ref_us = batch[batch_count - 1].receive_time_us;
+  if (parser.current_time_us > sender_session->twcc_last_feedback_ref_us) {
+    sender_session->twcc_last_feedback_ref_us = parser.current_time_us;
   }
 
-  if (sender_session->gcc_ctx && parser.packets_lost > 0) {
-    gcc_bwe_report_loss(sender_session->gcc_ctx, parser.packets_lost, parser.packet_status_count);
+  if (sender_session->gcc_ctx && fresh_lost > 0) {
+    gcc_bwe_report_loss(sender_session->gcc_ctx, fresh_lost, fresh_total);
     estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
   }
 
@@ -300,6 +322,7 @@ static void extract_svc_metadata(sfu_peer_session_t *sender_session, sfu_ingress
   }
 
   if (sfu_svc_parse_descriptor(codec, m->rtp.payload, m->rtp.payload_len, &m->svc) == 0) {
+    m->svc.rtp_timestamp = m->rtp.timestamp;
     m->has_svc = true;
     m->is_keyframe = sfu_svc_descriptor_is_keyframe(&m->svc);
   }

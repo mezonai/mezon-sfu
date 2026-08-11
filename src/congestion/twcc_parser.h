@@ -13,6 +13,12 @@
 #define TWCC_STATUS_RESERVED 3
 
 typedef struct {
+  uint16_t sequence_number;
+  uint8_t status;
+  int64_t receive_time_us;
+} sfu_twcc_status_t;
+
+typedef struct {
   const uint8_t *data;
   size_t len;
 
@@ -32,9 +38,11 @@ typedef struct {
 
   uint32_t packets_processed;
   uint32_t packets_lost;
+  bool failed;
 } sfu_twcc_parser_t;
 
 int sfu_twcc_parser_init(sfu_twcc_parser_t *parser, const uint8_t *data, size_t len, int64_t unwrap_anchor_us);
+bool sfu_twcc_parser_next_status(sfu_twcc_parser_t *parser, sfu_twcc_status_t *out_status);
 bool sfu_twcc_parser_next(sfu_twcc_parser_t *parser, gcc_packet_info_t *out_pkt);
 
 #endif  // SFU_TWCC_PARSER_H

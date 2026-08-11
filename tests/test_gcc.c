@@ -54,6 +54,14 @@ static void test_steadily_growing_queue_detected(void) {
     saw = ctx.trendline.usage_state;
   }
   assert(saw == GCC_BWE_OVERUSE);
+
+  ctx.aimd.current_bitrate_bps = START;
+  ctx.aimd.ack_bitrate_bps = MAXB;
+  ctx.aimd.have_ack_bitrate = true;
+  uint32_t before = ctx.aimd.current_bitrate_bps;
+  feed_group(&ctx, &seq, &send_us, &recv_us, 1, 1200, 10000, 11000);
+  assert(ctx.aimd.state == GCC_RATE_CTRL_DECREASE);
+  assert(ctx.aimd.current_bitrate_bps < before);
 }
 
 /* Constant delay (send 10 ms, recv 10 ms) must NOT signal overuse. */
@@ -82,18 +90,18 @@ static void test_growth_is_time_paced(void) {
   /* Trace A: 20 groups over 2 seconds, 1 packet per group. */
   uint16_t seq = 0;
   int64_t s = 1000000, r = 1000000;
-  feed_group(&a, &seq, &s, &r, 1, 1200, 100000, 100000);
+  feed_group(&a, &seq, &s, &r, 1, 0, 100000, 100000);
   for (int i = 0; i < 20; i++) {
-    feed_group(&a, &seq, &s, &r, 1, 1200, 100000, 100000);
+    feed_group(&a, &seq, &s, &r, 1, 0, 100000, 100000);
   }
 
-  /* Trace B: same wall time and group structure but 5 packets per group. */
+  /* Trace B: same wall time and zero-byte estimator input, 5 callbacks per group. */
   seq = 0;
   s = 1000000;
   r = 1000000;
-  feed_group(&b, &seq, &s, &r, 5, 1200, 100000, 100000);
+  feed_group(&b, &seq, &s, &r, 5, 0, 100000, 100000);
   for (int i = 0; i < 20; i++) {
-    feed_group(&b, &seq, &s, &r, 5, 1200, 100000, 100000);
+    feed_group(&b, &seq, &s, &r, 5, 0, 100000, 100000);
   }
 
   assert(a.aimd.current_bitrate_bps == b.aimd.current_bitrate_bps);
@@ -253,6 +261,58 @@ static void test_loss_has_control_effect(void) {
   assert(ctx.aimd.current_bitrate_bps == 500000);
 }
 
+static void test_ack_bitrate_uses_aggregate_window(void) {
+  gcc_bwe_context_t ctx;
+  gcc_bwe_init(&ctx, START, MINB, MAXB);
+
+  gcc_packet_info_t p = {0};
+  for (int burst = 0; burst <= 5; burst++) {
+    for (int i = 0; i < 5; i++) {
+      p.sequence_number++;
+      p.send_time_us = 1000000 + burst * 30000;
+      p.receive_time_us = 1000000 + burst * 30000;
+      p.size_bytes = 1200;
+      gcc_bwe_process_twcc_packet(&ctx, &p);
+    }
+    if (burst < 5) {
+      assert(!ctx.aimd.have_ack_bitrate);
+    }
+  }
+
+  assert(ctx.aimd.have_ack_bitrate);
+  assert(ctx.aimd.ack_bitrate_bps > 1500000);
+  assert(ctx.aimd.ack_bitrate_bps < 2500000);
+
+  p.sequence_number++;
+  p.send_time_us += 500000;
+  p.receive_time_us += 500000;
+  gcc_bwe_process_twcc_packet(&ctx, &p);
+  assert(!ctx.aimd.have_ack_bitrate);
+  assert(ctx.aimd.ack_window_bytes == p.size_bytes);
+}
+
+static void test_normal_ack_cap_does_not_decrease(void) {
+  gcc_bwe_context_t ctx;
+  gcc_bwe_init(&ctx, START, MINB, MAXB);
+
+  uint16_t seq = 0;
+  int64_t send_us = 1000000, recv_us = 1000000;
+  feed_group(&ctx, &seq, &send_us, &recv_us, 1, 1200, 100000, 100000);
+
+  ctx.aimd.current_bitrate_bps = 1000000;
+  ctx.aimd.ack_bitrate_bps = 100000;
+  ctx.aimd.have_ack_bitrate = true;
+  ctx.aimd.state = GCC_RATE_CTRL_INCREASE;
+  ctx.aimd.last_increase_us = recv_us - 200000;
+  ctx.aimd.ack_window_bytes = 0;
+  ctx.aimd.ack_window_min_recv_us = 0;
+  ctx.aimd.ack_window_max_recv_us = 0;
+
+  feed_group(&ctx, &seq, &send_us, &recv_us, 1, 1200, 100000, 100000);
+  assert(ctx.trendline.usage_state == GCC_BWE_NORMAL);
+  assert(ctx.aimd.current_bitrate_bps == 1000000);
+}
+
 int main(void) {
   test_steadily_growing_queue_detected();
   test_constant_delay_is_normal();
@@ -263,6 +323,8 @@ int main(void) {
   test_reorder_ignored();
   test_feedback_gap_not_counted_as_overuse();
   test_loss_has_control_effect();
+  test_ack_bitrate_uses_aggregate_window();
+  test_normal_ack_cap_does_not_decrease();
   printf("test_gcc: OK\n");
   return 0;
 }

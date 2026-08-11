@@ -69,7 +69,7 @@ void sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
                         sfu_pacer_class_t video_class) {
   if (sub_session->worker_id == w->worker_index) {
     sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, video_ssrc, video_pt, video_rtx_pt, video_rtx_ssrc, has_video, is_audio, video_class);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    //sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
 

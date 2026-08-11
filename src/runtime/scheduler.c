@@ -3,7 +3,6 @@
 #include <pthread.h>
 #include <string.h>
 #include <unistd.h>
-#include "congestion/gcc.h"
 #include "peer/session.h"
 #include "runtime/cpu.h"
 #include "runtime/signal.h"
@@ -170,16 +169,41 @@ sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *sessio
   return &free_slot->sched;
 }
 
-bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe) {
-  if (sched->needs_keyframe) {
-    if (!is_keyframe) {
-      SFU_LOG_DEBUG("DROP frame due to missing keyframe (waiting for keyframe)");
-      return false;
-    }
-    sched->needs_keyframe = false;
-    sched->current_sid = sched->target_sid;
-    sched->current_tid = sched->target_tid;
+static void sfu_scheduler_begin_picture(sfu_subscriber_scheduler_t *sched, uint32_t rtp_timestamp) {
+  if (sched->picture_valid && sched->picture_timestamp == rtp_timestamp) {
+    return;
   }
+  sched->picture_valid = true;
+  sched->picture_timestamp = rtp_timestamp;
+  sched->completed_sid_mask = 0;
+  sched->failed_sid_mask = 0;
+  sched->transition_active = false;
+  sched->transition_failed = false;
+  sched->transition_sid = 0;
+  sched->transition_timestamp = 0;
+}
+
+sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc) {
+  (void)sched;
+  if (desc->sid > 0 || desc->tid > 0) {
+    return SFU_PACER_CLASS_VIDEO_ENH;
+  }
+  return SFU_PACER_CLASS_VIDEO_BASE;
+}
+
+bool sfu_scheduler_prepare_packet(sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe, sfu_scheduler_decision_t *decision) {
+  if (!sched || !desc || !decision) {
+    return false;
+  }
+
+  memset(decision, 0, sizeof(*decision));
+  decision->rtp_timestamp = desc->rtp_timestamp;
+  decision->sid = desc->sid;
+  decision->tid = desc->tid;
+  decision->e_bit = desc->e_bit;
+  decision->pacer_class = sfu_scheduler_classify_frame(sched, desc);
+
+  sfu_scheduler_begin_picture(sched, desc->rtp_timestamp);
 
   if (sched->target_sid < sched->current_sid) {
     sched->current_sid = sched->target_sid;
@@ -188,38 +212,100 @@ bool sfu_scheduler_evaluate_frame(sfu_subscriber_scheduler_t *sched, const sfu_s
     sched->current_tid = sched->target_tid;
   }
 
-  if (sched->current_sid < sched->target_sid) {
-    if (desc->p_bit == 0 && desc->sid <= sched->target_sid) {
-      sched->current_sid = desc->sid;
+  if (sched->needs_keyframe) {
+    if (!is_keyframe) {
+      return false;
     }
+    decision->start_keyframe = true;
+    decision->transition_packet = true;
   }
 
-  if (sched->current_tid < sched->target_tid) {
-    if (desc->u_bit == 1 && desc->tid <= sched->target_tid) {
-      sched->current_tid = desc->tid;
-    }
+  if (desc->sid > sched->target_sid || desc->tid > sched->target_tid) {
+    return false;
   }
 
   if (desc->sid > sched->current_sid) {
-    return false;
+    uint8_t candidate_sid = (uint8_t)(sched->current_sid + 1);
+    if (desc->sid != candidate_sid || candidate_sid > sched->target_sid) {
+      return false;
+    }
+
+    if (sched->transition_active) {
+      if (sched->transition_timestamp != desc->rtp_timestamp || sched->transition_sid != desc->sid || sched->transition_failed) {
+        return false;
+      }
+    } else {
+      if (desc->b_bit == 0 || desc->p_bit != 0) {
+        return false;
+      }
+      uint8_t lower_mask = (uint8_t)(1u << sched->current_sid);
+      if (desc->d_bit != 0 && ((sched->completed_sid_mask & lower_mask) == 0 || (sched->failed_sid_mask & lower_mask) != 0)) {
+        return false;
+      }
+      decision->start_transition = true;
+    }
+    decision->transition_packet = true;
   }
+
   if (desc->tid > sched->current_tid) {
-    return false;
+    if (desc->u_bit == 0) {
+      return false;
+    }
+    decision->start_temporal_transition = true;
+    decision->transition_packet = true;
   }
 
-  if (desc->d_bit == 1 && desc->sid > sched->current_sid) {
-    return false;
+  if (sched->target_sid > sched->current_sid && desc->p_bit == 0) {
+    decision->transition_packet = true;
+  }
+  if (decision->transition_packet) {
+    decision->pacer_class = SFU_PACER_CLASS_VIDEO_TRANSITION;
   }
 
+  decision->should_forward = true;
   return true;
 }
 
-sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc) {
-  if (desc->sid > 0 || desc->tid > 1) {
-    return SFU_PACER_CLASS_VIDEO_ENH;
+void sfu_scheduler_commit_packet(sfu_subscriber_scheduler_t *sched, const sfu_scheduler_decision_t *decision) {
+  if (!sched || !decision || !decision->should_forward || !sched->picture_valid || sched->picture_timestamp != decision->rtp_timestamp) {
+    return;
   }
-  (void)sched;
-  return SFU_PACER_CLASS_VIDEO_BASE;
+
+  if (decision->start_keyframe) {
+    sched->needs_keyframe = false;
+  }
+  if (decision->start_transition) {
+    sched->transition_active = true;
+    sched->transition_failed = false;
+    sched->transition_sid = decision->sid;
+    sched->transition_timestamp = decision->rtp_timestamp;
+  }
+  if (decision->start_temporal_transition && decision->tid <= sched->target_tid) {
+    sched->current_tid = decision->tid;
+  }
+
+  uint8_t sid_mask = (uint8_t)(1u << decision->sid);
+  if (decision->e_bit != 0 && (sched->failed_sid_mask & sid_mask) == 0) {
+    sched->completed_sid_mask |= sid_mask;
+  }
+
+  if (sched->transition_active && sched->transition_timestamp == decision->rtp_timestamp && sched->transition_sid == decision->sid && decision->e_bit != 0) {
+    if (!sched->transition_failed && (sched->failed_sid_mask & sid_mask) == 0 && decision->sid <= sched->target_sid) {
+      sched->current_sid = decision->sid;
+    }
+    sched->transition_active = false;
+    sched->transition_failed = false;
+  }
+}
+
+void sfu_scheduler_reject_packet(sfu_subscriber_scheduler_t *sched, const sfu_scheduler_decision_t *decision) {
+  if (!sched || !decision || !sched->picture_valid || sched->picture_timestamp != decision->rtp_timestamp || decision->sid >= 8) {
+    return;
+  }
+  sched->failed_sid_mask |= (uint8_t)(1u << decision->sid);
+  if (sched->transition_active && sched->transition_timestamp == decision->rtp_timestamp && sched->transition_sid == decision->sid) {
+    sched->transition_failed = true;
+  }
 }
 
 typedef struct sfu_layer_rung {
@@ -292,13 +378,11 @@ void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_
   sched->current_sid = 0;
   sched->current_tid = 0;
   sched->needs_keyframe = true;
+  sched->picture_valid = false;
+  sched->completed_sid_mask = 0;
+  sched->failed_sid_mask = 0;
+  sched->transition_active = false;
+  sched->transition_failed = false;
 
   atomic_fetch_add_explicit(&session->egress_generation, 1, memory_order_acq_rel);
-
-  if (session->gcc_ctx) {
-    uint32_t min_bps = session->gcc_ctx->aimd.min_bitrate_bps;
-    uint32_t max_bps = session->gcc_ctx->aimd.max_bitrate_bps;
-    uint32_t start_bps = session->gcc_ctx->aimd.current_bitrate_bps;
-    gcc_bwe_init(session->gcc_ctx, start_bps, min_bps, max_bps);
-  }
 }

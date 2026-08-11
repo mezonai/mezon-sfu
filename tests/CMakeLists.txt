@@ -90,6 +90,10 @@ add_executable(test_twcc_parser test_twcc_parser.c)
 target_link_libraries(test_twcc_parser PRIVATE sfu_core)
 add_test(NAME twcc_parser COMMAND test_twcc_parser)
 
+add_executable(test_twcc_history test_twcc_history.c)
+target_link_libraries(test_twcc_history PRIVATE sfu_core)
+add_test(NAME twcc_history COMMAND test_twcc_history)
+
 add_executable(test_pacer test_pacer.c)
 target_link_libraries(test_pacer PRIVATE sfu_core)
 add_test(NAME pacer COMMAND test_pacer)
