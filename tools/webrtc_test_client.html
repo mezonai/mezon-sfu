@@ -374,19 +374,19 @@
                 <div class="form-group">
                     <label for="videoCodec">Video Codec</label>
                     <select id="videoCodec">
-                        <option value="VP9" selected>VP9 (SVC capable)</option>
-                        <option value="VP8">VP8 (no SVC)</option>
+                        <option value="VP8" selected>VP8 (no SVC)</option>
+                        <option value="VP9">VP9 (SVC capable)</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label for="svcMode">SVC Scalability Mode</label>
                     <select id="svcMode">
-                        <option value="L3T3" selected>L3T3 (3 Spatial, 3 Temporal)</option>
+                        <option value="none" selected>Disabled (single stream)</option>
+                        <option value="L3T3">L3T3 (3 Spatial, 3 Temporal)</option>
                         <option value="L3T3_KEY">L3T3_KEY (3 Spatial, Keyframe-based)</option>
                         <option value="L2T2">L2T2 (2 Spatial, 2 Temporal)</option>
                         <option value="L1T3">L1T3 (1 Spatial, 3 Temporal)</option>
                         <option value="L1T2">L1T2 (1 Spatial, 2 Temporal)</option>
-                        <option value="none">Disabled (single stream)</option>
                     </select>
                     <small style="color: var(--muted); display:block; margin-top:4px;">
                         SVC modes only apply to VP9. VP8 always uses a single stream.
@@ -737,7 +737,7 @@
                 const caps = RTCRtpSender.getCapabilities("video");
                 if (!caps || !caps.codecs) return;
 
-                const wanted = (codecName || "VP9").toLowerCase();
+                const wanted = (codecName || "VP8").toLowerCase();
                 const preferred = caps.codecs.filter(
                     (c) => c.mimeType.toLowerCase() === "video/" + wanted
                 );
@@ -794,7 +794,7 @@
 
             async function applyVideoEncodingParams(pc) {
                 const selectedMode = document.getElementById("svcMode").value;
-                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP9";
+                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
                 const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
                 const uplink =
                     pc.getTransceivers().find((t) => t.mid === "1") ||
@@ -845,7 +845,7 @@
             /* Configure video transceiver: codec preference + optional VP9 SVC mode */
             async function enableSvcForVideoSender(pc, videoTrack) {
                 const selectedMode = document.getElementById("svcMode").value;
-                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP9";
+                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
 
                 const transceiver =
                     pc.getTransceivers().find(
@@ -1235,7 +1235,7 @@
                                 // x-google-*-bitrate on VP8/VP9 fmtp is the reliable way
                                 // to lift Chrome's libvpx start rate off the ~150 kbps L3T3
                                 // floor. setParameters(minBitrate) alone is often stripped.
-                                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP9";
+                                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
                                 const selectedMode = (document.getElementById("svcMode") || {}).value || "none";
                                 const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
                                 const mungedSdp = mungeVideoBitrate(
