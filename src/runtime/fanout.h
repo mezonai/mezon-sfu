@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
+#include "media/svc/svc_descriptor.h"
 #include "memory/pool.h"
 #include "sfu/datadef.h"
 #include "sfu/packet.h"
@@ -22,6 +23,7 @@ typedef struct sfu_fanout_job {
   socklen_t dst_len;
   sfu_peer_session_t *subscriber;
   sfu_peer_session_t *publisher;
+  sfu_svc_descriptor_t svc;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
   uint32_t pool_index;
@@ -30,7 +32,8 @@ typedef struct sfu_fanout_job {
   uint8_t video_rtx_pt;
   bool has_video;
   bool is_audio;
-  uint8_t pacer_class;
+  bool has_svc;
+  bool is_keyframe;
   uint8_t kind;
 } sfu_fanout_job_t;
 
@@ -49,8 +52,9 @@ void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh);
 bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, const struct sockaddr_storage *dst_addr,
                              socklen_t dst_len);
 bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, sfu_peer_session_t *subscriber,
-                                     const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc, uint32_t video_rtx_ssrc, uint8_t video_pt,
-                                     uint8_t video_rtx_pt, bool has_video, bool is_audio, uint8_t pacer_class);
+                                     sfu_peer_session_t *publisher, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
+                                     uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, bool is_audio,
+                                     const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe);
 bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher);
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data);
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job);

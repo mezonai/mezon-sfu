@@ -81,6 +81,8 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
     return -1;
   }
 
+  memset(out, 0, sizeof(*out));
+
   size_t offset = 0;
   uint8_t first_byte = payload[offset++];
 
@@ -170,7 +172,7 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
     bool g_bit = (ss_first >> 3) & 0x01;
 
     if (y_bit) {
-      size_t res_bytes = (size_t)(n_s + 1) * 2;
+      size_t res_bytes = (size_t)(n_s + 1) * 4;
       if (len - offset < res_bytes) {
         return -1;
       }
@@ -187,7 +189,7 @@ int sfu_parse_vp9_descriptor(const uint8_t *payload, size_t len, sfu_vp9_descrip
           return -1;
         }
         uint8_t pg_byte = payload[offset++];
-        uint8_t r = (pg_byte >> 1) & 0x03;
+        uint8_t r = (pg_byte >> 2) & 0x03;
         if (len - offset < r) {
           return -1;
         }

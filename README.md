@@ -107,18 +107,18 @@ The compiled binary will be generated at `./build/mezon-sfu`.
 
 ### crucial environment variable
 
-* **`SFU_PUBLIC_HOST`**: This controls the IP address the SFU advertises to WebRTC clients.
+* **`config.ini`**: This is default config to run in local.
 
 
-* Set this to `127.0.0.1` for local testing.
-* Set this to your server's **external public IP** (e.g., `27.72.29.150`) when deploying to a remote host.
+* Set publish_host to `127.0.0.1` for local testing.
+* Set this to your server's **external public IP** (e.g., `27.75.30.171`) when deploying to a remote host.
 
 #### running both signaling & media
 
 Best for local development or single-server environments.
 
 ```bash
-SFU_PUBLIC_HOST=127.0.0.1 ./build/mezon-sfu
+./build/mezon-sfu -c ../config.ini
 
 ```
 

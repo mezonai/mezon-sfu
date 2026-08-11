@@ -464,9 +464,15 @@ static void kf_fixture_init(kf_fixture_t *f) {
   f->pub_video_ssrc = 0xdeadbeefu;
   f->publisher->uplink_video.ssrc = f->pub_video_ssrc;
   f->publisher->uplink_video.rtx_ssrc = 0xbeefdead;
+  f->publisher->uplink_video.payload_type = SFU_PT_VP9;
+  f->publisher->uplink_video.rtx_payload_type = SFU_PT_VP9_RTX;
+  f->publisher->uplink_video.codec = SFU_VIDEO_CODEC_VP9;
   f->publisher->uplink_video.active = true;
   f->publisher->uplink_audio.active = true;
 
+  f->base.session->uplink_video.payload_type = SFU_PT_VP8;
+  f->base.session->uplink_video.rtx_payload_type = SFU_PT_VP8_RTX;
+  f->base.session->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
   f->base.session->uplink_video.active = true;
   f->base.session->uplink_audio.active = true;
 
@@ -474,6 +480,31 @@ static void kf_fixture_init(kf_fixture_t *f) {
   room_add_peer(&f->room, f->base.session);
   /* add order: publisher first, so the subscriber is in the publisher's
    * receiver snapshot with the publisher's own uplink SSRCs. */
+}
+
+static void feed_publisher_vp9(kf_fixture_t *f, uint16_t seq, uint32_t timestamp, const uint8_t *descriptor, size_t descriptor_len) {
+  uint8_t plain[512] = {0};
+  plain[0] = 0x80;
+  plain[1] = SFU_PT_VP9;
+  sfu_write_be16(plain + 2, seq);
+  sfu_write_be32(plain + 4, timestamp);
+  sfu_write_be32(plain + 8, f->pub_video_ssrc);
+  memcpy(plain + 12, descriptor, descriptor_len);
+  memset(plain + 12 + descriptor_len, 0xab, 16);
+  size_t plain_len = 12 + descriptor_len + 16;
+
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f->base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f->base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f->publisher->cold->addr;
+  pkt->peer_addr_len = f->publisher->cold->addr_len;
+  sfu_ingress_process(&f->base.w, pkt);
 }
 
 static void kf_fixture_destroy(kf_fixture_t *f) {
@@ -583,7 +614,7 @@ static void test_egress_writes_twcc_extension(void) {
    * negotiated at extmap id 5, history allocated. An RTX cache is required
    * by the forwarding path (it puts every forwarded video packet). */
   sfu_peer_session_t *sub = f.base.session;
-  sub->twcc_extmap_id = 5;
+  sub->twcc_send_extmap_id = 5;
   assert(sub->twcc_history == NULL);
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
@@ -634,7 +665,7 @@ static void test_egress_no_twcc_without_negotiation(void) {
   kf_fixture_init(&f);
 
   sfu_peer_session_t *sub = f.base.session;
-  sub->twcc_extmap_id = 0; /* not negotiated */
+  sub->twcc_send_extmap_id = 0; /* not negotiated */
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
   sfu_twcc_history_init(sub->twcc_history);
@@ -690,7 +721,7 @@ static void test_remote_forward_egress_on_owner(void) {
 
   sfu_peer_session_t *sub = f.base.session;
   sub->worker_id = 1; /* owned by the other worker */
-  sub->twcc_extmap_id = 5;
+  sub->twcc_send_extmap_id = 5;
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
   sfu_twcc_history_init(sub->twcc_history);
@@ -731,6 +762,38 @@ static void test_remote_forward_egress_on_owner(void) {
   close(w1_fds[1]);
   f.base.w.mesh = NULL;
   sfu_fanout_mesh_destroy(&mesh);
+  kf_fixture_destroy(&f);
+}
+
+static void test_svc_filter_rewrites_sequence_and_cache_identity(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  const uint8_t keyframe[] = {0x0c};                    /* P=0 B=1 E=1, SID=0 TID=0 */
+  const uint8_t upper[] = {0x6c, 0x02, 0x00};          /* P=1 L=1 B=1 E=1, SID=1 */
+  const uint8_t base_delta[] = {0x4c};                 /* P=1 B=1 E=1, SID=0 TID=0 */
+  feed_publisher_vp9(&f, 100, 9000, keyframe, sizeof(keyframe));
+  feed_publisher_vp9(&f, 101, 9001, upper, sizeof(upper));
+  feed_publisher_vp9(&f, 102, 9002, base_delta, sizeof(base_delta));
+
+  uint8_t cached[512];
+  uint32_t cached_len = sizeof(cached);
+  uint32_t rtx_ssrc = 0;
+  uint8_t rtx_pt = 0;
+  assert(sfu_rtx_cache_get_stream(f.base.cache, 100, cached, &cached_len, &rtx_ssrc, &rtx_pt, f.pub_video_ssrc, 0));
+  assert(sfu_read_be16(cached + 2) == 100);
+  assert((cached[1] & 0x80) != 0);
+  assert(rtx_ssrc == f.publisher->uplink_video.rtx_ssrc);
+  assert(rtx_pt == f.publisher->uplink_video.rtx_payload_type);
+
+  cached_len = sizeof(cached);
+  assert(sfu_rtx_cache_get_stream(f.base.cache, 101, cached, &cached_len, &rtx_ssrc, &rtx_pt, f.pub_video_ssrc, 0));
+  assert(sfu_read_be16(cached + 2) == 101); /* source 102 became subscriber 101 */
+  assert((cached[1] & 0x7f) == SFU_PT_VP9);
+  assert((cached[1] & 0x80) != 0);
+
+  cached_len = sizeof(cached);
+  assert(!sfu_rtx_cache_get_stream(f.base.cache, 102, cached, &cached_len, &rtx_ssrc, &rtx_pt, f.pub_video_ssrc, 0));
   kf_fixture_destroy(&f);
 }
 
@@ -791,7 +854,7 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
   kf_fixture_init(&f);
 
   sfu_peer_session_t *sub = f.base.session;
-  sub->twcc_extmap_id = 0; /* pacing does not require TWCC negotiation */
+  sub->twcc_send_extmap_id = 0; /* pacing does not require TWCC negotiation */
 
   /* Arm the pacer: 1 Mbps estimate -> 2.5 Mbps pacing, 12.5 KB bucket. */
   sfu_pacer_set_rate(&sub->pacer, 1000000, (int64_t)sfu_now_us());
@@ -835,8 +898,8 @@ static void test_nack_line_rate_throttled_by_rtx_budget(void) {
   fixture_t f;
   fixture_init(&f);
 
-  /* Cache 60 packets so every NACK hits. */
-  for (uint16_t s = 1; s <= 60; s++) {
+  /* Cache enough packets for both capped NACK members so every request hits. */
+  for (uint16_t s = 1; s <= 96; s++) {
     uint8_t pkt_buf[512];
     size_t pkt_len;
     build_rtp_video(pkt_buf, s, 100, &pkt_len);
@@ -856,20 +919,21 @@ static void test_nack_line_rate_throttled_by_rtx_budget(void) {
   assert(sfu_metric_get("rtx_dropped_budget") == 0);
 
   /* Arm the session-level pacer with a small estimate: 1 Mbps -> RTX budget
-   * floor cap 4096 bytes -> 3 retransmissions per 40 ms window, then drops. */
+   * floor cap 4096 bytes. Cache lookup now precedes budgeting and charges the
+   * actual 114-byte retransmission input, so 35 fit before the budget drops. */
   sfu_pacer_set_rate(&f.session->pacer, 1000000, (int64_t)sfu_now_us());
 
-  uint16_t fci2[2 * 12];
-  for (int i = 0; i < 12; i++) {
+  uint16_t fci2[2 * 48];
+  for (int i = 0; i < 48; i++) {
     fci2[i * 2] = (uint16_t)(49 + i);
     fci2[i * 2 + 1] = 0;
   }
-  nack_len = build_nack(nack, fci2, 24);
+  nack_len = build_nack(nack, fci2, 96);
   feed_rtcp(&f, nack, nack_len);
 
-  /* 48 + 3 served; 9 dropped by the budget. */
-  assert(f.cache->next_rtx_seq == 48 + 3);
-  assert(sfu_metric_get("rtx_dropped_budget") == 9);
+  /* 48 + 35 served; 13 dropped by the budget. */
+  assert(f.cache->next_rtx_seq == 48 + 35);
+  assert(sfu_metric_get("rtx_dropped_budget") == 13);
 
   fixture_destroy(&f);
 }
@@ -884,7 +948,7 @@ static void test_forward_churn_subscriber_disconnect(void) {
   kf_fixture_init(&f);
 
   sfu_peer_session_t *sub = f.base.session;
-  sub->twcc_extmap_id = 5;
+  sub->twcc_send_extmap_id = 5;
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
   sfu_twcc_history_init(sub->twcc_history);
@@ -1110,6 +1174,7 @@ int main(void) {
   test_egress_writes_twcc_extension();
   test_egress_no_twcc_without_negotiation();
   test_remote_forward_egress_on_owner();
+  test_svc_filter_rewrites_sequence_and_cache_identity();
   test_nack_wrong_stream_misses_cache();
   test_generation_bump_invalidates_cache();
   test_egress_pacer_drops_enhancement_not_audio();

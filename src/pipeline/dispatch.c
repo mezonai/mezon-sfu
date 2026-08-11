@@ -71,7 +71,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool has_pending_answer = false;
   bool pending_is_audience = false;
   uint32_t pending_audio_ssrc = 0, pending_video_ssrc = 0, pending_rtx_ssrc = 0;
-  uint8_t pending_video_pt = 0, pending_rtx_pt = 0, pending_twcc_extmap_id = 0;
+  uint8_t pending_video_pt = 0, pending_rtx_pt = 0, pending_video_codec = 0;
+  uint8_t pending_twcc_recv_extmap_id = 0, pending_twcc_send_extmap_id = 0;
 
   if (have_ufrag) {
     pthread_mutex_lock(&w->routing_table->mutex);
@@ -105,7 +106,9 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         pending_rtx_ssrc = match->pending_rtx_ssrc;
         pending_video_pt = match->pending_video_pt;
         pending_rtx_pt = match->pending_rtx_pt;
-        pending_twcc_extmap_id = match->pending_twcc_extmap_id;
+        pending_video_codec = match->pending_video_codec;
+        pending_twcc_recv_extmap_id = match->pending_twcc_recv_extmap_id;
+        pending_twcc_send_extmap_id = match->pending_twcc_send_extmap_id;
         pending_is_audience = match->is_audience;
         match->has_pending_answer = false;
       }
@@ -171,30 +174,26 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
         if (!session->room) {
           SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
 
-          if (has_pending_answer) {
-            session->uplink_audio.ssrc = pending_audio_ssrc;
-            session->uplink_audio.active = (pending_audio_ssrc != 0);
-            session->uplink_video.ssrc = pending_video_ssrc;
-            session->uplink_video.rtx_ssrc = pending_rtx_ssrc;
-            session->uplink_video.active = (pending_video_ssrc != 0);
-            session->uplink_video.payload_type = pending_video_pt;
-            session->uplink_video.rtx_payload_type = pending_rtx_pt;
-            session->twcc_extmap_id = pending_twcc_extmap_id;
-            atomic_store_explicit(&session->is_audience, pending_is_audience, memory_order_release);
-            for (int pi = 0; pi < 128; pi++) {
-              session->pt_map[pi] = (uint8_t)pi;
+            if (has_pending_answer) {
+              session->uplink_audio.ssrc = pending_audio_ssrc;
+              session->uplink_audio.active = (pending_audio_ssrc != 0);
+              session->uplink_video.ssrc = pending_video_ssrc;
+              session->uplink_video.rtx_ssrc = pending_rtx_ssrc;
+              session->uplink_video.active = (pending_video_ssrc != 0);
+              session->uplink_video.payload_type = pending_video_pt;
+              session->uplink_video.rtx_payload_type = pending_rtx_pt;
+              session->uplink_video.codec = (sfu_video_codec_t)pending_video_codec;
+              session->twcc_recv_extmap_id = pending_twcc_recv_extmap_id;
+              session->twcc_send_extmap_id = pending_twcc_send_extmap_id;
+              atomic_store_explicit(&session->is_audience, pending_is_audience, memory_order_release);
+              for (int pi = 0; pi < 128; pi++) {
+                session->pt_map[pi] = (uint8_t)pi;
+              }
+              SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u", w->worker_index, client_ufrag,
+                           pending_audio_ssrc, pending_video_ssrc, pending_rtx_ssrc);
             }
-            if (pending_video_pt != 0) {
-              session->pt_map[96] = pending_video_pt;
-            }
-            if (pending_rtx_pt != 0) {
-              session->pt_map[97] = pending_rtx_pt;
-            }
-            SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u", w->worker_index, client_ufrag,
-                         pending_audio_ssrc, pending_video_ssrc, pending_rtx_ssrc);
             room_add_peer(room, session);
             session->fd = matched_signaling_fd;
-          }
         }
 
         if (session->worker_id == UINT16_MAX) {

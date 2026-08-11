@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <uv.h>
@@ -144,108 +145,6 @@ static bool extract_sdp_ice_ufrag(const char *sdp, size_t sdp_len, char *out, si
 
 static sfu_signaling_server_t *g_signaling_server = NULL;
 
-static void extract_sdp_ssrcs(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc) {
-  *audio_ssrc = 0;
-  *video_ssrc = 0;
-  *rtx_ssrc = 0;
-  int current_media = 0; /* 0 = none, 1 = audio, 2 = video */
-
-  size_t pos = 0;
-  while (pos < sdp_len) {
-    size_t line_start = pos;
-    while (pos < sdp_len && sdp[pos] != '\n') {
-      pos++;
-    }
-    size_t line_end = pos;
-    if (line_end > line_start && sdp[line_end - 1] == '\r') {
-      line_end--;
-    }
-    if (pos < sdp_len) {
-      pos++;
-    }
-
-    size_t len = line_end - line_start;
-    const char *line = sdp + line_start;
-
-    if (len >= 7 && memcmp(line, "m=audio", 7) == 0) {
-      current_media = 1;
-    } else if (len >= 7 && memcmp(line, "m=video", 7) == 0) {
-      current_media = 2;
-    } else if (len >= 7 && memcmp(line, "a=ssrc:", 7) == 0) {
-      if (len >= 12 && memcmp(line, "a=ssrc-group", 12) == 0) {
-        continue;
-      }
-
-      /* Extract SSRC value safely */
-      char *endptr;
-      uint32_t ssrc = (uint32_t)strtoul(line + 7, &endptr, 10);
-
-      /* If strtoul didn't consume any digits, skip this line entirely */
-      if (endptr == line + 7 || ssrc == 0) {
-        continue;
-      }
-
-      if (current_media == 1 && *audio_ssrc == 0) {
-        *audio_ssrc = ssrc;
-      } else if (current_media == 2) {
-        if (*video_ssrc == 0) {
-          *video_ssrc = ssrc;
-        } else if (*rtx_ssrc == 0 && ssrc != *video_ssrc) {
-          *rtx_ssrc = ssrc;
-        }
-      }
-    }
-  }
-}
-
-static void extract_sdp_video_pts(const char *sdp, size_t sdp_len, uint8_t *video_pt, uint8_t *rtx_pt) {
-  *video_pt = 0;
-  *rtx_pt = 0;
-  if (!sdp || sdp_len == 0) {
-    return;
-  }
-
-  int current_media = 0;
-  size_t pos = 0;
-  while (pos < sdp_len) {
-    size_t line_start = pos;
-    while (pos < sdp_len && sdp[pos] != '\n') {
-      pos++;
-    }
-    size_t line_end = pos;
-    if (line_end > line_start && sdp[line_end - 1] == '\r') {
-      line_end--;
-    }
-    if (pos < sdp_len) {
-      pos++;
-    }
-
-    size_t len = line_end - line_start;
-    const char *line = sdp + line_start;
-
-    if (len >= 7 && memcmp(line, "m=audio", 7) == 0) {
-      current_media = 1;
-    } else if (len >= 7 && memcmp(line, "m=video", 7) == 0) {
-      current_media = 2;
-    } else if (current_media == 2 && len >= 9 && memcmp(line, "a=rtpmap:", 9) == 0) {
-      char *endptr;
-      unsigned long pt = strtoul(line + 9, &endptr, 10);
-      if (endptr > line + 9 && *endptr == ' ' && pt < 128) {
-        const char *codec = endptr + 1;
-        size_t codec_len = len - (size_t)(codec - line);
-        if (codec_len >= 3 && (memcmp(codec, "VP9", 3) == 0 || memcmp(codec, "vp9", 3) == 0)) {
-          *video_pt = (uint8_t)pt;
-        } else if (codec_len >= 3 && (memcmp(codec, "AV1", 3) == 0 || memcmp(codec, "av1", 3) == 0)) {
-          *video_pt = (uint8_t)pt;
-        } else if (codec_len >= 3 && (memcmp(codec, "VP8", 3) == 0 || memcmp(codec, "vp8", 3) == 0)) {
-          *video_pt = (uint8_t)pt;
-        } else if (codec_len >= 3 && (memcmp(codec, "rtx", 3) == 0 || memcmp(codec, "RTX", 3) == 0)) {
-          *rtx_pt = (uint8_t)pt;
-        }
-      }
-    }
-  }
-}
 
 static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_signaling_server_t *s) {
   char offer[SFU_SIGNALING_SDP_CAP];
@@ -398,54 +297,269 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
 
 uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len) { return extract_sdp_twcc_extmap_id(sdp, sdp_len); }
 
+typedef enum sfu_sdp_direction {
+  SFU_SDP_DIRECTION_NONE = 0,
+  SFU_SDP_DIRECTION_SENDONLY,
+  SFU_SDP_DIRECTION_RECVONLY,
+  SFU_SDP_DIRECTION_SENDRECV,
+  SFU_SDP_DIRECTION_INACTIVE,
+} sfu_sdp_direction_t;
+
+typedef struct sfu_answer_section {
+  int media_kind;
+  int mid;
+  sfu_sdp_direction_t direction;
+  uint8_t payloads[16];
+  uint8_t payload_count;
+  sfu_video_codec_t codecs[128];
+  uint8_t rtx_apt[128];
+  bool is_rtx[128];
+  uint32_t ssrcs[4];
+  uint8_t ssrc_count;
+  uint32_t fid_media_ssrc;
+  uint32_t fid_rtx_ssrc;
+  uint8_t twcc_extmap_id;
+} sfu_answer_section_t;
+
+typedef struct sfu_answer_media {
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t rtx_ssrc;
+  uint8_t video_pt;
+  uint8_t rtx_pt;
+  sfu_video_codec_t video_codec;
+  uint8_t twcc_recv_extmap_id;
+  uint8_t twcc_send_extmap_id;
+} sfu_answer_media_t;
+
+static void answer_section_reset(sfu_answer_section_t *section) {
+  memset(section, 0, sizeof(*section));
+  section->mid = -1;
+}
+
+static void answer_section_finalize(const sfu_answer_section_t *section, sfu_answer_media_t *media) {
+  bool sends = section->direction == SFU_SDP_DIRECTION_SENDONLY || section->direction == SFU_SDP_DIRECTION_SENDRECV;
+  bool receives = section->direction == SFU_SDP_DIRECTION_RECVONLY || section->direction == SFU_SDP_DIRECTION_SENDRECV;
+
+  if (section->media_kind == 1 && section->mid == 0 && sends && section->ssrc_count > 0) {
+    media->audio_ssrc = section->ssrcs[0];
+  }
+
+  if (section->media_kind == 2 && section->mid == 1 && sends) {
+    for (uint8_t i = 0; i < section->payload_count; i++) {
+      uint8_t pt = section->payloads[i];
+      if (!section->is_rtx[pt] && section->codecs[pt] != SFU_VIDEO_CODEC_NONE) {
+        media->video_pt = pt;
+        media->video_codec = section->codecs[pt];
+        break;
+      }
+    }
+    if (media->video_pt != 0) {
+      for (uint8_t pt = 0; pt < 128; pt++) {
+        if (section->is_rtx[pt] && section->rtx_apt[pt] == media->video_pt) {
+          media->rtx_pt = pt;
+          break;
+        }
+      }
+    }
+    if (section->fid_media_ssrc != 0) {
+      media->video_ssrc = section->fid_media_ssrc;
+      media->rtx_ssrc = section->fid_rtx_ssrc;
+    } else if (section->ssrc_count > 0) {
+      media->video_ssrc = section->ssrcs[0];
+      if (section->ssrc_count > 1) {
+        media->rtx_ssrc = section->ssrcs[1];
+      }
+    }
+    media->twcc_recv_extmap_id = section->twcc_extmap_id;
+  }
+
+  if (section->media_kind == 2 && section->mid != 1 && receives && media->twcc_send_extmap_id == 0) {
+    media->twcc_send_extmap_id = section->twcc_extmap_id;
+  }
+}
+
+static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media_t *media) {
+  if (!sdp || !media) {
+    return false;
+  }
+
+  memset(media, 0, sizeof(*media));
+  sfu_answer_section_t section;
+  answer_section_reset(&section);
+  bool have_section = false;
+
+  size_t pos = 0;
+  while (pos < sdp_len) {
+    size_t line_start = pos;
+    while (pos < sdp_len && sdp[pos] != '\n') {
+      pos++;
+    }
+    size_t line_end = pos;
+    if (line_end > line_start && sdp[line_end - 1] == '\r') {
+      line_end--;
+    }
+    if (pos < sdp_len) {
+      pos++;
+    }
+
+    size_t line_len = line_end - line_start;
+    if (line_len == 0 || line_len >= 512) {
+      continue;
+    }
+    char line[512];
+    memcpy(line, sdp + line_start, line_len);
+    line[line_len] = '\0';
+
+    if (strncmp(line, "m=", 2) == 0) {
+      if (have_section) {
+        answer_section_finalize(&section, media);
+      }
+      answer_section_reset(&section);
+      have_section = true;
+      section.media_kind = strncmp(line, "m=audio", 7) == 0 ? 1 : strncmp(line, "m=video", 7) == 0 ? 2 : 0;
+      const char *payloads = strstr(line, "SAVPF ");
+      if (payloads) {
+        payloads += 6;
+        while (*payloads != '\0' && section.payload_count < sizeof(section.payloads)) {
+          char *endptr;
+          unsigned long pt = strtoul(payloads, &endptr, 10);
+          if (endptr == payloads || pt > 127) {
+            break;
+          }
+          section.payloads[section.payload_count++] = (uint8_t)pt;
+          payloads = endptr;
+          while (*payloads == ' ') {
+            payloads++;
+          }
+        }
+      }
+      continue;
+    }
+    if (!have_section) {
+      continue;
+    }
+
+    if (strncmp(line, "a=mid:", 6) == 0) {
+      section.mid = (int)strtol(line + 6, NULL, 10);
+    } else if (strcmp(line, "a=sendonly") == 0) {
+      section.direction = SFU_SDP_DIRECTION_SENDONLY;
+    } else if (strcmp(line, "a=recvonly") == 0) {
+      section.direction = SFU_SDP_DIRECTION_RECVONLY;
+    } else if (strcmp(line, "a=sendrecv") == 0) {
+      section.direction = SFU_SDP_DIRECTION_SENDRECV;
+    } else if (strcmp(line, "a=inactive") == 0) {
+      section.direction = SFU_SDP_DIRECTION_INACTIVE;
+    } else if (strncmp(line, "a=rtpmap:", 9) == 0) {
+      char *endptr;
+      unsigned long pt = strtoul(line + 9, &endptr, 10);
+      if (endptr != line + 9 && *endptr == ' ' && pt < 128) {
+        const char *codec = endptr + 1;
+        if (strncasecmp(codec, "VP9", 3) == 0) {
+          section.codecs[pt] = SFU_VIDEO_CODEC_VP9;
+        } else if (strncasecmp(codec, "AV1", 3) == 0) {
+          section.codecs[pt] = SFU_VIDEO_CODEC_AV1;
+        } else if (strncasecmp(codec, "VP8", 3) == 0) {
+          section.codecs[pt] = SFU_VIDEO_CODEC_VP8;
+        } else if (strncasecmp(codec, "rtx", 3) == 0) {
+          section.is_rtx[pt] = true;
+        }
+      }
+    } else if (strncmp(line, "a=fmtp:", 7) == 0) {
+      char *endptr;
+      unsigned long pt = strtoul(line + 7, &endptr, 10);
+      char *apt = strstr(endptr, "apt=");
+      if (pt < 128 && apt) {
+        unsigned long apt_pt = strtoul(apt + 4, NULL, 10);
+        if (apt_pt < 128) {
+          section.is_rtx[pt] = true;
+          section.rtx_apt[pt] = (uint8_t)apt_pt;
+        }
+      }
+    } else if (strncmp(line, "a=ssrc-group:FID ", 17) == 0) {
+      unsigned media_ssrc = 0, rtx_ssrc = 0;
+      if (sscanf(line + 17, "%u %u", &media_ssrc, &rtx_ssrc) == 2) {
+        section.fid_media_ssrc = media_ssrc;
+        section.fid_rtx_ssrc = rtx_ssrc;
+      }
+    } else if (strncmp(line, "a=ssrc:", 7) == 0) {
+      unsigned long ssrc = strtoul(line + 7, NULL, 10);
+      if (ssrc != 0) {
+        bool duplicate = false;
+        for (uint8_t i = 0; i < section.ssrc_count; i++) {
+          duplicate |= section.ssrcs[i] == (uint32_t)ssrc;
+        }
+        if (!duplicate && section.ssrc_count < 4) {
+          section.ssrcs[section.ssrc_count++] = (uint32_t)ssrc;
+        }
+      }
+    } else if (strncmp(line, "a=extmap:", 9) == 0 && strstr(line, "transport-wide-cc")) {
+      char *endptr;
+      unsigned long id = strtoul(line + 9, &endptr, 10);
+      if (endptr != line + 9 && id > 0 && id < 15) {
+        section.twcc_extmap_id = (uint8_t)id;
+      }
+    }
+  }
+
+  if (have_section) {
+    answer_section_finalize(&section, media);
+  }
+  return true;
+}
+
+bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc, uint8_t *video_pt,
+                                 uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id, uint8_t *twcc_send_extmap_id) {
+  sfu_answer_media_t media;
+  if (!parse_answer_media(sdp, sdp_len, &media)) {
+    return false;
+  }
+  *audio_ssrc = media.audio_ssrc;
+  *video_ssrc = media.video_ssrc;
+  *rtx_ssrc = media.rtx_ssrc;
+  *video_pt = media.video_pt;
+  *rtx_pt = media.rtx_pt;
+  *video_codec = media.video_codec;
+  *twcc_recv_extmap_id = media.twcc_recv_extmap_id;
+  *twcc_send_extmap_id = media.twcc_send_extmap_id;
+  return true;
+}
+
 static bool handle_signaling_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
   if (!session) {
     return false;
   }
 
-  uint32_t audio_ssrc = 0;
-  uint32_t video_ssrc = 0;
-  uint32_t rtx_ssrc = 0;
+  sfu_answer_media_t media;
+  if (!parse_answer_media(sdp, (size_t)sdp_len, &media)) {
+    return false;
+  }
 
-  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &audio_ssrc, &video_ssrc, &rtx_ssrc);
+  bool new_audio_active = media.audio_ssrc != 0;
+  bool new_video_active = media.video_ssrc != 0;
+  bool changed = session->uplink_audio.ssrc != media.audio_ssrc || session->uplink_audio.active != new_audio_active ||
+                 session->uplink_video.ssrc != media.video_ssrc || session->uplink_video.rtx_ssrc != media.rtx_ssrc ||
+                 session->uplink_video.active != new_video_active || session->uplink_video.payload_type != media.video_pt ||
+                 session->uplink_video.rtx_payload_type != media.rtx_pt || session->uplink_video.codec != media.video_codec;
 
-  uint8_t video_pt = 0;
-  uint8_t rtx_pt = 0;
-
-  extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
-
-  bool new_audio_active = (audio_ssrc != 0);
-  bool new_video_active = (video_ssrc != 0);
-  bool changed = session->uplink_audio.ssrc != audio_ssrc || session->uplink_audio.active != new_audio_active || session->uplink_video.ssrc != video_ssrc ||
-                 session->uplink_video.rtx_ssrc != rtx_ssrc || session->uplink_video.active != new_video_active ||
-                 session->uplink_video.payload_type != video_pt || session->uplink_video.rtx_payload_type != rtx_pt;
-
-  session->uplink_audio.ssrc = audio_ssrc;
+  session->uplink_audio.ssrc = media.audio_ssrc;
   session->uplink_audio.active = new_audio_active;
-
-  session->uplink_video.ssrc = video_ssrc;
-  session->uplink_video.rtx_ssrc = rtx_ssrc;
+  session->uplink_video.ssrc = media.video_ssrc;
+  session->uplink_video.rtx_ssrc = media.rtx_ssrc;
   session->uplink_video.active = new_video_active;
-
-  session->uplink_video.payload_type = video_pt;
-  session->uplink_video.rtx_payload_type = rtx_pt;
-
-  session->twcc_extmap_id = extract_sdp_twcc_extmap_id(sdp, (size_t)sdp_len);
+  session->uplink_video.payload_type = media.video_pt;
+  session->uplink_video.rtx_payload_type = media.rtx_pt;
+  session->uplink_video.codec = media.video_codec;
+  session->twcc_recv_extmap_id = media.twcc_recv_extmap_id;
+  session->twcc_send_extmap_id = media.twcc_send_extmap_id;
 
   for (int i = 0; i < 128; i++) {
     session->pt_map[i] = (uint8_t)i;
   }
 
-  if (video_pt != 0) {
-    session->pt_map[96] = video_pt;
-  }
-
-  if (rtx_pt != 0) {
-    session->pt_map[97] = rtx_pt;
-  }
-
-  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u changed=%d", session->cold->ufrag, audio_ssrc, video_ssrc,
-               rtx_ssrc, video_pt, rtx_pt, changed);
+  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u changed=%d",
+               session->cold->ufrag, media.audio_ssrc, media.video_ssrc, media.rtx_ssrc, media.video_pt, media.rtx_pt, media.video_codec,
+               media.twcc_recv_extmap_id, media.twcc_send_extmap_id, changed);
   return changed;
 }
 
@@ -663,27 +777,30 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                     session->peer_id = generate_unique_id();
                   }
                   bool role_changed = false;
+                  bool newly_bound = false;
                   if (session->room) {
                     role_changed = room_update_peer_role((sfu_room_t *)session->room, session, c->is_audience);
                   } else {
                     atomic_store_explicit(&session->is_audience, c->is_audience, memory_order_release);
                   }
                   bool media_changed = handle_signaling_answer(session, sdp, sdp_len);
-                  if (session->room && (media_changed || role_changed)) {
-                    SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d), refreshing + renegotiating", c->client_ufrag, media_changed,
-                                 role_changed);
+                  if (!session->room) {
+                    room_add_peer(c->joined_room, session);
+                    session->fd = c->fd;
+                    newly_bound = session->room == c->joined_room;
+                  }
+                  if (session->room && (media_changed || role_changed || newly_bound)) {
+                    SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag,
+                                 media_changed, role_changed, newly_bound);
                     room_refresh_peer_streams((sfu_room_t *)session->room, session);
                     sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
                   }
                   sfu_session_release(session);
                 } else {
-                  uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
-                  uint8_t video_pt = 0, rtx_pt = 0;
-                  extract_sdp_ssrcs(sdp, (size_t)sdp_len, &audio_ssrc, &video_ssrc, &rtx_ssrc);
-                  extract_sdp_video_pts(sdp, (size_t)sdp_len, &video_pt, &rtx_pt);
-                  uint8_t twcc_extmap_id = extract_sdp_twcc_extmap_id(sdp, (size_t)sdp_len);
-
-                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, audio_ssrc, video_ssrc, rtx_ssrc, video_pt, rtx_pt, twcc_extmap_id,
+                  sfu_answer_media_t media;
+                  parse_answer_media(sdp, (size_t)sdp_len, &media);
+                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, media.audio_ssrc, media.video_ssrc, media.rtx_ssrc, media.video_pt,
+                                                       media.rtx_pt, media.video_codec, media.twcc_recv_extmap_id, media.twcc_send_extmap_id,
                                                        generate_unique_id(), c->is_audience);
                   SFU_LOG_WARN("signaling: answer for ufrag=%s arrived before session was created; stashed parsed SSRCs for apply on bind", c->client_ufrag);
                 }

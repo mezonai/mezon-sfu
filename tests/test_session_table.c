@@ -240,7 +240,7 @@ static void test_routing_table(void) {
   sfu_register_ufrag_room(&rtable, "ufrag_bob", &dummy_room, 10);
   sfu_register_ufrag_room(&rtable, "ufrag_eve", &dummy_room, 11);
 
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_bob", 111, 222, 333, 96, 97, 6, 0, false);
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_bob", 111, 222, 333, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 0, false);
 
   sfu_routing_table_unregister_fd(&rtable, 10);
   assert(rtable.count == 1);
@@ -263,8 +263,8 @@ static void test_audience_role_propagation(void) {
   sfu_register_ufrag_room(&rtable, "ufrag_aud", &dummy_room, 20);
   sfu_register_ufrag_room(&rtable, "ufrag_spk", &dummy_room, 21);
 
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_aud", 111, 222, 333, 96, 97, 6, 0, true);
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_spk", 444, 555, 666, 96, 97, 6, 0, false);
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_aud", 111, 222, 333, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 0, true);
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_spk", 444, 555, 666, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 0, false);
 
   const sfu_routing_entry_t *aud = NULL;
   const sfu_routing_entry_t *spk = NULL;
