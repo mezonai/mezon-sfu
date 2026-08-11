@@ -358,6 +358,14 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
 
   s->next_remote_mid = 2;
+  {
+    static atomic_uint_fast32_t peer_id_counter = 0;
+    uint32_t id = (uint32_t)atomic_fetch_add_explicit(&peer_id_counter, 1, memory_order_relaxed) + 1;
+    if (id == 0) {
+      id = (uint32_t)atomic_fetch_add_explicit(&peer_id_counter, 1, memory_order_relaxed) + 1;
+    }
+    s->peer_id = id;
+  }
 
   s->gcc_ctx = SFU_CALLOC(1, sizeof(gcc_bwe_context_t));
   if (s->gcc_ctx) {

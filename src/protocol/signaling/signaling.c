@@ -557,9 +557,9 @@ static bool handle_signaling_answer(sfu_peer_session_t *session, const char *sdp
     session->pt_map[i] = (uint8_t)i;
   }
 
-  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u changed=%d",
-               session->cold->ufrag, media.audio_ssrc, media.video_ssrc, media.rtx_ssrc, media.video_pt, media.rtx_pt, media.video_codec,
-               media.twcc_recv_extmap_id, media.twcc_send_extmap_id, changed);
+  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u changed=%d", session->cold->ufrag,
+               media.audio_ssrc, media.video_ssrc, media.rtx_ssrc, media.video_pt, media.rtx_pt, media.video_codec, media.twcc_recv_extmap_id,
+               media.twcc_send_extmap_id, changed);
   return changed;
 }
 

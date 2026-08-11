@@ -344,8 +344,8 @@ void sfu_scheduler_commit_packet(sfu_subscriber_scheduler_t *sched, const sfu_sc
   }
 
   if (decision->keyframe_packet && decision->e_bit != 0) {
-    bool complete = sched->keyframe_active && !sched->keyframe_failed && sched->keyframe_timestamp == decision->rtp_timestamp &&
-                    (sched->failed_sid_mask & sid_mask) == 0;
+    bool complete =
+        sched->keyframe_active && !sched->keyframe_failed && sched->keyframe_timestamp == decision->rtp_timestamp && (sched->failed_sid_mask & sid_mask) == 0;
     sched->needs_keyframe = !complete;
     sched->keyframe_active = false;
     sched->keyframe_failed = !complete;
@@ -359,8 +359,8 @@ void sfu_scheduler_commit_packet(sfu_subscriber_scheduler_t *sched, const sfu_sc
     sched->transition_failed = false;
   }
 
-  if (sched->temporal_transition_active && sched->temporal_transition_timestamp == decision->rtp_timestamp &&
-      sched->temporal_transition_tid == decision->tid && decision->e_bit != 0) {
+  if (sched->temporal_transition_active && sched->temporal_transition_timestamp == decision->rtp_timestamp && sched->temporal_transition_tid == decision->tid &&
+      decision->e_bit != 0) {
     if (!sched->temporal_transition_failed && (sched->failed_sid_mask & sid_mask) == 0 && decision->tid <= sched->target_tid) {
       sched->current_tid = decision->tid;
     }
@@ -380,11 +380,12 @@ void sfu_scheduler_reject_packet(sfu_subscriber_scheduler_t *sched, const sfu_sc
     sched->keyframe_active = false;
     sched->keyframe_failed = true;
   }
-  if ((decision->start_transition || sched->transition_active) && sched->transition_timestamp == decision->rtp_timestamp && sched->transition_sid == decision->sid) {
+  if ((decision->start_transition || sched->transition_active) && sched->transition_timestamp == decision->rtp_timestamp &&
+      sched->transition_sid == decision->sid) {
     sched->transition_failed = true;
   }
-  if ((decision->start_temporal_transition || sched->temporal_transition_active) &&
-      sched->temporal_transition_timestamp == decision->rtp_timestamp && sched->temporal_transition_tid == decision->tid) {
+  if ((decision->start_temporal_transition || sched->temporal_transition_active) && sched->temporal_transition_timestamp == decision->rtp_timestamp &&
+      sched->temporal_transition_tid == decision->tid) {
     sched->temporal_transition_failed = true;
   }
 }

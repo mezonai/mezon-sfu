@@ -372,6 +372,13 @@
                     <input type="text" id="displayName" value="Guest" />
                 </div>
                 <div class="form-group">
+                    <label for="videoCodec">Video Codec</label>
+                    <select id="videoCodec">
+                        <option value="VP9" selected>VP9 (SVC capable)</option>
+                        <option value="VP8">VP8 (no SVC)</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label for="svcMode">SVC Scalability Mode</label>
                     <select id="svcMode">
                         <option value="L3T3" selected>L3T3 (3 Spatial, 3 Temporal)</option>
@@ -379,8 +386,11 @@
                         <option value="L2T2">L2T2 (2 Spatial, 2 Temporal)</option>
                         <option value="L1T3">L1T3 (1 Spatial, 3 Temporal)</option>
                         <option value="L1T2">L1T2 (1 Spatial, 2 Temporal)</option>
-                        <option value="none">Disabled (Simulcast / Single Stream)</option>
+                        <option value="none">Disabled (single stream)</option>
                     </select>
+                    <small style="color: var(--muted); display:block; margin-top:4px;">
+                        SVC modes only apply to VP9. VP8 always uses a single stream.
+                    </small>
                 </div>
 
                 <div class="join-btn-group">
@@ -711,8 +721,8 @@
                 }
             }
 
-            /* Force VP9 codec selection via setCodecPreferences */
-            function forceVp9Codec(transceiver) {
+            /* Force preferred video codec via setCodecPreferences */
+            function forceVideoCodec(transceiver, codecName) {
                 if (
                     !transceiver ||
                     typeof transceiver.setCodecPreferences !== "function"
@@ -727,32 +737,39 @@
                 const caps = RTCRtpSender.getCapabilities("video");
                 if (!caps || !caps.codecs) return;
 
-                // Filter specifically for VP9
-                const vp9Codecs = caps.codecs.filter(
-                    (c) => c.mimeType.toLowerCase() === "video/vp9"
+                const wanted = (codecName || "VP9").toLowerCase();
+                const preferred = caps.codecs.filter(
+                    (c) => c.mimeType.toLowerCase() === "video/" + wanted
+                );
+                const rtx = caps.codecs.filter(
+                    (c) => c.mimeType.toLowerCase() === "video/rtx"
                 );
 
-                if (vp9Codecs.length > 0) {
+                if (preferred.length > 0) {
                     try {
-                        transceiver.setCodecPreferences(vp9Codecs);
-                        console.log("Forced VP9 Codec Preference:", vp9Codecs);
+                        // Prefer selected codec first; keep RTX so NACK recovery works.
+                        transceiver.setCodecPreferences([...preferred, ...rtx]);
+                        console.log("Forced video codec preference:", wanted, preferred);
                     } catch (e) {
-                        console.warn("setCodecPreferences for VP9 failed:", e);
+                        console.warn("setCodecPreferences for " + wanted + " failed:", e);
                     }
                 } else {
-                    console.warn("VP9 codec is not supported by this browser.");
+                    console.warn(wanted.toUpperCase() + " codec is not supported by this browser.");
                 }
             }
 
-            /* Configure VP9 Transceiver & Apply SVC Scalability Mode */
+            /* Configure video transceiver: codec preference + optional VP9 SVC mode */
             async function enableSvcForVideoSender(pc, videoTrack) {
                 const selectedMode = document.getElementById("svcMode").value;
+                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP9";
 
                 const transceiver =
                     pc.getTransceivers().find(
                         (t) =>
-                            (t.receiver && t.receiver.track && t.receiver.track.kind === "video") ||
-                            t.mid === "1"
+                            t.mid === "1" ||
+                            (t.sender && t.sender.track && t.sender.track.kind === "video") ||
+                            (t.receiver && t.receiver.track && t.receiver.track.kind === "video" &&
+                             (t.direction === "sendonly" || t.direction === "sendrecv" || t.direction === "inactive"))
                     );
 
                 if (!transceiver) {
@@ -761,56 +778,65 @@
                     return;
                 }
 
-                // Force VP9 Codec Preference
-                forceVp9Codec(transceiver);
+                // Prefer the uplink mid:1 transceiver when present.
+                const uplink =
+                    pc.getTransceivers().find((t) => t.mid === "1") || transceiver;
 
-                await transceiver.sender.replaceTrack(videoTrack);
-                if (transceiver.direction !== "sendrecv" && transceiver.direction !== "sendonly") {
-                    transceiver.direction = "sendonly";
+                forceVideoCodec(uplink, selectedCodec);
+
+                await uplink.sender.replaceTrack(videoTrack);
+                if (uplink.direction !== "sendrecv" && uplink.direction !== "sendonly") {
+                    uplink.direction = "sendonly";
                 }
 
-                // Apply SVC mode if selected
-                if (selectedMode !== "none") {
-                    try {
-                        const params = transceiver.sender.getParameters();
-                        if (!params.encodings || params.encodings.length === 0) {
-                            params.encodings = [{}];
-                        }
+                // SVC only applies to VP9. Always clear scalabilityMode for VP8 or
+                // when the user selects Disabled so the encoder cannot keep a
+                // previously negotiated multi-layer mode after renegotiation.
+                const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
+                try {
+                    const params = uplink.sender.getParameters();
+                    if (!params.encodings || params.encodings.length === 0) {
+                        params.encodings = [{}];
+                    }
+                    if (wantSvc) {
                         params.encodings[0].scalabilityMode = selectedMode;
-                        params.encodings[0].maxBitrate = 2_500_000; // Allow sufficient bitrate for spatial layers
-
-                        await transceiver.sender.setParameters(params);
-
-                        // Read back the effective parameters: Chrome may accept the
-                        // setParameters call but silently drop scalabilityMode (e.g.
-                        // if the encoder can't honor it), which shows up later as
-                        // scalabilityMode=N/A in getStats().
-                        const effective = transceiver.sender.getParameters();
-                        const applied = effective.encodings && effective.encodings[0]
-                            ? effective.encodings[0].scalabilityMode
-                            : undefined;
-                        console.log(
-                            `SVC requested: ${selectedMode}, ` +
-                                `encoder now reports scalabilityMode=${applied || "NONE (dropped!)"}, ` +
-                                `encodings=${effective.encodings ? effective.encodings.length : 0}`
-                        );
-                        if (!applied) {
-                            const isFirefox = navigator.userAgent.includes("Firefox");
-                            console.warn(
-                                `SVC mode ${selectedMode} was NOT applied by the encoder. ` +
-                                    (isFirefox
-                                        ? "Firefox does not implement scalabilityMode in setParameters -- " +
-                                          "SVC only works in Chrome/Chromium. Test there to see layers."
-                                        : "The VP9 encoder refused the scalability mode. " +
-                                          "Try a lighter mode (e.g. L1T3) or lower the capture resolution.")
-                            );
+                        params.encodings[0].maxBitrate = 2_500_000;
+                    } else {
+                        // Explicitly clear any leftover SVC mode.
+                        if ("scalabilityMode" in params.encodings[0]) {
+                            delete params.encodings[0].scalabilityMode;
                         }
-                    } catch (e) {
+                        params.encodings[0].maxBitrate = 1_500_000;
+                    }
+
+                    await uplink.sender.setParameters(params);
+
+                    const effective = uplink.sender.getParameters();
+                    const applied = effective.encodings && effective.encodings[0]
+                        ? effective.encodings[0].scalabilityMode
+                        : undefined;
+                    console.log(
+                        `Video sender: codec=${selectedCodec}, SVC requested=${wantSvc ? selectedMode : "none"}, ` +
+                            `encoder reports scalabilityMode=${applied || "NONE"}, ` +
+                            `encodings=${effective.encodings ? effective.encodings.length : 0}`
+                    );
+                    if (wantSvc && !applied) {
+                        const isFirefox = navigator.userAgent.includes("Firefox");
                         console.warn(
-                            `Could not set SVC scalabilityMode (${selectedMode}):`,
-                            e
+                            `SVC mode ${selectedMode} was NOT applied by the encoder. ` +
+                                (isFirefox
+                                    ? "Firefox does not implement scalabilityMode in setParameters -- " +
+                                      "SVC only works in Chrome/Chromium. Test there to see layers."
+                                    : "The VP9 encoder refused the scalability mode. " +
+                                      "Try a lighter mode (e.g. L1T3) or lower the capture resolution. " +
+                                      "Or switch Video Codec to VP8 / SVC Disabled for a single stream.")
                         );
                     }
+                } catch (e) {
+                    console.warn(
+                        `Could not configure video sender (codec=${selectedCodec}, mode=${selectedMode}):`,
+                        e
+                    );
                 }
             }
 
