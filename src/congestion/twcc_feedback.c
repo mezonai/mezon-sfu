@@ -197,8 +197,8 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
         max_d = d;
       }
     }
-    SFU_LOG_INFO("twcc_fb: base=%u win=%u recv=%u lost=%u dmin=%lldus dmax=%lldus", base_seq, window, received_count, window - received_count,
-                 (long long)min_d, (long long)max_d);
+    SFU_LOG_INFO("twcc_fb: base=%u win=%u recv=%u lost=%u dmin=%lldus dmax=%lldus", base_seq, window, received_count, window - received_count, (long long)min_d,
+                 (long long)max_d);
   }
 
   return (int)packet_len;
