@@ -89,24 +89,25 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
   bool has_decision = media->has_svc && media->has_video && !media->is_audio;
 
   if (has_decision) {
-    if (!media->publisher) {
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-      return false;
+    if (!media->publisher || media->publisher->peer_id == 0) {
+      SFU_LOG_WARN("worker %u: [EGRESS] VP9 without publisher peer_id; forwarding without layer filter", w->worker_index);
+      has_decision = false;
+    } else {
+      sched = sfu_session_scheduler_for(sub_session, media->publisher->peer_id);
+      if (!sched) {
+        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+        return false;
+      }
+      if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
+        sfu_worker_request_keyframe_throttled(w, media->publisher);
+      }
+      if (!sfu_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+        sfu_scheduler_reject_packet(sched, &decision);
+        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+        return false;
+      }
+      video_class = decision.pacer_class;
     }
-    sched = sfu_session_scheduler_for(sub_session, media->publisher->peer_id);
-    if (!sched) {
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-      return false;
-    }
-    if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
-      sfu_worker_request_keyframe_throttled(w, media->publisher);
-    }
-    if (!sfu_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
-      sfu_scheduler_reject_packet(sched, &decision);
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-      return false;
-    }
-    video_class = decision.pacer_class;
   }
 
   bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL);

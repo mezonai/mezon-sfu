@@ -680,6 +680,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     uint32_t mid_video = mid_audio + 1;
 
     sfu_sdp_receiver_view_t slot;
+    memset(&slot, 0, sizeof(slot));
     bool found = false;
     for (uint32_t i = 0; i < receiver_count; i++) {
       sfu_sdp_receiver_view_t candidate;

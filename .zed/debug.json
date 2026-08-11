@@ -8,9 +8,7 @@
       "cwd": "$ZED_WORKTREE_ROOT"
     },
     "program": "$ZED_WORKTREE_ROOT/build/mezon-sfu",
-    "request": "launch",
-    "env": {
-      "SFU_PUBLIC_HOST": "172.16.11.90"
-    }
+    "args": ["-c", "config.ini"],
+    "request": "launch"
   }
 ]

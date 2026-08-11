@@ -252,7 +252,9 @@ static void test_routing_table(void) {
 /* Audience role must survive the deferred-answer path: the routing entry
  * stashes is_audience, and handle_stun's apply step must propagate it into the
  * session before the peer joins the room graph. Also verify the subscription
- * guard: an audience session must never be acquirable as a publish source. */
+ * guard: an audience session must never be acquirable as a publish source.
+ * peer_id from the deferred answer must also land on the session so VP9
+ * subscriber-scheduler lookup cannot see publisher_id==0. */
 static void test_audience_role_propagation(void) {
   sfu_routing_table_t rtable;
   assert(sfu_routing_table_init(&rtable) == 0);
@@ -263,8 +265,8 @@ static void test_audience_role_propagation(void) {
   sfu_register_ufrag_room(&rtable, "ufrag_aud", &dummy_room, 20);
   sfu_register_ufrag_room(&rtable, "ufrag_spk", &dummy_room, 21);
 
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_aud", 111, 222, 333, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 0, true);
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_spk", 444, 555, 666, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 0, false);
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_aud", 111, 222, 333, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 42, true);
+  sfu_routing_table_set_pending_answer(&rtable, "ufrag_spk", 444, 555, 666, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 77, false);
 
   const sfu_routing_entry_t *aud = NULL;
   const sfu_routing_entry_t *spk = NULL;
@@ -278,8 +280,10 @@ static void test_audience_role_propagation(void) {
   assert(aud != NULL && spk != NULL);
   assert(aud->has_pending_answer && aud->is_audience);
   assert(spk->has_pending_answer && !spk->is_audience);
+  assert(aud->peer_id == 42);
+  assert(spk->peer_id == 77);
 
-  /* Mirror handle_stun's deferred-apply step: role must land on the session. */
+  /* Mirror handle_stun's deferred-apply step: role + peer_id must land. */
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
   sfu_session_table_t table;
@@ -291,8 +295,14 @@ static void test_audience_role_propagation(void) {
 
   sfu_peer_session_t *s = sfu_session_table_get_or_create(&table, &addr, addr_len);
   assert(s != NULL);
+  assert(s->peer_id != 0); /* construction always assigns a non-zero id */
+  uint32_t construction_id = s->peer_id;
+  /* Deferred answer peer_id overrides construction id when present. */
+  s->peer_id = aud->peer_id;
   atomic_store(&s->is_audience, aud->is_audience);
   assert(atomic_load(&s->is_audience) == true);
+  assert(s->peer_id == 42);
+  assert(s->peer_id != construction_id || construction_id == 42);
 
   /* Guard: audience sessions are never a publish source. */
   assert(sfu_session_subscriptions_acquire(s) == NULL);
@@ -300,7 +310,9 @@ static void test_audience_role_propagation(void) {
   /* Speaker sessions keep normal (non-NULL once published) semantics; with no
    * published snapshot yet, acquire is NULL but the flag itself is clear. */
   atomic_store(&s->is_audience, spk->is_audience);
+  s->peer_id = spk->peer_id;
   assert(atomic_load(&s->is_audience) == false);
+  assert(s->peer_id == 77);
 
   sfu_session_release(s);
   sfu_session_table_destroy(&table);
