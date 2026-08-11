@@ -452,12 +452,60 @@ static void test_multi_publisher_concurrent_churn(void) {
   sfu_room_destroy(&room);
 }
 
+static void test_fanout_uses_publisher_stream_identity(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 10) == 0);
+
+  sfu_peer_session_t *publisher = mock_session("publisher");
+  sfu_peer_session_t *subscriber = mock_session("subscriber");
+  publisher->uplink_video.ssrc = 1111;
+  publisher->uplink_video.rtx_ssrc = 2222;
+  publisher->uplink_video.payload_type = 98;
+  publisher->uplink_video.rtx_payload_type = 97;
+  publisher->uplink_video.codec = SFU_VIDEO_CODEC_VP9;
+  subscriber->uplink_video.ssrc = 3333;
+  subscriber->uplink_video.rtx_ssrc = 4444;
+  subscriber->uplink_video.payload_type = 96;
+  subscriber->uplink_video.rtx_payload_type = 99;
+  subscriber->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+
+  room_add_peer(&room, publisher);
+  room_add_peer(&room, subscriber);
+
+  sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(publisher);
+  assert(snap != NULL && snap->count == 1);
+  const sfu_receiver_entry_t *entry = &snap->entries[0];
+  assert(entry->subscriber == subscriber);
+  assert(entry->video_ssrc == publisher->uplink_video.ssrc);
+  assert(entry->video_rtx_ssrc == publisher->uplink_video.rtx_ssrc);
+  assert(entry->video_pt == publisher->uplink_video.payload_type);
+  assert(entry->video_rtx_pt == publisher->uplink_video.rtx_payload_type);
+  assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);
+  assert(strcmp(entry->subscriber_ufrag, publisher->cold->ufrag) == 0);
+  sfu_subscriptions_snapshot_release(snap);
+
+  snap = sfu_session_subscriptions_acquire(subscriber);
+  assert(snap != NULL && snap->count == 1);
+  entry = &snap->entries[0];
+  assert(entry->subscriber == publisher);
+  assert(entry->video_ssrc == publisher->uplink_video.ssrc);
+  assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);
+  sfu_subscriptions_snapshot_release(snap);
+
+  room_remove_peer(&room, subscriber);
+  room_remove_peer(&room, publisher);
+  sfu_session_release(subscriber);
+  sfu_session_release(publisher);
+  sfu_room_destroy(&room);
+}
+
 int main(void) {
   test_add_remove();
   test_audience_role_asymmetry_and_transition();
   test_snapshot_hold_across_replace();
   test_concurrent_snapshot_read_write();
   test_multi_publisher_concurrent_churn();
+  test_fanout_uses_publisher_stream_identity();
 
   printf("test_room: OK\n");
   return 0;

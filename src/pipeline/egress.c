@@ -4,9 +4,12 @@
 #include "congestion/twcc_history.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
+#include "pipeline/keyframe.h"
 #include "rtp/rtp_ext.h"
+#include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
 #include "runtime/fanout.h"
+#include "runtime/scheduler.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/srtp/srtp.h"
@@ -15,33 +18,38 @@
 #include "util/netbytes.h"
 
 static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
-                                     uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video, bool is_audio,
-                                     sfu_pacer_class_t video_class) {
+                                     const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_subscriber_scheduler_t *sched,
+                                     const sfu_scheduler_decision_t *decision) {
   int enc_len = (int)pkt->len;
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
-  uint8_t expected_pt = sfu_session_get_mapped_pt(sub_session, incoming_pt);
-  if (incoming_pt != expected_pt) {
-    pkt->data[1] = (pkt->data[1] & 0x80) | (expected_pt & 0x7F);
+  if (!media->is_audio && media->has_video && media->video_pt != 0 && incoming_pt != media->video_pt) {
+    pkt->data[1] = (pkt->data[1] & 0x80) | (media->video_pt & 0x7F);
   }
 
   int64_t send_time_us = (int64_t)sfu_now_us();
-  sfu_pacer_class_t cls = is_audio ? SFU_PACER_CLASS_AUDIO : (has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
+  sfu_pacer_class_t cls = media->is_audio ? SFU_PACER_CLASS_AUDIO : (media->has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
   if (!sfu_pacer_should_send(&sub_session->pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
     sfu_metric_inc("pacer_dropped_enh");
     return false;
   }
 
   uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
-  if (has_video && incoming_pt == video_pt && sub_session->rtx_cache) {
-    sfu_rtx_cache_put_stream(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, video_rtx_ssrc, video_rtx_pt, video_ssrc,
-                             atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
+  if (sched && decision) {
+    subscriber_seq = sfu_scheduler_assign_output_seq(sched, subscriber_seq);
+    if (!sfu_rtp_packet_set_seq(pkt->data, pkt->len, subscriber_seq) || !sfu_rtp_packet_set_marker(pkt->data, pkt->len, decision->set_marker)) {
+      return false;
+    }
+  }
+  if (media->has_video && !media->is_audio && sub_session->rtx_cache) {
+    sfu_rtx_cache_put_stream(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, media->video_rtx_ssrc, media->video_rtx_pt,
+                             media->video_ssrc, atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
   }
 
-  if (sub_session->twcc_extmap_id != 0) {
+  if (sub_session->twcc_send_extmap_id != 0) {
     uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
     size_t new_len = (size_t)enc_len;
-    if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, sub_session->twcc_extmap_id, twcc_seq, &new_len)) {
+    if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, sub_session->twcc_send_extmap_id, twcc_seq, &new_len)) {
       enc_len = (int)new_len;
       if (sub_session->twcc_history) {
         sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
@@ -67,21 +75,48 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 }
 
 bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
-                        uint32_t video_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, uint32_t video_rtx_ssrc, bool has_video, bool is_audio,
-                        sfu_pacer_class_t video_class) {
-  if (sub_session->worker_id == w->worker_index) {
-    bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, video_ssrc, video_pt, video_rtx_pt, video_rtx_ssrc, has_video, is_audio, video_class);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-    return admitted;
-  }
-
-  atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
-  if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, pkt, sub_session, dst, dst_len, video_ssrc, video_rtx_ssrc, video_pt,
-                                       video_rtx_pt, has_video, is_audio, (uint8_t)video_class)) {
-    SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
-    sfu_session_release(sub_session);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+                        const sfu_egress_media_t *media) {
+  if (!w || !sub_session || !pkt || !dst || !media || sub_session->worker_id != w->worker_index) {
+    if (w && pkt) {
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    }
     return false;
   }
-  return true;
+
+  sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
+  sfu_subscriber_scheduler_t *sched = NULL;
+  sfu_scheduler_decision_t decision;
+  bool has_decision = media->has_svc && media->has_video && !media->is_audio;
+
+  if (has_decision) {
+    if (!media->publisher) {
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      return false;
+    }
+    sched = sfu_session_scheduler_for(sub_session, media->publisher->peer_id);
+    if (!sched) {
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      return false;
+    }
+    if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
+      sfu_worker_request_keyframe_throttled(w, media->publisher);
+    }
+    if (!sfu_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+      sfu_scheduler_reject_packet(sched, &decision);
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      return false;
+    }
+    video_class = decision.pacer_class;
+  }
+
+  bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL);
+  if (has_decision) {
+    if (admitted) {
+      sfu_scheduler_commit_packet(sched, &decision);
+    } else {
+      sfu_scheduler_reject_packet(sched, &decision);
+    }
+  }
+  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+  return admitted;
 }

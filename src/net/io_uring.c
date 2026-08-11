@@ -115,14 +115,20 @@ int sfu_ring_arm_recv(sfu_ring_t *r) {
 }
 
 int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
+  if (!r || !pkt || !dst || dst_len == 0 || (size_t)dst_len > sizeof(pkt->peer_addr)) {
+    return -1;
+  }
+
   struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
   if (!sqe) {
     return -1;
   }
 
+  memcpy(&pkt->peer_addr, dst, dst_len);
+  pkt->peer_addr_len = dst_len;
   sfu_packet_retain(pkt, 1);
   io_uring_prep_send_zc(sqe, r->fd, pkt->data, pkt->len, 0, 0);
-  io_uring_prep_send_set_addr(sqe, dst, dst_len);
+  io_uring_prep_send_set_addr(sqe, (const struct sockaddr *)&pkt->peer_addr, pkt->peer_addr_len);
   io_uring_sqe_set_data(sqe, pkt);
 
   return 0;

@@ -199,39 +199,54 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     }
     requested[requested_count++] = lost_seq;
 
-    if (!sfu_pacer_rtx_allow(&sender_session->pacer, 1200 /* conservative MTU estimate */, (int64_t)sfu_now_us())) {
-      sfu_metric_inc("rtx_dropped_budget");
-      continue;
-    }
-
     uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
     uint32_t orig_len = 0;
     uint32_t rtx_ssrc = 0;
     uint8_t rtx_pt = 0;
 
-    if (sfu_rtx_cache_get_stream(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
-      sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
-      if (!rtx_enc) {
-        continue;
-      }
-
-      uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
-      size_t rtx_built_len = 0;
-      if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, next_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
-        sfu_metric_inc("rtx_build_fail");
-        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
-        continue;
-      }
-
-      int rtx_enc_len = (int)rtx_built_len;
-      if (sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap)) {
-        rtx_enc->len = (uint32_t)rtx_enc_len;
-        sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
-      }
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
-    } else {
+    if (!sfu_rtx_cache_get_stream(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
       unrecoverable_loss = true;
+      continue;
     }
+
+    if (!sfu_pacer_rtx_allow(&sender_session->pacer, orig_len + 2, (int64_t)sfu_now_us())) {
+      sfu_metric_inc("rtx_dropped_budget");
+      continue;
+    }
+
+    sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
+    if (!rtx_enc) {
+      continue;
+    }
+
+    uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
+    size_t rtx_built_len = 0;
+    if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, next_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
+      sfu_metric_inc("rtx_build_fail");
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+      continue;
+    }
+
+    int64_t send_time_us = (int64_t)sfu_now_us();
+    if (sender_session->twcc_send_extmap_id != 0) {
+      uint16_t twcc_seq = __atomic_fetch_add(&sender_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+      size_t rewritten_len = rtx_built_len;
+      if (sfu_rtp_ext_write_twcc(rtx_enc->data, rtx_built_len, rtx_enc->cap, sender_session->twcc_send_extmap_id, twcc_seq, &rewritten_len)) {
+        rtx_built_len = rewritten_len;
+        if (sender_session->twcc_history) {
+          sfu_twcc_history_record(sender_session->twcc_history, twcc_seq, send_time_us, (uint32_t)rtx_built_len);
+        }
+      } else {
+        sfu_metric_inc("twcc_write_fail");
+      }
+    }
+
+    int rtx_enc_len = (int)rtx_built_len;
+    if (sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap)) {
+      rtx_enc->len = (uint32_t)rtx_enc_len;
+      sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
+    }
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
   }
 
   if (capped) {
@@ -308,24 +323,28 @@ static void handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
 }
 
-static void extract_svc_metadata(sfu_peer_session_t *sender_session, sfu_ingress_media_t *m) {
+typedef enum sfu_svc_parse_status {
+  SFU_SVC_NOT_PRESENT = 0,
+  SFU_SVC_PARSE_OK,
+  SFU_SVC_PARSE_MALFORMED,
+} sfu_svc_parse_status_t;
+
+static sfu_svc_parse_status_t extract_svc_metadata(sfu_peer_session_t *sender_session, sfu_ingress_media_t *m) {
   m->has_svc = false;
   m->is_keyframe = false;
 
-  if (m->is_audio || m->rtp.payload_type != sender_session->uplink_video.payload_type) {
-    return;
+  if (m->is_audio || m->rtp.payload_type != sender_session->uplink_video.payload_type || sender_session->uplink_video.codec != SFU_VIDEO_CODEC_VP9) {
+    return SFU_SVC_NOT_PRESENT;
   }
 
-  sfu_video_codec_t codec = sfu_video_codec_from_pt(m->rtp.payload_type);
-  if (codec == SFU_VIDEO_CODEC_NONE) {
-    return;
+  if (sfu_svc_parse_descriptor(sender_session->uplink_video.codec, m->rtp.payload, m->rtp.payload_len, &m->svc) != 0) {
+    return SFU_SVC_PARSE_MALFORMED;
   }
 
-  if (sfu_svc_parse_descriptor(codec, m->rtp.payload, m->rtp.payload_len, &m->svc) == 0) {
-    m->svc.rtp_timestamp = m->rtp.timestamp;
-    m->has_svc = true;
-    m->is_keyframe = sfu_svc_descriptor_is_keyframe(&m->svc);
-  }
+  m->svc.rtp_timestamp = m->rtp.timestamp;
+  m->has_svc = true;
+  m->is_keyframe = sfu_svc_descriptor_is_keyframe(&m->svc);
+  return SFU_SVC_PARSE_OK;
 }
 
 void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
@@ -379,13 +398,13 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  if (sender_session->twcc_recv && sender_session->twcc_extmap_id == 0) {
-    sender_session->twcc_extmap_id = SFU_TWCC_RECV_EXTMAP_ID;
+  if (sender_session->twcc_recv && sender_session->twcc_recv_extmap_id == 0) {
+    sender_session->twcc_recv_extmap_id = SFU_TWCC_RECV_EXTMAP_ID;
   }
 
-  if (sender_session->twcc_recv && sender_session->twcc_extmap_id != 0 && m.rtp.extension) {
+  if (sender_session->twcc_recv && sender_session->twcc_recv_extmap_id != 0 && m.rtp.extension) {
     uint16_t twcc_seq = 0;
-    if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, sender_session->twcc_extmap_id, &twcc_seq)) {
+    if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, sender_session->twcc_recv_extmap_id, &twcc_seq)) {
       int64_t arrival_us = pkt->recv_ts_ns ? (int64_t)(pkt->recv_ts_ns / 1000ULL) : (int64_t)sfu_now_us();
       sfu_twcc_recv_tracker_record(sender_session->twcc_recv, twcc_seq, arrival_us);
     }
@@ -418,7 +437,14 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   m.is_audio = !is_video_pt;
-  extract_svc_metadata(sender_session, &m);
+  sfu_svc_parse_status_t svc_status = extract_svc_metadata(sender_session, &m);
+  if (svc_status == SFU_SVC_PARSE_MALFORMED) {
+    sfu_metric_inc("vp9_descriptor_parse_fail");
+    sfu_worker_request_keyframe_throttled(w, sender_session);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
 
   sfu_router_forward(w, sender_session, &m);
 

@@ -91,8 +91,10 @@ static int append_twcc_recv_attribute(char *out, size_t out_cap, size_t *offset)
   return 0;
 }
 
-static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, uint8_t video_pt, uint8_t rtx_pt) {
-  sfu_video_codec_t codec = sfu_video_codec_from_pt(video_pt);
+static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, sfu_video_codec_t codec, uint8_t video_pt, uint8_t rtx_pt) {
+  if (codec == SFU_VIDEO_CODEC_NONE) {
+    codec = sfu_video_codec_from_pt(video_pt);
+  }
   const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9) ? "VP9" : (codec == SFU_VIDEO_CODEC_AV1) ? "AV1" : "VP8";
 
   char line[128];
@@ -273,13 +275,13 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_video_codec_attributes(out, out_cap, &off, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0) {
+  if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP9, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0) {
     return -1;
   }
-  if (append_video_codec_attributes(out, out_cap, &off, SFU_PT_AV1, SFU_PT_AV1_RTX) != 0) {
+  if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_AV1, SFU_PT_AV1, SFU_PT_AV1_RTX) != 0) {
     return -1;
   }
-  if (append_video_codec_attributes(out, out_cap, &off, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0) {
+  if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP8, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0) {
     return -1;
   }
 
@@ -301,6 +303,7 @@ static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t 
   view->mid_video = e->mid_video;
   view->video_pt = e->video_pt;
   view->video_rtx_pt = e->video_rtx_pt;
+  view->video_codec = e->video_codec;
   view->has_audio = e->has_audio;
   view->has_video = e->has_video;
   view->audio_active = e->audio_active;
@@ -447,7 +450,7 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
         goto fail;
       }
       if (current_media == 2 && video_pt != 0) {
-        if (append_video_codec_attributes(out, out_cap, &off, video_pt, rtx_pt) != 0) {
+        if (append_video_codec_attributes(out, out_cap, &off, session->uplink_video.codec, video_pt, rtx_pt) != 0) {
           goto fail;
         }
       }
@@ -555,7 +558,7 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
       if (append_twcc_attributes(out, out_cap, &off) != 0) {
         goto fail;
       }
-      if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {
+      if (append_video_codec_attributes(out, out_cap, &off, slot.video_codec, remote_video_pt, remote_rtx_pt) != 0) {
         goto fail;
       }
       if (append_remote_video_ssrcs(out, out_cap, &off, slot.video_ssrc, slot.video_rtx_ssrc, slot.owner_ufrag) != 0) {
@@ -669,7 +672,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_twcc_recv_attribute(out, out_cap, &off) != 0) {
     goto fail;
   }
-  if (append_video_codec_attributes(out, out_cap, &off, local_video_pt, local_rtx_pt) != 0) {
+  if (append_video_codec_attributes(out, out_cap, &off, session->uplink_video.codec, local_video_pt, local_rtx_pt) != 0) {
     goto fail;
   }
 
@@ -746,7 +749,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     if (append_twcc_attributes(out, out_cap, &off) != 0) {
       goto fail;
     }
-    if (append_video_codec_attributes(out, out_cap, &off, remote_video_pt, remote_rtx_pt) != 0) {
+    if (append_video_codec_attributes(out, out_cap, &off, slot.video_codec, remote_video_pt, remote_rtx_pt) != 0) {
       goto fail;
     }
     if (video_live) {

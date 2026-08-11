@@ -126,8 +126,9 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
 }
 
 bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, sfu_peer_session_t *subscriber,
-                                     const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc, uint32_t video_rtx_ssrc, uint8_t video_pt,
-                                     uint8_t video_rtx_pt, bool has_video, bool is_audio, uint8_t pacer_class) {
+                                     sfu_peer_session_t *publisher, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
+                                     uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, bool is_audio,
+                                     const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe) {
   sfu_fanout_job_t *job = mesh_job_alloc(mesh, src_worker, dst_worker);
   if (!job) {
     return false;
@@ -138,13 +139,18 @@ bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worke
   job->dst_len = dst_len;
   job->kind = SFU_FANOUT_JOB_FORWARD;
   job->subscriber = subscriber;
+  job->publisher = publisher;
+  if (has_svc && svc) {
+    job->svc = *svc;
+  }
   job->video_ssrc = video_ssrc;
   job->video_rtx_ssrc = video_rtx_ssrc;
   job->video_pt = video_pt;
   job->video_rtx_pt = video_rtx_pt;
   job->has_video = has_video;
   job->is_audio = is_audio;
-  job->pacer_class = pacer_class;
+  job->has_svc = has_svc;
+  job->is_keyframe = is_keyframe;
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);

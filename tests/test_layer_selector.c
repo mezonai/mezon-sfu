@@ -211,6 +211,86 @@ static void test_keyframe_gate_does_not_jump_to_target(void) {
   assert(sched.current_tid == 0);
 }
 
+static void test_multi_packet_keyframe_transaction(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sched.target_sid = 0;
+  sched.target_tid = 0;
+
+  sfu_scheduler_decision_t decision;
+  sfu_svc_descriptor_t start = make_desc(600, 0, 0, 0, 0, 0, 1, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &start, true, &decision));
+  assert(decision.start_keyframe && decision.keyframe_packet);
+  assert(!decision.set_marker);
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.needs_keyframe && sched.keyframe_active);
+
+  sfu_svc_descriptor_t middle = make_desc(600, 0, 0, 0, 0, 0, 0, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &middle, false, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.needs_keyframe);
+
+  sfu_svc_descriptor_t end = make_desc(600, 0, 0, 0, 0, 0, 0, 1);
+  assert(sfu_scheduler_prepare_packet(&sched, &end, false, &decision));
+  assert(decision.set_marker);
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe && !sched.keyframe_active);
+}
+
+static void test_keyframe_reject_keeps_gate_armed(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+
+  sfu_scheduler_decision_t decision;
+  sfu_svc_descriptor_t start = make_desc(700, 0, 0, 0, 0, 0, 1, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &start, true, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+
+  sfu_svc_descriptor_t middle = make_desc(700, 0, 0, 0, 0, 0, 0, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &middle, false, &decision));
+  sfu_scheduler_reject_packet(&sched, &decision);
+  assert(sched.needs_keyframe && sched.keyframe_failed);
+
+  sfu_svc_descriptor_t end = make_desc(700, 0, 0, 0, 0, 0, 0, 1);
+  assert(!sfu_scheduler_prepare_packet(&sched, &end, false, &decision));
+}
+
+static void test_temporal_transition_commits_on_end(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.target_sid = 0;
+  sched.target_tid = 1;
+
+  sfu_scheduler_decision_t decision;
+  sfu_svc_descriptor_t start = make_desc(800, 0, 1, 1, 1, 0, 1, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &start, false, &decision));
+  assert(decision.start_temporal_transition);
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.current_tid == 0 && sched.temporal_transition_active);
+
+  sfu_svc_descriptor_t middle = make_desc(800, 0, 1, 1, 0, 0, 0, 0);
+  assert(sfu_scheduler_prepare_packet(&sched, &middle, false, &decision));
+  assert(decision.pacer_class == SFU_PACER_CLASS_VIDEO_TRANSITION);
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.current_tid == 0);
+
+  sfu_svc_descriptor_t end = make_desc(800, 0, 1, 1, 0, 0, 0, 1);
+  assert(sfu_scheduler_prepare_packet(&sched, &end, false, &decision));
+  sfu_scheduler_commit_packet(&sched, &decision);
+  assert(sched.current_tid == 1 && !sched.temporal_transition_active);
+}
+
+static void test_output_sequence_translation(void) {
+  sfu_subscriber_scheduler_t sched;
+  sfu_subscriber_scheduler_init(&sched, 1);
+  assert(sfu_scheduler_assign_output_seq(&sched, 100) == 100);
+  assert(sfu_scheduler_assign_output_seq(&sched, 102) == 101);
+  sched.next_output_seq = UINT16_MAX;
+  assert(sfu_scheduler_assign_output_seq(&sched, 500) == UINT16_MAX);
+  assert(sfu_scheduler_assign_output_seq(&sched, 600) == 0);
+}
+
 int main(void) {
   test_up_needs_headroom();
   test_down_holds_at_rung_rate();
@@ -221,6 +301,10 @@ int main(void) {
   test_spatial_transition_reject_prevents_promotion();
   test_independent_spatial_transition_and_picture_reset();
   test_keyframe_gate_does_not_jump_to_target();
+  test_multi_packet_keyframe_transaction();
+  test_keyframe_reject_keeps_gate_armed();
+  test_temporal_transition_commits_on_end();
+  test_output_sequence_translation();
   printf("test_layer_selector: OK\n");
   return 0;
 }
