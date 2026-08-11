@@ -50,6 +50,16 @@ static void write_run_chunk(uint8_t **p, uint8_t symbol, uint16_t run) {
   *p += 2;
 }
 
+static void write_vector_chunk(uint8_t **p, const uint8_t *symbols, uint32_t count) {
+  uint16_t chunk = (uint16_t)(0x8000u | 0x4000u);
+  for (uint32_t k = 0; k < 7; k++) {
+    uint16_t sym = (k < count) ? symbols[k] : TWCC_STATUS_NOT_RECEIVED;
+    chunk |= (uint16_t)((sym & 0x3u) << (12 - 2 * k));
+  }
+  sfu_write_be16(*p, chunk);
+  *p += 2;
+}
+
 int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, uint32_t media_ssrc, int64_t now_us, uint8_t *buf, size_t cap) {
   if (!t || !buf || !sfu_twcc_recv_tracker_pending(t)) {
     return 0;
@@ -57,39 +67,36 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
 
   uint8_t status[SFU_TWCC_FEEDBACK_MAX_PACKETS];
   int64_t arrival[SFU_TWCC_FEEDBACK_MAX_PACKETS];
-  uint16_t base_seq = t->report_start_seq;
-  uint32_t window = 0;
-  uint32_t received_count = 0;
-  for (;;) {
-    base_seq = t->report_start_seq;
-    window = (uint32_t)(uint16_t)(t->latest_seq - base_seq) + 1u;
-    if (window > SFU_TWCC_FEEDBACK_MAX_PACKETS) {
-      window = SFU_TWCC_FEEDBACK_MAX_PACKETS;
-    }
-    if (window == 0) {
-      return 0;
-    }
 
-    received_count = 0;
-    for (uint32_t i = 0; i < window; i++) {
-      uint16_t seq = (uint16_t)(base_seq + i);
-      sfu_twcc_recv_entry_t *e = &t->entries[seq & SFU_TWCC_RECV_MASK];
-      if (e->valid && e->seq == seq) {
-        arrival[i] = e->arrival_us;
-        status[i] = TWCC_STATUS_SMALL_DELTA;
-        received_count++;
-      } else {
-        arrival[i] = 0;
-        status[i] = TWCC_STATUS_NOT_RECEIVED;
-      }
+  uint32_t span = (uint32_t)(uint16_t)(t->latest_seq - t->report_start_seq) + 1u;
+  if (span > SFU_TWCC_FEEDBACK_MAX_PACKETS) {
+    t->report_start_seq = (uint16_t)(t->latest_seq - (SFU_TWCC_FEEDBACK_MAX_PACKETS - 1));
+  }
+
+  uint16_t base_seq = t->report_start_seq;
+  uint32_t window = (uint32_t)(uint16_t)(t->latest_seq - base_seq) + 1u;
+  if (window > SFU_TWCC_FEEDBACK_MAX_PACKETS) {
+    window = SFU_TWCC_FEEDBACK_MAX_PACKETS;
+  }
+  if (window == 0) {
+    return 0;
+  }
+
+  uint32_t received_count = 0;
+  for (uint32_t i = 0; i < window; i++) {
+    uint16_t seq = (uint16_t)(base_seq + i);
+    sfu_twcc_recv_entry_t *e = &t->entries[seq & SFU_TWCC_RECV_MASK];
+    if (e->valid && e->seq == seq) {
+      arrival[i] = e->arrival_us;
+      status[i] = TWCC_STATUS_SMALL_DELTA;
+      received_count++;
+    } else {
+      arrival[i] = 0;
+      status[i] = TWCC_STATUS_NOT_RECEIVED;
     }
-    if (received_count > 0) {
-      break;
-    }
-    t->report_start_seq = (uint16_t)(base_seq + window);
-    if (!sfu_twcc_recv_tracker_pending(t)) {
-      return 0;
-    }
+  }
+  if (received_count == 0) {
+    return 0;
   }
 
   int64_t ref_us = 0;
@@ -111,7 +118,8 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
         continue;
       }
       int64_t d_us = arrival[i] - clock_us;
-      int64_t units = (d_us >= 0) ? (d_us / TWCC_SMALL_DELTA_UNIT_US) : -((-d_us + TWCC_SMALL_DELTA_UNIT_US - 1) / TWCC_SMALL_DELTA_UNIT_US);
+      int64_t units = (d_us >= 0) ? ((d_us + TWCC_SMALL_DELTA_UNIT_US / 2) / TWCC_SMALL_DELTA_UNIT_US)
+                                  : -((-d_us + TWCC_SMALL_DELTA_UNIT_US / 2) / TWCC_SMALL_DELTA_UNIT_US);
       if (units < 0 || units > 255) {
         status[i] = TWCC_STATUS_LARGE_DELTA;
         if (units > 32767) {
@@ -122,22 +130,30 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
         }
       }
       delta_units[i] = (int32_t)units;
-      clock_us = arrival[i];
+      clock_us += units * TWCC_SMALL_DELTA_UNIT_US;
     }
   }
 
   uint8_t chunk_buf[SFU_TWCC_FEEDBACK_MAX_PACKETS * 2];
   uint8_t *cp = chunk_buf;
   {
-    uint32_t i = 0;
-    while (i < window) {
-      uint8_t sym = status[i];
-      uint32_t run = 1;
-      while (i + run < window && status[i + run] == sym && run < 0x1FFF) {
-        run++;
+    bool homogeneous = window > 0;
+    for (uint32_t i = 1; i < window; i++) {
+      if (status[i] != status[0]) {
+        homogeneous = false;
+        break;
       }
-      write_run_chunk(&cp, sym, (uint16_t)run);
-      i += run;
+    }
+    if (homogeneous) {
+      write_run_chunk(&cp, status[0], (uint16_t)window);
+    } else {
+      for (uint32_t i = 0; i < window; i += 7) {
+        uint32_t n = window - i;
+        if (n > 7) {
+          n = 7;
+        }
+        write_vector_chunk(&cp, &status[i], n);
+      }
     }
   }
   size_t chunk_len = (size_t)(cp - chunk_buf);
@@ -162,6 +178,9 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
   }
 
   buf[0] = 0x80 | 15;
+  if (pad) {
+    buf[0] |= 0x20;
+  }
   buf[1] = 205;
   uint32_t words = (uint32_t)(packet_len / 4u) - 1u;
   sfu_write_be16(buf + 2, (uint16_t)words);
@@ -178,6 +197,7 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
   memcpy(buf + TWCC_FIXED_LEN + chunk_len, delta_buf, delta_len);
   if (pad) {
     memset(buf + total, 0, pad);
+    buf[packet_len - 1] = (uint8_t)pad;
   }
 
   t->report_start_seq = (uint16_t)(base_seq + window);
@@ -197,8 +217,8 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
         max_d = d;
       }
     }
-    SFU_LOG_INFO("twcc_fb: base=%u win=%u recv=%u lost=%u dmin=%lldus dmax=%lldus", base_seq, window, received_count, window - received_count, (long long)min_d,
-                 (long long)max_d);
+    SFU_LOG_DEBUG("twcc_fb: base=%u win=%u recv=%u lost=%u dmin=%lldus dmax=%lldus", base_seq, window, received_count, window - received_count,
+                  (long long)min_d, (long long)max_d);
   }
 
   return (int)packet_len;

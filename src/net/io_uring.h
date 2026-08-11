@@ -9,9 +9,12 @@
 #include "sfu/packet.h"
 #include "util/ringbuffer.h"
 
+#define SFU_RECV_CMSG_BUFSIZE 64u
+
 typedef struct sfu_ring {
   struct io_uring ring;
   struct msghdr recv_msg_template;
+  uint8_t recv_cmsg_buf[SFU_RECV_CMSG_BUFSIZE];
   struct io_uring_buf_ring *buf_ring;
   void *buf_ring_mem;
   uint32_t buf_count;

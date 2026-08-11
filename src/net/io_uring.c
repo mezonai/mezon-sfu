@@ -82,6 +82,8 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
 
   memset(&r->recv_msg_template, 0, sizeof(r->recv_msg_template));
   r->recv_msg_template.msg_namelen = sizeof(struct sockaddr_storage);
+  r->recv_msg_template.msg_control = r->recv_cmsg_buf;
+  r->recv_msg_template.msg_controllen = sizeof(r->recv_cmsg_buf);
 
   SFU_LOG_INFO("io_uring ring initialized: sq=%u cq=%u bufs=%u x %uB bgid=%d on fd=%d", sq_entries, cq_entries, buf_count, buf_size, bgid, fd);
   return 0;
@@ -218,6 +220,16 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
   uint16_t peer_port;
   format_ring_peer_addr((const struct sockaddr *)name, peer_ip, &peer_port);
 
+  uint64_t kernel_recv_ts_ns = 0;
+  for (struct cmsghdr *cmsg = io_uring_recvmsg_cmsg_firsthdr(o, &r->recv_msg_template); cmsg;
+       cmsg = io_uring_recvmsg_cmsg_nexthdr(o, &r->recv_msg_template, cmsg)) {
+    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_TIMESTAMPNS) {
+      const struct timespec *ts = (const struct timespec *)CMSG_DATA(cmsg);
+      kernel_recv_ts_ns = (uint64_t)ts->tv_sec * 1000000000ULL + (uint64_t)ts->tv_nsec;
+      break;
+    }
+  }
+
   if (o->flags & MSG_TRUNC) {
     SFU_LOG_WARN("datagram truncated from %s:%u (bid=%u), dropping", peer_ip, peer_port, bid);
     int mask = io_uring_buf_ring_mask(r->buf_count);
@@ -250,6 +262,7 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
   }
   memcpy(&pkt->peer_addr, name, namelen);
   pkt->peer_addr_len = namelen;
+  pkt->recv_ts_ns = kernel_recv_ts_ns;
 
   on_recv(user_data, pkt);
 
