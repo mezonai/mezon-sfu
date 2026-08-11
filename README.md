@@ -198,9 +198,3 @@ If you use the **Zed** editor, you can run and debug your builds directly with C
 Steps **5, 6, 7, and 8** are indeed encapsulated inside **`sfu_room_forward_packet()`** executing on the worker thread, while Step 9 hands off the processed packet to the subscriber egress pipeline where Step 10 (`protect`) and Step 11 (`io_uring` write) take over.
 
 
-## diagram
-<img width="1440" height="840" alt="image" src="https://github.com/user-attachments/assets/f3772f59-b4b9-4086-9a6e-a80346da1bef" />
-
-<img width="1440" height="720" alt="image" src="https://github.com/user-attachments/assets/3c4832a0-ff90-4357-a3b9-5b329fd6ee0d" />
-
-<img width="2720" height="1320" alt="mezon_sfu_core_architecture" src="https://github.com/user-attachments/assets/67892729-529a-4bcf-9490-1598d6526a5a" />
