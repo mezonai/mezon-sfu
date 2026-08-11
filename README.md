@@ -161,10 +161,7 @@ If you use the **Zed** editor, you can run and debug your builds directly with C
     },
     "program": "$ZED_WORKTREE_ROOT/build/mezon-sfu",
     "args": ["-c", "config.ini"],
-    "request": "launch",
-    "env": {
-      "SFU_PUBLIC_HOST": "127.0.0.1"
-    }
+    "request": "launch"
   }
 ]
 
