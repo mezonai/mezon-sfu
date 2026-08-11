@@ -68,11 +68,6 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
   uint8_t status[SFU_TWCC_FEEDBACK_MAX_PACKETS];
   int64_t arrival[SFU_TWCC_FEEDBACK_MAX_PACKETS];
 
-  uint32_t span = (uint32_t)(uint16_t)(t->latest_seq - t->report_start_seq) + 1u;
-  if (span > SFU_TWCC_FEEDBACK_MAX_PACKETS) {
-    t->report_start_seq = (uint16_t)(t->latest_seq - (SFU_TWCC_FEEDBACK_MAX_PACKETS - 1));
-  }
-
   uint16_t base_seq = t->report_start_seq;
   uint32_t window = (uint32_t)(uint16_t)(t->latest_seq - base_seq) + 1u;
   if (window > SFU_TWCC_FEEDBACK_MAX_PACKETS) {
@@ -96,6 +91,7 @@ int sfu_twcc_feedback_build(sfu_twcc_recv_tracker_t *t, uint32_t sender_ssrc, ui
     }
   }
   if (received_count == 0) {
+    t->report_start_seq = (uint16_t)(base_seq + window);
     return 0;
   }
 

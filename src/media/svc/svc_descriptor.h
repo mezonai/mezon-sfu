@@ -15,6 +15,7 @@ typedef struct sfu_svc_descriptor {
   uint8_t d_bit;
   uint8_t b_bit;
   uint8_t e_bit;
+  uint8_t l_bit;
 } sfu_svc_descriptor_t;
 
 int sfu_svc_parse_descriptor(sfu_video_codec_t codec, const uint8_t *payload, size_t payload_len, sfu_svc_descriptor_t *out);

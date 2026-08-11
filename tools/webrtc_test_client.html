@@ -758,6 +758,90 @@
                 }
             }
 
+            /* Force Chrome's encoder start/min rates via SDP fmtp. setParameters
+             * minBitrate is often ignored (getParameters shows minBitrate=?), while
+             * x-google-*-bitrate on the chosen video PT reliably lifts libvpx off
+             * the ~150 kbps L3T3 floor. */
+            function mungeVideoBitrate(sdp, minKbps, startKbps, maxKbps) {
+                if (!sdp) return sdp;
+                const pts = new Set();
+                for (const m of sdp.matchAll(/^a=rtpmap:(\d+) (VP9|VP8|AV1)\//gim)) {
+                    pts.add(m[1]);
+                }
+                if (pts.size === 0) return sdp;
+                let out = sdp;
+                for (const pt of pts) {
+                    const fmtpRe = new RegExp(`^a=fmtp:${pt} (.*)$`, "m");
+                    const extras = `x-google-min-bitrate=${minKbps};x-google-start-bitrate=${startKbps};x-google-max-bitrate=${maxKbps}`;
+                    if (fmtpRe.test(out)) {
+                        out = out.replace(fmtpRe, (line, rest) => {
+                            let cleaned = rest
+                                .replace(/;?\s*x-google-(?:min|start|max)-bitrate=\d+/gi, "")
+                                .replace(/^;|;$/g, "");
+                            return `a=fmtp:${pt} ${cleaned ? cleaned + ";" : ""}${extras}`;
+                        });
+                    } else {
+                        // Insert fmtp after the matching rtpmap line.
+                        const rtpmapRe = new RegExp(`^(a=rtpmap:${pt} .*)$`, "m");
+                        out = out.replace(rtpmapRe, `$1\r\na=fmtp:${pt} ${extras}`);
+                    }
+                }
+                // Do not inject b=AS: Chrome rejected session-level AS ("Expects m
+                // line") and media-level AS is unnecessary when x-google-*-bitrate
+                // is present on the video PT fmtp lines above.
+                return out;
+            }
+
+            async function applyVideoEncodingParams(pc) {
+                const selectedMode = document.getElementById("svcMode").value;
+                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP9";
+                const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
+                const uplink =
+                    pc.getTransceivers().find((t) => t.mid === "1") ||
+                    pc.getTransceivers().find((t) => t.sender && t.sender.track && t.sender.track.kind === "video");
+                if (!uplink || !uplink.sender) return;
+
+                try {
+                    const params = uplink.sender.getParameters();
+                    if (!params.encodings || params.encodings.length === 0) {
+                        params.encodings = [{}];
+                    }
+                    // Chrome requires degradationPreference on the root params object
+                    // for some versions when changing encoding rates.
+                    params.degradationPreference = "maintain-framerate";
+                    if (wantSvc) {
+                        params.encodings[0].scalabilityMode = selectedMode;
+                        params.encodings[0].maxBitrate = 2_500_000;
+                        params.encodings[0].maxFramerate = 30;
+                        params.encodings[0].scaleResolutionDownBy = 1;
+                        params.encodings[0].priority = "high";
+                        params.encodings[0].networkPriority = "high";
+                        // minBitrate is best-effort; many Chrome builds strip it from
+                        // getParameters even when the encoder accepted the floor.
+                        params.encodings[0].minBitrate = 1_000_000;
+                    } else {
+                        if ("scalabilityMode" in params.encodings[0]) {
+                            delete params.encodings[0].scalabilityMode;
+                        }
+                        params.encodings[0].maxBitrate = 1_500_000;
+                        params.encodings[0].maxFramerate = 30;
+                        params.encodings[0].scaleResolutionDownBy = 1;
+                        params.encodings[0].priority = "high";
+                        params.encodings[0].networkPriority = "high";
+                        params.encodings[0].minBitrate = 600_000;
+                    }
+                    await uplink.sender.setParameters(params);
+                    const enc0 = (uplink.sender.getParameters().encodings || [{}])[0];
+                    console.log(
+                        `Encoding params applied: mode=${enc0.scalabilityMode || "none"} ` +
+                            `min=${enc0.minBitrate || "?"} max=${enc0.maxBitrate || "?"} ` +
+                            `priority=${enc0.priority || "?"} net=${enc0.networkPriority || "?"}`
+                    );
+                } catch (e) {
+                    console.warn("applyVideoEncodingParams failed:", e);
+                }
+            }
+
             /* Configure video transceiver: codec preference + optional VP9 SVC mode */
             async function enableSvcForVideoSender(pc, videoTrack) {
                 const selectedMode = document.getElementById("svcMode").value;
@@ -784,63 +868,24 @@
 
                 forceVideoCodec(uplink, selectedCodec);
 
+                if (videoTrack && "contentHint" in videoTrack) {
+                    try {
+                        videoTrack.contentHint = "motion";
+                    } catch (_) { /* older browsers */ }
+                }
+
                 await uplink.sender.replaceTrack(videoTrack);
                 if (uplink.direction !== "sendrecv" && uplink.direction !== "sendonly") {
                     uplink.direction = "sendonly";
                 }
 
-                // SVC only applies to VP9. Always clear scalabilityMode for VP8 or
-                // when the user selects Disabled so the encoder cannot keep a
-                // previously negotiated multi-layer mode after renegotiation.
-                const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
-                try {
-                    const params = uplink.sender.getParameters();
-                    if (!params.encodings || params.encodings.length === 0) {
-                        params.encodings = [{}];
-                    }
-                    if (wantSvc) {
-                        params.encodings[0].scalabilityMode = selectedMode;
-                        params.encodings[0].maxBitrate = 2_500_000;
-                    } else {
-                        // Explicitly clear any leftover SVC mode.
-                        if ("scalabilityMode" in params.encodings[0]) {
-                            delete params.encodings[0].scalabilityMode;
-                        }
-                        params.encodings[0].maxBitrate = 1_500_000;
-                    }
-
-                    await uplink.sender.setParameters(params);
-
-                    const effective = uplink.sender.getParameters();
-                    const applied = effective.encodings && effective.encodings[0]
-                        ? effective.encodings[0].scalabilityMode
-                        : undefined;
-                    console.log(
-                        `Video sender: codec=${selectedCodec}, SVC requested=${wantSvc ? selectedMode : "none"}, ` +
-                            `encoder reports scalabilityMode=${applied || "NONE"}, ` +
-                            `encodings=${effective.encodings ? effective.encodings.length : 0}`
-                    );
-                    if (wantSvc && !applied) {
-                        const isFirefox = navigator.userAgent.includes("Firefox");
-                        console.warn(
-                            `SVC mode ${selectedMode} was NOT applied by the encoder. ` +
-                                (isFirefox
-                                    ? "Firefox does not implement scalabilityMode in setParameters -- " +
-                                      "SVC only works in Chrome/Chromium. Test there to see layers."
-                                    : "The VP9 encoder refused the scalability mode. " +
-                                      "Try a lighter mode (e.g. L1T3) or lower the capture resolution. " +
-                                      "Or switch Video Codec to VP8 / SVC Disabled for a single stream.")
-                        );
-                    }
-                } catch (e) {
-                    console.warn(
-                        `Could not configure video sender (codec=${selectedCodec}, mode=${selectedMode}):`,
-                        e
-                    );
-                }
+                await applyVideoEncodingParams(pc);
             }
 
             function startGccStatsMonitor(pc) {
+                // Per-ssrc last sample for actual media send/recv rate (bytes delta).
+                const prevOutBySsrc = new Map();
+                const prevInBySsrc = new Map();
                 const interval = setInterval(async () => {
                     if (
                         pc.connectionState === "closed" ||
@@ -861,12 +906,21 @@
                     // what tells us whether the VP9 preference actually won and
                     // SVC could engage.
                     const codecsById = new Map();
+                    let availableOutKbps = null;
                     stats.forEach((report) => {
                         if (report.type === "codec") {
                             codecsById.set(report.id, report);
                         }
+                        if (
+                            report.type === "candidate-pair" &&
+                            report.state === "succeeded" &&
+                            report.availableOutgoingBitrate
+                        ) {
+                            availableOutKbps = Math.round(report.availableOutgoingBitrate / 1000);
+                        }
                     });
 
+                    const nowMs = performance.now();
                     stats.forEach((report) => {
                         if (
                             report.type === "outbound-rtp" &&
@@ -875,24 +929,38 @@
                             const mode = report.scalabilityMode || "N/A";
                             const res = `${report.frameWidth || 0}x${report.frameHeight || 0}`;
                             const fps = report.framesPerSecond || 0;
+                            // targetBitrate is often stuck ~150kbps for L3T3 in Chrome
+                            // while the encoder actually sends far more — prefer sent=.
                             const kbps = report.targetBitrate ? Math.round(report.targetBitrate / 1000) : "?";
 
-                            // Debug: negotiated codec + encoder implementation.
-                            // RTX reports have no framesPerSecond, so fps>0
-                            // identifies the real media stream vs the RTX stream.
                             const codec = report.codecId ? codecsById.get(report.codecId) : null;
                             const codecName = codec ? codec.mimeType.split("/")[1] : "unknown";
                             const encoder = report.encoderImplementation || "unknown";
                             const isRtx = !report.framesPerSecond && !report.frameWidth ? " [RTX stream]" : "";
 
+                            let sentKbps = "?";
+                            if (typeof report.bytesSent === "number") {
+                                const key = report.ssrc != null ? String(report.ssrc) : report.id;
+                                const prev = prevOutBySsrc.get(key);
+                                if (prev && nowMs > prev.t) {
+                                    const dBytes = report.bytesSent - prev.bytes;
+                                    const dSec = (nowMs - prev.t) / 1000;
+                                    if (dBytes >= 0 && dSec > 0) {
+                                        sentKbps = Math.round((dBytes * 8) / 1000 / dSec);
+                                    }
+                                }
+                                prevOutBySsrc.set(key, { bytes: report.bytesSent, t: nowMs });
+                            }
+
                             console.log(
                                 `[VP9 SVC] Outbound: codec=${codecName} encoder=${encoder} ` +
-                                    `target=${kbps}kbps res=${res} fps=${fps} ` +
+                                    `sent=${sentKbps}kbps (target=${kbps} ignore-if-low) ` +
+                                    `availableOut=${availableOutKbps != null ? availableOutKbps + "kbps" : "?"} ` +
+                                    `res=${res} fps=${fps} ` +
                                     `scalabilityMode=${mode} ` +
                                     `qualityLimitation=${report.qualityLimitationReason || "none"}${isRtx}`
                             );
 
-                            // Update live overlay badge on local tile (skip RTX reports)
                             if (isRtx) return;
                             const localTile = participants.get("local");
                             if (localTile && localTile.badges) {
@@ -900,8 +968,42 @@
                                     <span class="badge">${codecName}</span>
                                     <span class="badge">${mode}</span>
                                     <span class="badge">${res} @ ${fps}fps</span>
+                                    <span class="badge">${sentKbps}kbps</span>
                                 `;
                             }
+                        }
+
+                        if (
+                            report.type === "inbound-rtp" &&
+                            report.kind === "video"
+                        ) {
+                            const res = `${report.frameWidth || 0}x${report.frameHeight || 0}`;
+                            const fps = report.framesPerSecond || 0;
+                            const codec = report.codecId ? codecsById.get(report.codecId) : null;
+                            const codecName = codec ? codec.mimeType.split("/")[1] : "unknown";
+                            const decoded = report.framesDecoded || 0;
+                            const lost = report.packetsLost || 0;
+                            const received = report.packetsReceived || 0;
+
+                            let recvKbps = "?";
+                            if (typeof report.bytesReceived === "number") {
+                                const key = report.ssrc != null ? String(report.ssrc) : report.id;
+                                const prev = prevInBySsrc.get(key);
+                                if (prev && nowMs > prev.t) {
+                                    const dBytes = report.bytesReceived - prev.bytes;
+                                    const dSec = (nowMs - prev.t) / 1000;
+                                    if (dBytes >= 0 && dSec > 0) {
+                                        recvKbps = Math.round((dBytes * 8) / 1000 / dSec);
+                                    }
+                                }
+                                prevInBySsrc.set(key, { bytes: report.bytesReceived, t: nowMs });
+                            }
+
+                            console.log(
+                                `[VP9 SVC] Inbound: codec=${codecName} recv=${recvKbps}kbps ` +
+                                    `res=${res} fps=${fps} decoded=${decoded} ` +
+                                    `pkts=${received} lost=${lost} ssrc=${report.ssrc || "?"}`
+                            );
                         }
                     });
                 }, 2000);
@@ -930,7 +1032,7 @@
             }
 
             async function connectAndJoin() {
-                const wsUrl = document.getElementById("wsUrl").value.trim();
+                let wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
                 const displayName =
                     document.getElementById("displayName").value.trim() ||
@@ -939,6 +1041,14 @@
                 if (!roomId) {
                     setJoinStatus("Please enter a Room ID", true);
                     return;
+                }
+
+                // Browsers block ws:// from https:// pages (mixed content). Prefer wss.
+                if (location.protocol === "https:" && wsUrl.startsWith("ws://")) {
+                    const upgraded = "wss://" + wsUrl.slice("ws://".length);
+                    console.warn(`Upgrading insecure WebSocket URL to ${upgraded} (page is HTTPS)`);
+                    wsUrl = upgraded;
+                    document.getElementById("wsUrl").value = wsUrl;
                 }
 
                 joinBtn.disabled = true;
@@ -1075,10 +1185,7 @@
                                     pc.addTrack(audioTrack, localStream);
                                 }
 
-                                if (videoTc && videoTrack) {
-                                    await videoTc.sender.replaceTrack(videoTrack);
-                                    videoTc.direction = "sendonly";
-                                } else if (videoTrack) {
+                                if (videoTrack) {
                                     await enableSvcForVideoSender(pc, videoTrack);
                                 }
                                 localTracksAdded = true;
@@ -1125,7 +1232,25 @@
                                 }
 
                                 const answer = await pc.createAnswer();
-                                await pc.setLocalDescription(answer);
+                                // x-google-*-bitrate on VP8/VP9 fmtp is the reliable way
+                                // to lift Chrome's libvpx start rate off the ~150 kbps L3T3
+                                // floor. setParameters(minBitrate) alone is often stripped.
+                                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP9";
+                                const selectedMode = (document.getElementById("svcMode") || {}).value || "none";
+                                const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
+                                const mungedSdp = mungeVideoBitrate(
+                                    answer.sdp,
+                                    wantSvc ? 1000 : 600,
+                                    wantSvc ? 1500 : 1000,
+                                    wantSvc ? 2500 : 1500
+                                );
+                                await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
+
+                                // Re-apply encodings after the answer is set so Chrome
+                                // does not drop scalabilityMode / rates across renegotiation.
+                                if (currentJoinMode === "speaker" && localTracksAdded) {
+                                    await applyVideoEncodingParams(pc);
+                                }
 
                                 // Prune tiles whose peer left the room entirely.
                                 // The SFU never removes m-lines: when a peer leaves,
