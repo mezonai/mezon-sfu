@@ -800,13 +800,20 @@
                     }
                     if (wantSvc) {
                         params.encodings[0].scalabilityMode = selectedMode;
+                        // L3T3 needs headroom for three spatial layers. minBitrate
+                        // keeps Chrome from parking the encoder at ~30–150 kbps when
+                        // send-side BWE is still probing; maxBitrate is the hard cap.
+                        params.encodings[0].minBitrate = 600_000;
                         params.encodings[0].maxBitrate = 2_500_000;
+                        params.encodings[0].maxFramerate = 30;
                     } else {
                         // Explicitly clear any leftover SVC mode.
                         if ("scalabilityMode" in params.encodings[0]) {
                             delete params.encodings[0].scalabilityMode;
                         }
+                        params.encodings[0].minBitrate = 400_000;
                         params.encodings[0].maxBitrate = 1_500_000;
+                        params.encodings[0].maxFramerate = 30;
                     }
 
                     await uplink.sender.setParameters(params);
@@ -815,9 +822,11 @@
                     const applied = effective.encodings && effective.encodings[0]
                         ? effective.encodings[0].scalabilityMode
                         : undefined;
+                    const enc0 = effective.encodings && effective.encodings[0] ? effective.encodings[0] : {};
                     console.log(
                         `Video sender: codec=${selectedCodec}, SVC requested=${wantSvc ? selectedMode : "none"}, ` +
                             `encoder reports scalabilityMode=${applied || "NONE"}, ` +
+                            `minBitrate=${enc0.minBitrate || "?"} maxBitrate=${enc0.maxBitrate || "?"}, ` +
                             `encodings=${effective.encodings ? effective.encodings.length : 0}`
                     );
                     if (wantSvc && !applied) {
@@ -861,9 +870,17 @@
                     // what tells us whether the VP9 preference actually won and
                     // SVC could engage.
                     const codecsById = new Map();
+                    let availableOutKbps = null;
                     stats.forEach((report) => {
                         if (report.type === "codec") {
                             codecsById.set(report.id, report);
+                        }
+                        if (
+                            report.type === "candidate-pair" &&
+                            report.state === "succeeded" &&
+                            report.availableOutgoingBitrate
+                        ) {
+                            availableOutKbps = Math.round(report.availableOutgoingBitrate / 1000);
                         }
                     });
 
@@ -887,7 +904,8 @@
 
                             console.log(
                                 `[VP9 SVC] Outbound: codec=${codecName} encoder=${encoder} ` +
-                                    `target=${kbps}kbps res=${res} fps=${fps} ` +
+                                    `target=${kbps}kbps availableOut=${availableOutKbps != null ? availableOutKbps + "kbps" : "?"} ` +
+                                    `res=${res} fps=${fps} ` +
                                     `scalabilityMode=${mode} ` +
                                     `qualityLimitation=${report.qualityLimitationReason || "none"}${isRtx}`
                             );
@@ -930,7 +948,7 @@
             }
 
             async function connectAndJoin() {
-                const wsUrl = document.getElementById("wsUrl").value.trim();
+                let wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
                 const displayName =
                     document.getElementById("displayName").value.trim() ||
@@ -939,6 +957,14 @@
                 if (!roomId) {
                     setJoinStatus("Please enter a Room ID", true);
                     return;
+                }
+
+                // Browsers block ws:// from https:// pages (mixed content). Prefer wss.
+                if (location.protocol === "https:" && wsUrl.startsWith("ws://")) {
+                    const upgraded = "wss://" + wsUrl.slice("ws://".length);
+                    console.warn(`Upgrading insecure WebSocket URL to ${upgraded} (page is HTTPS)`);
+                    wsUrl = upgraded;
+                    document.getElementById("wsUrl").value = wsUrl;
                 }
 
                 joinBtn.disabled = true;
