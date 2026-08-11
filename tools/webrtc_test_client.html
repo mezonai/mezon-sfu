@@ -786,10 +786,9 @@
                         out = out.replace(rtpmapRe, `$1\r\na=fmtp:${pt} ${extras}`);
                     }
                 }
-                // Session-level AS bandwidth hint (kbps).
-                if (!/^b=AS:/m.test(out)) {
-                    out = out.replace(/^(t=0 0\r\n)/m, `$1b=AS:${maxKbps}\r\n`);
-                }
+                // Do not inject b=AS: Chrome rejected session-level AS ("Expects m
+                // line") and media-level AS is unnecessary when x-google-*-bitrate
+                // is present on the video PT fmtp lines above.
                 return out;
             }
 
