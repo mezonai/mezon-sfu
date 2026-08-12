@@ -489,6 +489,10 @@
             let audioCtx = null;
 
             const participants = new Map();
+            // Remote mids whose publisher left the room. Historical SDP keeps those
+            // m-lines as inactive tombstones; without this set, resyncRemoteMedia
+            // would recreate empty tiles after peer_left.
+            const leftRemoteMids = new Set();
 
             const joinPreview = document.getElementById("joinPreview");
             const joinStatus = document.getElementById("joinStatus");
@@ -616,30 +620,51 @@
              * Demote keeps the same mids inactive for push-to-talk re-promote. */
             function handlePeerLeft(msg) {
                 const mids = [];
-                if (msg.mid_video != null && msg.mid_video !== 0) {
-                    mids.push(String(msg.mid_video));
-                }
-                if (msg.mid_audio != null && msg.mid_audio !== 0) {
-                    mids.push(String(msg.mid_audio));
-                }
+                const addMid = (v) => {
+                    if (v == null || v === "" || v === 0 || v === "0") return;
+                    mids.push(String(v));
+                };
+                addMid(msg.mid_video);
+                addMid(msg.mid_audio);
+
                 for (const mid of mids) {
+                    leftRemoteMids.add(mid);
                     removeTile("mid-" + mid);
-                }
-                // Drop any audio elements keyed only by mid that never got a tile.
-                for (const mid of mids) {
                     document
                         .querySelectorAll(
                             `audio[data-owner="${CSS.escape("mid-" + mid)}"]`
                         )
                         .forEach((el) => el.remove());
                 }
+
+                // Fallback: if the server could not resolve mids (0/0), drop remote
+                // tiles whose transceiver is currently inactive. Demote is not a
+                // peer_left, so this path only runs on leave.
+                if (mids.length === 0 && pc) {
+                    for (const t of pc.getTransceivers()) {
+                        if (!t.mid || t.mid === "0" || t.mid === "1") continue;
+                        const dir = t.currentDirection || t.direction;
+                        if (dir === "inactive" || dir === "stopped") {
+                            leftRemoteMids.add(String(t.mid));
+                            removeTile("mid-" + t.mid);
+                            document
+                                .querySelectorAll(
+                                    `audio[data-owner="${CSS.escape("mid-" + t.mid)}"]`
+                                )
+                                .forEach((el) => el.remove());
+                        }
+                    }
+                }
+
                 console.log(
                     "peer_left:",
                     msg.ufrag || "",
                     "mids",
-                    mids.join(","),
+                    mids.join(",") || "(fallback inactive)",
                     "peer_id",
-                    msg.peer_id
+                    msg.peer_id,
+                    "leftRemoteMids",
+                    [...leftRemoteMids]
                 );
             }
 
@@ -708,10 +733,20 @@
                 if (!pc) return;
                 for (const t of pc.getTransceivers()) {
                     if (!t.mid || t.mid === "0" || t.mid === "1") continue;
+                    // Publisher left: keep historical inactive m-line, no tile.
+                    if (leftRemoteMids.has(String(t.mid))) continue;
                     const track = t.receiver && t.receiver.track;
                     if (!track || track.readyState === "ended") continue;
                     const id = "mid-" + t.mid;
                     if (track.kind === "video") {
+                        // Do not invent a tile for an already-inactive remote mid
+                        // unless we already had one (demote → avatar). Leave must
+                        // not recreate after peer_left.
+                        const dir = t.currentDirection || t.direction;
+                        const already = participants.has(id);
+                        if (!already && (dir === "inactive" || dir === "stopped")) {
+                            continue;
+                        }
                         const p = ensureParticipant(id, {
                             isLocal: false,
                             label: "Peer " + id.substring(0, 8),
@@ -1186,6 +1221,7 @@
                     pc.close();
                     pc = null;
                 }
+                leftRemoteMids.clear();
                 participants.forEach((_, id) => removeTile(id));
                 document.getElementById("meetingRoom").style.display = "none";
                 document.getElementById("joinScreen").style.display = "flex";
@@ -1603,8 +1639,13 @@
                         // same msid/stream id when a demoted peer is re-promoted
                         // with new tracks, so stream id alone cannot tell peers
                         // (or incarnations of the same peer) apart.
-                        const id = event.transceiver && event.transceiver.mid
-                            ? "mid-" + event.transceiver.mid
+                        const mid = event.transceiver && event.transceiver.mid;
+                        if (mid && leftRemoteMids.has(String(mid))) {
+                            console.log("ontrack ignored for left remote mid", mid);
+                            return;
+                        }
+                        const id = mid
+                            ? "mid-" + mid
                             : (event.streams && event.streams.length > 0
                                 ? event.streams[0].id
                                 : track.id);
@@ -1696,7 +1737,6 @@
                         }
 
                         if (msg.type === "peer_left") {
-                            console.log("peer left", msg);
                             handlePeerLeft(msg);
                             return;
                         }
