@@ -469,6 +469,8 @@ static void kf_fixture_init(kf_fixture_t *f) {
   f->publisher->uplink_video.codec = SFU_VIDEO_CODEC_VP9;
   f->publisher->uplink_video.active = true;
   f->publisher->uplink_audio.active = true;
+  atomic_store_explicit(&f->publisher->audio_send_negotiated, true, memory_order_release);
+  atomic_store_explicit(&f->publisher->video_send_negotiated, true, memory_order_release);
 
   f->base.session->uplink_video.payload_type = SFU_PT_VP8;
   f->base.session->uplink_video.rtx_payload_type = SFU_PT_VP8_RTX;
@@ -530,6 +532,35 @@ static void test_pli_routes_to_source_publisher(void) {
 
   assert(f.publisher->last_pli_time != 0);    /* publisher got the request */
   assert(f.base.session->last_pli_time == 0); /* subscriber did not */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 0);
+  kf_fixture_destroy(&f);
+}
+
+/* Audience peers publish no RTP, but their RTCP feedback must still resolve
+ * the speaker stream they subscribe to. */
+static void test_audience_pli_routes_to_source_publisher(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  /* Rebuild the graph exactly like production: audience is marked before add,
+   * so it subscribes to the speaker but is not a publish source. */
+  room_remove_peer(&f.room, f.base.session);
+  atomic_store_explicit(&f.base.session->is_audience, true, memory_order_release);
+  room_add_peer(&f.room, f.base.session);
+  sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(f.publisher);
+  assert(subscriptions != NULL && subscriptions->count == 0);
+  sfu_subscriptions_snapshot_release(subscriptions);
+  sfu_receiver_snapshot_t *fanout = sfu_session_fanout_targets_acquire(f.publisher);
+  assert(fanout != NULL && fanout->count == 1 && fanout->entries[0].subscriber == f.base.session);
+  sfu_subscriptions_snapshot_release(fanout);
+
+  uint8_t pli[64];
+  size_t pli_len = rtcp_member_header(pli, 1, 206, MEDIA_SSRC, 4);
+  sfu_write_be32(pli + 8, f.pub_video_ssrc);
+  feed_rtcp(&f.base, pli, pli_len);
+
+  assert(f.publisher->last_pli_time != 0);
+  assert(f.base.session->last_pli_time == 0);
   assert(sfu_metric_get("rtcp_kf_unresolved") == 0);
   kf_fixture_destroy(&f);
 }
@@ -631,6 +662,7 @@ static void test_egress_writes_twcc_extension(void) {
    * and the SVC scheduler path — which would drop our synthetic non-keyframe
    * — never runs. The plain forward path still applies. */
   f.publisher->uplink_video.payload_type = 0;
+  atomic_store_explicit(&f.publisher->audio_send_negotiated, true, memory_order_release);
   f.base.session->uplink_video.payload_type = 0;
   f.base.session->uplink_video.rtx_payload_type = 0;
 
@@ -676,6 +708,7 @@ static void test_egress_no_twcc_without_negotiation(void) {
   sfu_twcc_history_init(sub->twcc_history);
 
   f.publisher->uplink_video.payload_type = 0;
+  atomic_store_explicit(&f.publisher->audio_send_negotiated, true, memory_order_release);
   f.base.session->uplink_video.payload_type = 0;
   f.base.session->uplink_video.rtx_payload_type = 0;
 
@@ -1177,6 +1210,7 @@ int main(void) {
   test_fir_ignored();
   test_packet_release_ownership();
   test_pli_routes_to_source_publisher();
+  test_audience_pli_routes_to_source_publisher();
   test_nack_miss_routes_to_source_publisher();
   test_pli_unknown_ssrc_falls_back();
   test_gcc_estimate_reaches_scheduler();

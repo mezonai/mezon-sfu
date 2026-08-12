@@ -66,59 +66,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   char client_ufrag[32];
   bool have_ufrag = sfu_stun_extract_client_ufrag(pkt->data, pkt->len, w->ice_creds->ufrag, client_ufrag, sizeof(client_ufrag));
-  sfu_room_t *room = NULL;
-  int matched_signaling_fd = -1;
-  bool has_pending_answer = false;
-  bool pending_is_audience = false;
-  uint32_t pending_audio_ssrc = 0, pending_video_ssrc = 0, pending_rtx_ssrc = 0;
-  uint32_t pending_peer_id = 0;
-  uint8_t pending_video_pt = 0, pending_rtx_pt = 0, pending_video_codec = 0;
-  uint8_t pending_twcc_recv_extmap_id = 0, pending_twcc_send_extmap_id = 0;
 
-  if (have_ufrag) {
-    pthread_mutex_lock(&w->routing_table->mutex);
-
-    sfu_routing_entry_t *match = NULL;
-    for (int i = 0; i < w->routing_table->count; i++) {
-      if (strcmp(w->routing_table->entries[i].ufrag, client_ufrag) == 0) {
-        match = &w->routing_table->entries[i];
-        break;
-      }
-    }
-
-    if (match) {
-      if (match->has_owner && match->worker_index != w->worker_index) {
-        SFU_LOG_INFO("worker %u: Migrating ufrag=%s from worker %u (NAT path changed to %s:%u)", w->worker_index, client_ufrag, match->worker_index, ip, port);
-        match->worker_index = w->worker_index;
-      }
-
-      if (!match->has_owner) {
-        match->worker_index = w->worker_index;
-        match->has_owner = true;
-        SFU_LOG_INFO("worker %u: Claimed ownership of ufrag=%s", w->worker_index, client_ufrag);
-      }
-
-      room = (sfu_room_t *)match->room;
-      matched_signaling_fd = match->fd;
-      if (match->peer_id != 0) {
-        pending_peer_id = match->peer_id;
-      }
-      if (match->has_pending_answer) {
-        has_pending_answer = true;
-        pending_audio_ssrc = match->pending_audio_ssrc;
-        pending_video_ssrc = match->pending_video_ssrc;
-        pending_rtx_ssrc = match->pending_rtx_ssrc;
-        pending_video_pt = match->pending_video_pt;
-        pending_rtx_pt = match->pending_rtx_pt;
-        pending_video_codec = match->pending_video_codec;
-        pending_twcc_recv_extmap_id = match->pending_twcc_recv_extmap_id;
-        pending_twcc_send_extmap_id = match->pending_twcc_send_extmap_id;
-        pending_is_audience = match->is_audience;
-        match->has_pending_answer = false;
-      }
-    }
-    pthread_mutex_unlock(&w->routing_table->mutex);
-  } else {
+  if (!have_ufrag) {
     SFU_LOG_WARN(
         "worker %u: STUN request from %s:%u has no parseable client ufrag "
         "(malformed USERNAME attribute, or doesn't match our local ufrag prefix) "
@@ -135,111 +84,109 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  SFU_LOG_DEBUG("worker %u: Responding to STUN Binding Request from %s:%u", w->worker_index, ip, port);
+  if (!have_ufrag) {
+    return;
+  }
 
+  bool nominated = sfu_stun_has_use_candidate(pkt->data, pkt->len);
+  sfu_routing_snapshot_t route;
+  if (!sfu_routing_table_lookup_route(w->routing_table, client_ufrag, w->worker_index, &route) || !route.room || route.fd < 0) {
+    SFU_LOG_DEBUG(
+        "worker %u: no signaling route yet for ufrag=%s (from %s:%u); "
+        "withholding STUN response until answer registration",
+        w->worker_index, client_ufrag, ip, port);
+    return;
+  }
+
+  SFU_LOG_DEBUG("worker %u: Responding to STUN Binding Request from %s:%u", w->worker_index, ip, port);
   send_raw(w, response, response_len, &pkt->peer_addr, pkt->peer_addr_len);
 
-  if (have_ufrag) {
-    if (room) {
-      /* Both lookups return a caller pin (+1 ref) that this function releases
-       * exactly once on every path below. */
-      sfu_peer_session_t *session = NULL;
-      if (client_ufrag[0] != '\0') {
-        session = sfu_session_table_find_by_ufrag(w->sessions, client_ufrag);
-      }
+  sfu_peer_session_t *session = NULL;
+  if (nominated) {
+    session = sfu_session_table_get_or_create_by_ufrag(w->sessions, &pkt->peer_addr, pkt->peer_addr_len, client_ufrag, true);
+  } else {
+    session = sfu_session_table_find_by_ufrag(w->sessions, client_ufrag);
+  }
+  if (!session) {
+    if (!nominated) {
+      SFU_LOG_DEBUG("worker %u: non-nominated check for ufrag=%s; waiting for USE-CANDIDATE", w->worker_index, client_ufrag);
+      return;
+    }
+    SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
+    return;
+  }
+  if (!sfu_session_accepts_work(session)) {
+    SFU_LOG_DEBUG("worker %u: session for ufrag=%s is closing; skipping room bind", w->worker_index, client_ufrag);
+    sfu_session_release(session);
+    return;
+  }
 
-      if (session) {
-        bool addr_changed = !(session->cold->addr_len == pkt->peer_addr_len && memcmp(&session->cold->addr, &pkt->peer_addr, pkt->peer_addr_len) == 0);
-        if (addr_changed) {
-          if (session->state == SFU_SESSION_ESTABLISHED) {
-            SFU_LOG_DEBUG("worker %u: ufrag=%s STUN from alternate candidate %s:%u (session already established at different addr, not rebinding)",
-                          w->worker_index, client_ufrag, ip, port);
-          } else if (!sfu_session_table_rebind_addr(w->sessions, session, &pkt->peer_addr, pkt->peer_addr_len)) {
-            SFU_LOG_DEBUG("worker %u: ufrag=%s rebind rejected (session closing or not a table member)", w->worker_index, client_ufrag);
-          }
-        }
-      } else {
-        session = sfu_session_table_get_or_create(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
-      }
-      if (!session) {
-        SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
-      } else if (!sfu_session_accepts_work(session)) {
-        /* Session is closing/closed: do not bind, index, or mutate it. */
-        SFU_LOG_DEBUG("worker %u: session for ufrag=%s is closing; skipping room bind", w->worker_index, client_ufrag);
-      } else {
-        if (session->cold->ufrag[0] == '\0') {
-          strncpy(session->cold->ufrag, client_ufrag, sizeof(session->cold->ufrag) - 1);
-          session->cold->ufrag[sizeof(session->cold->ufrag) - 1] = '\0';
-          if (!sfu_session_table_index_ufrag(w->sessions, session)) {
-            SFU_LOG_WARN("worker %u: ufrag index rejected for closing session %s", w->worker_index, client_ufrag);
-          }
-        }
-
-        if (!session->room) {
-          SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, room->room_id);
-
-          if (pending_peer_id != 0) {
-            session->peer_id = pending_peer_id;
-          }
-          if (has_pending_answer) {
-            session->uplink_audio.ssrc = pending_audio_ssrc;
-            session->uplink_audio.active = (pending_audio_ssrc != 0);
-            session->uplink_video.ssrc = pending_video_ssrc;
-            session->uplink_video.rtx_ssrc = pending_rtx_ssrc;
-            session->uplink_video.active = (pending_video_ssrc != 0);
-            session->uplink_video.payload_type = pending_video_pt;
-            session->uplink_video.rtx_payload_type = pending_rtx_pt;
-            session->uplink_video.codec = (sfu_video_codec_t)pending_video_codec;
-            session->twcc_recv_extmap_id = pending_twcc_recv_extmap_id;
-            session->twcc_send_extmap_id = pending_twcc_send_extmap_id;
-            atomic_store_explicit(&session->is_audience, pending_is_audience, memory_order_release);
-            for (int pi = 0; pi < 128; pi++) {
-              session->pt_map[pi] = (uint8_t)pi;
-            }
-            SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u peer_id=%u", w->worker_index, client_ufrag,
-                         pending_audio_ssrc, pending_video_ssrc, pending_rtx_ssrc, session->peer_id);
-          }
-          bool route_still_registered = false;
-          pthread_mutex_lock(&w->routing_table->mutex);
-          for (int i = 0; i < w->routing_table->count; i++) {
-            sfu_routing_entry_t *entry = &w->routing_table->entries[i];
-            if (entry->fd == matched_signaling_fd && strcmp(entry->ufrag, client_ufrag) == 0 && entry->room == room) {
-              route_still_registered = true;
-              break;
-            }
-          }
-
-          if (!route_still_registered) {
-            SFU_LOG_INFO("worker %u: signaling route disappeared before binding ufrag=%s; skipping room publication", w->worker_index, client_ufrag);
-          } else {
-            session->fd = matched_signaling_fd;
-            room_add_peer(room, session);
-            if (session->room == room) {
-              sfu_signaling_trigger_renegotiation(room);
-            }
-          }
-          pthread_mutex_unlock(&w->routing_table->mutex);
-        }
-
-        if (session->worker_id == UINT16_MAX) {
-          session->worker_id = w->worker_index;
-          SFU_LOG_INFO("worker %u: session ufrag=%s assigned to worker %u", w->worker_index, session->cold->ufrag, session->worker_id);
-        } else if (session->worker_id != w->worker_index) {
-          SFU_LOG_INFO("worker %u: session ufrag=%s worker ownership migrating %u -> %u", w->worker_index, session->cold->ufrag, session->worker_id,
-                       w->worker_index);
-          session->worker_id = w->worker_index;
-        }
-      }
-      if (session) {
-        sfu_session_release(session);
-      }
-    } else {
-      SFU_LOG_DEBUG(
-          "worker %u: no room registered yet for ufrag=%s (from %s:%u) -- "
-          "offer may not have reached signaling yet, will retry on next STUN",
-          w->worker_index, client_ufrag, ip, port);
+  bool role_changed = false;
+  bool media_changed = false;
+  bool applied_answer = false;
+  sfu_pending_answer_t pending;
+  bool took_pending = route.pending_generation != 0 &&
+                      sfu_routing_table_take_pending_answer(w->routing_table, client_ufrag, route.room, route.fd, route.pending_generation, &pending);
+  if (!took_pending) {
+    sfu_routing_snapshot_t latest;
+    if (sfu_routing_table_lookup_route(w->routing_table, client_ufrag, w->worker_index, &latest) && latest.room == route.room && latest.fd == route.fd &&
+        latest.pending_generation != 0) {
+      took_pending = sfu_routing_table_take_pending_answer(w->routing_table, client_ufrag, latest.room, latest.fd, latest.pending_generation, &pending);
     }
   }
+  if (took_pending) {
+    if (session->room && session->room != route.room) {
+      SFU_LOG_WARN("worker %u: session ufrag=%s belongs to another room; refusing pending answer", w->worker_index, client_ufrag);
+      sfu_session_release(session);
+      return;
+    }
+    applied_answer = sfu_session_apply_pending_answer(session, &pending, route.fd, &role_changed, &media_changed);
+    if (applied_answer) {
+      SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u peer_id=%u audience=%d", w->worker_index,
+                   client_ufrag, pending.audio_ssrc, pending.video_ssrc, pending.rtx_ssrc, session->peer_id, pending.is_audience);
+    }
+  }
+
+  bool newly_bound = false;
+  if (!session->room) {
+    bool has_applied_answer = atomic_load_explicit(&session->applied_answer_generation, memory_order_acquire) != 0 && session->fd == route.fd;
+    if (!applied_answer && !has_applied_answer) {
+      SFU_LOG_DEBUG("worker %u: authenticated STUN for ufrag=%s has no applied answer yet; deferring room publication", w->worker_index, client_ufrag);
+      sfu_session_release(session);
+      return;
+    }
+
+    sfu_routing_snapshot_t current_route;
+    if (!sfu_routing_table_lookup_route(w->routing_table, client_ufrag, w->worker_index, &current_route) || current_route.room != route.room ||
+        current_route.fd != route.fd) {
+      SFU_LOG_INFO("worker %u: signaling route disappeared before binding ufrag=%s; skipping room publication", w->worker_index, client_ufrag);
+      sfu_session_release(session);
+      return;
+    }
+
+    SFU_LOG_INFO("worker %u: bound session %s:%u (ufrag=%s) to room_id=%" PRIu64, w->worker_index, ip, port, client_ufrag, route.room->room_id);
+    room_add_peer(route.room, session);
+    newly_bound = session->room == route.room;
+  } else if (session->room != route.room) {
+    SFU_LOG_WARN("worker %u: session ufrag=%s belongs to another room; rejecting route bind", w->worker_index, client_ufrag);
+    sfu_session_release(session);
+    return;
+  }
+
+  pthread_mutex_lock(&session->answer_lock);
+  if (session->state != SFU_SESSION_ESTABLISHED && nominated) {
+    session->worker_id = w->worker_index;
+  } else if (session->worker_id == UINT16_MAX) {
+    session->worker_id = w->worker_index;
+  }
+  pthread_mutex_unlock(&session->answer_lock);
+
+  if (session->room && (newly_bound || role_changed || media_changed)) {
+    room_refresh_peer_streams((sfu_room_t *)session->room, session);
+    sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+  }
+
+  sfu_session_release(session);
 }
 
 static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
@@ -247,15 +194,21 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint16_t port;
   format_peer_endpoint(&pkt->peer_addr, ip, &port);
 
-  /* Caller pin: released at the end of this handler on every path. */
-  sfu_peer_session_t *session = sfu_session_table_get_or_create(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
+  sfu_peer_session_t *session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
   if (!session) {
-    SFU_LOG_ERROR("worker %u: CRITICAL! Session table full or rejected registration for %s:%u", w->worker_index, ip, port);
+    SFU_LOG_DEBUG("worker %u: dropping DTLS from unknown/closed peer %s:%u", w->worker_index, ip, port);
     return;
   }
 
   if (!sfu_session_accepts_work(session)) {
     SFU_LOG_DEBUG("worker %u: dropping DTLS for closing session %s:%u", w->worker_index, ip, port);
+    sfu_session_release(session);
+    return;
+  }
+
+  pthread_mutex_lock(&session->answer_lock);
+  if (session->cold->addr_len != pkt->peer_addr_len || memcmp(&session->cold->addr, &pkt->peer_addr, pkt->peer_addr_len) != 0) {
+    pthread_mutex_unlock(&session->answer_lock);
     sfu_session_release(session);
     return;
   }
@@ -300,6 +253,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
       break;
   }
 
+  pthread_mutex_unlock(&session->answer_lock);
   sfu_session_release(session);
 }
 
@@ -316,7 +270,7 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   if (sfu_dtls_is_dtls_packet(pkt->data, pkt->len)) {
-    SFU_LOG_INFO("worker %u: Identified DTLS packet from %s:%u", w->worker_index, ip, port);
+    SFU_LOG_DEBUG("worker %u: Identified DTLS packet from %s:%u", w->worker_index, ip, port);
     handle_dtls(w, pkt);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;

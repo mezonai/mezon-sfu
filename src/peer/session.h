@@ -9,10 +9,13 @@
 #include "sfu/datadef.h"
 
 typedef struct sfu_worker sfu_worker_t;
+typedef struct sfu_pending_answer sfu_pending_answer_t;
 
 int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx);
 void sfu_session_table_destroy(sfu_session_table_t *t);
 sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
+sfu_peer_session_t *sfu_session_table_get_or_create_by_ufrag(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len, const char *ufrag,
+                                                             bool allow_rebind);
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
 sfu_peer_session_t *sfu_session_table_find_by_ufrag(sfu_session_table_t *t, const char *ufrag);
 typedef void (*sfu_session_iter_fn)(sfu_peer_session_t *s, void *user);
@@ -22,6 +25,7 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s);
 void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s);
 bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len);
 bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *session);
+bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pending_answer_t *answer, int fd, bool *role_changed, bool *media_changed);
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir);
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher);
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s);

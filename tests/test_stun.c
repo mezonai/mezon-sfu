@@ -21,7 +21,8 @@ static void write_be32(uint8_t *p, uint32_t v) {
  * ICE client would: USERNAME = "{server-ufrag}:{client-ufrag}",
  * MESSAGE-INTEGRITY keyed with the server's password (the short-term
  * credential rule: authenticate with the *recipient's* password). */
-static size_t build_binding_request(uint8_t *buf, const sfu_ice_credentials_t *server_creds, const char *client_ufrag) {
+static size_t build_binding_request_flags(uint8_t *buf, const sfu_ice_credentials_t *server_creds, const char *client_ufrag, bool use_candidate,
+                                          bool append_after_integrity) {
   write_be16(buf, 0x0001); /* Binding Request */
   write_be16(buf + 2, 0);  /* length, patched below */
   write_be32(buf + 4, 0x2112A442u);
@@ -39,6 +40,12 @@ static size_t build_binding_request(uint8_t *buf, const sfu_ice_credentials_t *s
   size_t padded = (size_t)((ulen + 3) & ~3);
   off += 4 + padded;
 
+  if (use_candidate && !append_after_integrity) {
+    write_be16(buf + off, 0x0025); /* USE-CANDIDATE */
+    write_be16(buf + off + 2, 0);
+    off += 4;
+  }
+
   write_be16(buf + 2, (uint16_t)((off - 20) + 24)); /* length up through M-I */
   uint8_t hmac[20];
   unsigned int hmac_len = 0;
@@ -48,7 +55,18 @@ static size_t build_binding_request(uint8_t *buf, const sfu_ice_credentials_t *s
   memcpy(buf + off + 4, hmac, 20);
   off += 4 + 20;
 
+  if (use_candidate && append_after_integrity) {
+    write_be16(buf + off, 0x0025); /* unauthenticated appended USE-CANDIDATE */
+    write_be16(buf + off + 2, 0);
+    off += 4;
+    write_be16(buf + 2, (uint16_t)(off - 20));
+  }
+
   return off;
+}
+
+static size_t build_binding_request(uint8_t *buf, const sfu_ice_credentials_t *server_creds, const char *client_ufrag) {
+  return build_binding_request_flags(buf, server_creds, client_ufrag, false, false);
 }
 
 int main(void) {
@@ -113,6 +131,19 @@ int main(void) {
   size_t bad_len = build_binding_request(bad_request, &wrong_creds, "peerufrag");
   size_t bad_response_len = sfu_stun_handle_binding_request(bad_request, bad_len, &server_creds, &src, sizeof(sin), response, sizeof(response));
   assert(bad_response_len == 0);
+
+  uint8_t nominated_request[512];
+  size_t nominated_len = build_binding_request_flags(nominated_request, &server_creds, "peerufrag", true, false);
+  assert(sfu_stun_handle_binding_request(nominated_request, nominated_len, &server_creds, &src, sizeof(sin), response, sizeof(response)) > 0);
+  assert(sfu_stun_has_use_candidate(nominated_request, nominated_len));
+
+  /* A USE-CANDIDATE appended after MESSAGE-INTEGRITY is not authenticated and
+   * must never trigger nomination/rebinding, even if the header length is
+   * extended to include the attacker-controlled bytes. */
+  uint8_t appended_request[512];
+  size_t appended_len = build_binding_request_flags(appended_request, &server_creds, "peerufrag", true, true);
+  assert(sfu_stun_handle_binding_request(appended_request, appended_len, &server_creds, &src, sizeof(sin), response, sizeof(response)) > 0);
+  assert(!sfu_stun_has_use_candidate(appended_request, appended_len));
 
   printf("test_stun: OK\n");
   return 0;
