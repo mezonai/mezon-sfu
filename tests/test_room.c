@@ -19,6 +19,9 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   assert(s->cold != NULL);
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
   s->active = true;
+  assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->media_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->snapshot_lock, NULL) == 0);
   atomic_store(&s->refcount, 1);
   atomic_store(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
   atomic_store(&s->accepts_work, true);
@@ -173,6 +176,7 @@ static void test_audience_role_asymmetry_and_transition(void) {
   /* Audience receives the speaker SDP source but never owns an RTP fanout
    * snapshot. The speaker forwards to the audience. */
   assert(receiver_count(audience) == 1);
+  assert(audience->next_remote_mid == 4);
   assert(subscribes_to(audience, speaker));
   assert(receiver_count(speaker) == 0);
   assert(fanout_target_count(speaker) == 1);

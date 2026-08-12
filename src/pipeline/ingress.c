@@ -50,11 +50,6 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
     return NULL;
   }
 
-  bool sub_is_audience = atomic_load_explicit(&subscriber->is_audience, memory_order_acquire);
-  if (sub_is_audience) {
-    return NULL;
-  }
-
   pthread_mutex_lock(&room->lock);
   sfu_peer_session_t *result = NULL;
   for (uint32_t i = 0; i < room->peer_count; i++) {
@@ -62,10 +57,13 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
     if (publisher == subscriber) {
       continue;
     }
-    if (publisher->uplink_video.ssrc != media_ssrc && publisher->uplink_video.rtx_ssrc != media_ssrc) {
+    pthread_mutex_lock(&publisher->media_lock);
+    bool media_matches = publisher->uplink_video.ssrc == media_ssrc || publisher->uplink_video.rtx_ssrc == media_ssrc;
+    pthread_mutex_unlock(&publisher->media_lock);
+    if (!media_matches) {
       continue;
     }
-    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(publisher);
+    sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(publisher);
     if (!snap) {
       continue;
     }
@@ -333,11 +331,16 @@ static sfu_svc_parse_status_t extract_svc_metadata(sfu_peer_session_t *sender_se
   m->has_svc = false;
   m->is_keyframe = false;
 
-  if (m->is_audio || m->rtp.payload_type != sender_session->uplink_video.payload_type || sender_session->uplink_video.codec != SFU_VIDEO_CODEC_VP9) {
+  pthread_mutex_lock(&sender_session->media_lock);
+  uint8_t video_pt = sender_session->uplink_video.payload_type;
+  sfu_video_codec_t codec = sender_session->uplink_video.codec;
+  pthread_mutex_unlock(&sender_session->media_lock);
+
+  if (m->is_audio || m->rtp.payload_type != video_pt || codec != SFU_VIDEO_CODEC_VP9) {
     return SFU_SVC_NOT_PRESENT;
   }
 
-  if (sfu_svc_parse_descriptor(sender_session->uplink_video.codec, m->rtp.payload, m->rtp.payload_len, &m->svc) != 0) {
+  if (sfu_svc_parse_descriptor(codec, m->rtp.payload, m->rtp.payload_len, &m->svc) != 0) {
     return SFU_SVC_PARSE_MALFORMED;
   }
 
@@ -398,13 +401,12 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  if (sender_session->twcc_recv && sender_session->twcc_recv_extmap_id == 0) {
-    sender_session->twcc_recv_extmap_id = SFU_TWCC_RECV_EXTMAP_ID;
-  }
-
-  if (sender_session->twcc_recv && sender_session->twcc_recv_extmap_id != 0 && m.rtp.extension) {
+  pthread_mutex_lock(&sender_session->media_lock);
+  uint8_t twcc_recv_extmap_id = sender_session->twcc_recv_extmap_id;
+  pthread_mutex_unlock(&sender_session->media_lock);
+  if (sender_session->twcc_recv && twcc_recv_extmap_id != 0 && m.rtp.extension) {
     uint16_t twcc_seq = 0;
-    if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, sender_session->twcc_recv_extmap_id, &twcc_seq)) {
+    if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, twcc_recv_extmap_id, &twcc_seq)) {
       int64_t arrival_us;
       if (pkt->recv_ts_ns != 0) {
         arrival_us = (int64_t)(pkt->recv_ts_ns / 1000ULL);
@@ -421,11 +423,26 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
+  pthread_mutex_lock(&sender_session->media_lock);
   uint8_t in_pt = m.rtp.payload_type;
   bool is_video_pt = (in_pt == sender_session->uplink_video.payload_type) || (in_pt == sender_session->uplink_video.rtx_payload_type);
+  bool send_negotiated = is_video_pt ? atomic_load_explicit(&sender_session->video_send_negotiated, memory_order_acquire)
+                                     : atomic_load_explicit(&sender_session->audio_send_negotiated, memory_order_acquire);
   bool learned = false;
+  if (!send_negotiated) {
+    pthread_mutex_unlock(&sender_session->media_lock);
+    sfu_metric_inc("unnegotiated_rtp_drop");
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
   if (is_video_pt) {
-    if (sender_session->uplink_video.ssrc == 0 && m.rtp.ssrc != 0) {
+    if (in_pt == sender_session->uplink_video.rtx_payload_type) {
+      if (m.rtp.ssrc != 0 && sender_session->uplink_video.rtx_ssrc != m.rtp.ssrc) {
+        sender_session->uplink_video.rtx_ssrc = m.rtp.ssrc;
+        learned = true;
+      }
+    } else if (m.rtp.ssrc != 0 && sender_session->uplink_video.ssrc != m.rtp.ssrc) {
       sender_session->uplink_video.ssrc = m.rtp.ssrc;
       learned = true;
     }
@@ -434,7 +451,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       learned = true;
     }
   } else {
-    if (sender_session->uplink_audio.ssrc == 0 && m.rtp.ssrc != 0) {
+    if (m.rtp.ssrc != 0 && sender_session->uplink_audio.ssrc != m.rtp.ssrc) {
       sender_session->uplink_audio.ssrc = m.rtp.ssrc;
       learned = true;
     }
@@ -443,6 +460,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       learned = true;
     }
   }
+  pthread_mutex_unlock(&sender_session->media_lock);
   if (learned) {
     atomic_store_explicit(&sender_session->uplink_ssrc_dirty, true, memory_order_release);
   }
@@ -460,8 +478,12 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_router_forward(w, sender_session, &m);
 
   if (atomic_exchange_explicit(&sender_session->uplink_ssrc_dirty, false, memory_order_acq_rel) && sender_session->room) {
+    pthread_mutex_lock(&sender_session->media_lock);
+    uint32_t learned_audio_ssrc = sender_session->uplink_audio.ssrc;
+    uint32_t learned_video_ssrc = sender_session->uplink_video.ssrc;
+    pthread_mutex_unlock(&sender_session->media_lock);
     SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u video=%u); refreshing + renegotiating", w->worker_index,
-                 sender_session->cold->ufrag, sender_session->uplink_audio.ssrc, sender_session->uplink_video.ssrc);
+                 sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc);
     room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
     sfu_signaling_trigger_renegotiation((sfu_room_t *)sender_session->room);
   }

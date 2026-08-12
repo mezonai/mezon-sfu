@@ -46,10 +46,13 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
                              media->video_ssrc, atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
   }
 
-  if (sub_session->twcc_send_extmap_id != 0) {
+  pthread_mutex_lock(&sub_session->media_lock);
+  uint8_t twcc_send_extmap_id = sub_session->twcc_send_extmap_id;
+  pthread_mutex_unlock(&sub_session->media_lock);
+  if (twcc_send_extmap_id != 0) {
     uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
     size_t new_len = (size_t)enc_len;
-    if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, sub_session->twcc_send_extmap_id, twcc_seq, &new_len)) {
+    if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, twcc_send_extmap_id, twcc_seq, &new_len)) {
       enc_len = (int)new_len;
       if (sub_session->twcc_history) {
         sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);

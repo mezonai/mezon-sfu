@@ -1,4 +1,5 @@
 #include "runtime/routing_context.h"
+#include <stdio.h>
 #include <string.h>
 #include "util/log.h"
 
@@ -19,29 +20,122 @@ void sfu_routing_table_destroy(sfu_routing_table_t *table) {
   }
 }
 
-void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
-                                          uint8_t video_pt, uint8_t rtx_pt, sfu_video_codec_t video_codec, uint8_t twcc_recv_extmap_id,
-                                          uint8_t twcc_send_extmap_id, uint32_t peer_id, bool is_audience) {
-  pthread_mutex_lock(&table->mutex);
+static sfu_routing_entry_t *find_entry_locked(sfu_routing_table_t *table, const char *client_ufrag) {
   for (int i = 0; i < table->count; i++) {
     if (strcmp(table->entries[i].ufrag, client_ufrag) == 0) {
-      table->entries[i].pending_audio_ssrc = audio_ssrc;
-      table->entries[i].pending_video_ssrc = video_ssrc;
-      table->entries[i].pending_rtx_ssrc = rtx_ssrc;
-      table->entries[i].pending_video_pt = video_pt;
-      table->entries[i].pending_rtx_pt = rtx_pt;
-      table->entries[i].pending_video_codec = (uint8_t)video_codec;
-      table->entries[i].pending_twcc_recv_extmap_id = twcc_recv_extmap_id;
-      table->entries[i].pending_twcc_send_extmap_id = twcc_send_extmap_id;
-      table->entries[i].has_pending_answer = true;
-      table->entries[i].peer_id = peer_id;
-      table->entries[i].is_audience = is_audience;
-      pthread_mutex_unlock(&table->mutex);
-      return;
+      return &table->entries[i];
     }
   }
-  SFU_LOG_WARN("signaling: no routing entry for ufrag=%s to attach pending answer", client_ufrag);
+  return NULL;
+}
+
+bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
+                                       const sfu_pending_answer_t *answer, uint32_t *out_generation) {
+  if (!table || !client_ufrag || client_ufrag[0] == '\0' || !room || fd < 0 || !answer) {
+    return false;
+  }
+
+  pthread_mutex_lock(&table->mutex);
+  sfu_routing_entry_t *entry = find_entry_locked(table, client_ufrag);
+  if (entry && (entry->room != room || entry->fd != fd)) {
+    pthread_mutex_unlock(&table->mutex);
+    SFU_LOG_WARN("rejecting route ownership change for ufrag=%s (fd %d -> %d)", client_ufrag, entry->fd, fd);
+    return false;
+  }
+  if (!entry) {
+    if (table->count >= SFU_MAX_UFRAG_MAPPINGS) {
+      pthread_mutex_unlock(&table->mutex);
+      SFU_LOG_ERROR("ufrag->room table FULL. Cannot register ufrag=%s", client_ufrag);
+      return false;
+    }
+    entry = &table->entries[table->count++];
+    memset(entry, 0, sizeof(*entry));
+    snprintf(entry->ufrag, sizeof(entry->ufrag), "%s", client_ufrag);
+    entry->fd = -1;
+  }
+
+  uint32_t generation = entry->pending_answer.generation + 1;
+  if (generation == 0) {
+    generation = 1;
+  }
+
+  sfu_pending_answer_t published = *answer;
+  if (entry->pending_answer.peer_id != 0) {
+    published.peer_id = entry->pending_answer.peer_id;
+  }
+  published.generation = generation;
+  published.valid = true;
+
+  entry->room = room;
+  entry->fd = fd;
+  entry->pending_answer = published;
+
+  if (out_generation) {
+    *out_generation = generation;
+  }
   pthread_mutex_unlock(&table->mutex);
+  return true;
+}
+
+bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *client_ufrag, uint32_t worker_index, sfu_routing_snapshot_t *out) {
+  if (!table || !client_ufrag || !out) {
+    return false;
+  }
+
+  pthread_mutex_lock(&table->mutex);
+  sfu_routing_entry_t *entry = find_entry_locked(table, client_ufrag);
+  if (!entry) {
+    pthread_mutex_unlock(&table->mutex);
+    return false;
+  }
+
+  entry->worker_index = worker_index;
+  entry->has_owner = true;
+  out->room = entry->room;
+  out->worker_index = entry->worker_index;
+  out->fd = entry->fd;
+  out->has_owner = entry->has_owner;
+  out->pending_generation = entry->pending_answer.valid ? entry->pending_answer.generation : 0;
+  pthread_mutex_unlock(&table->mutex);
+  return true;
+}
+
+bool sfu_routing_table_take_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,
+                                           sfu_pending_answer_t *out) {
+  if (!table || !client_ufrag || !room || fd < 0 || generation == 0 || !out) {
+    return false;
+  }
+
+  pthread_mutex_lock(&table->mutex);
+  sfu_routing_entry_t *entry = find_entry_locked(table, client_ufrag);
+  if (!entry || entry->room != room || entry->fd != fd || !entry->pending_answer.valid || entry->pending_answer.generation != generation) {
+    pthread_mutex_unlock(&table->mutex);
+    return false;
+  }
+
+  *out = entry->pending_answer;
+  entry->pending_answer.valid = false;
+  pthread_mutex_unlock(&table->mutex);
+  return true;
+}
+
+bool sfu_routing_table_invalidate_pending(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t *out_generation) {
+  if (!table || !client_ufrag || !room || fd < 0) {
+    return false;
+  }
+  pthread_mutex_lock(&table->mutex);
+  sfu_routing_entry_t *entry = find_entry_locked(table, client_ufrag);
+  if (!entry || entry->room != room || entry->fd != fd) {
+    pthread_mutex_unlock(&table->mutex);
+    return false;
+  }
+  uint32_t generation = entry->pending_answer.generation + 1;
+  if (generation == 0) generation = 1;
+  entry->pending_answer.generation = generation;
+  entry->pending_answer.valid = false;
+  if (out_generation) *out_generation = generation;
+  pthread_mutex_unlock(&table->mutex);
+  return true;
 }
 
 void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd) {

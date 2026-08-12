@@ -55,6 +55,13 @@ int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
     t->capacity = 0;
     return -1;
   }
+  if (pthread_mutex_init(&t->ice_lock, NULL) != 0) {
+    pthread_mutex_destroy(&t->lock);
+    SFU_FREE(t->sessions);
+    t->sessions = NULL;
+    t->capacity = 0;
+    return -1;
+  }
 
   return 0;
 }
@@ -84,18 +91,13 @@ sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_sessio
   if (!s) {
     return NULL;
   }
+  pthread_mutex_lock((pthread_mutex_t *)&s->snapshot_lock);
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
-  while (snap) {
-    uint32_t rc = atomic_load_explicit(&snap->refcount, memory_order_relaxed);
-    if (rc == 0) {
-      snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
-      continue;
-    }
-    if (atomic_compare_exchange_weak_explicit(&snap->refcount, &rc, rc + 1, memory_order_acquire, memory_order_relaxed)) {
-      return snap;
-    }
+  if (snap) {
+    atomic_fetch_add_explicit(&snap->refcount, 1, memory_order_relaxed);
   }
-  return NULL;
+  pthread_mutex_unlock((pthread_mutex_t *)&s->snapshot_lock);
+  return snap;
 }
 
 void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap) {
@@ -113,8 +115,10 @@ void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap) {
 }
 
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
   sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->receivers, memory_order_acquire);
   atomic_store_explicit(&owner->receivers, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
   sfu_subscriptions_snapshot_release(old);
 }
 
@@ -122,23 +126,20 @@ sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_sessi
   if (!s) {
     return NULL;
   }
+  pthread_mutex_lock((pthread_mutex_t *)&s->snapshot_lock);
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->fanout_targets, memory_order_acquire);
-  while (snap) {
-    uint32_t rc = atomic_load_explicit(&snap->refcount, memory_order_relaxed);
-    if (rc == 0) {
-      snap = atomic_load_explicit(&s->fanout_targets, memory_order_acquire);
-      continue;
-    }
-    if (atomic_compare_exchange_weak_explicit(&snap->refcount, &rc, rc + 1, memory_order_acquire, memory_order_relaxed)) {
-      return snap;
-    }
+  if (snap) {
+    atomic_fetch_add_explicit(&snap->refcount, 1, memory_order_relaxed);
   }
-  return NULL;
+  pthread_mutex_unlock((pthread_mutex_t *)&s->snapshot_lock);
+  return snap;
 }
 
 void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
   sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->fanout_targets, memory_order_acquire);
   atomic_store_explicit(&owner->fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
   sfu_subscriptions_snapshot_release(old);
 }
 
@@ -156,16 +157,17 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     }
   }
 
+  pthread_mutex_lock(&s->snapshot_lock);
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->receivers, memory_order_acquire);
-  if (snap) {
-    atomic_store_explicit(&s->receivers, NULL, memory_order_release);
-    sfu_subscriptions_snapshot_release(snap);
-  }
+  atomic_store_explicit(&s->receivers, NULL, memory_order_release);
+  pthread_mutex_unlock(&s->snapshot_lock);
+  sfu_subscriptions_snapshot_release(snap);
+
+  pthread_mutex_lock(&s->snapshot_lock);
   snap = atomic_load_explicit(&s->fanout_targets, memory_order_acquire);
-  if (snap) {
-    atomic_store_explicit(&s->fanout_targets, NULL, memory_order_release);
-    sfu_subscriptions_snapshot_release(snap);
-  }
+  atomic_store_explicit(&s->fanout_targets, NULL, memory_order_release);
+  pthread_mutex_unlock(&s->snapshot_lock);
+  sfu_subscriptions_snapshot_release(snap);
 
   if (s->rtx_cache) {
     sfu_rtx_cache_destroy(s->rtx_cache);
@@ -192,6 +194,9 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     SFU_FREE(s->cold);
     s->cold = NULL;
   }
+  pthread_mutex_destroy(&s->snapshot_lock);
+  pthread_mutex_destroy(&s->media_lock);
+  pthread_mutex_destroy(&s->answer_lock);
 }
 
 void sfu_session_release(sfu_peer_session_t *s) {
@@ -346,6 +351,36 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->state = SFU_SESSION_NEW;
   s->fd = -1;
   s->worker_id = UINT16_MAX;
+  if (pthread_mutex_init(&s->answer_lock, NULL) != 0) {
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    if (index + 1 == t->count) {
+      t->count--;
+    }
+    pthread_mutex_unlock(&t->lock);
+    return NULL;
+  }
+  if (pthread_mutex_init(&s->media_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->answer_lock);
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    if (index + 1 == t->count) {
+      t->count--;
+    }
+    pthread_mutex_unlock(&t->lock);
+    return NULL;
+  }
+  if (pthread_mutex_init(&s->snapshot_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->media_lock);
+    pthread_mutex_destroy(&s->answer_lock);
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    if (index + 1 == t->count) {
+      t->count--;
+    }
+    pthread_mutex_unlock(&t->lock);
+    return NULL;
+  }
 
   for (int i = 0; i < 128; i++) {
     s->pt_map[i] = (uint8_t)i;
@@ -358,6 +393,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->receivers, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->fanout_targets, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
+  atomic_store_explicit(&s->audio_send_negotiated, false, memory_order_relaxed);
+  atomic_store_explicit(&s->video_send_negotiated, false, memory_order_relaxed);
 
   s->next_remote_mid = 2;
   {
@@ -433,6 +470,56 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   return s;
 }
 
+sfu_peer_session_t *sfu_session_table_get_or_create_by_ufrag(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len, const char *ufrag,
+                                                             bool allow_rebind) {
+  if (!t || !addr || addr_len == 0 || addr_len > sizeof(struct sockaddr_storage) || !ufrag || ufrag[0] == '\0') {
+    return NULL;
+  }
+
+  /* Serialize the compound find/create/index operation. Existing table helpers
+   * keep their own lock and remain safe for unrelated address lookups. */
+  pthread_mutex_lock(&t->ice_lock);
+
+  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(t, ufrag);
+  if (session) {
+    bool addr_changed = !addr_equal(&session->cold->addr, session->cold->addr_len, addr, addr_len);
+    if (addr_changed && allow_rebind && session->state != SFU_SESSION_ESTABLISHED) {
+      pthread_mutex_lock(&session->answer_lock);
+      if (session->state != SFU_SESSION_ESTABLISHED) {
+        sfu_session_table_rebind_addr(t, session, addr, addr_len);
+      }
+      pthread_mutex_unlock(&session->answer_lock);
+    }
+    pthread_mutex_unlock(&t->ice_lock);
+    return session;
+  }
+
+  session = sfu_session_table_get_or_create(t, addr, addr_len);
+  if (!session) {
+    pthread_mutex_unlock(&t->ice_lock);
+    return NULL;
+  }
+
+  if (session->cold->ufrag[0] != '\0' && strcmp(session->cold->ufrag, ufrag) != 0) {
+    SFU_LOG_WARN("session address already belongs to a different ufrag (%s != %s)", session->cold->ufrag, ufrag);
+    sfu_session_release(session);
+    pthread_mutex_unlock(&t->ice_lock);
+    return NULL;
+  }
+
+  if (session->cold->ufrag[0] == '\0') {
+    snprintf(session->cold->ufrag, sizeof(session->cold->ufrag), "%s", ufrag);
+  }
+  if (!sfu_session_table_index_ufrag(t, session)) {
+    sfu_peer_session_t *winner = sfu_session_table_find_by_ufrag(t, ufrag);
+    sfu_session_release(session);
+    session = winner;
+  }
+
+  pthread_mutex_unlock(&t->ice_lock);
+  return session;
+}
+
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len) {
   if (!addr || addr_len == 0) {
     return NULL;
@@ -478,13 +565,15 @@ uint32_t sfu_session_table_foreach(sfu_session_table_t *t, sfu_session_iter_fn f
     return 0;
   }
 
-  sfu_peer_session_t **pinned = SFU_CALLOC(t->count ? t->count : 1, sizeof(*pinned));
+  pthread_mutex_lock(&t->lock);
+  uint32_t pin_capacity = t->count ? t->count : 1;
+  sfu_peer_session_t **pinned = SFU_CALLOC(pin_capacity, sizeof(*pinned));
   if (!pinned) {
+    pthread_mutex_unlock(&t->lock);
     return 0;
   }
   uint32_t pinned_count = 0;
 
-  pthread_mutex_lock(&t->lock);
   for (uint32_t i = 0; i < t->count; i++) {
     sfu_peer_session_t *s = t->sessions[i];
     if (!s) {
@@ -556,6 +645,15 @@ bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s
     return false;
   }
 
+  uint32_t new_hash = fnv1a(addr, addr_len);
+  addr_match_ctx_t new_ctx = {t, addr, addr_len};
+  uint32_t occupied = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, new_hash, addr_matches_direct, &new_ctx, false);
+  if (occupied != SFU_HASH_EMPTY && t->addr_index[occupied].index != idx) {
+    pthread_mutex_unlock(&t->lock);
+    SFU_LOG_WARN("rejecting address rebind: target tuple belongs to another session");
+    return false;
+  }
+
   table_remove_addr_hash(t, s, idx);
   memcpy(&s->cold->addr, addr, addr_len);
   s->cold->addr_len = addr_len;
@@ -581,11 +679,20 @@ bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *s
 
   uint32_t hash = fnv1a(session->cold->ufrag, strlen(session->cold->ufrag));
   ufrag_match_ctx_t ctx = {t, session->cold->ufrag};
-  uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches_direct, &ctx, true);
-  if (slot != SFU_HASH_EMPTY) {
-    t->ufrag_index[slot].hash = hash;
-    t->ufrag_index[slot].index = idx;
+  uint32_t existing = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches_direct, &ctx, false);
+  if (existing != SFU_HASH_EMPTY && t->ufrag_index[existing].index != idx) {
+    pthread_mutex_unlock(&t->lock);
+    SFU_LOG_WARN("rejecting duplicate session for ufrag=%s", session->cold->ufrag);
+    return false;
   }
+
+  uint32_t slot = addr_probe(t->ufrag_index, SFU_SESSION_UFRAG_HASH_SLOTS, hash, ufrag_matches_direct, &ctx, true);
+  if (slot == SFU_HASH_EMPTY) {
+    pthread_mutex_unlock(&t->lock);
+    return false;
+  }
+  t->ufrag_index[slot].hash = hash;
+  t->ufrag_index[slot].index = idx;
 
   pthread_mutex_unlock(&t->lock);
   return true;
@@ -630,7 +737,83 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
   t->count = 0;
   t->capacity = 0;
 
+  pthread_mutex_destroy(&t->ice_lock);
   pthread_mutex_destroy(&t->lock);
+}
+
+bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pending_answer_t *answer, int fd, bool *role_changed, bool *media_changed) {
+  if (!session || !answer || !answer->valid) {
+    return false;
+  }
+
+  pthread_mutex_lock(&session->answer_lock);
+  uint32_t applied = atomic_load_explicit(&session->applied_answer_generation, memory_order_acquire);
+  if (answer->generation <= applied) {
+    pthread_mutex_unlock(&session->answer_lock);
+    return false;
+  }
+
+  bool old_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  bool role_diff = old_audience != answer->is_audience;
+  bool changed = false;
+
+  if (session->room && role_diff) {
+    role_diff = room_update_peer_role((sfu_room_t *)session->room, session, answer->is_audience);
+  } else if (!session->room) {
+    atomic_store_explicit(&session->is_audience, answer->is_audience, memory_order_release);
+  }
+
+  if (answer->audio_section_present) {
+    atomic_store_explicit(&session->audio_send_negotiated, answer->audio_sends && !answer->is_audience, memory_order_release);
+  }
+  if (answer->video_section_present) {
+    atomic_store_explicit(&session->video_send_negotiated, answer->video_sends && !answer->is_audience, memory_order_release);
+  }
+
+  pthread_mutex_lock(&session->media_lock);
+  uint32_t audio_ssrc = answer->audio_section_present ? (answer->audio_sends ? answer->audio_ssrc : 0) : session->uplink_audio.ssrc;
+  uint32_t video_ssrc = answer->video_section_present ? (answer->video_sends ? answer->video_ssrc : 0) : session->uplink_video.ssrc;
+  uint32_t rtx_ssrc = answer->video_section_present ? (answer->video_sends ? answer->rtx_ssrc : 0) : session->uplink_video.rtx_ssrc;
+  uint8_t video_pt = answer->video_pt != 0 ? answer->video_pt : session->uplink_video.payload_type;
+  uint8_t rtx_pt = answer->rtx_pt != 0 ? answer->rtx_pt : session->uplink_video.rtx_payload_type;
+  sfu_video_codec_t codec = answer->video_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->video_codec : session->uplink_video.codec;
+  bool current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  bool audio_active = !current_audience && audio_ssrc != 0;
+  bool video_active = !current_audience && video_ssrc != 0;
+
+  changed = session->uplink_audio.ssrc != audio_ssrc || session->uplink_audio.active != audio_active || session->uplink_video.ssrc != video_ssrc ||
+            session->uplink_video.rtx_ssrc != rtx_ssrc || session->uplink_video.active != video_active || session->uplink_video.payload_type != video_pt ||
+            session->uplink_video.rtx_payload_type != rtx_pt || session->uplink_video.codec != codec;
+
+  session->uplink_audio.ssrc = audio_ssrc;
+  session->uplink_audio.active = audio_active;
+  session->uplink_video.ssrc = video_ssrc;
+  session->uplink_video.rtx_ssrc = rtx_ssrc;
+  session->uplink_video.active = video_active;
+  session->uplink_video.payload_type = video_pt;
+  session->uplink_video.rtx_payload_type = rtx_pt;
+  session->uplink_video.codec = codec;
+  session->twcc_recv_extmap_id = answer->twcc_recv_extmap_id;
+  session->twcc_send_extmap_id = answer->twcc_send_extmap_id;
+  pthread_mutex_unlock(&session->media_lock);
+  if (answer->peer_id != 0) {
+    session->peer_id = answer->peer_id;
+  }
+  session->user_id = answer->user_id;
+  session->fd = fd;
+  for (int i = 0; i < 128; i++) {
+    session->pt_map[i] = (uint8_t)i;
+  }
+  atomic_store_explicit(&session->applied_answer_generation, answer->generation, memory_order_release);
+  pthread_mutex_unlock(&session->answer_lock);
+
+  if (role_changed) {
+    *role_changed = role_diff;
+  }
+  if (media_changed) {
+    *media_changed = changed;
+  }
+  return true;
 }
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
@@ -653,7 +836,9 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
     return;
   }
 
+  pthread_mutex_lock(&publisher->media_lock);
   uint32_t media_ssrc = publisher->uplink_video.ssrc;
+  pthread_mutex_unlock(&publisher->media_lock);
 
   SFU_LOG_DEBUG("[KF-DBG] Executing KF request on owner worker %u for pub peer_id=%u (uplink SSRC=%u)", w->worker_index, publisher->peer_id, media_ssrc);
 
@@ -676,7 +861,7 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
     return;
   }
 
-  SFU_LOG_INFO("Worker %u executing PLI output to publisher peer %u SSRC %u", w->worker_index, publisher->peer_id, publisher->uplink_video.ssrc);
+  SFU_LOG_INFO("Worker %u executing PLI output to publisher peer %u SSRC %u", w->worker_index, publisher->peer_id, media_ssrc);
 
   int rtcp_len = 0;
   uint32_t sfu_sender_ssrc = 1;
