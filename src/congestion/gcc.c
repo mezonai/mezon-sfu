@@ -2,29 +2,20 @@
 #include <math.h>
 #include <string.h>
 
-/* Burst grouping: packets whose send times are within 5 ms of the group's
- * first packet belong to the same burst (draft-ietf-rmcat-gcc-02 §4.1). */
 #define GCC_BURST_GROUPING_THRESHOLD_US 5000LL
 
-/* Delay smoothing factor for the trendline estimator. */
 #define GCC_DELAY_SMOOTHING_ALPHA 0.9
 
-/* Overuse detector (draft §4.2/§4.3). */
 #define GCC_OVERUSE_TIME_THRESHOLD_MS 10.0
 #define GCC_THRESHOLD_ADAPT_K_UP 0.0087
 #define GCC_THRESHOLD_ADAPT_K_DOWN 0.039
 #define GCC_THRESHOLD_MAX_DELTA_MS 20.0
 #define GCC_THRESHOLD_MIN_MS 6.0
 #define GCC_THRESHOLD_MAX_MS 600.0
-/* If overuse checks are separated by more than this, the accumulated
- * over-use time is reset instead of counted: a feedback gap is not evidence
- * of sustained congestion. */
 #define GCC_OVERUSE_GAP_DECAY_MS 75.0
 
-/* AIMD pacing: at most one additive increase per 100 ms of feedback, and
- * never above 1.5x the acknowledged bitrate while probing. */
 #define GCC_AIMD_MIN_INCREASE_INTERVAL_US 100000LL
-#define GCC_AIMD_ADDITIVE_BPS_PER_S 400000.0 /* ~400 kbps/s additive ramp */
+#define GCC_AIMD_ADDITIVE_BPS_PER_S 400000.0
 #define GCC_AIMD_PROBE_HEADROOM_NUM 3
 #define GCC_AIMD_PROBE_HEADROOM_DEN 2
 #define GCC_AIMD_DECREASE_FACTOR_NUM 85
@@ -39,8 +30,6 @@ static double clampd(double v, double lo, double hi) { return v < lo ? lo : (v >
 void gcc_bwe_init(gcc_bwe_context_t *ctx, uint32_t start_bitrate, uint32_t min_bitrate, uint32_t max_bitrate) {
   memset(ctx, 0, sizeof(gcc_bwe_context_t));
 
-  /* Validate the configured bounds: contradictory or zero configurations
-   * fall back to a sane default rather than producing inverted clamps. */
   if (min_bitrate == 0 || max_bitrate == 0 || min_bitrate > max_bitrate || start_bitrate < min_bitrate || start_bitrate > max_bitrate) {
     min_bitrate = 50000;
     max_bitrate = 5000000;
@@ -55,12 +44,6 @@ void gcc_bwe_init(gcc_bwe_context_t *ctx, uint32_t start_bitrate, uint32_t min_b
   ctx->trendline.usage_state = GCC_BWE_NORMAL;
 }
 
-/* Least-squares slope of smoothed delay vs relative arrival time, scaled by
- * the window's TIME SPAN (ms). The result is the predicted delay change
- * across the window — comparable in magnitude to the delay threshold no
- * matter how many samples the window holds. (Scaling by raw sample count
- * instead made the trend ~20x smaller than the threshold for per-group
- * feedback and permanently blind to steady queue growth.) */
 static double trendline_modified_trend(const gcc_trendline_estimator_t *te) {
   if (te->history_count < 2) {
     return 0.0;
@@ -101,8 +84,6 @@ static void trendline_adapt_threshold(gcc_trendline_estimator_t *te, double modi
   }
   double abs_trend = fabs(modified_trend);
   if (abs_trend > te->threshold_ms + GCC_THRESHOLD_MAX_DELTA_MS) {
-    /* A trend jump this large is a cross-traffic spike, not queue growth;
-     * leave the threshold alone. */
     te->last_threshold_update_us = now_us;
     return;
   }
@@ -121,8 +102,6 @@ static void trendline_detect(gcc_trendline_estimator_t *te, double modified_tren
 
   if (modified_trend > te->threshold_ms) {
     if (gap_ms > GCC_OVERUSE_GAP_DECAY_MS) {
-      /* Stale evidence: a long silence followed by one high sample resets
-       * the accumulation rather than counting the whole gap. */
       te->time_over_using_ms = 0;
     } else {
       te->time_over_using_ms += gap_ms;
@@ -181,7 +160,6 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
       break;
     case GCC_BWE_NORMAL:
       if (aimd->state == GCC_RATE_CTRL_DECREASE) {
-        /* Recover cautiously: hold one evaluation after a decrease. */
         aimd->state = GCC_RATE_CTRL_HOLD;
         break;
       }
@@ -192,7 +170,7 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
         double elapsed_s = (double)(now_us - aimd->last_increase_us) / 1000000.0;
         uint64_t add = (uint64_t)(GCC_AIMD_ADDITIVE_BPS_PER_S * elapsed_s);
         if (add == 0) {
-          add = 1000; /* minimum quantum */
+          add = 1000;
         }
         uint64_t cap =
             aimd->have_ack_bitrate ? (uint64_t)aimd->ack_bitrate_bps * GCC_AIMD_PROBE_HEADROOM_NUM / GCC_AIMD_PROBE_HEADROOM_DEN : (uint64_t)UINT32_MAX;
@@ -269,8 +247,6 @@ void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) 
   gcc_aimd_controller_t *aimd = &ctx->aimd;
 
   if (lost * 100 > total * 10) {
-    /* Heavy loss: the delay estimator cannot see the queue through losses,
-     * so cap the estimate at the acknowledged receive rate. */
     if (aimd->have_ack_bitrate && aimd->current_bitrate_bps > aimd->ack_bitrate_bps) {
       aimd->current_bitrate_bps = aimd->ack_bitrate_bps;
       if (aimd->current_bitrate_bps < aimd->min_bitrate_bps) {
@@ -279,7 +255,6 @@ void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) 
     }
     aimd->state = GCC_RATE_CTRL_HOLD;
   } else if (lost * 100 > total * 2) {
-    /* Moderate loss: hold; do not probe upward into loss. */
     aimd->state = GCC_RATE_CTRL_HOLD;
   }
 }
@@ -287,10 +262,6 @@ void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) 
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt) {
   gcc_arrival_group_t *cg = &ctx->current_group;
 
-  /* Reorder policy: a packet older than the group's first send time is
-   * ignored; late/out-of-order feedback never rewrites an established
-   * group's endpoint (the old code treated every negative delta as "within
-   * 5 ms"). */
   bool reordered = cg->packet_count > 0 && pkt->send_time_us < cg->first_send_time_us;
   if (reordered) {
     return ctx->aimd.current_bitrate_bps;
@@ -310,7 +281,6 @@ uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_in
     return ctx->aimd.current_bitrate_bps;
   }
 
-  /* Group complete: compare with the previous completed group. */
   if (ctx->prev_group.packet_count > 0) {
     double delta_send_ms = (double)(cg->last_send_time_us - ctx->prev_group.last_send_time_us) / 1000.0;
     double delta_recv_ms = (double)(cg->last_recv_time_us - ctx->prev_group.last_recv_time_us) / 1000.0;
