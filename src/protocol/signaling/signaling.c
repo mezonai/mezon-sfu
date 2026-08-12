@@ -1,5 +1,6 @@
 #include "protocol/signaling/signaling.h"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <netinet/in.h>
@@ -26,6 +27,7 @@
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
 #include "runtime/scheduler.h"
+#include "runtime/timer.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -628,10 +630,10 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
   return 0;
 }
 
-static void on_client_close(uv_handle_t *handle) {
-  sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
+static void disconnect_client(sfu_client_conn_t *c);
 
-  SFU_LOG_INFO("signaling: on_client_close fired for fd=%d ufrag=%s", c->fd, c->client_ufrag);
+static void finish_client_close(sfu_client_conn_t *c) {
+  SFU_LOG_INFO("signaling: client closed fd=%d ufrag=%s", c->fd, c->client_ufrag);
 
   sfu_routing_table_unregister_fd(c->server->routing_table, c->fd);
 
@@ -661,14 +663,79 @@ static void on_client_close(uv_handle_t *handle) {
     }
   }
 
-  close(c->fd);
+  if (c->fd >= 0) {
+    close(c->fd);
+    c->fd = -1;
+  }
   SFU_FREE(c);
 }
 
+static void on_client_handle_closed(uv_handle_t *handle) {
+  sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
+  if (!c) {
+    return;
+  }
+  if (c->handles_open > 0) {
+    c->handles_open--;
+  }
+  if (c->handles_open == 0) {
+    finish_client_close(c);
+  }
+}
+
+static void on_keepalive_timer(uv_timer_t *timer) {
+  sfu_client_conn_t *c = (sfu_client_conn_t *)timer->data;
+  if (!c || c->disconnecting || !c->handshake_done) {
+    return;
+  }
+
+  const uint64_t now_ms = sfu_now_ms();
+  if (c->last_activity_ms != 0 && now_ms >= c->last_activity_ms && (now_ms - c->last_activity_ms) >= SFU_SIGNALING_IDLE_TIMEOUT_MS) {
+    SFU_LOG_WARN("signaling: idle timeout (%u ms) fd=%d ufrag=%s; closing peer/session", SFU_SIGNALING_IDLE_TIMEOUT_MS, c->fd, c->client_ufrag);
+    disconnect_client(c);
+    return;
+  }
+
+  static const char ping_msg[] = "{\"type\":\"ping\"}";
+  if (sfu_ws_send_text(c->fd, ping_msg, sizeof(ping_msg) - 1) != 0) {
+    SFU_LOG_WARN("signaling: failed to send ping fd=%d; closing", c->fd);
+    disconnect_client(c);
+  }
+}
+
+static void mark_client_activity(sfu_client_conn_t *c) {
+  if (c) {
+    c->last_activity_ms = sfu_now_ms();
+  }
+}
+
+static void start_client_keepalive(sfu_client_conn_t *c) {
+  if (!c || !c->keepalive_inited || c->disconnecting) {
+    return;
+  }
+  mark_client_activity(c);
+  int rc = uv_timer_start(&c->keepalive_timer, on_keepalive_timer, SFU_SIGNALING_PING_INTERVAL_MS, SFU_SIGNALING_PING_INTERVAL_MS);
+  if (rc != 0) {
+    SFU_LOG_WARN("signaling: keepalive timer start failed fd=%d: %s", c->fd, uv_strerror(rc));
+  }
+}
+
 static void disconnect_client(sfu_client_conn_t *c) {
+  if (!c || c->disconnecting) {
+    return;
+  }
+  c->disconnecting = true;
+
+  if (c->keepalive_inited) {
+    uv_timer_stop(&c->keepalive_timer);
+    if (!uv_is_closing((uv_handle_t *)&c->keepalive_timer)) {
+      uv_close((uv_handle_t *)&c->keepalive_timer, on_client_handle_closed);
+    }
+  }
+
   if (!uv_is_closing((uv_handle_t *)&c->poll_handle)) {
     uv_poll_stop(&c->poll_handle);
-    uv_close((uv_handle_t *)&c->poll_handle, on_client_close);
+    uv_close((uv_handle_t *)&c->poll_handle, on_client_handle_closed);
   }
 }
 
@@ -713,6 +780,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
         }
         c->handshake_done = true;
         SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", c->peer_ip, c->ip_detected_from_header ? "YES" : "NO");
+        start_client_keepalive(c);
       }
     } else {
       char buf[SFU_SIGNALING_RECV_CAP];
@@ -725,9 +793,18 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
       } else if (n == 0) {
         disconnect_client(c);
       } else {
+        mark_client_activity(c);
         char type[32];
         if (sfu_json_extract_string(buf, (size_t)n, "type", type, sizeof(type)) >= 0) {
-          if (strcmp(type, "join") == 0) {
+          if (strcmp(type, "ping") == 0) {
+            static const char pong_msg[] = "{\"type\":\"pong\"}";
+            if (sfu_ws_send_text(c->fd, pong_msg, sizeof(pong_msg) - 1) != 0) {
+              SFU_LOG_WARN("signaling: failed to send pong fd=%d; closing", c->fd);
+              disconnect_client(c);
+            }
+          } else if (strcmp(type, "pong") == 0) {
+            // nothing else to do.
+          } else if (strcmp(type, "join") == 0) {
             char room_str[32] = {0};
             char str_user_id[32] = {0};
             char role_str[16] = {0};
@@ -958,6 +1035,10 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
       c->fd = fd;
       c->server = s;
       c->handshake_done = false;
+      c->disconnecting = false;
+      c->keepalive_inited = false;
+      c->handles_open = 0;
+      c->last_activity_ms = 0;
       strcpy(c->peer_ip, "unknown");
 
       int rc = uv_poll_init_socket(handle->loop, &c->poll_handle, fd);
@@ -968,10 +1049,23 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
         return;
       }
       c->poll_handle.data = c;
+      c->handles_open = 1;
+
+      rc = uv_timer_init(handle->loop, &c->keepalive_timer);
+      if (rc != 0) {
+        SFU_LOG_ERROR("signaling: uv_timer_init failed: %s", uv_strerror(rc));
+        c->disconnecting = true;
+        uv_close((uv_handle_t *)&c->poll_handle, on_client_handle_closed);
+        return;
+      }
+      c->keepalive_timer.data = c;
+      c->keepalive_inited = true;
+      c->handles_open = 2;
+
       rc = uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
       if (rc != 0) {
         SFU_LOG_ERROR("signaling: uv_poll_start failed: %s", uv_strerror(rc));
-        uv_close((uv_handle_t *)&c->poll_handle, on_client_close);
+        disconnect_client(c);
       }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
       SFU_LOG_ERROR("signaling: accept failed: %s", strerror(errno));
@@ -989,11 +1083,17 @@ static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
   sfu_signaling_server_t *s = (sfu_signaling_server_t *)arg;
 
   if (handle->type == UV_POLL && handle->data != NULL && handle->data != s) {
-    uv_poll_stop((uv_poll_t *)handle);
-    uv_close(handle, on_client_close);
-  } else {
-    uv_close(handle, NULL);
+    disconnect_client((sfu_client_conn_t *)handle->data);
+    return;
   }
+  if (handle->type == UV_TIMER && handle->data != NULL) {
+    sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
+    if (c->server == s || c->server != NULL) {
+      disconnect_client(c);
+      return;
+    }
+  }
+  uv_close(handle, NULL);
 }
 
 static void *signaling_loop_main(void *arg) {
