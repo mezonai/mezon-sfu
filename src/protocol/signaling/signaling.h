@@ -10,7 +10,7 @@
 #include "transport/stun/stun.h"
 
 #define SFU_SIGNALING_PING_INTERVAL_MS 10000u
-#define SFU_SIGNALING_IDLE_TIMEOUT_MS 60000u
+#define SFU_SIGNALING_IDLE_TIMEOUT_MS 30000u
 
 typedef struct sfu_signaling_server {
   int listen_fd;
