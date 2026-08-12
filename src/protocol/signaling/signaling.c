@@ -16,7 +16,9 @@
 #include <unistd.h>
 #include <uv.h>
 #include "api/hook/producer.h"
+#include "config/config.h"
 #include "peer/session.h"
+#include "protocol/signaling/handshake.h"
 #include "protocol/signaling/json_lite.h"
 #include "protocol/signaling/sdp.h"
 #include "protocol/websocket/ws.h"
@@ -733,15 +735,31 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
             char room_str[32] = {0};
             char str_user_id[32] = {0};
             char role_str[16] = {0};
+            char token[4096];
             uint64_t room_id = 0;
-            uint64_t user_id = 0;
+            int64_t user_id = 0;
 
             if (sfu_json_extract_string(buf, (size_t)n, "room", room_str, sizeof(room_str)) >= 0) {
               room_id = (uint64_t)strtoull(room_str, NULL, 10);
             }
 
-            if (sfu_json_extract_string(buf, (size_t)n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
-              user_id = (uint64_t)strtoull(str_user_id, NULL, 10);
+            const char *jwt_secret = g_sfu_config.jwt_secret;
+            if (jwt_secret[0] != '\0') {
+              int token_len = sfu_json_extract_string(buf, (size_t)n, "token", token, sizeof(token));
+              if (token_len < 0) {
+                SFU_LOG_WARN("signaling: join missing token (fd=%d)", c->fd);
+                sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"missing_token\"}", 42);
+                return;
+              }
+              if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &user_id) != 0) {
+                SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
+                sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
+                return;
+              }
+              c->user_id = user_id;
+              SFU_LOG_INFO("signaling: join JWT ok user_id=%" PRId64 " (fd=%d)", user_id, c->fd);
+            } else if (sfu_json_extract_string(buf, (size_t)n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
+              user_id = (int64_t)strtoll(str_user_id, NULL, 10);
               c->user_id = user_id;
             }
 

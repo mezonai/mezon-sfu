@@ -14,6 +14,8 @@ typedef struct {
   char nats_url[256];
   char nats_client_name[128];
 
+  char jwt_secret[256];
+
   uint32_t packet_buf_size;
   uint32_t packet_pool_capacity;
   uint32_t provided_buf_count;
