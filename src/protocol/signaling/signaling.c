@@ -535,31 +535,55 @@ static bool handle_signaling_answer(sfu_peer_session_t *session, const char *sdp
     return false;
   }
 
-  bool new_audio_active = media.audio_ssrc != 0;
-  bool new_video_active = media.video_ssrc != 0;
-  bool changed = session->uplink_audio.ssrc != media.audio_ssrc || session->uplink_audio.active != new_audio_active ||
-                 session->uplink_video.ssrc != media.video_ssrc || session->uplink_video.rtx_ssrc != media.rtx_ssrc ||
-                 session->uplink_video.active != new_video_active || session->uplink_video.payload_type != media.video_pt ||
-                 session->uplink_video.rtx_payload_type != media.rtx_pt || session->uplink_video.codec != media.video_codec;
+  bool audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  uint32_t audio_ssrc = media.audio_ssrc != 0 ? media.audio_ssrc : session->uplink_audio.ssrc;
+  uint32_t video_ssrc = media.video_ssrc != 0 ? media.video_ssrc : session->uplink_video.ssrc;
+  uint32_t rtx_ssrc = media.rtx_ssrc != 0 ? media.rtx_ssrc : session->uplink_video.rtx_ssrc;
+  uint8_t video_pt = media.video_pt != 0 ? media.video_pt : session->uplink_video.payload_type;
+  uint8_t rtx_pt = media.rtx_pt != 0 ? media.rtx_pt : session->uplink_video.rtx_payload_type;
+  sfu_video_codec_t video_codec = media.video_codec != SFU_VIDEO_CODEC_NONE ? media.video_codec : session->uplink_video.codec;
 
-  session->uplink_audio.ssrc = media.audio_ssrc;
+  bool new_audio_active = !audience && audio_ssrc != 0;
+  bool new_video_active = !audience && video_ssrc != 0;
+
+  bool ssrc_identity_changed = (media.audio_ssrc != 0 && session->uplink_audio.ssrc != media.audio_ssrc) ||
+                               (media.video_ssrc != 0 && session->uplink_video.ssrc != media.video_ssrc) ||
+                               (media.rtx_ssrc != 0 && session->uplink_video.rtx_ssrc != media.rtx_ssrc);
+  bool active_changed = session->uplink_audio.active != new_audio_active || session->uplink_video.active != new_video_active;
+  bool codec_changed = (media.video_pt != 0 && session->uplink_video.payload_type != media.video_pt) ||
+                       (media.rtx_pt != 0 && session->uplink_video.rtx_payload_type != media.rtx_pt) ||
+                       (media.video_codec != SFU_VIDEO_CODEC_NONE && session->uplink_video.codec != media.video_codec);
+
+  bool changed = ssrc_identity_changed || active_changed || codec_changed;
+
+  session->uplink_audio.ssrc = audio_ssrc;
   session->uplink_audio.active = new_audio_active;
-  session->uplink_video.ssrc = media.video_ssrc;
-  session->uplink_video.rtx_ssrc = media.rtx_ssrc;
+  session->uplink_video.ssrc = video_ssrc;
+  session->uplink_video.rtx_ssrc = rtx_ssrc;
   session->uplink_video.active = new_video_active;
-  session->uplink_video.payload_type = media.video_pt;
-  session->uplink_video.rtx_payload_type = media.rtx_pt;
-  session->uplink_video.codec = media.video_codec;
-  session->twcc_recv_extmap_id = media.twcc_recv_extmap_id;
-  session->twcc_send_extmap_id = media.twcc_send_extmap_id;
+  if (video_pt != 0) {
+    session->uplink_video.payload_type = video_pt;
+  }
+  if (rtx_pt != 0) {
+    session->uplink_video.rtx_payload_type = rtx_pt;
+  }
+  if (video_codec != SFU_VIDEO_CODEC_NONE) {
+    session->uplink_video.codec = video_codec;
+  }
+  if (media.twcc_recv_extmap_id != 0) {
+    session->twcc_recv_extmap_id = media.twcc_recv_extmap_id;
+  }
+  if (media.twcc_send_extmap_id != 0) {
+    session->twcc_send_extmap_id = media.twcc_send_extmap_id;
+  }
 
   for (int i = 0; i < 128; i++) {
     session->pt_map[i] = (uint8_t)i;
   }
 
-  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u changed=%d", session->cold->ufrag,
-               media.audio_ssrc, media.video_ssrc, media.rtx_ssrc, media.video_pt, media.rtx_pt, media.video_codec, media.twcc_recv_extmap_id,
-               media.twcc_send_extmap_id, changed);
+  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u active=%d/%d changed=%d",
+               session->cold->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, session->uplink_video.payload_type, session->uplink_video.rtx_payload_type,
+               session->uplink_video.codec, session->twcc_recv_extmap_id, session->twcc_send_extmap_id, new_audio_active, new_video_active, changed);
   return changed;
 }
 
