@@ -67,7 +67,11 @@ void cleanup_nats_connection() {
 }
 
 bool dispatch_hook_event(const void *msg, int len) {
-  if (!msg) {
+  if (!msg || len <= 0) {
+    return false;
+  }
+  if (global_nats_nc == NULL) {
+    SFU_LOG_DEBUG("NATS Publish skipped: connection not ready");
     return false;
   }
 
