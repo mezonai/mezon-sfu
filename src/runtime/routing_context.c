@@ -29,8 +29,8 @@ static sfu_routing_entry_t *find_entry_locked(sfu_routing_table_t *table, const 
   return NULL;
 }
 
-bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
-                                       const sfu_pending_answer_t *answer, uint32_t *out_generation) {
+bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, const sfu_pending_answer_t *answer,
+                                       uint32_t *out_generation) {
   if (!table || !client_ufrag || client_ufrag[0] == '\0' || !room || fd < 0 || !answer) {
     return false;
   }
@@ -130,10 +130,14 @@ bool sfu_routing_table_invalidate_pending(sfu_routing_table_t *table, const char
     return false;
   }
   uint32_t generation = entry->pending_answer.generation + 1;
-  if (generation == 0) generation = 1;
+  if (generation == 0) {
+    generation = 1;
+  }
   entry->pending_answer.generation = generation;
   entry->pending_answer.valid = false;
-  if (out_generation) *out_generation = generation;
+  if (out_generation) {
+    *out_generation = generation;
+  }
   pthread_mutex_unlock(&table->mutex);
   return true;
 }
