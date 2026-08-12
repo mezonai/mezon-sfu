@@ -936,6 +936,12 @@
                 }
             }
 
+            function sendHook(type) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type }));
+                }
+            }
+
             function toggleCam() {
                 if (screenSharing) {
                     setConnState("stop screen share to toggle camera", "warn");
@@ -955,6 +961,7 @@
                         localStream,
                         camEnabled && localStream.getVideoTracks().length > 0,
                     );
+                sendHook(camEnabled ? "publish" : "unpublish");
             }
 
             function findUplinkVideoSender() {
@@ -1042,8 +1049,8 @@
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             cursor: "always",
-                            width: { ideal: 1920 },
-                            height: { ideal: 1080 },
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 },
                             frameRate: { ideal: 15, max: 30 },
                         },
                         audio: false,
@@ -1118,6 +1125,7 @@
                     setTileStream(local, new MediaStream([screenTrack]), true);
                 }
 
+                sendHook("share_screen");
                 setConnState("sharing screen", "ok");
             }
 

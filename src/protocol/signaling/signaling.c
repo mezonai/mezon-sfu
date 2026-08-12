@@ -576,15 +576,29 @@ bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audi
   return true;
 }
 
-static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
-  (void)s;
-  SFU_LOG_INFO(
-      "INTEGRATION: [NATS Publish] Topic: sfu.room.join | Payload: "
-      "{\"room\": %" PRIu64 ", \"ip\": \"%s\"}",
-      room_id, peer_ip);
+static void emit_hook_event(const char *event, int64_t user_id, uint64_t room_id) {
+  if (!event || event[0] == '\0' || room_id == 0) {
+    return;
+  }
 
-  // TODO: hardcode
-  dispatch_hook_event("{}", 2);
+  char msg[384];
+  int n = snprintf(msg, sizeof(msg),
+                   "{\"user_id\":\"%" PRId64 "\",\"room_id\":\"%" PRIu64 "\",\"name\":\"\",\"event\":\"%s\"}", user_id, room_id, event);
+  if (n <= 0 || (size_t)n >= sizeof(msg)) {
+    SFU_LOG_WARN("signaling: hook payload too large for event=%s", event);
+    return;
+  }
+
+  if (dispatch_hook_event(msg, n)) {
+    SFU_LOG_INFO("signaling: hook event=%s user_id=%" PRId64 " room_id=%" PRIu64, event, user_id, room_id);
+  } else {
+    SFU_LOG_DEBUG("signaling: hook event=%s not published (nats unavailable)", event);
+  }
+}
+
+static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, int64_t user_id) {
+  (void)s;
+  emit_hook_event("join", user_id, room_id);
 }
 
 static int extract_header_val(const char *handshake, const char *header_name, char *out_val, size_t out_len) {
@@ -635,6 +649,10 @@ static void disconnect_client(sfu_client_conn_t *c);
 static void finish_client_close(sfu_client_conn_t *c) {
   SFU_LOG_INFO("signaling: client closed fd=%d ufrag=%s", c->fd, c->client_ufrag);
 
+  const uint64_t room_id = c->joined_room_id;
+  const int64_t user_id = c->user_id;
+  const bool was_in_room = c->joined_room != NULL || room_id != 0;
+
   sfu_routing_table_unregister_fd(c->server->routing_table, c->fd);
 
   sfu_peer_session_t *session = NULL;
@@ -661,6 +679,10 @@ static void finish_client_close(sfu_client_conn_t *c) {
     if (room) {
       sfu_signaling_trigger_renegotiation(room);
     }
+  }
+
+  if (was_in_room) {
+    emit_hook_event("leave", user_id, room_id);
   }
 
   if (c->fd >= 0) {
@@ -804,7 +826,11 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
 
   c->joined_room = room;
   c->joined_room_id = room_id;
-  publish_join_event_to_nats(s, room_id, c->peer_ip);
+  publish_join_event_to_nats(s, room_id, c->user_id);
+  /* Speakers publish camera on join; audience is receive-only until PTT. */
+  if (!c->is_audience) {
+    emit_hook_event("publish", c->user_id, room_id);
+  }
 
   SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64, c->peer_ip, room_id);
 
@@ -953,10 +979,21 @@ static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s,
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
     sfu_signaling_trigger_renegotiation(c->joined_room);
+    /* Camera publish/unpublish follows speaker/audience role. */
+    emit_hook_event(is_audience ? "unpublish" : "publish", c->user_id, c->joined_room_id);
   }
   if (session) {
     sfu_session_release(session);
   }
+}
+
+static void handle_media_hook(sfu_client_conn_t *c, const char *event) {
+  if (!c->joined_room || c->joined_room_id == 0) {
+    static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
+    sfu_ws_send_text(c->fd, must_join, sizeof(must_join) - 1);
+    return;
+  }
+  emit_hook_event(event, c->user_id, c->joined_room_id);
 }
 
 static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
@@ -975,6 +1012,12 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
     handle_answer(c, s, buf, n);
   } else if (strcmp(type, "push_to_talk") == 0 || strcmp(type, "role_change") == 0) {
     handle_push_to_talk(c, s, buf, n, strcmp(type, "push_to_talk") == 0);
+  } else if (strcmp(type, "publish") == 0) {
+    handle_media_hook(c, "publish");
+  } else if (strcmp(type, "unpublish") == 0) {
+    handle_media_hook(c, "unpublish");
+  } else if (strcmp(type, "share_screen") == 0) {
+    handle_media_hook(c, "share_screen");
   } else {
     SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, c->peer_ip);
   }
