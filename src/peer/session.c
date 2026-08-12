@@ -395,6 +395,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
   atomic_store_explicit(&s->audio_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->video_send_negotiated, false, memory_order_relaxed);
+  atomic_store_explicit(&s->visible, true, memory_order_relaxed);
 
   s->next_remote_mid = 2;
   {

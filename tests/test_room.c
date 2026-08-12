@@ -25,6 +25,7 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   atomic_store(&s->refcount, 1);
   atomic_store(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
   atomic_store(&s->accepts_work, true);
+  atomic_store(&s->visible, true);
   s->uplink_audio.owner = s;
   s->uplink_video.owner = s;
   s->uplink_audio.active = true;

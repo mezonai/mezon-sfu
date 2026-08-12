@@ -1,5 +1,6 @@
 #include "protocol/signaling/json_lite.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -60,6 +61,69 @@ int sfu_json_extract_string(const char *json, size_t json_len, const char *field
 
   out[out_len] = '\0';
   return (int)out_len;
+}
+
+int sfu_json_extract_bool(const char *json, size_t json_len, const char *field, bool *out) {
+  if (!json || !field || !out || field[0] == '\0') {
+    return -1;
+  }
+
+  char needle[128];
+  int needle_len = snprintf(needle, sizeof(needle), "\"%s\"", field);
+  if (needle_len < 0 || (size_t)needle_len >= sizeof(needle) || (size_t)needle_len > json_len) {
+    return -1;
+  }
+
+  const char *end = json + json_len;
+  const char *p = NULL;
+  for (const char *candidate = json; candidate + needle_len <= end; candidate++) {
+    if (memcmp(candidate, needle, (size_t)needle_len) == 0) {
+      p = candidate + needle_len;
+      break;
+    }
+  }
+  if (!p) {
+    return -1;
+  }
+
+  while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ':')) {
+    p++;
+  }
+  if (p >= end) {
+    return -1;
+  }
+
+  if (*p == '"') {
+    p++;
+    char token[8] = {0};
+    size_t n = 0;
+    while (p < end && *p != '"' && n + 1 < sizeof(token)) {
+      token[n++] = *p++;
+    }
+    if (p >= end || *p != '"') {
+      return -1;
+    }
+    token[n] = '\0';
+    if (strcmp(token, "true") == 0 || strcmp(token, "1") == 0) {
+      *out = true;
+      return 0;
+    }
+    if (strcmp(token, "false") == 0 || strcmp(token, "0") == 0) {
+      *out = false;
+      return 0;
+    }
+    return -1;
+  }
+
+  if ((size_t)(end - p) >= 4 && memcmp(p, "true", 4) == 0) {
+    *out = true;
+    return 0;
+  }
+  if ((size_t)(end - p) >= 5 && memcmp(p, "false", 5) == 0) {
+    *out = false;
+    return 0;
+  }
+  return -1;
 }
 
 int sfu_json_escape(const char *value, size_t value_len, char *out, size_t out_cap) {

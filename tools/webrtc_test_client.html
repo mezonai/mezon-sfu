@@ -1844,6 +1844,16 @@
                     ws.onerror = () => {
                         setConnState("signaling error", "err");
                     };
+
+                    const sendVisibility = () => {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: "visibility",
+                                visible: document.visibilityState === "visible",
+                            }));
+                        }
+                    };
+                    document.addEventListener("visibilitychange", sendVisibility);
                 } catch (e) {
                     console.error("Connection failed:", e);
                     setJoinStatus(`WebRTC failed: ${e.message}`, true);

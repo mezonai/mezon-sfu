@@ -1,6 +1,7 @@
 #include "protocol/signaling/json_lite.h"
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -92,6 +93,29 @@ int main(void) {
     int n = sfu_json_extract_string("{\"room\":\"abc\"}", strlen("{\"room\":\"abc\"}"), "room", out, sizeof(out));
     assert(n == 3);
     assert(strcmp(out, "abc") == 0);
+  }
+
+  {
+    bool v = false;
+    assert(sfu_json_extract_bool("{\"type\":\"visibility\",\"visible\":true}", strlen("{\"type\":\"visibility\",\"visible\":true}"), "visible", &v) == 0);
+    assert(v == true);
+    assert(sfu_json_extract_bool("{\"visible\":false}", strlen("{\"visible\":false}"), "visible", &v) == 0);
+    assert(v == false);
+  }
+
+  {
+    bool v = false;
+    assert(sfu_json_extract_bool("{\"visible\":\"true\"}", strlen("{\"visible\":\"true\"}"), "visible", &v) == 0);
+    assert(v == true);
+    assert(sfu_json_extract_bool("{\"visible\":\"0\"}", strlen("{\"visible\":\"0\"}"), "visible", &v) == 0);
+    assert(v == false);
+  }
+
+  {
+    bool v = true;
+    assert(sfu_json_extract_bool("{\"type\":\"visibility\"}", strlen("{\"type\":\"visibility\"}"), "visible", &v) == -1);
+    assert(sfu_json_extract_bool("{\"visible\":\"maybe\"}", strlen("{\"visible\":\"maybe\"}"), "visible", &v) == -1);
+    assert(sfu_json_extract_bool(NULL, 0, "visible", &v) == -1);
   }
 
   /* Escape with out == NULL must return -1 without writing. */

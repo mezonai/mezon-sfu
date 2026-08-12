@@ -214,6 +214,7 @@ typedef struct sfu_peer_session {
   _Atomic bool is_audience;
   _Atomic bool audio_send_negotiated;
   _Atomic bool video_send_negotiated;
+  _Atomic bool visible;
   bool active;
   bool negotiation_needed;
   _Atomic bool uplink_ssrc_dirty;
