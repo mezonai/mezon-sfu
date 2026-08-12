@@ -442,12 +442,15 @@
                 </button>
                 <button
                     class="ctrl-btn"
-                    id="raiseHandBtn"
-                    onclick="raiseHand()"
-                    title="Raise hand to become a speaker"
-                    style="display: none;"
+                    id="pttBtn"
+                    onpointerdown="startPushToTalk(event)"
+                    onpointerup="stopPushToTalk(event)"
+                    onpointerleave="stopPushToTalk(event)"
+                    onpointercancel="stopPushToTalk(event)"
+                    title="push to talk"
+                    style="display: none; touch-action: none; user-select: none;"
                 >
-                    ✋
+                    🎙️
                 </button>
                 <button class="ctrl-btn leave" onclick="leaveMeeting()">
                     Leave
@@ -461,6 +464,10 @@
             let localStream = null;
             let localTracksAdded = false;
             let isNegotiating = false;
+            // Latest offer wins while a prior answer is in flight. Dropping offers
+            // (old "ignore while negotiating") leaves remote m-lines stuck inactive
+            // after push-to-talk / SSRC-learn races → black video on 2nd promote.
+            let pendingOfferSdp = null;
             let micEnabled = true;
             let camEnabled = true;
             let audioCtx = null;
@@ -610,25 +617,161 @@
                 p.stream = stream;
                 p.hasVideo = hasVideo;
                 p.video.srcObject = stream;
+                // Autoplay can be blocked after renegotiation; kick play() every bind.
+                const playPromise = p.video.play();
+                if (playPromise && typeof playPromise.catch === "function") {
+                    playPromise.catch(() => { /* autoplay race; unmute/gesture will retry */ });
+                }
 
                 const videoTrack = hasVideo ? stream.getVideoTracks()[0] : null;
                 const showVideo = () => {
-                    const live = hasVideo && videoTrack && !videoTrack.muted && videoTrack.readyState === "live";
+                    // Prefer showing the element whenever the track is live.
+                    // track.muted can lag after demote→promote even while frames
+                    // are decoding (we saw inbound decoded>0 with a black tile).
+                    const live = hasVideo && videoTrack && videoTrack.readyState === "live";
                     p.video.style.display = live ? "block" : "none";
                     p.avatar.style.display = live ? "none" : "flex";
+                    if (live) {
+                        const pp = p.video.play();
+                        if (pp && typeof pp.catch === "function") pp.catch(() => {});
+                    }
                 };
                 if (videoTrack) {
-                    // The SFU marks a demoted publisher's m-line inactive instead
-                    // of removing it, so the receiver track mutes (black frame)
-                    // rather than ending. Hide the video while muted so the tile
-                    // falls back to the avatar instead of a black placeholder.
                     videoTrack.addEventListener("mute", showVideo);
                     videoTrack.addEventListener("unmute", showVideo);
                     videoTrack.addEventListener("ended", showVideo);
+                    // Unmute often fires before the first frame is painted; retry.
+                    setTimeout(showVideo, 200);
+                    setTimeout(showVideo, 1000);
                 }
                 showVideo();
 
                 attachAudioMeter(p, stream);
+            }
+
+            /* Rebind remote mid tiles after every answer. Chrome often does NOT
+             * re-fire ontrack when a demoted peer is re-promoted on the same mid
+             * (track just unmutes). Without this, user1 keeps a black/empty tile
+             * after the 2nd push-to-talk. */
+            function resyncRemoteMedia(pc) {
+                if (!pc) return;
+                for (const t of pc.getTransceivers()) {
+                    if (!t.mid || t.mid === "0" || t.mid === "1") continue;
+                    const track = t.receiver && t.receiver.track;
+                    if (!track || track.readyState === "ended") continue;
+                    const id = "mid-" + t.mid;
+                    if (track.kind === "video") {
+                        const p = ensureParticipant(id, {
+                            isLocal: false,
+                            label: "Peer " + id.substring(0, 8),
+                        });
+                        const existing =
+                            p.video.srcObject && p.video.srcObject.getVideoTracks
+                                ? p.video.srcObject.getVideoTracks()[0]
+                                : null;
+                        if (existing !== track) {
+                            setTileStream(p, new MediaStream([track]), true);
+                        } else {
+                            const live = !track.muted && track.readyState === "live";
+                            p.video.style.display = live ? "block" : "none";
+                            p.avatar.style.display = live ? "none" : "flex";
+                        }
+                    } else if (track.kind === "audio") {
+                        let audioEl = document.querySelector(
+                            `audio[data-owner="${CSS.escape(id)}"]`
+                        );
+                        if (!audioEl) {
+                            audioEl = document.createElement("audio");
+                            audioEl.autoplay = true;
+                            audioEl.dataset.owner = id;
+                            document.body.appendChild(audioEl);
+                        }
+                        const cur =
+                            audioEl.srcObject && audioEl.srcObject.getAudioTracks
+                                ? audioEl.srcObject.getAudioTracks()[0]
+                                : null;
+                        if (cur !== track) {
+                            audioEl.srcObject = new MediaStream([track]);
+                        }
+                    }
+                }
+            }
+
+            async function handleServerOffer(sdp) {
+                if (!pc || !ws) return;
+                if (isNegotiating) {
+                    // Keep only the newest offer; older mid-flight snapshots are
+                    // stale (e.g. inactive before SSRC-learn).
+                    pendingOfferSdp = sdp;
+                    console.log("Offer queued (already negotiating); will apply latest after answer.");
+                    return;
+                }
+                isNegotiating = true;
+                try {
+                    await pc.setRemoteDescription(
+                        new RTCSessionDescription({ type: "offer", sdp })
+                    );
+
+                    if (!localTracksAdded && currentJoinMode === "speaker" && localStream) {
+                        const audioTrack = localStream.getAudioTracks()[0];
+                        const videoTrack = localStream.getVideoTracks()[0];
+                        if (audioTrack) {
+                            const audioTc = pc.getTransceivers().find(
+                                (t) => t.mid === "0" || (t.receiver && t.receiver.track && t.receiver.track.kind === "audio")
+                            );
+                            if (audioTc) {
+                                await audioTc.sender.replaceTrack(audioTrack);
+                                audioTc.direction = "sendonly";
+                            } else {
+                                pc.addTrack(audioTrack, localStream);
+                            }
+                        }
+                        if (videoTrack) await enableSvcForVideoSender(pc, videoTrack);
+                        localTracksAdded = true;
+                    }
+
+                    const answer = await pc.createAnswer();
+                    const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
+                    const selectedMode = (document.getElementById("svcMode") || {}).value || "none";
+                    const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
+                    const mungedSdp = mungeVideoBitrate(
+                        answer.sdp,
+                        wantSvc ? 1000 : 600,
+                        wantSvc ? 1500 : 1000,
+                        wantSvc ? 2500 : 1500
+                    );
+                    await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
+
+                    if (currentJoinMode === "speaker" && localTracksAdded) {
+                        await applyVideoEncodingParams(pc);
+                    }
+
+                    // Do NOT removeTile on inactive remote mids: demote and leave
+                    // look identical in SDP (a=inactive, no a=ssrc). Removing the
+                    // tile on demote breaks the 2nd push-to-talk because Chrome
+                    // rarely re-fires ontrack for the same mid. mute/unmute +
+                    // resyncRemoteMedia handle avatar vs video instead.
+                    resyncRemoteMedia(pc);
+
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(
+                            JSON.stringify({
+                                type: "answer",
+                                sdp: pc.localDescription.sdp,
+                            })
+                        );
+                    }
+                } catch (err) {
+                    console.error("Failed to answer server-initiated offer:", err);
+                    setConnState("negotiation failed", "err");
+                } finally {
+                    isNegotiating = false;
+                    if (pendingOfferSdp) {
+                        const next = pendingOfferSdp;
+                        pendingOfferSdp = null;
+                        await handleServerOffer(next);
+                    }
+                }
             }
 
             function attachAudioMeter(p, stream) {
@@ -698,7 +841,7 @@
             }
 
             function leaveMeeting() {
-                handRaised = false;
+                pttActive = false;
                 if (ws) {
                     ws.close();
                     ws = null;
@@ -713,11 +856,11 @@
                 joinBtn.disabled = false;
                 localTracksAdded = false;
                 isNegotiating = false;
-                const raiseBtn = document.getElementById("raiseHandBtn");
-                if (raiseBtn) {
-                    raiseBtn.style.display = "none";
-                    raiseBtn.style.background = "var(--tile)";
-                    raiseBtn.style.color = "var(--text)";
+                const pttBtn = document.getElementById("pttBtn");
+                if (pttBtn) {
+                    pttBtn.style.display = "none";
+                    pttBtn.style.background = "var(--tile)";
+                    pttBtn.style.color = "var(--text)";
                 }
             }
 
@@ -1009,26 +1152,66 @@
                 }, 2000);
             }
 
-            let handRaised = false;
+            let pttActive = false;
 
-            function raiseHand() {
-                if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-                handRaised = !handRaised;
-
-                ws.send(JSON.stringify({
-                    type: handRaised ? "raise_hand" : "role_change",
-                    role: handRaised ? "speaker" : "audience",
-                }));
-
-                const btn = document.getElementById("raiseHandBtn");
-                if (handRaised) {
+            function setPttButtonPressed(pressed) {
+                const btn = document.getElementById("pttBtn");
+                if (!btn) return;
+                if (pressed) {
                     btn.style.background = "var(--warn)";
                     btn.style.color = "#11111b";
                 } else {
                     btn.style.background = "var(--tile)";
                     btn.style.color = "var(--text)";
                 }
+            }
+
+            function startPushToTalk(event) {
+                if (event) {
+                    event.preventDefault();
+                    if (event.button !== undefined && event.button !== 0) return;
+                    if (event.currentTarget && event.pointerId !== undefined) {
+                        try {
+                            event.currentTarget.setPointerCapture(event.pointerId);
+                        } catch (_) {
+                            /* ignore unsupported capture */
+                        }
+                    }
+                }
+                if (!ws || ws.readyState !== WebSocket.OPEN || pttActive) return;
+
+                pttActive = true;
+                // Keep join-mode in sync so later offers re-attach encodings/tracks.
+                currentJoinMode = "speaker";
+                setPttButtonPressed(true);
+                ws.send(JSON.stringify({
+                    type: "push_to_talk",
+                    role: "speaker",
+                }));
+            }
+
+            function stopPushToTalk(event) {
+                if (event) {
+                    event.preventDefault();
+                    if (event.currentTarget && event.pointerId !== undefined &&
+                        typeof event.currentTarget.hasPointerCapture === "function" &&
+                        event.currentTarget.hasPointerCapture(event.pointerId)) {
+                        try {
+                            event.currentTarget.releasePointerCapture(event.pointerId);
+                        } catch (_) {
+                            /* ignore */
+                        }
+                    }
+                }
+                if (!ws || ws.readyState !== WebSocket.OPEN || !pttActive) return;
+
+                pttActive = false;
+                currentJoinMode = "audience";
+                setPttButtonPressed(false);
+                ws.send(JSON.stringify({
+                    type: "role_change",
+                    role: "audience",
+                }));
             }
 
             async function connectAndJoin() {
@@ -1120,7 +1303,7 @@
 
                         document.getElementById("micBtn").style.display = "flex";
                         document.getElementById("camBtn").style.display = "flex";
-                        document.getElementById("raiseHandBtn").style.display = "none";
+                        document.getElementById("pttBtn").style.display = "none";
 
                         if (!localStream.getAudioTracks().length) {
                             document.getElementById("micBtn").disabled = true;
@@ -1129,10 +1312,10 @@
                             document.getElementById("camBtn").disabled = true;
                         }
                     } else {
-                        // Hide mic/cam controls for audience
+                        // Hide mic/cam controls for audience; show hold-to-talk.
                         document.getElementById("micBtn").style.display = "none";
                         document.getElementById("camBtn").style.display = "none";
-                        document.getElementById("raiseHandBtn").style.display = "flex";
+                        document.getElementById("pttBtn").style.display = "flex";
                     }
 
                     setJoinStatus("Connecting to signaling server…");
@@ -1171,12 +1354,17 @@
                             // transceivers and switch them to send-only. addTrack()
                             // alone cannot make a recvonly transceiver send, so we
                             // replaceTrack + set direction on the audio/video senders.
+                            currentJoinMode = "speaker";
+                            pttActive = true;
+                            setPttButtonPressed(true);
                             try {
                                 const audioTrack = localStream.getAudioTracks()[0];
                                 const videoTrack = localStream.getVideoTracks()[0];
 
-                                const audioTc = pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === "audio");
-                                const videoTc = pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === "video");
+                                const audioTc = pc.getTransceivers().find(t =>
+                                    t.mid === "0" ||
+                                    (t.receiver && t.receiver.track && t.receiver.track.kind === "audio")
+                                );
 
                                 if (audioTc && audioTrack) {
                                     await audioTc.sender.replaceTrack(audioTrack);
@@ -1198,10 +1386,20 @@
                         if (msg.type === "role_changed" && msg.role === "audience") {
                             // Demoted: stop sending by detaching our tracks from the
                             // senders. The next server offer will mark them inactive.
+                            currentJoinMode = "audience";
+                            pttActive = false;
+                            setPttButtonPressed(false);
                             try {
-                                pc.getSenders().forEach(s => {
-                                    if (s.track) s.replaceTrack(null);
-                                });
+                                for (const s of pc.getSenders()) {
+                                    if (s.track) await s.replaceTrack(null);
+                                }
+                                // Prefer inactive on local uplink mids so the next
+                                // answer matches the SFU's a=inactive for audience.
+                                for (const t of pc.getTransceivers()) {
+                                    if (t.mid === "0" || t.mid === "1") {
+                                        try { t.direction = "inactive"; } catch (_) { /* */ }
+                                    }
+                                }
                                 localTracksAdded = false;
                             } catch (e) {
                                 console.error("Failed to detach tracks on demotion:", e);
@@ -1210,96 +1408,7 @@
                         }
 
                         if (msg.type === "offer") {
-                            if (isNegotiating) {
-                                console.log("Offer received while already negotiating -- ignoring.");
-                                return;
-                            }
-                            isNegotiating = true;
-                            try {
-                                await pc.setRemoteDescription(
-                                    new RTCSessionDescription({
-                                        type: "offer",
-                                        sdp: msg.sdp,
-                                    }),
-                                ).catch(e => console.error("setRemoteDescription failed:", e.name, e.message));
-
-                                if (!localTracksAdded && currentJoinMode === 'speaker') {
-                                    const audioTrack = localStream.getAudioTracks()[0];
-                                    const videoTrack = localStream.getVideoTracks()[0];
-                                    if (audioTrack) pc.addTrack(audioTrack, localStream);
-                                    if (videoTrack) await enableSvcForVideoSender(pc, videoTrack);
-                                    localTracksAdded = true;
-                                }
-
-                                const answer = await pc.createAnswer();
-                                // x-google-*-bitrate on VP8/VP9 fmtp is the reliable way
-                                // to lift Chrome's libvpx start rate off the ~150 kbps L3T3
-                                // floor. setParameters(minBitrate) alone is often stripped.
-                                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
-                                const selectedMode = (document.getElementById("svcMode") || {}).value || "none";
-                                const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
-                                const mungedSdp = mungeVideoBitrate(
-                                    answer.sdp,
-                                    wantSvc ? 1000 : 600,
-                                    wantSvc ? 1500 : 1000,
-                                    wantSvc ? 2500 : 1500
-                                );
-                                await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
-
-                                // Re-apply encodings after the answer is set so Chrome
-                                // does not drop scalabilityMode / rates across renegotiation.
-                                if (currentJoinMode === "speaker" && localTracksAdded) {
-                                    await applyVideoEncodingParams(pc);
-                                }
-
-                                // Prune tiles whose peer left the room entirely.
-                                // The SFU never removes m-lines: when a peer leaves,
-                                // its mids stay in the offer but become a=inactive
-                                // with no a=ssrc lines (the snapshot entry is dropped
-                                // by room_remove_peer -> snapshot_build_without, and
-                                // sfu_sdp_build_offer only emits a=ssrc for live
-                                // entries). A camera-off speaker keeps their m-line
-                                // a=sendonly, so their tile survives and the track
-                                // mute listener swaps it to the avatar fallback.
-                                const deadMids = new Set();
-                                for (const m of msg.sdp.split(/^m=/m).slice(1)) {
-                                    const midMatch = m.match(/^a=mid:(\S+)\s*$/m);
-                                    if (!midMatch) continue;
-                                    const mid = midMatch[1];
-                                    if (!/^\d+$/.test(mid)) continue; // skip local m-lines (mid 0/1)
-                                    const hasSsrc = /^a=ssrc:/m.test(m) || /^a=msid:\S+ \S+\s*$/m.test(m);
-                                    const isInactive = /^a=inactive\s*$/m.test(m);
-                                    if (isInactive && !hasSsrc) {
-                                        deadMids.add(mid);
-                                    }
-                                }
-
-                                for (const [id, p] of participants.entries()) {
-                                    if (id === "local") continue;
-                                    if (id.startsWith("mid-") && deadMids.has(id.slice(4))) {
-                                        removeTile(id);
-                                    }
-                                }
-                                // Also drop audio elements belonging to departed peers.
-                                document.querySelectorAll("audio[data-owner]").forEach(el => {
-                                    const owner = el.dataset.owner;
-                                    if (owner.startsWith("mid-") && deadMids.has(owner.slice(4))) {
-                                        el.remove();
-                                    }
-                                });
-
-                                ws.send(
-                                    JSON.stringify({
-                                        type: "answer",
-                                        sdp: pc.localDescription.sdp,
-                                    }),
-                                );
-                            } catch (err) {
-                                console.error("Failed to answer server-initiated offer:", err);
-                                setConnState("negotiation failed", "err");
-                            } finally {
-                                isNegotiating = false;
-                            }
+                            await handleServerOffer(msg.sdp);
                             return;
                         }
                     };
@@ -1308,6 +1417,7 @@
                         setConnState("disconnected", "err");
                         localTracksAdded = false;
                         isNegotiating = false;
+                        pendingOfferSdp = null;
                     };
                     ws.onerror = () => {
                         setConnState("signaling error", "err");
