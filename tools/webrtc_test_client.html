@@ -277,6 +277,10 @@
                 background: var(--err);
                 color: #11111b;
             }
+            .ctrl-btn.active {
+                background: var(--accent);
+                color: #11111b;
+            }
             .ctrl-btn.leave {
                 background: var(--err);
                 color: #11111b;
@@ -442,6 +446,15 @@
                 </button>
                 <button
                     class="ctrl-btn"
+                    id="screenBtn"
+                    onclick="toggleScreenShare()"
+                    title="Share screen"
+                    style="display: none;"
+                >
+                    🖥️
+                </button>
+                <button
+                    class="ctrl-btn"
                     id="pttBtn"
                     onpointerdown="startPushToTalk(event)"
                     onpointerup="stopPushToTalk(event)"
@@ -470,6 +483,9 @@
             let pendingOfferSdp = null;
             let micEnabled = true;
             let camEnabled = true;
+            let screenSharing = false;
+            let screenStream = null;
+            let cameraTrackBackup = null;
             let audioCtx = null;
 
             const participants = new Map();
@@ -714,7 +730,11 @@
 
                     if (!localTracksAdded && currentJoinMode === "speaker" && localStream) {
                         const audioTrack = localStream.getAudioTracks()[0];
-                        const videoTrack = localStream.getVideoTracks()[0];
+                        const videoTrack =
+                            (screenSharing &&
+                                screenStream &&
+                                screenStream.getVideoTracks()[0]) ||
+                            localStream.getVideoTracks()[0];
                         if (audioTrack) {
                             const audioTc = pc.getTransceivers().find(
                                 (t) => t.mid === "0" || (t.receiver && t.receiver.track && t.receiver.track.kind === "audio")
@@ -726,8 +746,31 @@
                                 pc.addTrack(audioTrack, localStream);
                             }
                         }
-                        if (videoTrack) await enableSvcForVideoSender(pc, videoTrack);
+                        if (videoTrack) {
+                            await enableSvcForVideoSender(pc, videoTrack);
+                            if (screenSharing) {
+                                const sender = findUplinkVideoSender();
+                                if (sender) await applyScreenEncodingParams(sender);
+                            }
+                        }
                         localTracksAdded = true;
+                    } else if (
+                        localTracksAdded &&
+                        screenSharing &&
+                        screenStream &&
+                        currentJoinMode === "speaker"
+                    ) {
+                        // Renegotiation while already sharing: keep screen on mid:1.
+                        const screenTrack = screenStream.getVideoTracks()[0];
+                        const sender = findUplinkVideoSender();
+                        if (screenTrack && sender && sender.track !== screenTrack) {
+                            try {
+                                await sender.replaceTrack(screenTrack);
+                                await applyScreenEncodingParams(sender);
+                            } catch (e) {
+                                console.warn("re-attach screen track failed:", e);
+                            }
+                        }
                     }
 
                     const answer = await pc.createAnswer();
@@ -824,6 +867,10 @@
             }
 
             function toggleCam() {
+                if (screenSharing) {
+                    setConnState("stop screen share to toggle camera", "warn");
+                    return;
+                }
                 camEnabled = !camEnabled;
                 localStream
                     .getVideoTracks()
@@ -840,8 +887,262 @@
                     );
             }
 
+            function findUplinkVideoSender() {
+                if (!pc) return null;
+                const tc =
+                    pc.getTransceivers().find((t) => t.mid === "1") ||
+                    pc.getTransceivers().find(
+                        (t) =>
+                            t.sender &&
+                            t.sender.track &&
+                            t.sender.track.kind === "video"
+                    ) ||
+                    pc.getTransceivers().find(
+                        (t) =>
+                            t.receiver &&
+                            t.receiver.track &&
+                            t.receiver.track.kind === "video" &&
+                            (t.direction === "sendonly" ||
+                                t.direction === "sendrecv" ||
+                                t.direction === "inactive")
+                    );
+                return tc ? tc.sender : null;
+            }
+
+            function setScreenButtonActive(active) {
+                const btn = document.getElementById("screenBtn");
+                if (!btn) return;
+                btn.classList.toggle("active", active);
+                btn.classList.toggle("off", false);
+                btn.textContent = active ? "🛑" : "🖥️";
+                btn.title = active ? "Stop sharing" : "Share screen";
+            }
+
+            function updateLocalScreenBadge(on) {
+                const local = participants.get("local");
+                if (!local || !local.badges) return;
+                let badge = local.badges.querySelector(".badge-screen");
+                if (on) {
+                    if (!badge) {
+                        badge = document.createElement("span");
+                        badge.className = "badge badge-screen";
+                        badge.textContent = "SCREEN";
+                        local.badges.appendChild(badge);
+                    }
+                } else if (badge) {
+                    badge.remove();
+                }
+            }
+
+            async function applyScreenEncodingParams(sender) {
+                if (!sender || typeof sender.getParameters !== "function") return;
+                try {
+                    const params = sender.getParameters();
+                    if (!params.encodings || params.encodings.length === 0) {
+                        params.encodings = [{}];
+                    }
+                    // Screen content: prefer clarity over motion/SVC.
+                    const enc = params.encodings[0];
+                    if ("scalabilityMode" in enc) {
+                        delete enc.scalabilityMode;
+                    }
+                    enc.maxFramerate = 15;
+                    enc.maxBitrate = 2_500_000;
+                    enc.scaleResolutionDownBy = 1;
+                    enc.priority = "high";
+                    enc.networkPriority = "high";
+                    await sender.setParameters(params);
+                } catch (e) {
+                    console.warn("applyScreenEncodingParams failed:", e);
+                }
+            }
+
+            async function startScreenShare() {
+                if (!pc || screenSharing) return;
+                if (currentJoinMode !== "speaker") {
+                    setConnState("join as speaker to share screen", "warn");
+                    return;
+                }
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                    setConnState("screen share not supported", "err");
+                    return;
+                }
+
+                try {
+                    screenStream = await navigator.mediaDevices.getDisplayMedia({
+                        video: {
+                            cursor: "always",
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                            frameRate: { ideal: 15, max: 30 },
+                        },
+                        audio: false,
+                    });
+                } catch (e) {
+                    console.warn("getDisplayMedia cancelled/failed:", e);
+                    setConnState("screen share cancelled", "warn");
+                    return;
+                }
+
+                const screenTrack = screenStream.getVideoTracks()[0];
+                if (!screenTrack) {
+                    screenStream.getTracks().forEach((t) => t.stop());
+                    screenStream = null;
+                    setConnState("no screen track", "err");
+                    return;
+                }
+
+                if ("contentHint" in screenTrack) {
+                    try {
+                        screenTrack.contentHint = "detail";
+                    } catch (_) {
+                        /* older browsers */
+                    }
+                }
+
+                const sender = findUplinkVideoSender();
+                if (!sender) {
+                    // No negotiated video uplink yet — keep stream and wait for offer attach.
+                    console.warn("No video sender yet; screen track will attach on next offer");
+                } else {
+                    // Remember camera track currently on the sender (or from localStream).
+                    cameraTrackBackup =
+                        (sender.track &&
+                            sender.track !== screenTrack &&
+                            sender.track.kind === "video" &&
+                            (!localStream ||
+                                localStream.getVideoTracks().indexOf(sender.track) >= 0)
+                            ? sender.track
+                            : null) ||
+                        (localStream ? localStream.getVideoTracks()[0] : null) ||
+                        null;
+
+                    try {
+                        await sender.replaceTrack(screenTrack);
+                        const tc = pc.getTransceivers().find((t) => t.sender === sender);
+                        if (tc && tc.direction !== "sendonly" && tc.direction !== "sendrecv") {
+                            tc.direction = "sendonly";
+                        }
+                        await applyScreenEncodingParams(sender);
+                    } catch (e) {
+                        console.error("replaceTrack(screen) failed:", e);
+                        screenTrack.stop();
+                        screenStream.getTracks().forEach((t) => t.stop());
+                        screenStream = null;
+                        setConnState("screen share failed", "err");
+                        return;
+                    }
+                }
+
+                screenTrack.addEventListener("ended", () => {
+                    // User stopped sharing from the browser chrome UI.
+                    stopScreenShare({ fromTrackEnded: true });
+                });
+
+                screenSharing = true;
+                setScreenButtonActive(true);
+                updateLocalScreenBadge(true);
+
+                const local = participants.get("local");
+                if (local) {
+                    setTileStream(local, new MediaStream([screenTrack]), true);
+                }
+
+                setConnState("sharing screen", "ok");
+            }
+
+            async function stopScreenShare(opts = {}) {
+                if (!screenSharing && !screenStream) return;
+
+                const screenTrack =
+                    screenStream && screenStream.getVideoTracks
+                        ? screenStream.getVideoTracks()[0]
+                        : null;
+
+                if (screenStream) {
+                    screenStream.getTracks().forEach((t) => {
+                        try {
+                            t.stop();
+                        } catch (_) {
+                            /* ignore */
+                        }
+                    });
+                    screenStream = null;
+                }
+
+                const sender = findUplinkVideoSender();
+                let restoreTrack = cameraTrackBackup;
+                if (
+                    !restoreTrack &&
+                    localStream &&
+                    localStream.getVideoTracks().length > 0
+                ) {
+                    restoreTrack = localStream.getVideoTracks()[0];
+                }
+
+                // Prefer a still-live camera track.
+                if (restoreTrack && restoreTrack.readyState === "ended") {
+                    restoreTrack = null;
+                }
+                if (
+                    !restoreTrack &&
+                    localStream &&
+                    localStream.getVideoTracks().length > 0
+                ) {
+                    const cam = localStream.getVideoTracks()[0];
+                    if (cam && cam.readyState === "live") restoreTrack = cam;
+                }
+
+                if (sender) {
+                    try {
+                        await sender.replaceTrack(restoreTrack || null);
+                        if (restoreTrack && camEnabled) {
+                            await applyVideoEncodingParams(pc);
+                        }
+                    } catch (e) {
+                        console.warn("restore camera after screen share failed:", e);
+                    }
+                }
+
+                cameraTrackBackup = null;
+                screenSharing = false;
+                setScreenButtonActive(false);
+                updateLocalScreenBadge(false);
+
+                const local = participants.get("local");
+                if (local) {
+                    if (restoreTrack && camEnabled) {
+                        setTileStream(
+                            local,
+                            localStream || new MediaStream([restoreTrack]),
+                            true
+                        );
+                    } else {
+                        setTileStream(local, localStream || new MediaStream(), false);
+                    }
+                }
+
+                if (!opts.fromTrackEnded) {
+                    setConnState("screen share stopped", "ok");
+                } else {
+                    setConnState("screen share ended", "warn");
+                }
+            }
+
+            async function toggleScreenShare() {
+                if (screenSharing) {
+                    await stopScreenShare();
+                } else {
+                    await startScreenShare();
+                }
+            }
+
             function leaveMeeting() {
                 pttActive = false;
+                if (screenSharing || screenStream) {
+                    // Fire-and-forget cleanup; meeting is tearing down.
+                    stopScreenShare().catch(() => {});
+                }
                 if (ws) {
                     ws.close();
                     ws = null;
@@ -861,6 +1162,11 @@
                     pttBtn.style.display = "none";
                     pttBtn.style.background = "var(--tile)";
                     pttBtn.style.color = "var(--text)";
+                }
+                const screenBtn = document.getElementById("screenBtn");
+                if (screenBtn) {
+                    screenBtn.style.display = "none";
+                    setScreenButtonActive(false);
                 }
             }
 
@@ -1013,7 +1319,10 @@
 
                 if (videoTrack && "contentHint" in videoTrack) {
                     try {
-                        videoTrack.contentHint = "motion";
+                        // Keep "detail" for screen share; use "motion" for camera.
+                        if (videoTrack.contentHint !== "detail") {
+                            videoTrack.contentHint = "motion";
+                        }
                     } catch (_) { /* older browsers */ }
                 }
 
@@ -1303,6 +1612,7 @@
 
                         document.getElementById("micBtn").style.display = "flex";
                         document.getElementById("camBtn").style.display = "flex";
+                        document.getElementById("screenBtn").style.display = "flex";
                         document.getElementById("pttBtn").style.display = "none";
 
                         if (!localStream.getAudioTracks().length) {
@@ -1312,9 +1622,10 @@
                             document.getElementById("camBtn").disabled = true;
                         }
                     } else {
-                        // Hide mic/cam controls for audience; show hold-to-talk.
+                        // Hide mic/cam/screen controls for audience; show hold-to-talk.
                         document.getElementById("micBtn").style.display = "none";
                         document.getElementById("camBtn").style.display = "none";
+                        document.getElementById("screenBtn").style.display = "none";
                         document.getElementById("pttBtn").style.display = "flex";
                     }
 
@@ -1359,7 +1670,11 @@
                             setPttButtonPressed(true);
                             try {
                                 const audioTrack = localStream.getAudioTracks()[0];
-                                const videoTrack = localStream.getVideoTracks()[0];
+                                const videoTrack =
+                                    (screenSharing &&
+                                        screenStream &&
+                                        screenStream.getVideoTracks()[0]) ||
+                                    localStream.getVideoTracks()[0];
 
                                 const audioTc = pc.getTransceivers().find(t =>
                                     t.mid === "0" ||
@@ -1375,6 +1690,10 @@
 
                                 if (videoTrack) {
                                     await enableSvcForVideoSender(pc, videoTrack);
+                                    if (screenSharing) {
+                                        const sender = findUplinkVideoSender();
+                                        if (sender) await applyScreenEncodingParams(sender);
+                                    }
                                 }
                                 localTracksAdded = true;
                             } catch (e) {
@@ -1389,6 +1708,9 @@
                             currentJoinMode = "audience";
                             pttActive = false;
                             setPttButtonPressed(false);
+                            if (screenSharing || screenStream) {
+                                await stopScreenShare();
+                            }
                             try {
                                 for (const s of pc.getSenders()) {
                                     if (s.track) await s.replaceTrack(null);
