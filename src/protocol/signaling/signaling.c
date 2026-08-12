@@ -582,8 +582,7 @@ static void emit_hook_event(const char *event, int64_t user_id, uint64_t room_id
   }
 
   char msg[384];
-  int n = snprintf(msg, sizeof(msg),
-                   "{\"user_id\":\"%" PRId64 "\",\"room_id\":\"%" PRIu64 "\",\"name\":\"\",\"event\":\"%s\"}", user_id, room_id, event);
+  int n = snprintf(msg, sizeof(msg), "{\"user_id\":\"%" PRId64 "\",\"room_id\":\"%" PRIu64 "\",\"name\":\"\",\"event\":\"%s\"}", user_id, room_id, event);
   if (n <= 0 || (size_t)n >= sizeof(msg)) {
     SFU_LOG_WARN("signaling: hook payload too large for event=%s", event);
     return;
@@ -594,11 +593,6 @@ static void emit_hook_event(const char *event, int64_t user_id, uint64_t room_id
   } else {
     SFU_LOG_DEBUG("signaling: hook event=%s not published (nats unavailable)", event);
   }
-}
-
-static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, int64_t user_id) {
-  (void)s;
-  emit_hook_event("join", user_id, room_id);
 }
 
 static int extract_header_val(const char *handshake, const char *header_name, char *out_val, size_t out_len) {
@@ -826,8 +820,7 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
 
   c->joined_room = room;
   c->joined_room_id = room_id;
-  publish_join_event_to_nats(s, room_id, c->user_id);
-  /* Speakers publish camera on join; audience is receive-only until PTT. */
+  emit_hook_event("join", c->user_id, room_id);
   if (!c->is_audience) {
     emit_hook_event("publish", c->user_id, room_id);
   }
@@ -979,7 +972,6 @@ static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s,
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
     sfu_signaling_trigger_renegotiation(c->joined_room);
-    /* Camera publish/unpublish follows speaker/audience role. */
     emit_hook_event(is_audience ? "unpublish" : "publish", c->user_id, c->joined_room_id);
   }
   if (session) {
