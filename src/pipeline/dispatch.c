@@ -91,9 +91,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool nominated = sfu_stun_has_use_candidate(pkt->data, pkt->len);
   sfu_routing_snapshot_t route;
   if (!sfu_routing_table_lookup_route(w->routing_table, client_ufrag, w->worker_index, &route) || !route.room || route.fd < 0) {
-    /* Do not acknowledge nomination before signaling binds the ufrag. ICE will
-     * retransmit; acknowledging here could start DTLS for an identity that the
-     * shared process-wide ICE password does not uniquely authenticate. */
     SFU_LOG_DEBUG(
         "worker %u: no signaling route yet for ufrag=%s (from %s:%u); "
         "withholding STUN response until answer registration",
@@ -131,8 +128,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool took_pending = route.pending_generation != 0 &&
                       sfu_routing_table_take_pending_answer(w->routing_table, client_ufrag, route.room, route.fd, route.pending_generation, &pending);
   if (!took_pending) {
-    /* If signaling published a newer answer between lookup and take, retry the
-     * latest generation rather than waiting for another connectivity check. */
     sfu_routing_snapshot_t latest;
     if (sfu_routing_table_lookup_route(w->routing_table, client_ufrag, w->worker_index, &latest) && latest.room == route.room && latest.fd == route.fd &&
         latest.pending_generation != 0) {
@@ -156,8 +151,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (!session->room) {
     bool has_applied_answer = atomic_load_explicit(&session->applied_answer_generation, memory_order_acquire) != 0 && session->fd == route.fd;
     if (!applied_answer && !has_applied_answer) {
-      /* Never publish the zero-initialized default speaker role. The complete
-       * answer remains in the routing table until an authenticated STUN takes it. */
       SFU_LOG_DEBUG("worker %u: authenticated STUN for ufrag=%s has no applied answer yet; deferring room publication", w->worker_index, client_ufrag);
       sfu_session_release(session);
       return;
@@ -180,7 +173,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  /* Serialize selected address and worker ownership with DTLS processing. */
   pthread_mutex_lock(&session->answer_lock);
   if (session->state != SFU_SESSION_ESTABLISHED && nominated) {
     session->worker_id = w->worker_index;
@@ -202,12 +194,9 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint16_t port;
   format_peer_endpoint(&pkt->peer_addr, ip, &port);
 
-  /* DTLS is accepted only after an authenticated, routed STUN nomination has
-   * created/indexed the session. Unknown tuples must not create address-only
-   * sessions that can race ICE ownership. */
   sfu_peer_session_t *session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
   if (!session) {
-    SFU_LOG_ERROR("worker %u: CRITICAL! Session table full or rejected registration for %s:%u", w->worker_index, ip, port);
+    SFU_LOG_DEBUG("worker %u: dropping DTLS from unknown/closed peer %s:%u", w->worker_index, ip, port);
     return;
   }
 
@@ -281,7 +270,7 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   if (sfu_dtls_is_dtls_packet(pkt->data, pkt->len)) {
-    SFU_LOG_INFO("worker %u: Identified DTLS packet from %s:%u", w->worker_index, ip, port);
+    SFU_LOG_DEBUG("worker %u: Identified DTLS packet from %s:%u", w->worker_index, ip, port);
     handle_dtls(w, pkt);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;

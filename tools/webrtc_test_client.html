@@ -1696,6 +1696,7 @@
                         }
 
                         if (msg.type === "peer_left") {
+                            console.log("peer left", msg);
                             handlePeerLeft(msg);
                             return;
                         }
