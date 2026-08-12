@@ -14,6 +14,7 @@
 #define ATTR_USERNAME 0x0006
 #define ATTR_MESSAGE_INTEGRITY 0x0008
 #define ATTR_XOR_MAPPED_ADDRESS 0x0020
+#define ATTR_USE_CANDIDATE 0x0025
 #define ATTR_FINGERPRINT 0x8028
 
 static const char kIceAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -199,6 +200,30 @@ size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len, const sf
   off = append_integrity_and_fingerprint(out_buf, off, local->pwd);
 
   return off;
+}
+
+bool sfu_stun_has_use_candidate(const uint8_t *data, size_t len) {
+  if (!sfu_stun_is_stun_packet(data, len) || read_be16(data) != STUN_TYPE_BINDING_REQ) {
+    return false;
+  }
+  size_t mi_offset = find_message_integrity(data, len);
+  if (mi_offset == 0) {
+    return false;
+  }
+  size_t off = STUN_HEADER_LEN;
+  while (off + 4 <= mi_offset) {
+    uint16_t attr_type = read_be16(data + off);
+    uint16_t attr_len = read_be16(data + off + 2);
+    size_t padded = (attr_len + 3) & ~((size_t)3);
+    if (off + 4 + padded > mi_offset) {
+      return false;
+    }
+    if (attr_type == ATTR_USE_CANDIDATE) {
+      return attr_len == 0;
+    }
+    off += 4 + padded;
+  }
+  return false;
 }
 
 bool sfu_stun_extract_client_ufrag(const uint8_t *data, size_t len, const char *local_ufrag, char *out_client_ufrag, size_t max_len) {

@@ -16,5 +16,6 @@ bool sfu_stun_is_stun_packet(const uint8_t *data, size_t len);
 size_t sfu_stun_handle_binding_request(const uint8_t *data, size_t len, const sfu_ice_credentials_t *local, const struct sockaddr_storage *src_addr,
                                        socklen_t src_addr_len, uint8_t *out_buf, size_t out_buf_cap);
 bool sfu_stun_extract_client_ufrag(const uint8_t *data, size_t len, const char *local_ufrag, char *out_client_ufrag, size_t max_len);
+bool sfu_stun_has_use_candidate(const uint8_t *data, size_t len);
 
 #endif /* SFU_TRANSPORT_STUN_H */

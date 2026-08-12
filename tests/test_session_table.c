@@ -228,8 +228,31 @@ static void test_concurrent_find_vs_close(void) {
 }
 
 /* ---------------------------------------------------------------------------
- * Routing table tests (unchanged behavior)
+ * Routing table tests
  * ------------------------------------------------------------------------- */
+static sfu_pending_answer_t make_pending(uint32_t peer_id, bool is_audience) {
+  sfu_pending_answer_t answer;
+  memset(&answer, 0, sizeof(answer));
+  answer.audio_ssrc = 111;
+  answer.video_ssrc = 222;
+  answer.rtx_ssrc = 333;
+  answer.video_pt = 96;
+  answer.rtx_pt = 97;
+  answer.video_codec = SFU_VIDEO_CODEC_VP8;
+  answer.twcc_recv_extmap_id = 6;
+  answer.twcc_send_extmap_id = 5;
+  answer.peer_id = peer_id;
+  answer.user_id = 9001;
+  answer.generation = 1;
+  answer.audio_section_present = true;
+  answer.video_section_present = true;
+  answer.audio_sends = !is_audience;
+  answer.video_sends = !is_audience;
+  answer.is_audience = is_audience;
+  answer.valid = true;
+  return answer;
+}
+
 static void test_routing_table(void) {
   sfu_routing_table_t rtable;
   assert(sfu_routing_table_init(&rtable) == 0);
@@ -237,53 +260,133 @@ static void test_routing_table(void) {
   sfu_room_t dummy_room;
   memset(&dummy_room, 0, sizeof(dummy_room));
 
-  sfu_register_ufrag_room(&rtable, "ufrag_bob", &dummy_room, 10);
-  sfu_register_ufrag_room(&rtable, "ufrag_eve", &dummy_room, 11);
+  sfu_pending_answer_t answer = make_pending(42, true);
+  uint32_t generation = 0;
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation));
+  assert(generation != 0);
 
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_bob", 111, 222, 333, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 0, false);
+  sfu_routing_snapshot_t route;
+  assert(sfu_routing_table_lookup_route(&rtable, "ufrag_bob", 3, &route));
+  assert(route.room == &dummy_room);
+  assert(route.fd == 10);
+  assert(route.pending_generation == generation);
+
+  sfu_pending_answer_t taken;
+  assert(!sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 11, generation, &taken));
+  assert(sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation, &taken));
+  assert(taken.is_audience);
+  assert(taken.peer_id == 42);
+  assert(taken.user_id == 9001);
+  assert(!sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation, &taken));
+
+  /* A later answer gets a new generation and preserves stable peer identity. */
+  answer = make_pending(999, false);
+  uint32_t generation2 = 0;
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation2));
+  assert(generation2 != generation);
+  assert(sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation2, &taken));
+  assert(taken.peer_id == 42);
+  assert(!taken.is_audience);
 
   sfu_routing_table_unregister_fd(&rtable, 10);
-  assert(rtable.count == 1);
-  assert(strcmp(rtable.entries[0].ufrag, "ufrag_eve") == 0);
-
+  assert(rtable.count == 0);
   sfu_routing_table_destroy(&rtable);
 }
 
-/* Audience role must survive the deferred-answer path: the routing entry
- * stashes is_audience, and handle_stun's apply step must propagate it into the
- * session before the peer joins the room graph. Also verify the subscription
- * guard: an audience session must never be acquirable as a publish source.
- * peer_id from the deferred answer must also land on the session so VP9
- * subscriber-scheduler lookup cannot see publisher_id==0. */
-static void test_audience_role_propagation(void) {
-  sfu_routing_table_t rtable;
-  assert(sfu_routing_table_init(&rtable) == 0);
+static void test_duplicate_ufrag_rejected(void) {
+  sfu_dtls_ctx_t dtls_ctx;
+  assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
+  sfu_session_table_t table;
+  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
 
-  sfu_room_t dummy_room;
-  memset(&dummy_room, 0, sizeof(dummy_room));
+  struct sockaddr_storage addr1, addr2;
+  socklen_t len1, len2;
+  make_addr(&addr1, &len1, "127.0.0.1", 9201);
+  make_addr(&addr2, &len2, "127.0.0.1", 9202);
 
-  sfu_register_ufrag_room(&rtable, "ufrag_aud", &dummy_room, 20);
-  sfu_register_ufrag_room(&rtable, "ufrag_spk", &dummy_room, 21);
+  sfu_peer_session_t *s1 = sfu_session_table_get_or_create(&table, &addr1, len1);
+  sfu_peer_session_t *s2 = sfu_session_table_get_or_create(&table, &addr2, len2);
+  assert(s1 && s2 && s1 != s2);
+  snprintf(s1->cold->ufrag, sizeof(s1->cold->ufrag), "same_ufrag");
+  snprintf(s2->cold->ufrag, sizeof(s2->cold->ufrag), "same_ufrag");
+  assert(sfu_session_table_index_ufrag(&table, s1));
+  assert(!sfu_session_table_index_ufrag(&table, s2));
 
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_aud", 111, 222, 333, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 42, true);
-  sfu_routing_table_set_pending_answer(&rtable, "ufrag_spk", 444, 555, 666, 96, 97, SFU_VIDEO_CODEC_VP8, 6, 5, 77, false);
+  sfu_peer_session_t *found = sfu_session_table_find_by_ufrag(&table, "same_ufrag");
+  assert(found == s1);
+  sfu_session_release(found);
+  sfu_session_release(s1);
+  sfu_session_release(s2);
+  sfu_session_table_destroy(&table);
+  sfu_dtls_ctx_destroy(&dtls_ctx);
+}
 
-  const sfu_routing_entry_t *aud = NULL;
-  const sfu_routing_entry_t *spk = NULL;
-  for (int i = 0; i < rtable.count; i++) {
-    if (strcmp(rtable.entries[i].ufrag, "ufrag_aud") == 0) {
-      aud = &rtable.entries[i];
-    } else if (strcmp(rtable.entries[i].ufrag, "ufrag_spk") == 0) {
-      spk = &rtable.entries[i];
-    }
+#define ICE_CREATORS 8
+typedef struct {
+  sfu_session_table_t *table;
+  pthread_barrier_t barrier;
+  sfu_peer_session_t *results[ICE_CREATORS];
+  struct sockaddr_storage addrs[ICE_CREATORS];
+  socklen_t lens[ICE_CREATORS];
+} ice_create_ctx_t;
+
+typedef struct {
+  ice_create_ctx_t *ctx;
+  int index;
+} ice_create_arg_t;
+
+static void *ice_creator(void *arg_) {
+  ice_create_arg_t *arg = arg_;
+  pthread_barrier_wait(&arg->ctx->barrier);
+  arg->ctx->results[arg->index] =
+      sfu_session_table_get_or_create_by_ufrag(arg->ctx->table, &arg->ctx->addrs[arg->index], arg->ctx->lens[arg->index], "shared", false);
+  return NULL;
+}
+
+static void test_concurrent_same_ufrag_creation(void) {
+  sfu_dtls_ctx_t dtls_ctx;
+  assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
+  sfu_session_table_t table;
+  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+
+  ice_create_ctx_t ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.table = &table;
+  pthread_barrier_init(&ctx.barrier, NULL, ICE_CREATORS);
+
+  pthread_t threads[ICE_CREATORS];
+  ice_create_arg_t args[ICE_CREATORS];
+  for (int i = 0; i < ICE_CREATORS; i++) {
+    char ip[32];
+    snprintf(ip, sizeof(ip), "10.0.1.%d", i + 1);
+    make_addr(&ctx.addrs[i], &ctx.lens[i], ip, (uint16_t)(9300 + i));
+    args[i].ctx = &ctx;
+    args[i].index = i;
+    assert(pthread_create(&threads[i], NULL, ice_creator, &args[i]) == 0);
   }
-  assert(aud != NULL && spk != NULL);
-  assert(aud->has_pending_answer && aud->is_audience);
-  assert(spk->has_pending_answer && !spk->is_audience);
-  assert(aud->peer_id == 42);
-  assert(spk->peer_id == 77);
+  for (int i = 0; i < ICE_CREATORS; i++) {
+    pthread_join(threads[i], NULL);
+  }
 
-  /* Mirror handle_stun's deferred-apply step: role + peer_id must land. */
+  assert(ctx.results[0] != NULL);
+  for (int i = 1; i < ICE_CREATORS; i++) {
+    assert(ctx.results[i] == ctx.results[0]);
+  }
+  uint32_t members = 0;
+  for (uint32_t i = 0; i < table.count; i++) {
+    if (table.sessions[i]) members++;
+  }
+  assert(members == 1);
+
+  for (int i = 0; i < ICE_CREATORS; i++) {
+    sfu_session_release(ctx.results[i]);
+  }
+  pthread_barrier_destroy(&ctx.barrier);
+  sfu_session_table_destroy(&table);
+  sfu_dtls_ctx_destroy(&dtls_ctx);
+}
+
+static void test_pending_answer_application(void) {
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
   sfu_session_table_t table;
@@ -291,33 +394,37 @@ static void test_audience_role_propagation(void) {
 
   struct sockaddr_storage addr;
   socklen_t addr_len;
-  make_addr(&addr, &addr_len, "127.0.0.1", 9100);
-
-  sfu_peer_session_t *s = sfu_session_table_get_or_create(&table, &addr, addr_len);
+  make_addr(&addr, &addr_len, "127.0.0.1", 9400);
+  sfu_peer_session_t *s = sfu_session_table_get_or_create_by_ufrag(&table, &addr, addr_len, "ufrag_aud", true);
   assert(s != NULL);
-  assert(s->peer_id != 0); /* construction always assigns a non-zero id */
-  uint32_t construction_id = s->peer_id;
-  /* Deferred answer peer_id overrides construction id when present. */
-  s->peer_id = aud->peer_id;
-  atomic_store(&s->is_audience, aud->is_audience);
-  assert(atomic_load(&s->is_audience) == true);
-  assert(s->peer_id == 42);
-  assert(s->peer_id != construction_id || construction_id == 42);
 
-  /* Guard: audience sessions are never a publish source. */
-  assert(sfu_session_subscriptions_acquire(s) == NULL);
-
-  /* Speaker sessions keep normal (non-NULL once published) semantics; with no
-   * published snapshot yet, acquire is NULL but the flag itself is clear. */
-  atomic_store(&s->is_audience, spk->is_audience);
-  s->peer_id = spk->peer_id;
-  assert(atomic_load(&s->is_audience) == false);
+  sfu_pending_answer_t answer = make_pending(77, true);
+  bool role_changed = false;
+  bool media_changed = false;
+  assert(sfu_session_apply_pending_answer(s, &answer, 20, &role_changed, &media_changed));
+  assert(atomic_load(&s->is_audience));
   assert(s->peer_id == 77);
+  assert(s->fd == 20);
+  assert(s->uplink_audio.ssrc == 0 && !s->uplink_audio.active);
+  assert(s->uplink_video.ssrc == 0 && !s->uplink_video.active);
+  assert(media_changed);
+
+  /* A stale generation cannot revert a newer applied answer. */
+  sfu_pending_answer_t stale = answer;
+  stale.generation = 1;
+  stale.is_audience = false;
+  stale.audio_sends = true;
+  stale.video_sends = true;
+  stale.audio_ssrc = 999;
+  stale.video_ssrc = 888;
+  assert(!sfu_session_apply_pending_answer(s, &stale, 21, &role_changed, &media_changed));
+  assert(atomic_load(&s->is_audience));
+  assert(s->uplink_video.ssrc == 0);
+  assert(s->fd == 20);
 
   sfu_session_release(s);
   sfu_session_table_destroy(&table);
   sfu_dtls_ctx_destroy(&dtls_ctx);
-  sfu_routing_table_destroy(&rtable);
 }
 
 int main(void) {
@@ -325,7 +432,9 @@ int main(void) {
   test_failed_construction();
   test_concurrent_find_vs_close();
   test_routing_table();
-  test_audience_role_propagation();
+  test_duplicate_ufrag_rejected();
+  test_concurrent_same_ufrag_creation();
+  test_pending_answer_application();
 
   printf("test_session_table: OK\n");
   return 0;

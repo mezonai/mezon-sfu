@@ -589,6 +589,15 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
+  bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  uint8_t local_video_pt = 0;
+  uint8_t local_rtx_pt = 0;
+  sfu_video_codec_t local_video_codec = SFU_VIDEO_CODEC_NONE;
+  pthread_mutex_lock((pthread_mutex_t *)&session->media_lock);
+  local_video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
+  local_rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
+  local_video_codec = session->uplink_video.codec;
+  pthread_mutex_unlock((pthread_mutex_t *)&session->media_lock);
 
   if (append_line(out, out_cap, &off, "v=0") != 0) {
     goto fail;
@@ -623,9 +632,6 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     goto fail;
   }
 
-  uint8_t local_video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
-  uint8_t local_rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
-
   n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     goto fail;
@@ -633,7 +639,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
     goto fail;
   }
-  if (append_line(out, out_cap, &off, atomic_load_explicit(&session->is_audience, memory_order_acquire) ? "a=inactive" : "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=mid:0") != 0) {
@@ -660,7 +666,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
     goto fail;
   }
-  if (append_line(out, out_cap, &off, atomic_load_explicit(&session->is_audience, memory_order_acquire) ? "a=inactive" : "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=mid:1") != 0) {
@@ -672,7 +678,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (append_twcc_recv_attribute(out, out_cap, &off) != 0) {
     goto fail;
   }
-  if (append_video_codec_attributes(out, out_cap, &off, session->uplink_video.codec, local_video_pt, local_rtx_pt) != 0) {
+  if (append_video_codec_attributes(out, out_cap, &off, local_video_codec, local_video_pt, local_rtx_pt) != 0) {
     goto fail;
   }
 

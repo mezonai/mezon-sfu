@@ -92,36 +92,6 @@ static bool build_and_send_joined_response(sfu_client_conn_t *c, uint64_t room_i
   return true;
 }
 
-void sfu_register_ufrag_room(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd) {
-  pthread_mutex_lock(&table->mutex);
-
-  for (int i = 0; i < table->count; i++) {
-    if (strcmp(table->entries[i].ufrag, client_ufrag) == 0) {
-      table->entries[i].room = room;
-      table->entries[i].fd = fd;
-      pthread_mutex_unlock(&table->mutex);
-      return;
-    }
-  }
-
-  if (table->count < SFU_MAX_UFRAG_MAPPINGS) {
-    sfu_routing_entry_t *entry = &table->entries[table->count];
-    strncpy(entry->ufrag, client_ufrag, sizeof(entry->ufrag) - 1);
-    entry->ufrag[sizeof(entry->ufrag) - 1] = '\0';
-    entry->room = room;
-    entry->fd = fd;
-
-    entry->has_owner = false;
-    entry->worker_index = 0;
-
-    table->count++;
-  } else {
-    SFU_LOG_ERROR("ufrag->room table FULL. Cannot register ufrag=%s", client_ufrag);
-  }
-
-  pthread_mutex_unlock(&table->mutex);
-}
-
 static bool extract_sdp_ice_ufrag(const char *sdp, size_t sdp_len, char *out, size_t out_cap) {
   static const char needle[] = "a=ice-ufrag:";
   const size_t needle_len = sizeof(needle) - 1;
@@ -239,6 +209,53 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   pthread_mutex_unlock(&room->lock);
 }
 
+static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
+  if (!room || !leaving) {
+    return;
+  }
+
+  const char *ufrag = (leaving->cold && leaving->cold->ufrag[0] != '\0') ? leaving->cold->ufrag : "";
+  const int64_t user_id = leaving->user_id;
+  const uint32_t peer_id = leaving->peer_id;
+
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *other = room->peers[i];
+    if (!other || other == leaving || other->fd < 0 || !sfu_session_accepts_work(other)) {
+      continue;
+    }
+
+    uint32_t mid_audio = 0;
+    uint32_t mid_video = 0;
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(other);
+    if (snap) {
+      for (uint32_t j = 0; j < snap->count; j++) {
+        if (snap->entries[j].subscriber == leaving) {
+          mid_audio = snap->entries[j].mid_audio;
+          mid_video = snap->entries[j].mid_video;
+          break;
+        }
+      }
+      sfu_subscriptions_snapshot_release(snap);
+    }
+
+    char msg[320];
+    int n = snprintf(msg, sizeof(msg),
+                     "{\"type\":\"peer_left\",\"ufrag\":\"%s\",\"user_id\":\"%" PRId64
+                     "\",\"peer_id\":%u,"
+                     "\"mid_audio\":%u,\"mid_video\":%u}",
+                     ufrag, user_id, peer_id, mid_audio, mid_video);
+    if (n > 0 && (size_t)n < sizeof(msg)) {
+      if (sfu_ws_send_text(other->fd, msg, (size_t)n) != 0) {
+        SFU_LOG_WARN("signaling: failed to send peer_left to fd=%d for leaving ufrag=%s", other->fd, ufrag);
+      } else {
+        SFU_LOG_INFO("signaling: peer_left to fd=%d for ufrag=%s mids=%u/%u", other->fd, ufrag, mid_audio, mid_video);
+      }
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+}
+
 static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
   static const char k_extmap[] = "a=extmap:";
   static const char k_twcc_uri[] = "transport-wide-cc";
@@ -321,6 +338,7 @@ typedef struct sfu_answer_section {
   uint32_t fid_media_ssrc;
   uint32_t fid_rtx_ssrc;
   uint8_t twcc_extmap_id;
+  bool rejected;
 } sfu_answer_section_t;
 
 typedef struct sfu_answer_media {
@@ -332,19 +350,33 @@ typedef struct sfu_answer_media {
   sfu_video_codec_t video_codec;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
+  bool audio_section_present;
+  bool video_section_present;
+  bool audio_sends;
+  bool video_sends;
 } sfu_answer_media_t;
 
 static void answer_section_reset(sfu_answer_section_t *section) {
   memset(section, 0, sizeof(*section));
   section->mid = -1;
+  section->direction = SFU_SDP_DIRECTION_SENDRECV;
 }
 
 static void answer_section_finalize(const sfu_answer_section_t *section, sfu_answer_media_t *media) {
-  bool sends = section->direction == SFU_SDP_DIRECTION_SENDONLY || section->direction == SFU_SDP_DIRECTION_SENDRECV;
-  bool receives = section->direction == SFU_SDP_DIRECTION_RECVONLY || section->direction == SFU_SDP_DIRECTION_SENDRECV;
+  bool sends = !section->rejected && (section->direction == SFU_SDP_DIRECTION_SENDONLY || section->direction == SFU_SDP_DIRECTION_SENDRECV);
+  bool receives = !section->rejected && (section->direction == SFU_SDP_DIRECTION_RECVONLY || section->direction == SFU_SDP_DIRECTION_SENDRECV);
 
-  if (section->media_kind == 1 && section->mid == 0 && sends && section->ssrc_count > 0) {
-    media->audio_ssrc = section->ssrcs[0];
+  if (section->media_kind == 1 && section->mid == 0) {
+    media->audio_section_present = true;
+    media->audio_sends = sends;
+    if (sends && section->ssrc_count > 0) {
+      media->audio_ssrc = section->ssrcs[0];
+    }
+  }
+
+  if (section->media_kind == 2 && section->mid == 1) {
+    media->video_section_present = true;
+    media->video_sends = sends;
   }
 
   if (section->media_kind == 2 && section->mid == 1 && sends) {
@@ -390,6 +422,7 @@ static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media
   sfu_answer_section_t section;
   answer_section_reset(&section);
   bool have_section = false;
+  sfu_sdp_direction_t session_direction = SFU_SDP_DIRECTION_SENDRECV;
 
   size_t pos = 0;
   while (pos < sdp_len) {
@@ -418,8 +451,13 @@ static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media
         answer_section_finalize(&section, media);
       }
       answer_section_reset(&section);
+      section.direction = session_direction;
       have_section = true;
       section.media_kind = strncmp(line, "m=audio", 7) == 0 ? 1 : strncmp(line, "m=video", 7) == 0 ? 2 : 0;
+      const char *port_start = strchr(line, ' ');
+      if (port_start) {
+        section.rejected = strtoul(port_start + 1, NULL, 10) == 0;
+      }
       const char *payloads = strstr(line, "SAVPF ");
       if (payloads) {
         payloads += 6;
@@ -439,6 +477,15 @@ static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media
       continue;
     }
     if (!have_section) {
+      if (strcmp(line, "a=sendonly") == 0) {
+        session_direction = SFU_SDP_DIRECTION_SENDONLY;
+      } else if (strcmp(line, "a=recvonly") == 0) {
+        session_direction = SFU_SDP_DIRECTION_RECVONLY;
+      } else if (strcmp(line, "a=sendrecv") == 0) {
+        session_direction = SFU_SDP_DIRECTION_SENDRECV;
+      } else if (strcmp(line, "a=inactive") == 0) {
+        session_direction = SFU_SDP_DIRECTION_INACTIVE;
+      }
       continue;
     }
 
@@ -507,7 +554,7 @@ static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media
   if (have_section) {
     answer_section_finalize(&section, media);
   }
-  return true;
+  return media->audio_section_present || media->video_section_present;
 }
 
 bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc, uint8_t *video_pt,
@@ -525,68 +572,6 @@ bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audi
   *twcc_recv_extmap_id = media.twcc_recv_extmap_id;
   *twcc_send_extmap_id = media.twcc_send_extmap_id;
   return true;
-}
-
-static bool handle_signaling_answer(sfu_peer_session_t *session, const char *sdp, int sdp_len) {
-  if (!session) {
-    return false;
-  }
-
-  sfu_answer_media_t media;
-  if (!parse_answer_media(sdp, (size_t)sdp_len, &media)) {
-    return false;
-  }
-
-  bool audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
-  uint32_t audio_ssrc = media.audio_ssrc != 0 ? media.audio_ssrc : session->uplink_audio.ssrc;
-  uint32_t video_ssrc = media.video_ssrc != 0 ? media.video_ssrc : session->uplink_video.ssrc;
-  uint32_t rtx_ssrc = media.rtx_ssrc != 0 ? media.rtx_ssrc : session->uplink_video.rtx_ssrc;
-  uint8_t video_pt = media.video_pt != 0 ? media.video_pt : session->uplink_video.payload_type;
-  uint8_t rtx_pt = media.rtx_pt != 0 ? media.rtx_pt : session->uplink_video.rtx_payload_type;
-  sfu_video_codec_t video_codec = media.video_codec != SFU_VIDEO_CODEC_NONE ? media.video_codec : session->uplink_video.codec;
-
-  bool new_audio_active = !audience && audio_ssrc != 0;
-  bool new_video_active = !audience && video_ssrc != 0;
-
-  bool ssrc_identity_changed = (media.audio_ssrc != 0 && session->uplink_audio.ssrc != media.audio_ssrc) ||
-                               (media.video_ssrc != 0 && session->uplink_video.ssrc != media.video_ssrc) ||
-                               (media.rtx_ssrc != 0 && session->uplink_video.rtx_ssrc != media.rtx_ssrc);
-  bool active_changed = session->uplink_audio.active != new_audio_active || session->uplink_video.active != new_video_active;
-  bool codec_changed = (media.video_pt != 0 && session->uplink_video.payload_type != media.video_pt) ||
-                       (media.rtx_pt != 0 && session->uplink_video.rtx_payload_type != media.rtx_pt) ||
-                       (media.video_codec != SFU_VIDEO_CODEC_NONE && session->uplink_video.codec != media.video_codec);
-
-  bool changed = ssrc_identity_changed || active_changed || codec_changed;
-
-  session->uplink_audio.ssrc = audio_ssrc;
-  session->uplink_audio.active = new_audio_active;
-  session->uplink_video.ssrc = video_ssrc;
-  session->uplink_video.rtx_ssrc = rtx_ssrc;
-  session->uplink_video.active = new_video_active;
-  if (video_pt != 0) {
-    session->uplink_video.payload_type = video_pt;
-  }
-  if (rtx_pt != 0) {
-    session->uplink_video.rtx_payload_type = rtx_pt;
-  }
-  if (video_codec != SFU_VIDEO_CODEC_NONE) {
-    session->uplink_video.codec = video_codec;
-  }
-  if (media.twcc_recv_extmap_id != 0) {
-    session->twcc_recv_extmap_id = media.twcc_recv_extmap_id;
-  }
-  if (media.twcc_send_extmap_id != 0) {
-    session->twcc_send_extmap_id = media.twcc_send_extmap_id;
-  }
-
-  for (int i = 0; i < 128; i++) {
-    session->pt_map[i] = (uint8_t)i;
-  }
-
-  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u active=%d/%d changed=%d",
-               session->cold->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, session->uplink_video.payload_type, session->uplink_video.rtx_payload_type,
-               session->uplink_video.codec, session->twcc_recv_extmap_id, session->twcc_send_extmap_id, new_audio_active, new_video_active, changed);
-  return changed;
 }
 
 static void publish_join_event_to_nats(sfu_signaling_server_t *s, uint64_t room_id, const char *peer_ip) {
@@ -656,7 +641,18 @@ static void on_client_close(uv_handle_t *handle) {
   }
 
   if (session) {
+    if (session->fd != c->fd) {
+      SFU_LOG_WARN("signaling: close fd=%d does not own session ufrag=%s fd=%d; leaving session alive", c->fd, c->client_ufrag, session->fd);
+      sfu_session_release(session);
+      session = NULL;
+    }
+  }
+
+  if (session) {
     sfu_room_t *room = (sfu_room_t *)session->room;
+    if (room) {
+      notify_peer_left(room, session);
+    }
     (void)sfu_session_begin_close(c->server->sessions, session);
     sfu_session_release(session);
 
@@ -812,14 +808,9 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
                   return;
                 }
-                if (have_ufrag) {
-                  if (c->client_ufrag[0] == '\0') {
-                    snprintf(c->client_ufrag, sizeof(c->client_ufrag), "%s", answer_ufrag);
-                  }
-                  sfu_register_ufrag_room(s->routing_table, c->client_ufrag, c->joined_room, c->fd);
-                  SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64, c->client_ufrag, c->joined_room_id);
+                if (have_ufrag && c->client_ufrag[0] == '\0') {
+                  snprintf(c->client_ufrag, sizeof(c->client_ufrag), "%s", answer_ufrag);
                 }
-
                 if (!have_ufrag && c->client_ufrag[0] == '\0') {
                   SFU_LOG_WARN("signaling: initial answer has no ICE ufrag (fd=%d), rejecting", c->fd);
                   static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
@@ -827,39 +818,69 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   return;
                 }
 
+                sfu_answer_media_t media;
+                if (!parse_answer_media(sdp, (size_t)sdp_len, &media)) {
+                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_sdp\"}";
+                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+                  return;
+                }
+
+                sfu_pending_answer_t pending;
+                memset(&pending, 0, sizeof(pending));
+                pending.audio_ssrc = media.audio_ssrc;
+                pending.video_ssrc = media.video_ssrc;
+                pending.rtx_ssrc = media.rtx_ssrc;
+                pending.video_pt = media.video_pt;
+                pending.rtx_pt = media.rtx_pt;
+                pending.video_codec = (uint8_t)media.video_codec;
+                pending.twcc_recv_extmap_id = media.twcc_recv_extmap_id;
+                pending.twcc_send_extmap_id = media.twcc_send_extmap_id;
+                pending.audio_section_present = media.audio_section_present;
+                pending.video_section_present = media.video_section_present;
+                pending.audio_sends = media.audio_sends;
+                pending.video_sends = media.video_sends;
+                pending.peer_id = generate_unique_id();
+                pending.user_id = c->user_id;
+                pending.is_audience = c->is_audience;
+                pending.valid = true;
+
+                uint32_t answer_generation = 0;
+                if (!sfu_routing_table_register_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, &pending, &answer_generation)) {
+                  static const char routing_failed[] = "{\"type\":\"error\",\"message\":\"routing_registration_failed\"}";
+                  sfu_ws_send_text(c->fd, routing_failed, sizeof(routing_failed) - 1);
+                  return;
+                }
+                SFU_LOG_INFO("signaling: atomically registered answer ufrag=%s -> room_id=%" PRIu64 " generation=%u", c->client_ufrag, c->joined_room_id,
+                             answer_generation);
+
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
-                  session->user_id = c->user_id;
-                  if (session->peer_id == 0) {
-                    session->peer_id = generate_unique_id();
-                  }
-                  bool role_changed = false;
-                  bool newly_bound = false;
-                  if (session->room) {
-                    role_changed = room_update_peer_role((sfu_room_t *)session->room, session, c->is_audience);
-                  } else {
-                    atomic_store_explicit(&session->is_audience, c->is_audience, memory_order_release);
-                  }
-                  bool media_changed = handle_signaling_answer(session, sdp, sdp_len);
-                  if (!session->room) {
-                    session->fd = c->fd;
-                    room_add_peer(c->joined_room, session);
-                    newly_bound = session->room == c->joined_room;
-                  }
-                  if (session->room && (media_changed || role_changed || newly_bound)) {
-                    SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag,
-                                 media_changed, role_changed, newly_bound);
-                    room_refresh_peer_streams((sfu_room_t *)session->room, session);
-                    sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+                  sfu_pending_answer_t claimed;
+                  bool claimed_answer =
+                      sfu_routing_table_take_pending_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, &claimed);
+                  if (claimed_answer) {
+                    bool role_changed = false;
+                    bool media_changed = false;
+                    bool newly_bound = false;
+                    sfu_room_t *session_room = (sfu_room_t *)session->room;
+                    if (session_room && session_room != c->joined_room) {
+                      SFU_LOG_WARN("signaling: session ufrag=%s already belongs to another room", c->client_ufrag);
+                    } else if (sfu_session_apply_pending_answer(session, &claimed, c->fd, &role_changed, &media_changed)) {
+                      if (!session->room) {
+                        room_add_peer(c->joined_room, session);
+                        newly_bound = session->room == c->joined_room;
+                      }
+                      if (session->room && (media_changed || role_changed || newly_bound)) {
+                        SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag,
+                                     media_changed, role_changed, newly_bound);
+                        room_refresh_peer_streams((sfu_room_t *)session->room, session);
+                        sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+                      }
+                    }
                   }
                   sfu_session_release(session);
                 } else {
-                  sfu_answer_media_t media;
-                  parse_answer_media(sdp, (size_t)sdp_len, &media);
-                  sfu_routing_table_set_pending_answer(s->routing_table, c->client_ufrag, media.audio_ssrc, media.video_ssrc, media.rtx_ssrc, media.video_pt,
-                                                       media.rtx_pt, media.video_codec, media.twcc_recv_extmap_id, media.twcc_send_extmap_id,
-                                                       generate_unique_id(), c->is_audience);
-                  SFU_LOG_WARN("signaling: answer for ufrag=%s arrived before session was created; stashed parsed SSRCs for apply on bind", c->client_ufrag);
+                  SFU_LOG_INFO("signaling: answer for ufrag=%s awaits authenticated STUN bind", c->client_ufrag);
                 }
               }
             }
@@ -877,7 +898,17 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
             } else {
               bool is_audience = strcmp(role_str, "audience") == 0;
               sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
-              if (!session || session->room != c->joined_room || !room_update_peer_role(c->joined_room, session, is_audience)) {
+              bool changed = false;
+              if (session && session->room == c->joined_room) {
+                pthread_mutex_lock(&session->answer_lock);
+                uint32_t invalidated_generation = 0;
+                if (sfu_routing_table_invalidate_pending(s->routing_table, c->client_ufrag, c->joined_room, c->fd, &invalidated_generation)) {
+                  atomic_store_explicit(&session->applied_answer_generation, invalidated_generation, memory_order_release);
+                }
+                changed = room_update_peer_role(c->joined_room, session, is_audience);
+                pthread_mutex_unlock(&session->answer_lock);
+              }
+              if (!changed) {
                 static const char role_change_rejected[] = "{\"type\":\"error\",\"message\":\"role_change_rejected\"}";
                 sfu_ws_send_text(c->fd, role_change_rejected, sizeof(role_change_rejected) - 1);
               } else {
