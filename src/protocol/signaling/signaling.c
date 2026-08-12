@@ -845,14 +845,14 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 }
               }
             }
-          } else if (strcmp(type, "raise_hand") == 0 || strcmp(type, "role_change") == 0) {
+          } else if (strcmp(type, "push_to_talk") == 0 || strcmp(type, "role_change") == 0) {
             char role_str[16] = {0};
-            bool raise_hand = strcmp(type, "raise_hand") == 0;
-            if (raise_hand) {
+            bool push_to_talk = strcmp(type, "push_to_talk") == 0;
+            if (push_to_talk) {
               snprintf(role_str, sizeof(role_str), "speaker");
             }
             if (!c->joined_room || c->client_ufrag[0] == '\0' ||
-                (!raise_hand && sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) < 0) ||
+                (!push_to_talk && sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) < 0) ||
                 (strcmp(role_str, "speaker") != 0 && strcmp(role_str, "audience") != 0)) {
               static const char invalid_role_change[] = "{\"type\":\"error\",\"message\":\"invalid_role_change\"}";
               sfu_ws_send_text(c->fd, invalid_role_change, sizeof(invalid_role_change) - 1);
