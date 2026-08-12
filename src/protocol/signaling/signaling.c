@@ -739,6 +739,247 @@ static void disconnect_client(sfu_client_conn_t *c) {
   }
 }
 
+static void handle_ping(sfu_client_conn_t *c) {
+  static const char pong_msg[] = "{\"type\":\"pong\"}";
+  if (sfu_ws_send_text(c->fd, pong_msg, sizeof(pong_msg) - 1) != 0) {
+    SFU_LOG_WARN("signaling: failed to send pong fd=%d; closing", c->fd);
+    disconnect_client(c);
+  }
+}
+
+static void handle_pong(sfu_client_conn_t *c) {
+  /* Activity already recorded by the caller; keepalive only. */
+  (void)c;
+}
+
+static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
+  char room_str[32] = {0};
+  char str_user_id[32] = {0};
+  char role_str[16] = {0};
+  char token[4096];
+  uint64_t room_id = 0;
+  int64_t user_id = 0;
+
+  if (sfu_json_extract_string(buf, n, "room", room_str, sizeof(room_str)) >= 0) {
+    room_id = (uint64_t)strtoull(room_str, NULL, 10);
+  }
+
+  const char *jwt_secret = g_sfu_config.jwt_secret;
+  if (jwt_secret[0] != '\0') {
+    int token_len = sfu_json_extract_string(buf, n, "token", token, sizeof(token));
+    if (token_len < 0) {
+      SFU_LOG_WARN("signaling: join missing token (fd=%d)", c->fd);
+      sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"missing_token\"}", 42);
+      return;
+    }
+    if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &user_id) != 0) {
+      SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
+      sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
+      return;
+    }
+    c->user_id = user_id;
+    SFU_LOG_INFO("signaling: join JWT ok user_id=%" PRId64 " (fd=%d)", user_id, c->fd);
+  } else if (sfu_json_extract_string(buf, n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
+    user_id = (int64_t)strtoll(str_user_id, NULL, 10);
+    c->user_id = user_id;
+  }
+
+  c->is_audience = false;
+  if (sfu_json_extract_string(buf, n, "role", role_str, sizeof(role_str)) >= 0) {
+    if (strcmp(role_str, "audience") == 0) {
+      c->is_audience = true;
+    }
+  }
+
+  if (room_id == 0) {
+    sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_room\"}", 41);
+    return;
+  }
+
+  sfu_room_t *room = sfu_room_registry_get_or_create(s->room_registry, room_id);
+  if (!room) {
+    sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"room_creation_failed\"}", 49);
+    return;
+  }
+
+  c->joined_room = room;
+  c->joined_room_id = room_id;
+  publish_join_event_to_nats(s, room_id, c->peer_ip);
+
+  SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64, c->peer_ip, room_id);
+
+  if (!build_and_send_joined_response(c, room_id)) {
+    SFU_LOG_WARN("signaling: failed to send joined response (fd=%d)", c->fd);
+  }
+
+  char response[128];
+  snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
+  sfu_ws_send_text(c->fd, response, strlen(response));
+
+  if (!build_and_send_initial_offer(c->fd, c->is_audience, s)) {
+    SFU_LOG_WARN("signaling: failed to send initial offer (fd=%d)", c->fd);
+  }
+}
+
+static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
+  if (!c->joined_room) {
+    SFU_LOG_WARN("signaling: answer received before join completed for peer %s", c->peer_ip);
+    sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}", 49);
+    return;
+  }
+
+  char sdp[SFU_SIGNALING_SDP_CAP];
+  int sdp_len = sfu_json_extract_string(buf, n, "sdp", sdp, sizeof(sdp));
+  if (sdp_len < 0) {
+    return;
+  }
+
+  char answer_ufrag[sizeof(c->client_ufrag)] = {0};
+  bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, answer_ufrag, sizeof(answer_ufrag));
+  if (have_ufrag && c->client_ufrag[0] != '\0' && strcmp(c->client_ufrag, answer_ufrag) != 0) {
+    SFU_LOG_WARN("signaling: answer ufrag changed for fd=%d (%s -> %s), rejecting", c->fd, c->client_ufrag, answer_ufrag);
+    static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
+    sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+    return;
+  }
+  if (have_ufrag && c->client_ufrag[0] == '\0') {
+    snprintf(c->client_ufrag, sizeof(c->client_ufrag), "%s", answer_ufrag);
+  }
+  if (!have_ufrag && c->client_ufrag[0] == '\0') {
+    SFU_LOG_WARN("signaling: initial answer has no ICE ufrag (fd=%d), rejecting", c->fd);
+    static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
+    sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+    return;
+  }
+
+  sfu_answer_media_t media;
+  if (!parse_answer_media(sdp, (size_t)sdp_len, &media)) {
+    static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_sdp\"}";
+    sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+    return;
+  }
+
+  sfu_pending_answer_t pending;
+  memset(&pending, 0, sizeof(pending));
+  pending.audio_ssrc = media.audio_ssrc;
+  pending.video_ssrc = media.video_ssrc;
+  pending.rtx_ssrc = media.rtx_ssrc;
+  pending.video_pt = media.video_pt;
+  pending.rtx_pt = media.rtx_pt;
+  pending.video_codec = (uint8_t)media.video_codec;
+  pending.twcc_recv_extmap_id = media.twcc_recv_extmap_id;
+  pending.twcc_send_extmap_id = media.twcc_send_extmap_id;
+  pending.audio_section_present = media.audio_section_present;
+  pending.video_section_present = media.video_section_present;
+  pending.audio_sends = media.audio_sends;
+  pending.video_sends = media.video_sends;
+  pending.peer_id = generate_unique_id();
+  pending.user_id = c->user_id;
+  pending.is_audience = c->is_audience;
+  pending.valid = true;
+
+  uint32_t answer_generation = 0;
+  if (!sfu_routing_table_register_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, &pending, &answer_generation)) {
+    static const char routing_failed[] = "{\"type\":\"error\",\"message\":\"routing_registration_failed\"}";
+    sfu_ws_send_text(c->fd, routing_failed, sizeof(routing_failed) - 1);
+    return;
+  }
+  SFU_LOG_INFO("signaling: atomically registered answer ufrag=%s -> room_id=%" PRIu64 " generation=%u", c->client_ufrag, c->joined_room_id, answer_generation);
+
+  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
+  if (!session) {
+    SFU_LOG_INFO("signaling: answer for ufrag=%s awaits authenticated STUN bind", c->client_ufrag);
+    return;
+  }
+
+  sfu_pending_answer_t claimed;
+  bool claimed_answer = sfu_routing_table_take_pending_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, &claimed);
+  if (claimed_answer) {
+    bool role_changed = false;
+    bool media_changed = false;
+    bool newly_bound = false;
+    sfu_room_t *session_room = (sfu_room_t *)session->room;
+    if (session_room && session_room != c->joined_room) {
+      SFU_LOG_WARN("signaling: session ufrag=%s already belongs to another room", c->client_ufrag);
+    } else if (sfu_session_apply_pending_answer(session, &claimed, c->fd, &role_changed, &media_changed)) {
+      if (!session->room) {
+        room_add_peer(c->joined_room, session);
+        newly_bound = session->room == c->joined_room;
+      }
+      if (session->room && (media_changed || role_changed || newly_bound)) {
+        SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag, media_changed,
+                     role_changed, newly_bound);
+        room_refresh_peer_streams((sfu_room_t *)session->room, session);
+        sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+      }
+    }
+  }
+  sfu_session_release(session);
+}
+
+static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n, bool push_to_talk) {
+  (void)s;
+  char role_str[16] = {0};
+  if (push_to_talk) {
+    snprintf(role_str, sizeof(role_str), "speaker");
+  }
+  if (!c->joined_room || c->client_ufrag[0] == '\0' || (!push_to_talk && sfu_json_extract_string(buf, n, "role", role_str, sizeof(role_str)) < 0) ||
+      (strcmp(role_str, "speaker") != 0 && strcmp(role_str, "audience") != 0)) {
+    static const char invalid_role_change[] = "{\"type\":\"error\",\"message\":\"invalid_role_change\"}";
+    sfu_ws_send_text(c->fd, invalid_role_change, sizeof(invalid_role_change) - 1);
+    return;
+  }
+
+  bool is_audience = strcmp(role_str, "audience") == 0;
+  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
+  bool changed = false;
+  if (session && session->room == c->joined_room) {
+    pthread_mutex_lock(&session->answer_lock);
+    uint32_t invalidated_generation = 0;
+    if (sfu_routing_table_invalidate_pending(c->server->routing_table, c->client_ufrag, c->joined_room, c->fd, &invalidated_generation)) {
+      atomic_store_explicit(&session->applied_answer_generation, invalidated_generation, memory_order_release);
+    }
+    changed = room_update_peer_role(c->joined_room, session, is_audience);
+    pthread_mutex_unlock(&session->answer_lock);
+  }
+  if (!changed) {
+    static const char role_change_rejected[] = "{\"type\":\"error\",\"message\":\"role_change_rejected\"}";
+    sfu_ws_send_text(c->fd, role_change_rejected, sizeof(role_change_rejected) - 1);
+  } else {
+    c->is_audience = is_audience;
+    char response[128];
+    int response_len = snprintf(response, sizeof(response), "{\"type\":\"role_changed\",\"user_id\":\"%" PRIu64 "\",\"role\":\"%s\"}", c->user_id, role_str);
+    if (response_len > 0 && (size_t)response_len < sizeof(response)) {
+      sfu_ws_send_text(c->fd, response, (size_t)response_len);
+    }
+    sfu_signaling_trigger_renegotiation(c->joined_room);
+  }
+  if (session) {
+    sfu_session_release(session);
+  }
+}
+
+static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
+  char type[32];
+  if (sfu_json_extract_string(buf, n, "type", type, sizeof(type)) < 0) {
+    return;
+  }
+
+  if (strcmp(type, "ping") == 0) {
+    handle_ping(c);
+  } else if (strcmp(type, "pong") == 0) {
+    handle_pong(c);
+  } else if (strcmp(type, "join") == 0) {
+    handle_join(c, s, buf, n);
+  } else if (strcmp(type, "answer") == 0) {
+    handle_answer(c, s, buf, n);
+  } else if (strcmp(type, "push_to_talk") == 0 || strcmp(type, "role_change") == 0) {
+    handle_push_to_talk(c, s, buf, n, strcmp(type, "push_to_talk") == 0);
+  } else {
+    SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, c->peer_ip);
+  }
+}
+
 static void on_client_readable(uv_poll_t *handle, int status, int events) {
   sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
   sfu_signaling_server_t *s = c->server;
@@ -748,267 +989,63 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
     return;
   }
 
-  if (events & UV_READABLE) {
-    if (!c->handshake_done) {
-      char peek_buf[2048];
-      ssize_t peek_len = recv(c->fd, peek_buf, sizeof(peek_buf) - 1, MSG_PEEK);
-      if (peek_len > 0) {
-        peek_buf[peek_len] = '\0';
-        if (extract_header_val(peek_buf, "X-Real-IP", c->peer_ip, sizeof(c->peer_ip)) == 0) {
-          c->ip_detected_from_header = 1;
-        } else if (extract_header_val(peek_buf, "X-Forwarded-For", c->peer_ip, sizeof(c->peer_ip)) == 0) {
-          c->ip_detected_from_header = 1;
-        }
+  if (!(events & UV_READABLE)) {
+    return;
+  }
+
+  if (!c->handshake_done) {
+    char peek_buf[2048];
+    ssize_t peek_len = recv(c->fd, peek_buf, sizeof(peek_buf) - 1, MSG_PEEK);
+    if (peek_len > 0) {
+      peek_buf[peek_len] = '\0';
+      if (extract_header_val(peek_buf, "X-Real-IP", c->peer_ip, sizeof(c->peer_ip)) == 0) {
+        c->ip_detected_from_header = 1;
+      } else if (extract_header_val(peek_buf, "X-Forwarded-For", c->peer_ip, sizeof(c->peer_ip)) == 0) {
+        c->ip_detected_from_header = 1;
       }
+    }
 
-      if (sfu_ws_handshake(c->fd) != 0) {
-        SFU_LOG_WARN("signaling: WebSocket handshake failed");
-        disconnect_client(c);
-      } else {
-        struct sockaddr_storage peer_addr;
-        socklen_t peer_addr_len = sizeof(peer_addr);
-        if (getpeername(c->fd, (struct sockaddr *)&peer_addr, &peer_addr_len) == 0) {
-          if (!c->ip_detected_from_header) {
-            if (peer_addr.ss_family == AF_INET) {
-              struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
-              inet_ntop(AF_INET, &s4->sin_addr, c->peer_ip, sizeof(c->peer_ip));
-            } else if (peer_addr.ss_family == AF_INET6) {
-              struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
-              inet_ntop(AF_INET6, &s6->sin6_addr, c->peer_ip, sizeof(c->peer_ip));
-            }
-          }
-        }
-        c->handshake_done = true;
-        SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", c->peer_ip, c->ip_detected_from_header ? "YES" : "NO");
-        start_client_keepalive(c);
-      }
-    } else {
-      char buf[SFU_SIGNALING_RECV_CAP];
-      ssize_t n = sfu_ws_recv_text(c->fd, buf, sizeof(buf));
-      if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          return;
-        }
-        disconnect_client(c);
-      } else if (n == 0) {
-        disconnect_client(c);
-      } else {
-        mark_client_activity(c);
-        char type[32];
-        if (sfu_json_extract_string(buf, (size_t)n, "type", type, sizeof(type)) >= 0) {
-          if (strcmp(type, "ping") == 0) {
-            static const char pong_msg[] = "{\"type\":\"pong\"}";
-            if (sfu_ws_send_text(c->fd, pong_msg, sizeof(pong_msg) - 1) != 0) {
-              SFU_LOG_WARN("signaling: failed to send pong fd=%d; closing", c->fd);
-              disconnect_client(c);
-            }
-          } else if (strcmp(type, "pong") == 0) {
-            // nothing else to do.
-          } else if (strcmp(type, "join") == 0) {
-            char room_str[32] = {0};
-            char str_user_id[32] = {0};
-            char role_str[16] = {0};
-            char token[4096];
-            uint64_t room_id = 0;
-            int64_t user_id = 0;
+    if (sfu_ws_handshake(c->fd) != 0) {
+      SFU_LOG_WARN("signaling: WebSocket handshake failed");
+      disconnect_client(c);
+      return;
+    }
 
-            if (sfu_json_extract_string(buf, (size_t)n, "room", room_str, sizeof(room_str)) >= 0) {
-              room_id = (uint64_t)strtoull(room_str, NULL, 10);
-            }
-
-            const char *jwt_secret = g_sfu_config.jwt_secret;
-            if (jwt_secret[0] != '\0') {
-              int token_len = sfu_json_extract_string(buf, (size_t)n, "token", token, sizeof(token));
-              if (token_len < 0) {
-                SFU_LOG_WARN("signaling: join missing token (fd=%d)", c->fd);
-                sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"missing_token\"}", 42);
-                return;
-              }
-              if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &user_id) != 0) {
-                SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
-                sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
-                return;
-              }
-              c->user_id = user_id;
-              SFU_LOG_INFO("signaling: join JWT ok user_id=%" PRId64 " (fd=%d)", user_id, c->fd);
-            } else if (sfu_json_extract_string(buf, (size_t)n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
-              user_id = (int64_t)strtoll(str_user_id, NULL, 10);
-              c->user_id = user_id;
-            }
-
-            c->is_audience = false;
-            if (sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) >= 0) {
-              if (strcmp(role_str, "audience") == 0) {
-                c->is_audience = true;
-              }
-            }
-
-            if (room_id == 0) {
-              sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_room\"}", 41);
-            } else {
-              sfu_room_t *room = sfu_room_registry_get_or_create(s->room_registry, room_id);
-              if (!room) {
-                sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"room_creation_failed\"}", 49);
-              } else {
-                c->joined_room = room;
-                c->joined_room_id = room_id;
-                publish_join_event_to_nats(s, room_id, c->peer_ip);
-
-                SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64, c->peer_ip, room_id);
-
-                if (!build_and_send_joined_response(c, room_id)) {
-                  SFU_LOG_WARN("signaling: failed to send joined response (fd=%d)", c->fd);
-                }
-
-                char response[128];
-                snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
-                sfu_ws_send_text(c->fd, response, strlen(response));
-
-                if (!build_and_send_initial_offer(c->fd, c->is_audience, s)) {
-                  SFU_LOG_WARN("signaling: failed to send initial offer (fd=%d)", c->fd);
-                }
-              }
-            }
-          } else if (strcmp(type, "answer") == 0) {
-            if (!c->joined_room) {
-              SFU_LOG_WARN("signaling: answer received before join completed for peer %s", c->peer_ip);
-              sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"must_join_room_first\"}", 49);
-            } else {
-              char sdp[SFU_SIGNALING_SDP_CAP];
-              int sdp_len = sfu_json_extract_string(buf, (size_t)n, "sdp", sdp, sizeof(sdp));
-              if (sdp_len >= 0) {
-                char answer_ufrag[sizeof(c->client_ufrag)] = {0};
-                bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, answer_ufrag, sizeof(answer_ufrag));
-                if (have_ufrag && c->client_ufrag[0] != '\0' && strcmp(c->client_ufrag, answer_ufrag) != 0) {
-                  SFU_LOG_WARN("signaling: answer ufrag changed for fd=%d (%s -> %s), rejecting", c->fd, c->client_ufrag, answer_ufrag);
-                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
-                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
-                  return;
-                }
-                if (have_ufrag && c->client_ufrag[0] == '\0') {
-                  snprintf(c->client_ufrag, sizeof(c->client_ufrag), "%s", answer_ufrag);
-                }
-                if (!have_ufrag && c->client_ufrag[0] == '\0') {
-                  SFU_LOG_WARN("signaling: initial answer has no ICE ufrag (fd=%d), rejecting", c->fd);
-                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
-                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
-                  return;
-                }
-
-                sfu_answer_media_t media;
-                if (!parse_answer_media(sdp, (size_t)sdp_len, &media)) {
-                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_sdp\"}";
-                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
-                  return;
-                }
-
-                sfu_pending_answer_t pending;
-                memset(&pending, 0, sizeof(pending));
-                pending.audio_ssrc = media.audio_ssrc;
-                pending.video_ssrc = media.video_ssrc;
-                pending.rtx_ssrc = media.rtx_ssrc;
-                pending.video_pt = media.video_pt;
-                pending.rtx_pt = media.rtx_pt;
-                pending.video_codec = (uint8_t)media.video_codec;
-                pending.twcc_recv_extmap_id = media.twcc_recv_extmap_id;
-                pending.twcc_send_extmap_id = media.twcc_send_extmap_id;
-                pending.audio_section_present = media.audio_section_present;
-                pending.video_section_present = media.video_section_present;
-                pending.audio_sends = media.audio_sends;
-                pending.video_sends = media.video_sends;
-                pending.peer_id = generate_unique_id();
-                pending.user_id = c->user_id;
-                pending.is_audience = c->is_audience;
-                pending.valid = true;
-
-                uint32_t answer_generation = 0;
-                if (!sfu_routing_table_register_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, &pending, &answer_generation)) {
-                  static const char routing_failed[] = "{\"type\":\"error\",\"message\":\"routing_registration_failed\"}";
-                  sfu_ws_send_text(c->fd, routing_failed, sizeof(routing_failed) - 1);
-                  return;
-                }
-                SFU_LOG_INFO("signaling: atomically registered answer ufrag=%s -> room_id=%" PRIu64 " generation=%u", c->client_ufrag, c->joined_room_id,
-                             answer_generation);
-
-                sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
-                if (session) {
-                  sfu_pending_answer_t claimed;
-                  bool claimed_answer =
-                      sfu_routing_table_take_pending_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, &claimed);
-                  if (claimed_answer) {
-                    bool role_changed = false;
-                    bool media_changed = false;
-                    bool newly_bound = false;
-                    sfu_room_t *session_room = (sfu_room_t *)session->room;
-                    if (session_room && session_room != c->joined_room) {
-                      SFU_LOG_WARN("signaling: session ufrag=%s already belongs to another room", c->client_ufrag);
-                    } else if (sfu_session_apply_pending_answer(session, &claimed, c->fd, &role_changed, &media_changed)) {
-                      if (!session->room) {
-                        room_add_peer(c->joined_room, session);
-                        newly_bound = session->room == c->joined_room;
-                      }
-                      if (session->room && (media_changed || role_changed || newly_bound)) {
-                        SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag,
-                                     media_changed, role_changed, newly_bound);
-                        room_refresh_peer_streams((sfu_room_t *)session->room, session);
-                        sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
-                      }
-                    }
-                  }
-                  sfu_session_release(session);
-                } else {
-                  SFU_LOG_INFO("signaling: answer for ufrag=%s awaits authenticated STUN bind", c->client_ufrag);
-                }
-              }
-            }
-          } else if (strcmp(type, "push_to_talk") == 0 || strcmp(type, "role_change") == 0) {
-            char role_str[16] = {0};
-            bool push_to_talk = strcmp(type, "push_to_talk") == 0;
-            if (push_to_talk) {
-              snprintf(role_str, sizeof(role_str), "speaker");
-            }
-            if (!c->joined_room || c->client_ufrag[0] == '\0' ||
-                (!push_to_talk && sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) < 0) ||
-                (strcmp(role_str, "speaker") != 0 && strcmp(role_str, "audience") != 0)) {
-              static const char invalid_role_change[] = "{\"type\":\"error\",\"message\":\"invalid_role_change\"}";
-              sfu_ws_send_text(c->fd, invalid_role_change, sizeof(invalid_role_change) - 1);
-            } else {
-              bool is_audience = strcmp(role_str, "audience") == 0;
-              sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
-              bool changed = false;
-              if (session && session->room == c->joined_room) {
-                pthread_mutex_lock(&session->answer_lock);
-                uint32_t invalidated_generation = 0;
-                if (sfu_routing_table_invalidate_pending(s->routing_table, c->client_ufrag, c->joined_room, c->fd, &invalidated_generation)) {
-                  atomic_store_explicit(&session->applied_answer_generation, invalidated_generation, memory_order_release);
-                }
-                changed = room_update_peer_role(c->joined_room, session, is_audience);
-                pthread_mutex_unlock(&session->answer_lock);
-              }
-              if (!changed) {
-                static const char role_change_rejected[] = "{\"type\":\"error\",\"message\":\"role_change_rejected\"}";
-                sfu_ws_send_text(c->fd, role_change_rejected, sizeof(role_change_rejected) - 1);
-              } else {
-                c->is_audience = is_audience;
-                char response[128];
-                int response_len =
-                    snprintf(response, sizeof(response), "{\"type\":\"role_changed\",\"user_id\":\"%" PRIu64 "\",\"role\":\"%s\"}", c->user_id, role_str);
-                if (response_len > 0 && (size_t)response_len < sizeof(response)) {
-                  sfu_ws_send_text(c->fd, response, (size_t)response_len);
-                }
-                sfu_signaling_trigger_renegotiation(c->joined_room);
-              }
-              if (session) {
-                sfu_session_release(session);
-              }
-            }
-          } else {
-            SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, c->peer_ip);
-          }
+    struct sockaddr_storage peer_addr;
+    socklen_t peer_addr_len = sizeof(peer_addr);
+    if (getpeername(c->fd, (struct sockaddr *)&peer_addr, &peer_addr_len) == 0) {
+      if (!c->ip_detected_from_header) {
+        if (peer_addr.ss_family == AF_INET) {
+          struct sockaddr_in *s4 = (struct sockaddr_in *)&peer_addr;
+          inet_ntop(AF_INET, &s4->sin_addr, c->peer_ip, sizeof(c->peer_ip));
+        } else if (peer_addr.ss_family == AF_INET6) {
+          struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&peer_addr;
+          inet_ntop(AF_INET6, &s6->sin6_addr, c->peer_ip, sizeof(c->peer_ip));
         }
       }
     }
+    c->handshake_done = true;
+    SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", c->peer_ip, c->ip_detected_from_header ? "YES" : "NO");
+    start_client_keepalive(c);
+    return;
   }
+
+  char buf[SFU_SIGNALING_RECV_CAP];
+  ssize_t n = sfu_ws_recv_text(c->fd, buf, sizeof(buf));
+  if (n < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return;
+    }
+    disconnect_client(c);
+    return;
+  }
+  if (n == 0) {
+    disconnect_client(c);
+    return;
+  }
+
+  mark_client_activity(c);
+  dispatch_client_message(c, s, buf, (size_t)n);
 }
 
 static void on_server_readable(uv_poll_t *handle, int status, int events) {
