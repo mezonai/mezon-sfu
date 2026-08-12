@@ -1731,6 +1731,17 @@
                             return;
                         }
 
+                        if (msg.type === "ping") {
+                            if (ws && ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: "pong" }));
+                            }
+                            return;
+                        }
+
+                        if (msg.type === "pong") {
+                            return;
+                        }
+
                         if (msg.type === "joined") {
                             setConnState("awaiting offer…", "warn");
                             return;
