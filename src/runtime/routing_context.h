@@ -55,8 +55,8 @@ int sfu_routing_table_init(sfu_routing_table_t *table);
 void sfu_routing_table_destroy(sfu_routing_table_t *table);
 void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd);
 
-bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
-                                       const sfu_pending_answer_t *answer, uint32_t *out_generation);
+bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, const sfu_pending_answer_t *answer,
+                                       uint32_t *out_generation);
 bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *client_ufrag, uint32_t worker_index, sfu_routing_snapshot_t *out);
 bool sfu_routing_table_take_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,
                                            sfu_pending_answer_t *out);
