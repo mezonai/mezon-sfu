@@ -5,6 +5,7 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +14,16 @@
 
 #define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_HANDSHAKE_BUF_CAP 4096
+#define WS_SEND_LOCK_COUNT 256
+
+static pthread_mutex_t g_ws_send_locks[WS_SEND_LOCK_COUNT];
+static pthread_once_t g_ws_send_locks_once = PTHREAD_ONCE_INIT;
+
+static void init_ws_send_locks(void) {
+  for (size_t i = 0; i < WS_SEND_LOCK_COUNT; i++) {
+    pthread_mutex_init(&g_ws_send_locks[i], NULL);
+  }
+}
 
 static ssize_t read_full_available(int fd, char *buf, size_t cap, const char *terminator) {
   size_t total = 0;
@@ -173,13 +184,15 @@ static int send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t len
     header_len = 10;
   }
 
-  if (write_exact(fd, header, header_len) < 0) {
-    return -1;
+  pthread_once(&g_ws_send_locks_once, init_ws_send_locks);
+  pthread_mutex_t *send_lock = &g_ws_send_locks[(unsigned)fd % WS_SEND_LOCK_COUNT];
+  pthread_mutex_lock(send_lock);
+  int result = 0;
+  if (write_exact(fd, header, header_len) < 0 || (len > 0 && write_exact(fd, payload, len) < 0)) {
+    result = -1;
   }
-  if (len > 0 && write_exact(fd, payload, len) < 0) {
-    return -1;
-  }
-  return 0;
+  pthread_mutex_unlock(send_lock);
+  return result;
 }
 
 int sfu_ws_send_text(int fd, const char *data, size_t len) { return send_frame(fd, 0x1, (const uint8_t *)data, len); }

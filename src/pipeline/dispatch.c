@@ -199,8 +199,26 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
             SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u peer_id=%u", w->worker_index, client_ufrag,
                          pending_audio_ssrc, pending_video_ssrc, pending_rtx_ssrc, session->peer_id);
           }
-          room_add_peer(room, session);
-          session->fd = matched_signaling_fd;
+          bool route_still_registered = false;
+          pthread_mutex_lock(&w->routing_table->mutex);
+          for (int i = 0; i < w->routing_table->count; i++) {
+            sfu_routing_entry_t *entry = &w->routing_table->entries[i];
+            if (entry->fd == matched_signaling_fd && strcmp(entry->ufrag, client_ufrag) == 0 && entry->room == room) {
+              route_still_registered = true;
+              break;
+            }
+          }
+
+          if (!route_still_registered) {
+            SFU_LOG_INFO("worker %u: signaling route disappeared before binding ufrag=%s; skipping room publication", w->worker_index, client_ufrag);
+          } else {
+            session->fd = matched_signaling_fd;
+            room_add_peer(room, session);
+            if (session->room == room) {
+              sfu_signaling_trigger_renegotiation(room);
+            }
+          }
+          pthread_mutex_unlock(&w->routing_table->mutex);
         }
 
         if (session->worker_id == UINT16_MAX) {

@@ -201,6 +201,51 @@ static void test_renegotiation_offer_role_directions(void) {
   free(session.cold);
 }
 
+static void test_audience_offer_with_active_remote_speaker(void) {
+  sfu_peer_session_t session;
+  sfu_transceiver_t audio[SFU_MAX_REMOTE_SLOTS], video[SFU_MAX_REMOTE_SLOTS];
+  sfu_peer_session_t remotes[SFU_MAX_REMOTE_SLOTS];
+  setup_mock_session(&session, audio, video, remotes);
+
+  atomic_store(&session.is_audience, true);
+  session.next_remote_mid = 4;
+  snprintf(remotes[0].cold->ufrag, sizeof(remotes[0].cold->ufrag), "speakerUfrag");
+  audio[0].ssrc = 1111;
+  audio[0].active = true;
+  video[0].ssrc = 2222;
+  video[0].rtx_ssrc = 3333;
+  video[0].payload_type = 96;
+  video[0].rtx_payload_type = 97;
+  video[0].codec = SFU_VIDEO_CODEC_VP8;
+  video[0].active = true;
+  sync_mock_snapshot(&session, audio, video);
+
+  char offer[4096];
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "m=audio") == 2);
+  assert(count_occurrences(offer, "m=video") == 2);
+  assert(count_occurrences(offer, "a=inactive") == 2);
+  assert(count_occurrences(offer, "a=sendonly") == 2);
+  assert(contains(offer, "a=mid:2"));
+  assert(contains(offer, "a=mid:3"));
+  assert(contains(offer, "a=ssrc:1111"));
+  assert(contains(offer, "a=ssrc:2222"));
+  assert(contains(offer, "a=ssrc-group:FID 2222 3333"));
+
+  video[0].ssrc = 0;
+  sync_mock_snapshot(&session, audio, video);
+  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=sendonly") == 1);
+  assert(count_occurrences(offer, "a=inactive") == 3);
+  assert(!contains(offer, "a=ssrc:2222"));
+
+  cleanup_mock_session(&session, remotes);
+}
+
 static void test_twcc_extmap_extraction(void) {
   extern uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len);
 
@@ -548,6 +593,7 @@ int main(void) {
 
   test_initial_offer_role_directions();
   test_renegotiation_offer_role_directions();
+  test_audience_offer_with_active_remote_speaker();
   test_twcc_extmap_extraction();
   test_answer_media_is_scoped_by_mid_and_direction();
   test_concurrent_build_vs_teardown();

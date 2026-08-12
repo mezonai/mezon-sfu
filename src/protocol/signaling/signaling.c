@@ -222,7 +222,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *session = room->peers[i];
 
-    if (!session || !sfu_session_accepts_work(session)) {
+    if (!session || session->fd < 0 || !sfu_session_accepts_work(session)) {
       continue;
     }
 
@@ -230,7 +230,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
       SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     } else {
-      SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
+      SFU_LOG_WARN("signaling: failed to send renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     }
     sfu_session_release(session);
   }
@@ -786,12 +786,27 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
               char sdp[SFU_SIGNALING_SDP_CAP];
               int sdp_len = sfu_json_extract_string(buf, (size_t)n, "sdp", sdp, sizeof(sdp));
               if (sdp_len >= 0) {
-                bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, c->client_ufrag, sizeof(c->client_ufrag));
+                char answer_ufrag[sizeof(c->client_ufrag)] = {0};
+                bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, answer_ufrag, sizeof(answer_ufrag));
+                if (have_ufrag && c->client_ufrag[0] != '\0' && strcmp(c->client_ufrag, answer_ufrag) != 0) {
+                  SFU_LOG_WARN("signaling: answer ufrag changed for fd=%d (%s -> %s), rejecting", c->fd, c->client_ufrag, answer_ufrag);
+                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
+                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+                  return;
+                }
                 if (have_ufrag) {
+                  if (c->client_ufrag[0] == '\0') {
+                    snprintf(c->client_ufrag, sizeof(c->client_ufrag), "%s", answer_ufrag);
+                  }
                   sfu_register_ufrag_room(s->routing_table, c->client_ufrag, c->joined_room, c->fd);
                   SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64, c->client_ufrag, c->joined_room_id);
-                } else {
-                  c->client_ufrag[0] = '\0';
+                }
+
+                if (!have_ufrag && c->client_ufrag[0] == '\0') {
+                  SFU_LOG_WARN("signaling: initial answer has no ICE ufrag (fd=%d), rejecting", c->fd);
+                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
+                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+                  return;
                 }
 
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
@@ -809,8 +824,8 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   }
                   bool media_changed = handle_signaling_answer(session, sdp, sdp_len);
                   if (!session->room) {
-                    room_add_peer(c->joined_room, session);
                     session->fd = c->fd;
+                    room_add_peer(c->joined_room, session);
                     newly_bound = session->room == c->joined_room;
                   }
                   if (session->room && (media_changed || role_changed || newly_bound)) {
