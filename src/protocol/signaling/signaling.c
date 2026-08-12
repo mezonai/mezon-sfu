@@ -209,6 +209,53 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   pthread_mutex_unlock(&room->lock);
 }
 
+static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
+  if (!room || !leaving) {
+    return;
+  }
+
+  const char *ufrag = (leaving->cold && leaving->cold->ufrag[0] != '\0') ? leaving->cold->ufrag : "";
+  const int64_t user_id = leaving->user_id;
+  const uint32_t peer_id = leaving->peer_id;
+
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->peer_count; i++) {
+    sfu_peer_session_t *other = room->peers[i];
+    if (!other || other == leaving || other->fd < 0 || !sfu_session_accepts_work(other)) {
+      continue;
+    }
+
+    uint32_t mid_audio = 0;
+    uint32_t mid_video = 0;
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(other);
+    if (snap) {
+      for (uint32_t j = 0; j < snap->count; j++) {
+        if (snap->entries[j].subscriber == leaving) {
+          mid_audio = snap->entries[j].mid_audio;
+          mid_video = snap->entries[j].mid_video;
+          break;
+        }
+      }
+      sfu_subscriptions_snapshot_release(snap);
+    }
+
+    char msg[320];
+    int n = snprintf(msg, sizeof(msg),
+                     "{\"type\":\"peer_left\",\"ufrag\":\"%s\",\"user_id\":\"%" PRId64
+                     "\",\"peer_id\":%u,"
+                     "\"mid_audio\":%u,\"mid_video\":%u}",
+                     ufrag, user_id, peer_id, mid_audio, mid_video);
+    if (n > 0 && (size_t)n < sizeof(msg)) {
+      if (sfu_ws_send_text(other->fd, msg, (size_t)n) != 0) {
+        SFU_LOG_WARN("signaling: failed to send peer_left to fd=%d for leaving ufrag=%s", other->fd, ufrag);
+      } else {
+        SFU_LOG_INFO("signaling: peer_left to fd=%d for ufrag=%s mids=%u/%u", other->fd, ufrag, mid_audio, mid_video);
+      }
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+}
+
 static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
   static const char k_extmap[] = "a=extmap:";
   static const char k_twcc_uri[] = "transport-wide-cc";
@@ -603,6 +650,9 @@ static void on_client_close(uv_handle_t *handle) {
 
   if (session) {
     sfu_room_t *room = (sfu_room_t *)session->room;
+    if (room) {
+      notify_peer_left(room, session);
+    }
     (void)sfu_session_begin_close(c->server->sessions, session);
     sfu_session_release(session);
 
@@ -806,7 +856,8 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
                 if (session) {
                   sfu_pending_answer_t claimed;
-                  bool claimed_answer = sfu_routing_table_take_pending_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, &claimed);
+                  bool claimed_answer =
+                      sfu_routing_table_take_pending_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, &claimed);
                   if (claimed_answer) {
                     bool role_changed = false;
                     bool media_changed = false;

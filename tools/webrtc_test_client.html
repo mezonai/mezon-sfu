@@ -605,7 +605,42 @@
                 if (p.rafHandle) cancelAnimationFrame(p.rafHandle);
                 p.tile.remove();
                 participants.delete(id);
+                document
+                    .querySelectorAll(`audio[data-owner="${CSS.escape(id)}"]`)
+                    .forEach((el) => el.remove());
                 updateParticipantCount();
+            }
+
+            /* Leave (not demote): server sends peer_left with the remote mids
+             * that were allocated for the departing publisher on this client.
+             * Demote keeps the same mids inactive for push-to-talk re-promote. */
+            function handlePeerLeft(msg) {
+                const mids = [];
+                if (msg.mid_video != null && msg.mid_video !== 0) {
+                    mids.push(String(msg.mid_video));
+                }
+                if (msg.mid_audio != null && msg.mid_audio !== 0) {
+                    mids.push(String(msg.mid_audio));
+                }
+                for (const mid of mids) {
+                    removeTile("mid-" + mid);
+                }
+                // Drop any audio elements keyed only by mid that never got a tile.
+                for (const mid of mids) {
+                    document
+                        .querySelectorAll(
+                            `audio[data-owner="${CSS.escape("mid-" + mid)}"]`
+                        )
+                        .forEach((el) => el.remove());
+                }
+                console.log(
+                    "peer_left:",
+                    msg.ufrag || "",
+                    "mids",
+                    mids.join(","),
+                    "peer_id",
+                    msg.peer_id
+                );
             }
 
             function ensureParticipant(id, opts) {
@@ -1657,6 +1692,11 @@
 
                         if (msg.type === "joined") {
                             setConnState("awaiting offer…", "warn");
+                            return;
+                        }
+
+                        if (msg.type === "peer_left") {
+                            handlePeerLeft(msg);
                             return;
                         }
 
