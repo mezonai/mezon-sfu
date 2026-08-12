@@ -78,6 +78,7 @@ add_library(sfu_core STATIC
   src/room/room_registry.c
   src/protocol/websocket/ws.c
   src/protocol/signaling/json_lite.c
+  src/protocol/signaling/handshake.c
   src/protocol/signaling/sdp.c
   src/protocol/signaling/signaling.c
   src/pipeline/dispatch.c
