@@ -9,6 +9,9 @@
 #include "runtime/routing_context.h"
 #include "transport/stun/stun.h"
 
+#define SFU_SIGNALING_PING_INTERVAL_MS 10000u
+#define SFU_SIGNALING_IDLE_TIMEOUT_MS 60000u
+
 typedef struct sfu_signaling_server {
   int listen_fd;
   atomic_bool running;
@@ -27,19 +30,23 @@ typedef struct sfu_signaling_server {
 typedef struct sfu_client_conn {
   char pending_answer_sdp[SFU_SIGNALING_SDP_CAP];
   uv_poll_t poll_handle;
-  uv_timer_t answer_retry_timer;
+  uv_timer_t keepalive_timer;
   sfu_signaling_server_t *server;
   sfu_room_t *joined_room;
   uint64_t joined_room_id;
+  uint64_t last_activity_ms;
   int64_t user_id;
   int fd;
   int pending_answer_sdp_len;
   int answer_retry_count;
   uint8_t ip_detected_from_header;
+  uint8_t handles_open;
   char peer_ip[64];
   char client_ufrag[32];
   bool handshake_done;
   bool is_audience;
+  bool disconnecting;
+  bool keepalive_inited;
 } sfu_client_conn_t;
 
 int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, const char *media_host, uint16_t media_port,
