@@ -344,6 +344,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->cold->addr_len = addr_len;
   s->active = true;
   s->state = SFU_SESSION_NEW;
+  s->fd = -1;
   s->worker_id = UINT16_MAX;
 
   for (int i = 0; i < 128; i++) {
