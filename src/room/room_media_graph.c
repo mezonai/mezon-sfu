@@ -253,6 +253,25 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
   }
 
   atomic_store_explicit(&peer->is_audience, is_audience, memory_order_release);
+
+  if (is_audience) {
+    peer->uplink_audio.active = false;
+    peer->uplink_video.active = false;
+
+    sfu_receiver_snapshot_t *empty = snapshot_alloc(0);
+    if (empty) {
+      empty->generation = 0;
+    }
+    sfu_session_publish_fanout_targets(peer, empty);
+  } else {
+    if (peer->uplink_audio.ssrc != 0) {
+      peer->uplink_audio.active = true;
+    }
+    if (peer->uplink_video.ssrc != 0) {
+      peer->uplink_video.active = true;
+    }
+  }
+
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *other = room->peers[i];
     if (!other || other == peer || !sfu_session_accepts_work(other)) {
@@ -277,20 +296,6 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
         fanout_snapshot_replace(peer, snap);
       }
     }
-  }
-
-  if (is_audience) {
-    sfu_receiver_snapshot_t *empty = snapshot_alloc(0);
-    if (empty) {
-      empty->generation = 0;
-    }
-    sfu_session_publish_fanout_targets(peer, empty);
-
-    peer->uplink_audio.ssrc = 0;
-    peer->uplink_audio.active = false;
-    peer->uplink_video.ssrc = 0;
-    peer->uplink_video.rtx_ssrc = 0;
-    peer->uplink_video.active = false;
   }
 
   peer->negotiation_needed = true;

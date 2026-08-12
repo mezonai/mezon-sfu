@@ -158,6 +158,12 @@ static void test_audience_role_asymmetry_and_transition(void) {
   assert(sfu_room_init(&room, 4) == 0);
 
   sfu_peer_session_t *speaker = mock_session("speaker");
+  speaker->uplink_audio.ssrc = 1111;
+  speaker->uplink_video.ssrc = 2222;
+  speaker->uplink_video.rtx_ssrc = 3333;
+  speaker->uplink_video.payload_type = 96;
+  speaker->uplink_video.rtx_payload_type = 97;
+  speaker->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
   sfu_peer_session_t *audience = mock_session("audience");
   atomic_store(&audience->is_audience, true);
 
@@ -172,6 +178,22 @@ static void test_audience_role_asymmetry_and_transition(void) {
   assert(fanout_target_count(speaker) == 1);
   assert(fanout_targets(speaker, audience));
   assert(fanout_target_count(audience) == 0);
+  {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(audience);
+    assert(snap != NULL && snap->count == 1);
+    assert(snap->entries[0].subscriber == speaker);
+    assert(snap->entries[0].mid_audio == 2);
+    assert(snap->entries[0].mid_video == 3);
+    assert(snap->entries[0].audio_active);
+    assert(snap->entries[0].video_active);
+    assert(snap->entries[0].audio_ssrc == 1111);
+    assert(snap->entries[0].video_ssrc == 2222);
+    assert(snap->entries[0].video_rtx_ssrc == 3333);
+    assert(snap->entries[0].video_pt == 96);
+    assert(snap->entries[0].video_rtx_pt == 97);
+    assert(snap->entries[0].video_codec == SFU_VIDEO_CODEC_VP8);
+    sfu_subscriptions_snapshot_release(snap);
+  }
 
   assert(room_update_peer_role(&room, audience, false));
   assert(!atomic_load(&audience->is_audience));

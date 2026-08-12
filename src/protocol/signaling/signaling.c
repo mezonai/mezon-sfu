@@ -222,7 +222,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *session = room->peers[i];
 
-    if (!session || !sfu_session_accepts_work(session)) {
+    if (!session || session->fd < 0 || !sfu_session_accepts_work(session)) {
       continue;
     }
 
@@ -230,7 +230,7 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
     if (build_and_send_offer(session->fd, session, g_signaling_server)) {
       SFU_LOG_INFO("signaling: sent renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     } else {
-      SFU_LOG_WARN("signaling: failed to send renegotiation offer to fd=%d", g_signaling_server->listen_fd);
+      SFU_LOG_WARN("signaling: failed to send renegotiation offer to ufrag=%s (fd=%d)", session->cold->ufrag, session->fd);
     }
     sfu_session_release(session);
   }
@@ -535,31 +535,55 @@ static bool handle_signaling_answer(sfu_peer_session_t *session, const char *sdp
     return false;
   }
 
-  bool new_audio_active = media.audio_ssrc != 0;
-  bool new_video_active = media.video_ssrc != 0;
-  bool changed = session->uplink_audio.ssrc != media.audio_ssrc || session->uplink_audio.active != new_audio_active ||
-                 session->uplink_video.ssrc != media.video_ssrc || session->uplink_video.rtx_ssrc != media.rtx_ssrc ||
-                 session->uplink_video.active != new_video_active || session->uplink_video.payload_type != media.video_pt ||
-                 session->uplink_video.rtx_payload_type != media.rtx_pt || session->uplink_video.codec != media.video_codec;
+  bool audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  uint32_t audio_ssrc = media.audio_ssrc != 0 ? media.audio_ssrc : session->uplink_audio.ssrc;
+  uint32_t video_ssrc = media.video_ssrc != 0 ? media.video_ssrc : session->uplink_video.ssrc;
+  uint32_t rtx_ssrc = media.rtx_ssrc != 0 ? media.rtx_ssrc : session->uplink_video.rtx_ssrc;
+  uint8_t video_pt = media.video_pt != 0 ? media.video_pt : session->uplink_video.payload_type;
+  uint8_t rtx_pt = media.rtx_pt != 0 ? media.rtx_pt : session->uplink_video.rtx_payload_type;
+  sfu_video_codec_t video_codec = media.video_codec != SFU_VIDEO_CODEC_NONE ? media.video_codec : session->uplink_video.codec;
 
-  session->uplink_audio.ssrc = media.audio_ssrc;
+  bool new_audio_active = !audience && audio_ssrc != 0;
+  bool new_video_active = !audience && video_ssrc != 0;
+
+  bool ssrc_identity_changed = (media.audio_ssrc != 0 && session->uplink_audio.ssrc != media.audio_ssrc) ||
+                               (media.video_ssrc != 0 && session->uplink_video.ssrc != media.video_ssrc) ||
+                               (media.rtx_ssrc != 0 && session->uplink_video.rtx_ssrc != media.rtx_ssrc);
+  bool active_changed = session->uplink_audio.active != new_audio_active || session->uplink_video.active != new_video_active;
+  bool codec_changed = (media.video_pt != 0 && session->uplink_video.payload_type != media.video_pt) ||
+                       (media.rtx_pt != 0 && session->uplink_video.rtx_payload_type != media.rtx_pt) ||
+                       (media.video_codec != SFU_VIDEO_CODEC_NONE && session->uplink_video.codec != media.video_codec);
+
+  bool changed = ssrc_identity_changed || active_changed || codec_changed;
+
+  session->uplink_audio.ssrc = audio_ssrc;
   session->uplink_audio.active = new_audio_active;
-  session->uplink_video.ssrc = media.video_ssrc;
-  session->uplink_video.rtx_ssrc = media.rtx_ssrc;
+  session->uplink_video.ssrc = video_ssrc;
+  session->uplink_video.rtx_ssrc = rtx_ssrc;
   session->uplink_video.active = new_video_active;
-  session->uplink_video.payload_type = media.video_pt;
-  session->uplink_video.rtx_payload_type = media.rtx_pt;
-  session->uplink_video.codec = media.video_codec;
-  session->twcc_recv_extmap_id = media.twcc_recv_extmap_id;
-  session->twcc_send_extmap_id = media.twcc_send_extmap_id;
+  if (video_pt != 0) {
+    session->uplink_video.payload_type = video_pt;
+  }
+  if (rtx_pt != 0) {
+    session->uplink_video.rtx_payload_type = rtx_pt;
+  }
+  if (video_codec != SFU_VIDEO_CODEC_NONE) {
+    session->uplink_video.codec = video_codec;
+  }
+  if (media.twcc_recv_extmap_id != 0) {
+    session->twcc_recv_extmap_id = media.twcc_recv_extmap_id;
+  }
+  if (media.twcc_send_extmap_id != 0) {
+    session->twcc_send_extmap_id = media.twcc_send_extmap_id;
+  }
 
   for (int i = 0; i < 128; i++) {
     session->pt_map[i] = (uint8_t)i;
   }
 
-  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u changed=%d", session->cold->ufrag,
-               media.audio_ssrc, media.video_ssrc, media.rtx_ssrc, media.video_pt, media.rtx_pt, media.video_codec, media.twcc_recv_extmap_id,
-               media.twcc_send_extmap_id, changed);
+  SFU_LOG_INFO("answer: ufrag=%s audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u video_pt=%u rtx_pt=%u codec=%u twcc_rx=%u twcc_tx=%u active=%d/%d changed=%d",
+               session->cold->ufrag, audio_ssrc, video_ssrc, rtx_ssrc, session->uplink_video.payload_type, session->uplink_video.rtx_payload_type,
+               session->uplink_video.codec, session->twcc_recv_extmap_id, session->twcc_send_extmap_id, new_audio_active, new_video_active, changed);
   return changed;
 }
 
@@ -762,12 +786,27 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
               char sdp[SFU_SIGNALING_SDP_CAP];
               int sdp_len = sfu_json_extract_string(buf, (size_t)n, "sdp", sdp, sizeof(sdp));
               if (sdp_len >= 0) {
-                bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, c->client_ufrag, sizeof(c->client_ufrag));
+                char answer_ufrag[sizeof(c->client_ufrag)] = {0};
+                bool have_ufrag = extract_sdp_ice_ufrag(sdp, (size_t)sdp_len, answer_ufrag, sizeof(answer_ufrag));
+                if (have_ufrag && c->client_ufrag[0] != '\0' && strcmp(c->client_ufrag, answer_ufrag) != 0) {
+                  SFU_LOG_WARN("signaling: answer ufrag changed for fd=%d (%s -> %s), rejecting", c->fd, c->client_ufrag, answer_ufrag);
+                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
+                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+                  return;
+                }
                 if (have_ufrag) {
+                  if (c->client_ufrag[0] == '\0') {
+                    snprintf(c->client_ufrag, sizeof(c->client_ufrag), "%s", answer_ufrag);
+                  }
                   sfu_register_ufrag_room(s->routing_table, c->client_ufrag, c->joined_room, c->fd);
                   SFU_LOG_INFO("signaling: registered client ufrag=%s -> room_id=%" PRIu64, c->client_ufrag, c->joined_room_id);
-                } else {
-                  c->client_ufrag[0] = '\0';
+                }
+
+                if (!have_ufrag && c->client_ufrag[0] == '\0') {
+                  SFU_LOG_WARN("signaling: initial answer has no ICE ufrag (fd=%d), rejecting", c->fd);
+                  static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_ufrag\"}";
+                  sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+                  return;
                 }
 
                 sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(s->sessions, c->client_ufrag);
@@ -785,8 +824,8 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                   }
                   bool media_changed = handle_signaling_answer(session, sdp, sdp_len);
                   if (!session->room) {
-                    room_add_peer(c->joined_room, session);
                     session->fd = c->fd;
+                    room_add_peer(c->joined_room, session);
                     newly_bound = session->room == c->joined_room;
                   }
                   if (session->room && (media_changed || role_changed || newly_bound)) {
@@ -806,14 +845,14 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
                 }
               }
             }
-          } else if (strcmp(type, "raise_hand") == 0 || strcmp(type, "role_change") == 0) {
+          } else if (strcmp(type, "push_to_talk") == 0 || strcmp(type, "role_change") == 0) {
             char role_str[16] = {0};
-            bool raise_hand = strcmp(type, "raise_hand") == 0;
-            if (raise_hand) {
+            bool push_to_talk = strcmp(type, "push_to_talk") == 0;
+            if (push_to_talk) {
               snprintf(role_str, sizeof(role_str), "speaker");
             }
             if (!c->joined_room || c->client_ufrag[0] == '\0' ||
-                (!raise_hand && sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) < 0) ||
+                (!push_to_talk && sfu_json_extract_string(buf, (size_t)n, "role", role_str, sizeof(role_str)) < 0) ||
                 (strcmp(role_str, "speaker") != 0 && strcmp(role_str, "audience") != 0)) {
               static const char invalid_role_change[] = "{\"type\":\"error\",\"message\":\"invalid_role_change\"}";
               sfu_ws_send_text(c->fd, invalid_role_change, sizeof(invalid_role_change) - 1);
