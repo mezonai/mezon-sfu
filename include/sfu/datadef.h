@@ -188,12 +188,16 @@ typedef struct sfu_peer_session {
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
+  pthread_mutex_t answer_lock;
+  pthread_mutex_t media_lock;
+  pthread_mutex_t snapshot_lock;
   uint8_t pt_map[128];
   int64_t user_id;
   int64_t last_pli_time;
   int64_t last_fir_time;
   uint32_t peer_id;
   uint32_t next_remote_mid;
+  _Atomic uint32_t applied_answer_generation;
   int fd;
   uint16_t worker_id;
   uint8_t twcc_recv_extmap_id;
@@ -208,6 +212,8 @@ typedef struct sfu_peer_session {
   uint8_t state;
   uint8_t fir_seq;
   _Atomic bool is_audience;
+  _Atomic bool audio_send_negotiated;
+  _Atomic bool video_send_negotiated;
   bool active;
   bool negotiation_needed;
   _Atomic bool uplink_ssrc_dirty;
@@ -224,6 +230,7 @@ typedef struct sfu_session_table {
   uint32_t capacity;
   uint32_t count;
   pthread_mutex_t lock;
+  pthread_mutex_t ice_lock;
   sfu_hash_slot_t addr_index[SFU_SESSION_ADDR_HASH_SLOTS];
   sfu_hash_slot_t ufrag_index[SFU_SESSION_UFRAG_HASH_SLOTS];
 } sfu_session_table_t;

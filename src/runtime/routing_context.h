@@ -3,28 +3,47 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include "sfu/datadef.h"
 
 #define SFU_MAX_UFRAG_MAPPINGS 2048
 
-typedef struct {
+typedef struct sfu_pending_answer {
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t rtx_ssrc;
+  uint32_t peer_id;
+  int64_t user_id;
+  uint32_t generation;
+  uint8_t video_pt;
+  uint8_t rtx_pt;
+  uint8_t video_codec;
+  uint8_t twcc_recv_extmap_id;
+  uint8_t twcc_send_extmap_id;
+  bool audio_section_present;
+  bool video_section_present;
+  bool audio_sends;
+  bool video_sends;
+  bool is_audience;
+  bool valid;
+} sfu_pending_answer_t;
+
+typedef struct sfu_routing_entry {
   char ufrag[32];
   sfu_room_t *room;
   uint32_t worker_index;
-  uint32_t pending_audio_ssrc;
-  uint32_t pending_video_ssrc;
-  uint32_t pending_rtx_ssrc;
-  uint32_t peer_id;
   int fd;
-  uint8_t pending_video_pt;
-  uint8_t pending_rtx_pt;
-  uint8_t pending_video_codec;
-  uint8_t pending_twcc_recv_extmap_id;
-  uint8_t pending_twcc_send_extmap_id;
   bool has_owner;
-  bool has_pending_answer;
-  bool is_audience;
+  sfu_pending_answer_t pending_answer;
 } sfu_routing_entry_t;
+
+typedef struct sfu_routing_snapshot {
+  sfu_room_t *room;
+  uint32_t worker_index;
+  int fd;
+  bool has_owner;
+  uint32_t pending_generation;
+} sfu_routing_snapshot_t;
 
 typedef struct {
   sfu_routing_entry_t entries[SFU_MAX_UFRAG_MAPPINGS];
@@ -35,9 +54,13 @@ typedef struct {
 int sfu_routing_table_init(sfu_routing_table_t *table);
 void sfu_routing_table_destroy(sfu_routing_table_t *table);
 void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd);
-void sfu_routing_table_set_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, uint32_t audio_ssrc, uint32_t video_ssrc, uint32_t rtx_ssrc,
-                                          uint8_t video_pt, uint8_t rtx_pt, sfu_video_codec_t video_codec, uint8_t twcc_recv_extmap_id,
-                                          uint8_t twcc_send_extmap_id, uint32_t peer_id, bool is_audience);
+
+bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
+                                       const sfu_pending_answer_t *answer, uint32_t *out_generation);
+bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *client_ufrag, uint32_t worker_index, sfu_routing_snapshot_t *out);
+bool sfu_routing_table_take_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,
+                                           sfu_pending_answer_t *out);
+bool sfu_routing_table_invalidate_pending(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t *out_generation);
 
 static inline uint32_t fnv1a(const void *data, size_t len) {
   const uint8_t *p = (const uint8_t *)data;

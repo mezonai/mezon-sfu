@@ -18,6 +18,9 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
 
   for (uint32_t i = 0; i < receiver_count; i++) {
     const sfu_receiver_entry_t *slot = &snap->entries[i];
+    if ((m->is_audio && !slot->audio_active) || (!m->is_audio && !slot->video_active)) {
+      continue;
+    }
 
     sfu_peer_session_t *sub_session = slot->subscriber;
     if (!sub_session || sub_session->state != SFU_SESSION_ESTABLISHED) {

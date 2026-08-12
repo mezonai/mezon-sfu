@@ -98,6 +98,8 @@ static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *a
   /* Allocate cold pointer for session */
   session->cold = calloc(1, sizeof(sfu_peer_session_cold_t));
   assert(session->cold != NULL);
+  assert(pthread_mutex_init(&session->media_lock, NULL) == 0);
+  assert(pthread_mutex_init(&session->snapshot_lock, NULL) == 0);
 
   sfu_receiver_snapshot_t *snap = calloc(1, sizeof(*snap) + SFU_MAX_REMOTE_SLOTS * sizeof(snap->entries[0]));
   assert(snap != NULL);
@@ -112,6 +114,7 @@ static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *a
     /* Allocate cold pointer for each remote peer */
     remotes[i].cold = calloc(1, sizeof(sfu_peer_session_cold_t));
     assert(remotes[i].cold != NULL);
+    assert(pthread_mutex_init(&remotes[i].media_lock, NULL) == 0);
     atomic_store(&remotes[i].refcount, 2); /* test pin + snapshot pin */
     atomic_store(&remotes[i].lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
     atomic_store(&remotes[i].accepts_work, true);
@@ -156,8 +159,11 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
      * ultimately free them) cannot be used here. */
     free(snap);
   }
+  pthread_mutex_destroy(&session->snapshot_lock);
+  pthread_mutex_destroy(&session->media_lock);
   free(session->cold);
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    pthread_mutex_destroy(&remotes[i].media_lock);
     free(remotes[i].cold);
   }
 }
@@ -184,6 +190,8 @@ static void test_renegotiation_offer_role_directions(void) {
   memset(&session, 0, sizeof(session));
   session.cold = calloc(1, sizeof(*session.cold));
   assert(session.cold != NULL);
+  assert(pthread_mutex_init(&session.media_lock, NULL) == 0);
+  assert(pthread_mutex_init(&session.snapshot_lock, NULL) == 0);
   session.next_remote_mid = 2;
 
   char offer[4096];
@@ -198,6 +206,8 @@ static void test_renegotiation_offer_role_directions(void) {
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=inactive") == 2);
 
+  pthread_mutex_destroy(&session.snapshot_lock);
+  pthread_mutex_destroy(&session.media_lock);
   free(session.cold);
 }
 
@@ -226,6 +236,9 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   offer[len] = '\0';
   assert(count_occurrences(offer, "m=audio") == 2);
   assert(count_occurrences(offer, "m=video") == 2);
+  assert(contains(offer, "a=group:BUNDLE 0 1 2 3"));
+  assert(!contains(offer, "a=mid:4"));
+  assert(!contains(offer, "a=mid:5"));
   assert(count_occurrences(offer, "a=inactive") == 2);
   assert(count_occurrences(offer, "a=sendonly") == 2);
   assert(contains(offer, "a=mid:2"));
@@ -372,6 +385,9 @@ static sfu_peer_session_t *race_mock_session(const char *ufrag) {
   assert(s->cold != NULL);
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
   s->active = true;
+  assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->media_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->snapshot_lock, NULL) == 0);
   atomic_store(&s->refcount, 1);
   atomic_store(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
   atomic_store(&s->accepts_work, true);

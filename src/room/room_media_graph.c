@@ -6,7 +6,7 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
-static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *target, const sfu_peer_session_t *media_source) {
+static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *target, sfu_peer_session_t *media_source) {
   atomic_fetch_add_explicit(&target->refcount, 1, memory_order_relaxed);
 
   e->subscriber = target;
@@ -16,6 +16,7 @@ static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *tar
     e->subscriber_ufrag[0] = '\0';
   }
 
+  pthread_mutex_lock(&media_source->media_lock);
   e->audio_ssrc = media_source->uplink_audio.ssrc;
   e->video_ssrc = media_source->uplink_video.ssrc;
   e->video_rtx_ssrc = media_source->uplink_video.rtx_ssrc;
@@ -24,6 +25,7 @@ static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *tar
   e->video_codec = media_source->uplink_video.codec;
   e->audio_active = media_source->uplink_audio.active;
   e->video_active = media_source->uplink_video.active;
+  pthread_mutex_unlock(&media_source->media_lock);
 }
 
 static uint32_t snapshot_find(const sfu_receiver_snapshot_t *old, const sfu_peer_session_t *dst) {
@@ -189,6 +191,10 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     pthread_mutex_unlock(&room->lock);
     return;
   }
+  if (!sfu_session_accepts_work(peer)) {
+    pthread_mutex_unlock(&room->lock);
+    return;
+  }
   if (room->peer_count >= SFU_ROOM_MAX_PEERS) {
     pthread_mutex_unlock(&room->lock);
     SFU_LOG_WARN("room %" PRIu64 " full", room->room_id);
@@ -197,6 +203,12 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
 
   room->peers[room->peer_count++] = peer;
   peer->room = room;
+  if (!sfu_session_accepts_work(peer)) {
+    room->peers[--room->peer_count] = NULL;
+    peer->room = NULL;
+    pthread_mutex_unlock(&room->lock);
+    return;
+  }
 
   for (uint32_t i = 0; i + 1 < room->peer_count; i++) {
     sfu_peer_session_t *other = room->peers[i];
@@ -253,16 +265,15 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
   }
 
   atomic_store_explicit(&peer->is_audience, is_audience, memory_order_release);
+  if (is_audience) {
+    atomic_store_explicit(&peer->audio_send_negotiated, false, memory_order_release);
+    atomic_store_explicit(&peer->video_send_negotiated, false, memory_order_release);
+  }
 
+  pthread_mutex_lock(&peer->media_lock);
   if (is_audience) {
     peer->uplink_audio.active = false;
     peer->uplink_video.active = false;
-
-    sfu_receiver_snapshot_t *empty = snapshot_alloc(0);
-    if (empty) {
-      empty->generation = 0;
-    }
-    sfu_session_publish_fanout_targets(peer, empty);
   } else {
     if (peer->uplink_audio.ssrc != 0) {
       peer->uplink_audio.active = true;
@@ -270,6 +281,15 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     if (peer->uplink_video.ssrc != 0) {
       peer->uplink_video.active = true;
     }
+  }
+  pthread_mutex_unlock(&peer->media_lock);
+
+  if (is_audience) {
+    sfu_receiver_snapshot_t *empty = snapshot_alloc(0);
+    if (empty) {
+      empty->generation = 0;
+    }
+    sfu_session_publish_fanout_targets(peer, empty);
   }
 
   for (uint32_t i = 0; i < room->peer_count; i++) {
