@@ -53,7 +53,7 @@ natsStatus init_nats_connection(const char *url, const char *client_name) {
     return st;
   }
 
-  SFU_LOG_ERROR("[NATS] Connected successfully.\n");
+  SFU_LOG_INFO("[NATS] Connected successfully.\n");
 
   return NATS_OK;
 }

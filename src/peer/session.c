@@ -196,6 +196,7 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   }
   pthread_mutex_destroy(&s->snapshot_lock);
   pthread_mutex_destroy(&s->media_lock);
+  pthread_mutex_destroy(&s->negotiation_lock);
   pthread_mutex_destroy(&s->answer_lock);
 }
 
@@ -360,7 +361,18 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
+  if (pthread_mutex_init(&s->negotiation_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->answer_lock);
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    if (index + 1 == t->count) {
+      t->count--;
+    }
+    pthread_mutex_unlock(&t->lock);
+    return NULL;
+  }
   if (pthread_mutex_init(&s->media_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->negotiation_lock);
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
@@ -372,6 +384,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   }
   if (pthread_mutex_init(&s->snapshot_lock, NULL) != 0) {
     pthread_mutex_destroy(&s->media_lock);
+    pthread_mutex_destroy(&s->negotiation_lock);
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
@@ -472,7 +485,10 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 }
 
 sfu_peer_session_t *sfu_session_table_get_or_create_by_ufrag(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len, const char *ufrag,
-                                                             bool allow_rebind) {
+                                                             bool allow_rebind, sfu_session_rebind_result_t *out_rebind) {
+  if (out_rebind) {
+    *out_rebind = SFU_SESSION_REBIND_UNCHANGED;
+  }
   if (!t || !addr || addr_len == 0 || addr_len > sizeof(struct sockaddr_storage) || !ufrag || ufrag[0] == '\0') {
     return NULL;
   }
@@ -484,12 +500,18 @@ sfu_peer_session_t *sfu_session_table_get_or_create_by_ufrag(sfu_session_table_t
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(t, ufrag);
   if (session) {
     bool addr_changed = !addr_equal(&session->cold->addr, session->cold->addr_len, addr, addr_len);
-    if (addr_changed && allow_rebind && session->state != SFU_SESSION_ESTABLISHED) {
+    if (addr_changed && allow_rebind) {
       pthread_mutex_lock(&session->answer_lock);
-      if (session->state != SFU_SESSION_ESTABLISHED) {
-        sfu_session_table_rebind_addr(t, session, addr, addr_len);
-      }
+      bool rebound = sfu_session_table_rebind_addr(t, session, addr, addr_len);
       pthread_mutex_unlock(&session->answer_lock);
+      if (out_rebind) {
+        *out_rebind = rebound ? SFU_SESSION_REBIND_APPLIED : SFU_SESSION_REBIND_REJECTED;
+      }
+      if (!rebound) {
+        sfu_session_release(session);
+        pthread_mutex_unlock(&t->ice_lock);
+        return NULL;
+      }
     }
     pthread_mutex_unlock(&t->ice_lock);
     return session;

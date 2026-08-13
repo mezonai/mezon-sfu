@@ -262,8 +262,13 @@ static void test_routing_table(void) {
 
   sfu_pending_answer_t answer = make_pending(42, true);
   uint32_t generation = 0;
-  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation));
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation) == SFU_ROUTING_REGISTER_OK);
   assert(generation != 0);
+
+  sfu_room_t other_room;
+  memset(&other_room, 0, sizeof(other_room));
+  assert(sfu_routing_table_register_answer(&rtable, "", &dummy_room, 10, &answer, NULL) == SFU_ROUTING_REGISTER_INVALID_ARGUMENT);
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &other_room, 11, &answer, NULL) == SFU_ROUTING_REGISTER_OWNERSHIP_CONFLICT);
 
   sfu_routing_snapshot_t route;
   assert(sfu_routing_table_lookup_route(&rtable, "ufrag_bob", 3, &route));
@@ -271,22 +276,13 @@ static void test_routing_table(void) {
   assert(route.fd == 10);
   assert(route.pending_generation == generation);
 
-  sfu_pending_answer_t taken;
-  assert(!sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 11, generation, &taken));
-  assert(sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation, &taken));
-  assert(taken.is_audience);
-  assert(taken.peer_id == 42);
-  assert(taken.user_id == 9001);
-  assert(!sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation, &taken));
-
   /* A later answer gets a new generation and preserves stable peer identity. */
   answer = make_pending(999, false);
   uint32_t generation2 = 0;
-  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation2));
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation2) == SFU_ROUTING_REGISTER_OK);
   assert(generation2 != generation);
-  assert(sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation2, &taken));
-  assert(taken.peer_id == 42);
-  assert(!taken.is_audience);
+  assert(sfu_routing_table_lookup_route(&rtable, "ufrag_bob", 3, &route));
+  assert(route.pending_generation == generation2);
 
   sfu_routing_table_unregister_fd(&rtable, 10);
   assert(rtable.count == 0);
@@ -339,7 +335,7 @@ static void *ice_creator(void *arg_) {
   ice_create_arg_t *arg = arg_;
   pthread_barrier_wait(&arg->ctx->barrier);
   arg->ctx->results[arg->index] =
-      sfu_session_table_get_or_create_by_ufrag(arg->ctx->table, &arg->ctx->addrs[arg->index], arg->ctx->lens[arg->index], "shared", false);
+      sfu_session_table_get_or_create_by_ufrag(arg->ctx->table, &arg->ctx->addrs[arg->index], arg->ctx->lens[arg->index], "shared", false, NULL);
   return NULL;
 }
 
@@ -395,13 +391,21 @@ static void test_pending_answer_application(void) {
   struct sockaddr_storage addr;
   socklen_t addr_len;
   make_addr(&addr, &addr_len, "127.0.0.1", 9400);
-  sfu_peer_session_t *s = sfu_session_table_get_or_create_by_ufrag(&table, &addr, addr_len, "ufrag_aud", true);
+  sfu_peer_session_t *s = sfu_session_table_get_or_create_by_ufrag(&table, &addr, addr_len, "ufrag_aud", true, NULL);
   assert(s != NULL);
 
   sfu_pending_answer_t answer = make_pending(77, true);
+  sfu_routing_table_t rtable;
+  sfu_room_t room;
+  memset(&room, 0, sizeof(room));
+  assert(sfu_routing_table_init(&rtable) == 0);
+  uint32_t generation = 0;
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_aud", &room, 20, &answer, &generation) == SFU_ROUTING_REGISTER_OK);
   bool role_changed = false;
   bool media_changed = false;
-  assert(sfu_session_apply_pending_answer(s, &answer, 20, &role_changed, &media_changed));
+  assert(!sfu_routing_table_reconcile_answer(&rtable, "ufrag_aud", &room, 21, generation, s, &role_changed, &media_changed));
+  assert(sfu_routing_table_reconcile_answer(&rtable, "ufrag_aud", &room, 20, generation, s, &role_changed, &media_changed));
+  assert(!sfu_routing_table_reconcile_answer(&rtable, "ufrag_aud", &room, 20, generation, s, NULL, NULL));
   assert(atomic_load(&s->is_audience));
   assert(s->peer_id == 77);
   assert(s->fd == 20);
@@ -422,7 +426,89 @@ static void test_pending_answer_application(void) {
   assert(s->uplink_video.ssrc == 0);
   assert(s->fd == 20);
 
+  sfu_routing_table_destroy(&rtable);
   sfu_session_release(s);
+  sfu_session_table_destroy(&table);
+  sfu_dtls_ctx_destroy(&dtls_ctx);
+}
+
+static void test_established_session_rebind(void) {
+  sfu_dtls_ctx_t dtls_ctx;
+  assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
+  sfu_session_table_t table;
+  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+
+  struct sockaddr_storage addr1, addr2;
+  socklen_t len1, len2;
+  make_addr(&addr1, &len1, "127.0.0.1", 9501);
+  make_addr(&addr2, &len2, "127.0.0.1", 9502);
+
+  sfu_session_rebind_result_t rebind = SFU_SESSION_REBIND_UNCHANGED;
+  sfu_peer_session_t *session = sfu_session_table_get_or_create_by_ufrag(&table, &addr1, len1, "rebind", true, &rebind);
+  assert(session != NULL);
+  assert(rebind == SFU_SESSION_REBIND_UNCHANGED);
+  session->state = SFU_SESSION_ESTABLISHED;
+  session->room = (sfu_room_t *)(uintptr_t)0x1234;
+  uint32_t peer_id = session->peer_id;
+
+  sfu_peer_session_t *same = sfu_session_table_get_or_create_by_ufrag(&table, &addr2, len2, "rebind", false, &rebind);
+  assert(same == session);
+  assert(rebind == SFU_SESSION_REBIND_UNCHANGED);
+  sfu_session_release(same);
+  same = sfu_session_table_find(&table, &addr1, len1);
+  assert(same == session);
+  sfu_session_release(same);
+  assert(sfu_session_table_find(&table, &addr2, len2) == NULL);
+
+  same = sfu_session_table_get_or_create_by_ufrag(&table, &addr2, len2, "rebind", true, &rebind);
+  assert(same == session);
+  assert(rebind == SFU_SESSION_REBIND_APPLIED);
+  assert(same->state == SFU_SESSION_ESTABLISHED);
+  assert(same->peer_id == peer_id);
+  assert(same->room == (sfu_room_t *)(uintptr_t)0x1234);
+  sfu_session_release(same);
+  assert(sfu_session_table_find(&table, &addr1, len1) == NULL);
+  same = sfu_session_table_find(&table, &addr2, len2);
+  assert(same == session);
+  sfu_session_release(same);
+  same = sfu_session_table_find_by_ufrag(&table, "rebind");
+  assert(same == session);
+  sfu_session_release(same);
+
+  session->room = NULL;
+  sfu_session_release(session);
+  sfu_session_table_destroy(&table);
+  sfu_dtls_ctx_destroy(&dtls_ctx);
+}
+
+static void test_established_rebind_conflict(void) {
+  sfu_dtls_ctx_t dtls_ctx;
+  assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
+  sfu_session_table_t table;
+  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+
+  struct sockaddr_storage addr1, addr2;
+  socklen_t len1, len2;
+  make_addr(&addr1, &len1, "127.0.0.1", 9511);
+  make_addr(&addr2, &len2, "127.0.0.1", 9512);
+  sfu_peer_session_t *a = sfu_session_table_get_or_create_by_ufrag(&table, &addr1, len1, "rebind_a", true, NULL);
+  sfu_peer_session_t *b = sfu_session_table_get_or_create_by_ufrag(&table, &addr2, len2, "rebind_b", true, NULL);
+  assert(a && b && a != b);
+  a->state = SFU_SESSION_ESTABLISHED;
+  b->state = SFU_SESSION_ESTABLISHED;
+
+  sfu_session_rebind_result_t rebind = SFU_SESSION_REBIND_UNCHANGED;
+  assert(sfu_session_table_get_or_create_by_ufrag(&table, &addr2, len2, "rebind_a", true, &rebind) == NULL);
+  assert(rebind == SFU_SESSION_REBIND_REJECTED);
+  sfu_peer_session_t *found = sfu_session_table_find(&table, &addr1, len1);
+  assert(found == a);
+  sfu_session_release(found);
+  found = sfu_session_table_find(&table, &addr2, len2);
+  assert(found == b);
+  sfu_session_release(found);
+
+  sfu_session_release(a);
+  sfu_session_release(b);
   sfu_session_table_destroy(&table);
   sfu_dtls_ctx_destroy(&dtls_ctx);
 }
@@ -435,6 +521,8 @@ int main(void) {
   test_duplicate_ufrag_rejected();
   test_concurrent_same_ufrag_creation();
   test_pending_answer_application();
+  test_established_session_rebind();
+  test_established_rebind_conflict();
 
   printf("test_session_table: OK\n");
   return 0;

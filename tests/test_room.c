@@ -20,6 +20,7 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
   s->active = true;
   assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->negotiation_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->media_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->snapshot_lock, NULL) == 0);
   atomic_store(&s->refcount, 1);
@@ -136,7 +137,13 @@ static void test_add_remove(void) {
     sfu_subscriptions_snapshot_release(snap);
   }
 
-  /* Removing a non-member is a safe no-op. */
+  sfu_room_t other_room;
+  assert(sfu_room_init(&other_room, 2) == 0);
+  room_add_peer(&other_room, a);
+  assert(a->room == &room);
+  assert(other_room.peer_count == 0);
+  sfu_room_destroy(&other_room);
+
   room_remove_peer(&room, b);
   assert(receiver_count(a) == 1);
 

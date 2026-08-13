@@ -1,5 +1,7 @@
 #include "pipeline/ingress.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <string.h>
 
@@ -354,7 +356,18 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_peer_session_t *sender_session = sfu_session_table_find(w->sessions, &pkt->peer_addr, pkt->peer_addr_len);
 
   if (!sender_session) {
-    SFU_LOG_WARN("worker %u: [INGRESS DROP] RTP from unknown peer! pkt_len=%u", w->worker_index, pkt->len);
+    char ip[INET6_ADDRSTRLEN] = "unknown";
+    uint16_t port = 0;
+    if (pkt->peer_addr.ss_family == AF_INET) {
+      const struct sockaddr_in *s4 = (const struct sockaddr_in *)&pkt->peer_addr;
+      inet_ntop(AF_INET, &s4->sin_addr, ip, sizeof(ip));
+      port = ntohs(s4->sin_port);
+    } else if (pkt->peer_addr.ss_family == AF_INET6) {
+      const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&pkt->peer_addr;
+      inet_ntop(AF_INET6, &s6->sin6_addr, ip, sizeof(ip));
+      port = ntohs(s6->sin6_port);
+    }
+    SFU_LOG_DEBUG("worker %u: [INGRESS DROP] RTP from unknown peer %s:%u pkt_len=%u", w->worker_index, ip, port, pkt->len);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }

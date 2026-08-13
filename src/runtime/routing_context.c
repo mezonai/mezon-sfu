@@ -1,6 +1,7 @@
 #include "runtime/routing_context.h"
 #include <stdio.h>
 #include <string.h>
+#include "peer/session.h"
 #include "util/log.h"
 
 int sfu_routing_table_init(sfu_routing_table_t *table) {
@@ -29,10 +30,10 @@ static sfu_routing_entry_t *find_entry_locked(sfu_routing_table_t *table, const 
   return NULL;
 }
 
-bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, const sfu_pending_answer_t *answer,
-                                       uint32_t *out_generation) {
+sfu_routing_register_result_t sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
+                                                                 const sfu_pending_answer_t *answer, uint32_t *out_generation) {
   if (!table || !client_ufrag || client_ufrag[0] == '\0' || !room || fd < 0 || !answer) {
-    return false;
+    return SFU_ROUTING_REGISTER_INVALID_ARGUMENT;
   }
 
   pthread_mutex_lock(&table->mutex);
@@ -40,13 +41,13 @@ bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *c
   if (entry && (entry->room != room || entry->fd != fd)) {
     pthread_mutex_unlock(&table->mutex);
     SFU_LOG_WARN("rejecting route ownership change for ufrag=%s (fd %d -> %d)", client_ufrag, entry->fd, fd);
-    return false;
+    return SFU_ROUTING_REGISTER_OWNERSHIP_CONFLICT;
   }
   if (!entry) {
     if (table->count >= SFU_MAX_UFRAG_MAPPINGS) {
       pthread_mutex_unlock(&table->mutex);
       SFU_LOG_ERROR("ufrag->room table FULL. Cannot register ufrag=%s", client_ufrag);
-      return false;
+      return SFU_ROUTING_REGISTER_TABLE_FULL;
     }
     entry = &table->entries[table->count++];
     memset(entry, 0, sizeof(*entry));
@@ -74,7 +75,7 @@ bool sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *c
     *out_generation = generation;
   }
   pthread_mutex_unlock(&table->mutex);
-  return true;
+  return SFU_ROUTING_REGISTER_OK;
 }
 
 bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *client_ufrag, uint32_t worker_index, sfu_routing_snapshot_t *out) {
@@ -100,9 +101,9 @@ bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *clie
   return true;
 }
 
-bool sfu_routing_table_take_pending_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,
-                                           sfu_pending_answer_t *out) {
-  if (!table || !client_ufrag || !room || fd < 0 || generation == 0 || !out) {
+bool sfu_routing_table_reconcile_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,
+                                        sfu_peer_session_t *session, bool *role_changed, bool *media_changed) {
+  if (!table || !client_ufrag || !room || fd < 0 || generation == 0 || !session) {
     return false;
   }
 
@@ -113,8 +114,25 @@ bool sfu_routing_table_take_pending_answer(sfu_routing_table_t *table, const cha
     return false;
   }
 
-  *out = entry->pending_answer;
-  entry->pending_answer.valid = false;
+  sfu_pending_answer_t pending = entry->pending_answer;
+  pthread_mutex_unlock(&table->mutex);
+
+  if (session->room && session->room != room) {
+    SFU_LOG_WARN("answer reconciliation rejected for ufrag=%s generation=%u: session belongs to another room", client_ufrag, generation);
+    return false;
+  }
+
+  bool applied = sfu_session_apply_pending_answer(session, &pending, fd, role_changed, media_changed);
+  if (!applied) {
+    SFU_LOG_DEBUG("answer reconciliation skipped for ufrag=%s generation=%u: session already applied this or a newer answer", client_ufrag, generation);
+    return false;
+  }
+
+  pthread_mutex_lock(&table->mutex);
+  entry = find_entry_locked(table, client_ufrag);
+  if (entry && entry->room == room && entry->fd == fd && entry->pending_answer.valid && entry->pending_answer.generation == generation) {
+    entry->pending_answer.valid = false;
+  }
   pthread_mutex_unlock(&table->mutex);
   return true;
 }

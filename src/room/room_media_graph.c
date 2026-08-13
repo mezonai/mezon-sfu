@@ -68,11 +68,13 @@ static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner
 
   for (uint32_t i = 0; i < old_count; i++) {
     snap->entries[i] = old->entries[i];
+    if (i == pos) {
+      continue;
+    }
     atomic_fetch_add_explicit(&old->entries[i].subscriber->refcount, 1, memory_order_relaxed);
   }
 
   snapshot_fill_entry(&snap->entries[pos], dst, fanout ? owner : dst);
-  sfu_session_release(dst);
 
   snap->count = old_count;
   sfu_subscriptions_snapshot_release(old);
@@ -135,8 +137,8 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
   sfu_receiver_entry_t *e = &snap->entries[old_count];
   memset(e, 0, sizeof(*e));
   if (!fanout) {
-    e->mid_audio = owner->next_remote_mid++;
-    e->mid_video = owner->next_remote_mid++;
+    e->mid_audio = atomic_fetch_add_explicit(&owner->next_remote_mid, 2, memory_order_relaxed);
+    e->mid_video = e->mid_audio + 1;
   }
   snapshot_fill_entry(e, dst, fanout ? owner : dst);
   e->has_audio = true;
@@ -188,6 +190,12 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_lock(&room->lock);
 
   if (peer->room == room) {
+    pthread_mutex_unlock(&room->lock);
+    return;
+  }
+  if (peer->room) {
+    SFU_LOG_WARN("peer %u already belongs to room %" PRIu64 "; refusing add to room %" PRIu64, peer->peer_id,
+                 ((sfu_room_t *)peer->room)->room_id, room->room_id);
     pthread_mutex_unlock(&room->lock);
     return;
   }

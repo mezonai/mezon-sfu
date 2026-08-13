@@ -102,8 +102,9 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   send_raw(w, response, response_len, &pkt->peer_addr, pkt->peer_addr_len);
 
   sfu_peer_session_t *session = NULL;
+  sfu_session_rebind_result_t rebind_result = SFU_SESSION_REBIND_UNCHANGED;
   if (nominated) {
-    session = sfu_session_table_get_or_create_by_ufrag(w->sessions, &pkt->peer_addr, pkt->peer_addr_len, client_ufrag, true);
+    session = sfu_session_table_get_or_create_by_ufrag(w->sessions, &pkt->peer_addr, pkt->peer_addr_len, client_ufrag, true, &rebind_result);
   } else {
     session = sfu_session_table_find_by_ufrag(w->sessions, client_ufrag);
   }
@@ -112,7 +113,11 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
       SFU_LOG_DEBUG("worker %u: non-nominated check for ufrag=%s; waiting for USE-CANDIDATE", w->worker_index, client_ufrag);
       return;
     }
-    SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
+    if (rebind_result == SFU_SESSION_REBIND_REJECTED) {
+      SFU_LOG_WARN("worker %u: authenticated ICE rebind rejected for ufrag=%s target=%s:%u", w->worker_index, client_ufrag, ip, port);
+    } else {
+      SFU_LOG_ERROR("worker %u: could not create/find session for %s:%u to bind room", w->worker_index, ip, port);
+    }
     return;
   }
   if (!sfu_session_accepts_work(session)) {
@@ -124,27 +129,21 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool role_changed = false;
   bool media_changed = false;
   bool applied_answer = false;
-  sfu_pending_answer_t pending;
-  bool took_pending = route.pending_generation != 0 &&
-                      sfu_routing_table_take_pending_answer(w->routing_table, client_ufrag, route.room, route.fd, route.pending_generation, &pending);
-  if (!took_pending) {
+  if (route.pending_generation != 0) {
+    applied_answer = sfu_routing_table_reconcile_answer(w->routing_table, client_ufrag, route.room, route.fd, route.pending_generation, session, &role_changed,
+                                                        &media_changed);
+  }
+  if (!applied_answer) {
     sfu_routing_snapshot_t latest;
     if (sfu_routing_table_lookup_route(w->routing_table, client_ufrag, w->worker_index, &latest) && latest.room == route.room && latest.fd == route.fd &&
-        latest.pending_generation != 0) {
-      took_pending = sfu_routing_table_take_pending_answer(w->routing_table, client_ufrag, latest.room, latest.fd, latest.pending_generation, &pending);
+        latest.pending_generation != 0 && latest.pending_generation != route.pending_generation) {
+      applied_answer = sfu_routing_table_reconcile_answer(w->routing_table, client_ufrag, latest.room, latest.fd, latest.pending_generation, session,
+                                                          &role_changed, &media_changed);
     }
   }
-  if (took_pending) {
-    if (session->room && session->room != route.room) {
-      SFU_LOG_WARN("worker %u: session ufrag=%s belongs to another room; refusing pending answer", w->worker_index, client_ufrag);
-      sfu_session_release(session);
-      return;
-    }
-    applied_answer = sfu_session_apply_pending_answer(session, &pending, route.fd, &role_changed, &media_changed);
-    if (applied_answer) {
-      SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s: audio_ssrc=%u video_ssrc=%u rtx_ssrc=%u peer_id=%u audience=%d", w->worker_index,
-                   client_ufrag, pending.audio_ssrc, pending.video_ssrc, pending.rtx_ssrc, session->peer_id, pending.is_audience);
-    }
+  if (applied_answer) {
+    SFU_LOG_INFO("worker %u: applied deferred answer for ufrag=%s generation=%u peer_id=%u", w->worker_index, client_ufrag,
+                 atomic_load_explicit(&session->applied_answer_generation, memory_order_acquire), session->peer_id);
   }
 
   bool newly_bound = false;
@@ -174,12 +173,15 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   pthread_mutex_lock(&session->answer_lock);
-  if (session->state != SFU_SESSION_ESTABLISHED && nominated) {
-    session->worker_id = w->worker_index;
-  } else if (session->worker_id == UINT16_MAX) {
+  uint16_t previous_worker = session->worker_id;
+  if (nominated && (rebind_result == SFU_SESSION_REBIND_APPLIED || session->state != SFU_SESSION_ESTABLISHED || session->worker_id == UINT16_MAX)) {
     session->worker_id = w->worker_index;
   }
   pthread_mutex_unlock(&session->answer_lock);
+  if (rebind_result == SFU_SESSION_REBIND_APPLIED) {
+    SFU_LOG_INFO("worker %u: authenticated ICE address rebind applied ufrag=%s peer_id=%u target=%s:%u worker=%u->%u state=%d", w->worker_index,
+                 client_ufrag, session->peer_id, ip, port, previous_worker, session->worker_id, session->state);
+  }
 
   if (session->room && (newly_bound || role_changed || media_changed)) {
     room_refresh_peer_streams((sfu_room_t *)session->room, session);

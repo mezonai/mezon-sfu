@@ -386,6 +386,7 @@ static sfu_peer_session_t *race_mock_session(const char *ufrag) {
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
   s->active = true;
   assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->negotiation_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->media_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->snapshot_lock, NULL) == 0);
   atomic_store(&s->refcount, 1);
