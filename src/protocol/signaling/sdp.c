@@ -615,9 +615,10 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
 
   SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_count=%u", ufrag ? ufrag : "unknown", receiver_count);
 
+  uint32_t next_remote_mid = atomic_load_explicit(&session->next_remote_mid, memory_order_acquire);
   char bundle_line[512];
   size_t blen = (size_t)snprintf(bundle_line, sizeof(bundle_line), "a=group:BUNDLE 0 1");
-  for (uint32_t mid_audio = 2; mid_audio < session->next_remote_mid; mid_audio += 2) {
+  for (uint32_t mid_audio = 2; mid_audio < next_remote_mid; mid_audio += 2) {
     uint32_t mid_video = mid_audio + 1;
     n = snprintf(bundle_line + blen, sizeof(bundle_line) - blen, " %u %u", mid_audio, mid_video);
     if (n < 0 || (size_t)n >= sizeof(bundle_line) - blen) {
@@ -682,7 +683,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     goto fail;
   }
 
-  for (uint32_t mid_audio = 2; mid_audio < session->next_remote_mid; mid_audio += 2) {
+  for (uint32_t mid_audio = 2; mid_audio < next_remote_mid; mid_audio += 2) {
     uint32_t mid_video = mid_audio + 1;
 
     sfu_sdp_receiver_view_t slot;
