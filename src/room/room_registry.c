@@ -28,6 +28,7 @@ sfu_room_t *sfu_room_registry_get_or_create(sfu_room_registry_t *reg, uint64_t r
 
   for (uint32_t i = 0; i < reg->room_count; i++) {
     if (reg->rooms[i].room_id == room_id) {
+      SFU_LOG_INFO("Reusing room: ID=%" PRIu64 " room=%p peers=%u", room_id, (void *)&reg->rooms[i], reg->rooms[i].peer_count);
       pthread_mutex_unlock(&reg->lock);
       return &reg->rooms[i];
     }
@@ -48,7 +49,7 @@ sfu_room_t *sfu_room_registry_get_or_create(sfu_room_registry_t *reg, uint64_t r
     return NULL;
   }
 
-  SFU_LOG_INFO("Created new room: ID=%" PRIu64, room_id);
+  SFU_LOG_INFO("Created new room: ID=%" PRIu64 " room=%p", room_id, (void *)room);
   pthread_mutex_unlock(&reg->lock);
   return room;
 }

@@ -825,7 +825,7 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
     emit_hook_event("publish", c->user_id, room_id);
   }
 
-  SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64, c->peer_ip, room_id);
+  SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64 " room=%p fd=%d", c->peer_ip, room_id, (void *)room, c->fd);
 
   if (!build_and_send_joined_response(c, room_id)) {
     SFU_LOG_WARN("signaling: failed to send joined response (fd=%d)", c->fd);
@@ -898,9 +898,19 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   pending.valid = true;
 
   uint32_t answer_generation = 0;
-  if (!sfu_routing_table_register_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, &pending, &answer_generation)) {
-    static const char routing_failed[] = "{\"type\":\"error\",\"message\":\"routing_registration_failed\"}";
-    sfu_ws_send_text(c->fd, routing_failed, sizeof(routing_failed) - 1);
+  sfu_routing_register_result_t register_result =
+      sfu_routing_table_register_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, &pending, &answer_generation);
+  if (register_result != SFU_ROUTING_REGISTER_OK) {
+    const char *message = register_result == SFU_ROUTING_REGISTER_OWNERSHIP_CONFLICT ? "duplicate_ice_ufrag"
+                          : register_result == SFU_ROUTING_REGISTER_TABLE_FULL       ? "routing_table_full"
+                                                                                     : "routing_registration_failed";
+    char response[96];
+    int response_len = snprintf(response, sizeof(response), "{\"type\":\"error\",\"message\":\"%s\"}", message);
+    if (response_len > 0 && (size_t)response_len < sizeof(response)) {
+      sfu_ws_send_text(c->fd, response, (size_t)response_len);
+    }
+    SFU_LOG_WARN("signaling: route registration failed for ufrag=%s fd=%d room_id=%" PRIu64 " outcome=%d", c->client_ufrag, c->fd,
+                 c->joined_room_id, register_result);
     return;
   }
   SFU_LOG_INFO("signaling: atomically registered answer ufrag=%s -> room_id=%" PRIu64 " generation=%u", c->client_ufrag, c->joined_room_id, answer_generation);
@@ -911,26 +921,20 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     return;
   }
 
-  sfu_pending_answer_t claimed;
-  bool claimed_answer = sfu_routing_table_take_pending_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, &claimed);
-  if (claimed_answer) {
-    bool role_changed = false;
-    bool media_changed = false;
-    bool newly_bound = false;
-    sfu_room_t *session_room = (sfu_room_t *)session->room;
-    if (session_room && session_room != c->joined_room) {
-      SFU_LOG_WARN("signaling: session ufrag=%s already belongs to another room", c->client_ufrag);
-    } else if (sfu_session_apply_pending_answer(session, &claimed, c->fd, &role_changed, &media_changed)) {
-      if (!session->room) {
-        room_add_peer(c->joined_room, session);
-        newly_bound = session->room == c->joined_room;
-      }
-      if (session->room && (media_changed || role_changed || newly_bound)) {
-        SFU_LOG_INFO("answer: media/role changed for ufrag=%s (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag, media_changed,
-                     role_changed, newly_bound);
-        room_refresh_peer_streams((sfu_room_t *)session->room, session);
-        sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
-      }
+  bool role_changed = false;
+  bool media_changed = false;
+  bool newly_bound = false;
+  if (sfu_routing_table_reconcile_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, session, &role_changed,
+                                         &media_changed)) {
+    if (!session->room) {
+      room_add_peer(c->joined_room, session);
+      newly_bound = session->room == c->joined_room;
+    }
+    if (session->room && (media_changed || role_changed || newly_bound)) {
+      SFU_LOG_INFO("answer: media/role changed for ufrag=%s generation=%u (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag,
+                   answer_generation, media_changed, role_changed, newly_bound);
+      room_refresh_peer_streams((sfu_room_t *)session->room, session);
+      sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
     }
   }
   sfu_session_release(session);

@@ -262,8 +262,13 @@ static void test_routing_table(void) {
 
   sfu_pending_answer_t answer = make_pending(42, true);
   uint32_t generation = 0;
-  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation));
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation) == SFU_ROUTING_REGISTER_OK);
   assert(generation != 0);
+
+  sfu_room_t other_room;
+  memset(&other_room, 0, sizeof(other_room));
+  assert(sfu_routing_table_register_answer(&rtable, "", &dummy_room, 10, &answer, NULL) == SFU_ROUTING_REGISTER_INVALID_ARGUMENT);
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &other_room, 11, &answer, NULL) == SFU_ROUTING_REGISTER_OWNERSHIP_CONFLICT);
 
   sfu_routing_snapshot_t route;
   assert(sfu_routing_table_lookup_route(&rtable, "ufrag_bob", 3, &route));
@@ -271,22 +276,13 @@ static void test_routing_table(void) {
   assert(route.fd == 10);
   assert(route.pending_generation == generation);
 
-  sfu_pending_answer_t taken;
-  assert(!sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 11, generation, &taken));
-  assert(sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation, &taken));
-  assert(taken.is_audience);
-  assert(taken.peer_id == 42);
-  assert(taken.user_id == 9001);
-  assert(!sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation, &taken));
-
   /* A later answer gets a new generation and preserves stable peer identity. */
   answer = make_pending(999, false);
   uint32_t generation2 = 0;
-  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation2));
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_bob", &dummy_room, 10, &answer, &generation2) == SFU_ROUTING_REGISTER_OK);
   assert(generation2 != generation);
-  assert(sfu_routing_table_take_pending_answer(&rtable, "ufrag_bob", &dummy_room, 10, generation2, &taken));
-  assert(taken.peer_id == 42);
-  assert(!taken.is_audience);
+  assert(sfu_routing_table_lookup_route(&rtable, "ufrag_bob", 3, &route));
+  assert(route.pending_generation == generation2);
 
   sfu_routing_table_unregister_fd(&rtable, 10);
   assert(rtable.count == 0);
@@ -399,9 +395,17 @@ static void test_pending_answer_application(void) {
   assert(s != NULL);
 
   sfu_pending_answer_t answer = make_pending(77, true);
+  sfu_routing_table_t rtable;
+  sfu_room_t room;
+  memset(&room, 0, sizeof(room));
+  assert(sfu_routing_table_init(&rtable) == 0);
+  uint32_t generation = 0;
+  assert(sfu_routing_table_register_answer(&rtable, "ufrag_aud", &room, 20, &answer, &generation) == SFU_ROUTING_REGISTER_OK);
   bool role_changed = false;
   bool media_changed = false;
-  assert(sfu_session_apply_pending_answer(s, &answer, 20, &role_changed, &media_changed));
+  assert(!sfu_routing_table_reconcile_answer(&rtable, "ufrag_aud", &room, 21, generation, s, &role_changed, &media_changed));
+  assert(sfu_routing_table_reconcile_answer(&rtable, "ufrag_aud", &room, 20, generation, s, &role_changed, &media_changed));
+  assert(!sfu_routing_table_reconcile_answer(&rtable, "ufrag_aud", &room, 20, generation, s, NULL, NULL));
   assert(atomic_load(&s->is_audience));
   assert(s->peer_id == 77);
   assert(s->fd == 20);
@@ -422,6 +426,7 @@ static void test_pending_answer_application(void) {
   assert(s->uplink_video.ssrc == 0);
   assert(s->fd == 20);
 
+  sfu_routing_table_destroy(&rtable);
   sfu_session_release(s);
   sfu_session_table_destroy(&table);
   sfu_dtls_ctx_destroy(&dtls_ctx);

@@ -136,7 +136,13 @@ static void test_add_remove(void) {
     sfu_subscriptions_snapshot_release(snap);
   }
 
-  /* Removing a non-member is a safe no-op. */
+  sfu_room_t other_room;
+  assert(sfu_room_init(&other_room, 2) == 0);
+  room_add_peer(&other_room, a);
+  assert(a->room == &room);
+  assert(other_room.peer_count == 0);
+  sfu_room_destroy(&other_room);
+
   room_remove_peer(&room, b);
   assert(receiver_count(a) == 1);
 

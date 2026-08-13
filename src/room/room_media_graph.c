@@ -191,6 +191,12 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     pthread_mutex_unlock(&room->lock);
     return;
   }
+  if (peer->room) {
+    SFU_LOG_WARN("peer %u already belongs to room %" PRIu64 "; refusing add to room %" PRIu64, peer->peer_id,
+                 ((sfu_room_t *)peer->room)->room_id, room->room_id);
+    pthread_mutex_unlock(&room->lock);
+    return;
+  }
   if (!sfu_session_accepts_work(peer)) {
     pthread_mutex_unlock(&room->lock);
     return;
