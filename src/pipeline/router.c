@@ -27,6 +27,10 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       continue;
     }
 
+    if (!m->is_audio && !atomic_load_explicit(&sub_session->visible, memory_order_acquire)) {
+      continue;
+    }
+
     if (!sub_session->schedulers) {
       continue;
     }

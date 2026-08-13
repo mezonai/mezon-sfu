@@ -482,7 +482,7 @@
             // after push-to-talk / SSRC-learn races → black video on 2nd promote.
             let pendingOfferSdp = null;
             let micEnabled = true;
-            let camEnabled = true;
+            let camEnabled = false;
             let screenSharing = false;
             let screenStream = null;
             let cameraTrackBackup = null;
@@ -522,7 +522,7 @@
             window.addEventListener("DOMContentLoaded", async () => {
                 try {
                     localStream = await navigator.mediaDevices.getUserMedia({
-                        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                        video: { width: { ideal: 320 }, height: { ideal: 480 } },
                         audio: true,
                     });
                 } catch (e) {
@@ -543,12 +543,16 @@
                     }
                 }
 
+                // Camera off by default; keep tracks so the user can turn it on later.
+                localStream.getVideoTracks().forEach((t) => {
+                    t.enabled = false;
+                });
                 joinPreview.srcObject = localStream;
 
                 const hasVideo = localStream.getVideoTracks().length > 0;
                 const hasAudio = localStream.getAudioTracks().length > 0;
                 if (hasVideo && hasAudio)
-                    setJoinStatus("Camera and mic ready.");
+                    setJoinStatus("Mic ready. Camera off by default.");
                 else if (hasAudio)
                     setJoinStatus("Mic ready (no camera found).");
                 else
@@ -1691,19 +1695,27 @@
                             isLocal: true,
                             label: displayName + " (You)",
                         });
-                        const hasLocalVideo = localStream.getVideoTracks().length > 0;
-                        setTileStream(localTile, localStream, hasLocalVideo);
+                        const hasVideoTrack =
+                            localStream.getVideoTracks().length > 0;
+                        setTileStream(
+                            localTile,
+                            localStream,
+                            camEnabled && hasVideoTrack,
+                        );
 
                         document.getElementById("micBtn").style.display = "flex";
-                        document.getElementById("camBtn").style.display = "flex";
+                        const camBtn = document.getElementById("camBtn");
+                        camBtn.style.display = "flex";
+                        camBtn.textContent = camEnabled ? "📷" : "📵";
+                        camBtn.classList.toggle("off", !camEnabled);
                         document.getElementById("screenBtn").style.display = "flex";
                         document.getElementById("pttBtn").style.display = "none";
 
                         if (!localStream.getAudioTracks().length) {
                             document.getElementById("micBtn").disabled = true;
                         }
-                        if (!hasLocalVideo) {
-                            document.getElementById("camBtn").disabled = true;
+                        if (!hasVideoTrack) {
+                            camBtn.disabled = true;
                         }
                     } else {
                         // Hide mic/cam/screen controls for audience; show hold-to-talk.
@@ -1844,6 +1856,16 @@
                     ws.onerror = () => {
                         setConnState("signaling error", "err");
                     };
+
+                    const sendVisibility = () => {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: "visibility",
+                                visible: document.visibilityState === "visible",
+                            }));
+                        }
+                    };
+                    document.addEventListener("visibilitychange", sendVisibility);
                 } catch (e) {
                     console.error("Connection failed:", e);
                     setJoinStatus(`WebRTC failed: ${e.message}`, true);

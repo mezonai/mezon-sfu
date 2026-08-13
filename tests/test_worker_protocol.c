@@ -1041,6 +1041,123 @@ static void test_forward_churn_subscriber_disconnect(void) {
   kf_fixture_destroy(&f);
 }
 
+static void test_visibility_false_stops_forward(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sub->twcc_send_extmap_id = 5;
+  sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
+  assert(sub->twcc_history != NULL);
+  sfu_twcc_history_init(sub->twcc_history);
+
+  f.publisher->uplink_video.payload_type = RTP_PT;
+  f.publisher->uplink_video.rtx_payload_type = RTX_PT;
+  f.publisher->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+  atomic_store_explicit(&f.publisher->audio_send_negotiated, true, memory_order_release);
+  atomic_store_explicit(&f.publisher->video_send_negotiated, true, memory_order_release);
+  sub->uplink_video.payload_type = RTP_PT;
+  sub->uplink_video.rtx_payload_type = RTX_PT;
+  sub->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+
+  room_refresh_peer_streams(&f.room, f.publisher);
+
+  assert(atomic_load_explicit(&sub->visible, memory_order_acquire));
+
+  {
+    uint8_t plain[512];
+    size_t plain_len;
+    build_rtp_video(plain, 2000, 60, &plain_len);
+    uint8_t wire[1024];
+    memcpy(wire, plain, plain_len);
+    int wire_len = (int)plain_len;
+    assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+    sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+    assert(pkt != NULL);
+    memcpy(pkt->data, wire, (size_t)wire_len);
+    pkt->len = (uint32_t)wire_len;
+    pkt->peer_addr = f.publisher->cold->addr;
+    pkt->peer_addr_len = f.publisher->cold->addr_len;
+    sfu_ingress_process(&f.base.w, pkt);
+
+    gcc_packet_info_t info = {0};
+    assert(sfu_twcc_history_lookup(sub->twcc_history, 0, &info));
+  }
+
+  atomic_store_explicit(&sub->visible, false, memory_order_release);
+  {
+    uint8_t plain[512];
+    size_t plain_len;
+    build_rtp_video(plain, 2001, 60, &plain_len);
+    uint8_t wire[1024];
+    memcpy(wire, plain, plain_len);
+    int wire_len = (int)plain_len;
+    assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+    sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+    assert(pkt != NULL);
+    memcpy(pkt->data, wire, (size_t)wire_len);
+    pkt->len = (uint32_t)wire_len;
+    pkt->peer_addr = f.publisher->cold->addr;
+    pkt->peer_addr_len = f.publisher->cold->addr_len;
+    sfu_ingress_process(&f.base.w, pkt);
+
+    gcc_packet_info_t info = {0};
+    assert(!sfu_twcc_history_lookup(sub->twcc_history, 1, &info));
+  }
+
+  {
+    uint8_t plain[512] = {0};
+    plain[0] = 0x80;
+    plain[1] = 111;
+    sfu_write_be16(plain + 2, 3000);
+    sfu_write_be32(plain + 4, 0x55667788u);
+    sfu_write_be32(plain + 8, 0x11111111u);
+    memset(plain + 12, 0xcd, 20);
+    size_t plain_len = 32;
+    uint8_t wire[1024];
+    memcpy(wire, plain, plain_len);
+    int wire_len = (int)plain_len;
+    assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+    sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+    assert(pkt != NULL);
+    memcpy(pkt->data, wire, (size_t)wire_len);
+    pkt->len = (uint32_t)wire_len;
+    pkt->peer_addr = f.publisher->cold->addr;
+    pkt->peer_addr_len = f.publisher->cold->addr_len;
+    sfu_ingress_process(&f.base.w, pkt);
+
+    gcc_packet_info_t info = {0};
+    assert(sfu_twcc_history_lookup(sub->twcc_history, 1, &info));
+  }
+
+  atomic_store_explicit(&sub->visible, true, memory_order_release);
+  {
+    uint8_t plain[512];
+    size_t plain_len;
+    build_rtp_video(plain, 2002, 60, &plain_len);
+    uint8_t wire[1024];
+    memcpy(wire, plain, plain_len);
+    int wire_len = (int)plain_len;
+    assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+    sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+    assert(pkt != NULL);
+    memcpy(pkt->data, wire, (size_t)wire_len);
+    pkt->len = (uint32_t)wire_len;
+    pkt->peer_addr = f.publisher->cold->addr;
+    pkt->peer_addr_len = f.publisher->cold->addr_len;
+    sfu_ingress_process(&f.base.w, pkt);
+
+    gcc_packet_info_t info = {0};
+    assert(sfu_twcc_history_lookup(sub->twcc_history, 2, &info));
+  }
+
+  kf_fixture_destroy(&f);
+}
+
 /* #82 acceptance interleaving (#86): source switch with COLLIDING sequence
  * numbers and a delayed NACK. Publisher A's seq 42 is cached at generation
  * 0; the source switches (generation bumps); publisher B's stream reuses
@@ -1223,6 +1340,7 @@ int main(void) {
   test_egress_pacer_drops_enhancement_not_audio();
   test_nack_line_rate_throttled_by_rtx_budget();
   test_forward_churn_subscriber_disconnect();
+  test_visibility_false_stops_forward();
   test_source_switch_colliding_seq_delayed_nack();
   test_kf_request_cross_worker_no_packet_leak();
   test_kf_enqueue_ring_full_drops_ref();
