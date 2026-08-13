@@ -11,11 +11,17 @@
 typedef struct sfu_worker sfu_worker_t;
 typedef struct sfu_pending_answer sfu_pending_answer_t;
 
+typedef enum sfu_session_rebind_result {
+  SFU_SESSION_REBIND_UNCHANGED = 0,
+  SFU_SESSION_REBIND_APPLIED,
+  SFU_SESSION_REBIND_REJECTED,
+} sfu_session_rebind_result_t;
+
 int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx);
 void sfu_session_table_destroy(sfu_session_table_t *t);
 sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
 sfu_peer_session_t *sfu_session_table_get_or_create_by_ufrag(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len, const char *ufrag,
-                                                             bool allow_rebind);
+                                                             bool allow_rebind, sfu_session_rebind_result_t *out_rebind);
 sfu_peer_session_t *sfu_session_table_find(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
 sfu_peer_session_t *sfu_session_table_find_by_ufrag(sfu_session_table_t *t, const char *ufrag);
 typedef void (*sfu_session_iter_fn)(sfu_peer_session_t *s, void *user);
