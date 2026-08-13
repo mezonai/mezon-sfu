@@ -189,6 +189,7 @@ typedef struct sfu_peer_session {
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
   pthread_mutex_t answer_lock;
+  pthread_mutex_t negotiation_lock;
   pthread_mutex_t media_lock;
   pthread_mutex_t snapshot_lock;
   uint8_t pt_map[128];

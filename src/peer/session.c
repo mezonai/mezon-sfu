@@ -196,6 +196,7 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   }
   pthread_mutex_destroy(&s->snapshot_lock);
   pthread_mutex_destroy(&s->media_lock);
+  pthread_mutex_destroy(&s->negotiation_lock);
   pthread_mutex_destroy(&s->answer_lock);
 }
 
@@ -360,7 +361,18 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_mutex_unlock(&t->lock);
     return NULL;
   }
+  if (pthread_mutex_init(&s->negotiation_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->answer_lock);
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    if (index + 1 == t->count) {
+      t->count--;
+    }
+    pthread_mutex_unlock(&t->lock);
+    return NULL;
+  }
   if (pthread_mutex_init(&s->media_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->negotiation_lock);
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
@@ -372,6 +384,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   }
   if (pthread_mutex_init(&s->snapshot_lock, NULL) != 0) {
     pthread_mutex_destroy(&s->media_lock);
+    pthread_mutex_destroy(&s->negotiation_lock);
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
