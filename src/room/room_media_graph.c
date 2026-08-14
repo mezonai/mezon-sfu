@@ -181,7 +181,6 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
 
 static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
   sfu_session_publish_receivers(owner, new_snap);
-  owner->negotiation_needed = true;
 }
 
 static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) { sfu_session_publish_fanout_targets(owner, new_snap); }

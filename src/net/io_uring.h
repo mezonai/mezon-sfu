@@ -19,9 +19,13 @@ typedef struct sfu_ring {
   void *buf_ring_mem;
   uint32_t buf_count;
   uint32_t buf_size;
+  uint32_t payload_cap;
   int bgid;
   int fd;
 } sfu_ring_t;
+
+uint32_t sfu_ring_recv_overhead(void);
+uint32_t sfu_ring_recv_slot_size(uint32_t payload_cap);
 
 #define SFU_CQE_TAG_RECV 0x1ULL
 #define SFU_CQE_TAG_MASK 0x1ULL
