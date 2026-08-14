@@ -152,7 +152,7 @@ static void fixture_init(fixture_t *f) {
   assert(f->session != NULL);
   memcpy(&f->session->srtp, &f->srtp, sizeof(f->srtp));
   f->session->state = SFU_SESSION_ESTABLISHED;
-  f->session->worker_id = 0;
+  sfu_session_set_owner_worker(f->session, 0);
   /* The worker forwards RTX to a zeroed io_uring send ring; keeps the test
    * single-threaded and out of the kernel. The session's gcc/twcc/scheduler
    * sub-allocations stay unused (TWCC members are not exercised here; the
@@ -452,7 +452,7 @@ static void kf_fixture_init(kf_fixture_t *f) {
   memcpy(key_material + 46, key_material + 32, 14);
   assert(sfu_srtp_ctx_init_from_dtls(&f->publisher->srtp, key_material, 0x0001, false) == 0);
   f->publisher->state = SFU_SESSION_ESTABLISHED;
-  f->publisher->worker_id = 0;
+  sfu_session_set_owner_worker(f->publisher, 0);
   /* Production peer_ids are always non-zero (generate_unique_id starts at 1);
    * the scheduler table keys on them and reserves 0 for empty slots. */
   f->publisher->peer_id = 1001;
@@ -471,12 +471,14 @@ static void kf_fixture_init(kf_fixture_t *f) {
   f->publisher->uplink_audio.active = true;
   atomic_store_explicit(&f->publisher->audio_send_negotiated, true, memory_order_release);
   atomic_store_explicit(&f->publisher->video_send_negotiated, true, memory_order_release);
+  sfu_session_publish_media(f->publisher);
 
   f->base.session->uplink_video.payload_type = SFU_PT_VP8;
   f->base.session->uplink_video.rtx_payload_type = SFU_PT_VP8_RTX;
   f->base.session->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
   f->base.session->uplink_video.active = true;
   f->base.session->uplink_audio.active = true;
+  sfu_session_publish_media(f->base.session);
 
   room_add_peer(&f->room, f->publisher);
   room_add_peer(&f->room, f->base.session);
@@ -651,6 +653,7 @@ static void test_egress_writes_twcc_extension(void) {
    * by the forwarding path (it puts every forwarded video packet). */
   sfu_peer_session_t *sub = f.base.session;
   sub->twcc_send_extmap_id = 5;
+  sfu_session_publish_media(sub);
   assert(sub->twcc_history == NULL);
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
@@ -662,9 +665,11 @@ static void test_egress_writes_twcc_extension(void) {
    * and the SVC scheduler path — which would drop our synthetic non-keyframe
    * — never runs. The plain forward path still applies. */
   f.publisher->uplink_video.payload_type = 0;
+  sfu_session_publish_media(f.publisher);
   atomic_store_explicit(&f.publisher->audio_send_negotiated, true, memory_order_release);
   f.base.session->uplink_video.payload_type = 0;
   f.base.session->uplink_video.rtx_payload_type = 0;
+  sfu_session_publish_media(f.base.session);
 
   /* Feed one publisher RTP packet through the ingress path. */
   uint8_t plain[512];
@@ -703,14 +708,17 @@ static void test_egress_no_twcc_without_negotiation(void) {
 
   sfu_peer_session_t *sub = f.base.session;
   sub->twcc_send_extmap_id = 0; /* not negotiated */
+  sfu_session_publish_media(sub);
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
   sfu_twcc_history_init(sub->twcc_history);
 
   f.publisher->uplink_video.payload_type = 0;
+  sfu_session_publish_media(f.publisher);
   atomic_store_explicit(&f.publisher->audio_send_negotiated, true, memory_order_release);
   f.base.session->uplink_video.payload_type = 0;
   f.base.session->uplink_video.rtx_payload_type = 0;
+  sfu_session_publish_media(f.base.session);
 
   uint8_t plain[512];
   size_t plain_len;
@@ -758,15 +766,18 @@ static void test_remote_forward_egress_on_owner(void) {
   assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
 
   sfu_peer_session_t *sub = f.base.session;
-  sub->worker_id = 1; /* owned by the other worker */
+  sfu_session_set_owner_worker(sub, 1); /* owned by the other worker */
   sub->twcc_send_extmap_id = 5;
+  sfu_session_publish_media(sub);
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
   sfu_twcc_history_init(sub->twcc_history);
 
   f.publisher->uplink_video.payload_type = 0;
+  sfu_session_publish_media(f.publisher);
   sub->uplink_video.payload_type = 0;
   sub->uplink_video.rtx_payload_type = 0;
+  sfu_session_publish_media(sub);
 
   uint8_t plain[512];
   size_t plain_len;
@@ -893,6 +904,7 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
 
   sfu_peer_session_t *sub = f.base.session;
   sub->twcc_send_extmap_id = 0; /* pacing does not require TWCC negotiation */
+  sfu_session_publish_media(sub);
 
   /* Arm the pacer: 1 Mbps estimate -> 2.5 Mbps pacing, 12.5 KB bucket. */
   sfu_pacer_set_rate(&sub->pacer, 1000000, (int64_t)sfu_now_us());
@@ -991,13 +1003,16 @@ static void test_forward_churn_subscriber_disconnect(void) {
 
   sfu_peer_session_t *sub = f.base.session;
   sub->twcc_send_extmap_id = 5;
+  sfu_session_publish_media(sub);
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
   sfu_twcc_history_init(sub->twcc_history);
 
   f.publisher->uplink_video.payload_type = 0;
+  sfu_session_publish_media(f.publisher);
   sub->uplink_video.payload_type = 0;
   sub->uplink_video.rtx_payload_type = 0;
+  sfu_session_publish_media(sub);
 
   uint16_t seq = 5000;
   for (int round = 0; round < 8; round++) {
@@ -1047,6 +1062,7 @@ static void test_visibility_false_stops_forward(void) {
 
   sfu_peer_session_t *sub = f.base.session;
   sub->twcc_send_extmap_id = 5;
+  sfu_session_publish_media(sub);
   sub->twcc_history = SFU_CALLOC(1, sizeof(*sub->twcc_history));
   assert(sub->twcc_history != NULL);
   sfu_twcc_history_init(sub->twcc_history);
@@ -1054,11 +1070,13 @@ static void test_visibility_false_stops_forward(void) {
   f.publisher->uplink_video.payload_type = RTP_PT;
   f.publisher->uplink_video.rtx_payload_type = RTX_PT;
   f.publisher->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+  sfu_session_publish_media(f.publisher);
   atomic_store_explicit(&f.publisher->audio_send_negotiated, true, memory_order_release);
   atomic_store_explicit(&f.publisher->video_send_negotiated, true, memory_order_release);
   sub->uplink_video.payload_type = RTP_PT;
   sub->uplink_video.rtx_payload_type = RTX_PT;
   sub->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+  sfu_session_publish_media(sub);
 
   room_refresh_peer_streams(&f.room, f.publisher);
 
@@ -1226,7 +1244,7 @@ static void test_kf_request_cross_worker_no_packet_leak(void) {
   assert(sfu_fanout_mesh_init(&mesh, 2, 16, 32) == 0);
   f.base.w.mesh = &mesh;
   f.base.w.worker_index = 0;
-  f.publisher->worker_id = 1; /* owned by the other worker */
+  sfu_session_set_owner_worker(f.publisher, 1); /* owned by the other worker */
 
   uint32_t before = pool_free_count(&f.base.pp);
   uint32_t ref_before = atomic_load(&f.publisher->refcount);
@@ -1275,7 +1293,7 @@ static void test_kf_enqueue_ring_full_drops_ref(void) {
   assert(sfu_fanout_mesh_init(&mesh, 2, 4 /* tiny ring */, 32) == 0);
   f.base.w.mesh = &mesh;
   f.base.w.worker_index = 0;
-  f.publisher->worker_id = 1;
+  sfu_session_set_owner_worker(f.publisher, 1);
 
   uint32_t ref_before = atomic_load(&f.publisher->refcount);
 

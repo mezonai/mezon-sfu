@@ -14,7 +14,7 @@
 #define SFU_DTLS_FINGERPRINT_LEN 96
 
 #define SFU_SESSION_TABLE_MAX 8192
-#define SFU_ROOM_MAX_PEERS 256
+#define SFU_ROOM_MAX_PEERS 300
 #define SFU_MAX_REMOTE_SLOTS (SFU_ROOM_MAX_PEERS - 1)
 #define SFU_MAX_REMOTE_TRANSCEIVERS (SFU_MAX_REMOTE_SLOTS * SFU_REMOTE_TRANSCEIVERS_PER_SLOT)
 #define SFU_MAX_UPLINK_TRANSCEIVERS 3      /* audio, camera, screen */
@@ -22,7 +22,7 @@
 
 #define SFU_SIGNALING_RECV_CAP 16384
 #define SFU_SIGNALING_SDP_CAP 16384
-#define SFU_SIGNALING_JSON_CAP 32768
+#define SFU_SIGNALING_JSON_CAP 65536
 
 #define SFU_HASH_EMPTY UINT32_MAX
 #define SFU_HASH_DELETED (UINT32_MAX - 1)
@@ -152,6 +152,19 @@ struct sfu_receiver_snapshot {
   sfu_receiver_entry_t entries[];
 };
 
+typedef struct sfu_media_snapshot {
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  sfu_video_codec_t video_codec;
+  uint8_t twcc_recv_extmap_id;
+  uint8_t twcc_send_extmap_id;
+  bool audio_active;
+  bool video_active;
+} sfu_media_snapshot_t;
+
 typedef struct sfu_pacer {
   uint64_t sent[SFU_PACER_CLASS_COUNT];
   int64_t balance_bytes;
@@ -188,10 +201,13 @@ typedef struct sfu_peer_session {
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
+  _Atomic uint64_t media_snap_words[3];
+  _Atomic uint32_t media_snap_seq;
   pthread_mutex_t answer_lock;
   pthread_mutex_t negotiation_lock;
   pthread_mutex_t media_lock;
   pthread_mutex_t snapshot_lock;
+  pthread_mutex_t ingress_lock;
   uint8_t pt_map[128];
   int64_t user_id;
   int64_t last_pli_time;
@@ -200,7 +216,7 @@ typedef struct sfu_peer_session {
   _Atomic uint32_t next_remote_mid;
   _Atomic uint32_t applied_answer_generation;
   int fd;
-  uint16_t worker_id;
+  _Atomic uint64_t worker_owner;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
   int64_t twcc_last_feedback_ref_us;
@@ -222,6 +238,7 @@ typedef struct sfu_peer_session {
   bool renegotiation_pending;
   uint32_t offer_generation;
   _Atomic bool uplink_ssrc_dirty;
+  _Atomic bool membership_announced;
 } sfu_peer_session_t;
 
 typedef struct sfu_hash_slot {
@@ -234,7 +251,7 @@ typedef struct sfu_session_table {
   sfu_dtls_ctx_t *dtls_ctx;
   uint32_t capacity;
   uint32_t count;
-  pthread_mutex_t lock;
+  pthread_rwlock_t lock;
   pthread_mutex_t ice_lock;
   sfu_hash_slot_t addr_index[SFU_SESSION_ADDR_HASH_SLOTS];
   sfu_hash_slot_t ufrag_index[SFU_SESSION_UFRAG_HASH_SLOTS];
