@@ -197,22 +197,43 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
   payload_json[payload_json_len] = '\0';
 
   int64_t user_id = 0;
-  if (extract_json_int64((const char *)payload_json, payload_json_len, "uid", &user_id) == 0 ||
-      extract_json_int64((const char *)payload_json, payload_json_len, "user_id", &user_id) == 0) {
+  if (extract_json_int64((const char *)payload_json, payload_json_len, "identity", &user_id) == 0 ||
+      extract_json_int64((const char *)payload_json, payload_json_len, "sub", &user_id) == 0) {
     out->user_id = user_id;
-    out->has_user_id = 1;
+    out->has_user_id = true;
   }
 
   int64_t exp = 0;
   if (extract_json_int64((const char *)payload_json, payload_json_len, "exp", &exp) == 0) {
     out->exp = exp;
-    out->has_exp = 1;
+    out->has_exp = true;
+  }
+
+  int64_t nbf = 0;
+  if (extract_json_int64((const char *)payload_json, payload_json_len, "nbf", &nbf) == 0) {
+    out->nbf = nbf;
+    out->has_nbf = true;
+  }
+
+  (void)sfu_json_extract_string((const char *)payload_json, payload_json_len, "iss", out->iss, sizeof(out->iss));
+  (void)sfu_json_extract_string((const char *)payload_json, payload_json_len, "metadata", out->metadata, sizeof(out->metadata));
+
+  int64_t room_id = 0;
+  if (extract_json_int64((const char *)payload_json, payload_json_len, "room", &room_id) == 0 && room_id > 0) {
+    out->room_id = (uint64_t)room_id;
+    out->has_room = true;
+  }
+
+  bool room_join = false;
+  if (sfu_json_extract_bool((const char *)payload_json, payload_json_len, "roomJoin", &room_join) == 0) {
+    out->room_join = room_join;
   }
 
   return 0;
 }
 
-int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, int64_t *out_user_id) {
+int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, uint64_t requested_room_id, int64_t *out_user_id,
+                                    uint64_t *out_room_id) {
   if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out_user_id) {
     return -1;
   }
@@ -223,17 +244,35 @@ int sfu_handshake_verify_join_token(const char *token, size_t token_len, const c
     return -1;
   }
   if (!claims.has_user_id || claims.user_id == 0) {
-    SFU_LOG_WARN("handshake: JWT missing uid/user_id claim");
+    SFU_LOG_WARN("handshake: JWT missing identity/sub claim");
     return -1;
   }
-  if (claims.has_exp) {
-    int64_t now = (int64_t)time(NULL);
-    if (claims.exp < now) {
-      SFU_LOG_WARN("handshake: JWT expired (exp=%" PRId64 " now=%" PRId64 ")", claims.exp, now);
-      return -1;
-    }
+  if (!claims.room_join) {
+    SFU_LOG_WARN("handshake: JWT video.roomJoin is not true");
+    return -1;
+  }
+  if (!claims.has_room || claims.room_id == 0) {
+    SFU_LOG_WARN("handshake: JWT missing video.room claim");
+    return -1;
+  }
+  if (requested_room_id != 0 && requested_room_id != claims.room_id) {
+    SFU_LOG_WARN("handshake: JWT room %" PRIu64 " does not match join room %" PRIu64, claims.room_id, requested_room_id);
+    return -1;
+  }
+
+  int64_t now = (int64_t)time(NULL);
+  if (claims.has_nbf && now < claims.nbf) {
+    SFU_LOG_WARN("handshake: JWT not yet valid (nbf=%" PRId64 " now=%" PRId64 ")", claims.nbf, now);
+    return -1;
+  }
+  if (claims.has_exp && claims.exp < now) {
+    SFU_LOG_WARN("handshake: JWT expired (exp=%" PRId64 " now=%" PRId64 ")", claims.exp, now);
+    return -1;
   }
 
   *out_user_id = claims.user_id;
+  if (out_room_id) {
+    *out_room_id = claims.room_id;
+  }
   return 0;
 }
