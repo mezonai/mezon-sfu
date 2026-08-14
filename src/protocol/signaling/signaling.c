@@ -1451,7 +1451,7 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         uint32_t mid_video = 0;
         membership_find_mids(members[i].session, joined, &mid_audio, &mid_video);
         char event[320];
-        n = snprintf(event, sizeof(event),
+        int n = snprintf(event, sizeof(event),
                      "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
                      "\",\"role\":\"%s\",\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}}",
                      count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined->cold ? joined->cold->ufrag : "", mid_audio,
