@@ -236,6 +236,11 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
     bool enqueue = false;
     pthread_mutex_lock(&session->negotiation_lock);
     session->renegotiation_pending = true;
+    if (session->state != SFU_SESSION_ESTABLISHED) {
+      pthread_mutex_unlock(&session->negotiation_lock);
+      sfu_session_release(session);
+      continue;
+    }
     if (!session->negotiation_needed) {
       session->negotiation_needed = true;
       enqueue = true;
@@ -1443,6 +1448,12 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
     bool send = false;
     pthread_mutex_lock(&session->negotiation_lock);
     session->negotiation_needed = false;
+    if (session->state != SFU_SESSION_ESTABLISHED) {
+      session->renegotiation_pending = true;
+      pthread_mutex_unlock(&session->negotiation_lock);
+      sfu_session_release(session);
+      continue;
+    }
     if (session->renegotiation_pending && !session->offer_outstanding && sfu_session_accepts_work(session) && session->fd >= 0) {
       session->renegotiation_pending = false;
       session->offer_outstanding = true;

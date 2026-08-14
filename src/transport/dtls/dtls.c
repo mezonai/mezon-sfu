@@ -187,6 +187,11 @@ sfu_dtls_feed_status_t sfu_dtls_conn_feed(sfu_dtls_conn_t *conn, const uint8_t *
     } else if (profile->id == 0x0008) {
       material_len = 88;  // GCM-256 (32 * 2 + 12 * 2)
     }
+    if (material_len > sizeof(conn->srtp_keying_material)) {
+      SFU_LOG_ERROR("DTLS: SRTP keying material length %zu exceeds buffer %zu (profile 0x%04lx)", material_len, sizeof(conn->srtp_keying_material),
+                    profile->id);
+      return SFU_DTLS_FEED_ERROR;
+    }
 
     if (SSL_export_keying_material(conn->ssl, conn->srtp_keying_material, material_len, "EXTRACTOR-dtls_srtp", 19, NULL, 0, 0) != 1) {
       SFU_LOG_ERROR("DTLS: handshake completed but SRTP key export failed");

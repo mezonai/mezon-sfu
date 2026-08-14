@@ -11,6 +11,12 @@
 #include <string.h>
 #include <sys/socket.h>
 
+uint32_t sfu_ring_recv_overhead(void) {
+  return (uint32_t)sizeof(struct io_uring_recvmsg_out) + (uint32_t)sizeof(struct sockaddr_storage) + SFU_RECV_CMSG_BUFSIZE;
+}
+
+uint32_t sfu_ring_recv_slot_size(uint32_t payload_cap) { return payload_cap + sfu_ring_recv_overhead(); }
+
 static void format_ring_peer_addr(const struct sockaddr *addr, char *out_ip, uint16_t *out_port) {
   strcpy(out_ip, "unknown");
   *out_port = 0;
@@ -54,10 +60,11 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
     return -1;
   }
 
-  r->buf_size = buf_size;
+  r->payload_cap = buf_size;
+  r->buf_size = sfu_ring_recv_slot_size(buf_size);
   r->buf_count = buf_count;
   r->bgid = bgid;
-  r->buf_ring_mem = SFU_ALIGNED_ALLOC(SFU_CACHELINE_SIZE, (size_t)buf_count * buf_size);
+  r->buf_ring_mem = SFU_ALIGNED_ALLOC(SFU_CACHELINE_SIZE, (size_t)buf_count * r->buf_size);
   if (!r->buf_ring_mem) {
     SFU_LOG_ERROR("failed to allocate provided-buffer backing store");
     io_uring_queue_exit(&r->ring);
@@ -75,8 +82,8 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
 
   int mask = io_uring_buf_ring_mask(buf_count);
   for (uint32_t i = 0; i < buf_count; i++) {
-    void *addr = (uint8_t *)r->buf_ring_mem + (size_t)i * buf_size;
-    io_uring_buf_ring_add(r->buf_ring, addr, buf_size, (unsigned short)i, mask, (int)i);
+    void *addr = (uint8_t *)r->buf_ring_mem + (size_t)i * r->buf_size;
+    io_uring_buf_ring_add(r->buf_ring, addr, r->buf_size, (unsigned short)i, mask, (int)i);
   }
   io_uring_buf_ring_advance(r->buf_ring, (int)buf_count);
 
@@ -85,7 +92,8 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
   r->recv_msg_template.msg_control = r->recv_cmsg_buf;
   r->recv_msg_template.msg_controllen = sizeof(r->recv_cmsg_buf);
 
-  SFU_LOG_INFO("io_uring ring initialized: sq=%u cq=%u bufs=%u x %uB bgid=%d on fd=%d", sq_entries, cq_entries, buf_count, buf_size, bgid, fd);
+  SFU_LOG_INFO("io_uring ring initialized: sq=%u cq=%u bufs=%u x %uB slot (payload=%u + overhead=%u) bgid=%d on fd=%d", sq_entries, cq_entries, buf_count,
+               r->buf_size, r->payload_cap, sfu_ring_recv_overhead(), bgid, fd);
   return 0;
 }
 
@@ -258,7 +266,7 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
 
   pkt->data = (uint8_t *)payload;
   pkt->len = payload_len;
-  pkt->cap = r->buf_size;
+  pkt->cap = r->payload_cap;
   pkt->kbuf_index = bid;
   pkt->buf_source = SFU_BUF_SOURCE_KERNEL;
 

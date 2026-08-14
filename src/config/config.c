@@ -35,7 +35,7 @@ void sfu_config_set_defaults(void) {
   snprintf(g_sfu_config.nats_client_name, sizeof(g_sfu_config.nats_client_name), "sfu_nats_client");
   g_sfu_config.jwt_secret[0] = '\0';
 
-  g_sfu_config.packet_buf_size = 1600;
+  g_sfu_config.packet_buf_size = 2048;
   g_sfu_config.packet_pool_capacity = 262144;
   g_sfu_config.provided_buf_count = 8192;
   g_sfu_config.provided_buf_group_id = 0;

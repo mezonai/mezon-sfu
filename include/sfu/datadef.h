@@ -8,8 +8,9 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
-// SRTP_AES128_CM_SHA1_80: 2 x (16-byte key + 14-byte salt)
-#define SFU_SRTP_KEY_MATERIAL_LEN 60
+// Max DTLS-SRTP exporter length: GCM-256 is 2 x (32-byte key + 12-byte salt) = 88
+#define SFU_SRTP_KEY_MATERIAL_LEN 88
+_Static_assert(SFU_SRTP_KEY_MATERIAL_LEN >= 88, "GCM-256 DTLS-SRTP exporter writes 88 bytes");
 // "XX:XX:...:XX\0" for SHA-256, 32 bytes -> 95 chars + nul
 #define SFU_DTLS_FINGERPRINT_LEN 96
 
