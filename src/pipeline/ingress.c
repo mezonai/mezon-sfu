@@ -424,8 +424,18 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  sfu_media_snapshot_t twcc_msnap = sfu_session_load_media(sender_session);
-  uint8_t twcc_recv_extmap_id = twcc_msnap.twcc_recv_extmap_id;
+  sfu_media_snapshot_t pt_msnap = sfu_session_load_media(sender_session);
+  uint8_t in_pt = m.rtp.payload_type;
+  bool is_video_pt = (in_pt == pt_msnap.video_pt) || (in_pt == pt_msnap.video_rtx_pt);
+  if (!is_video_pt && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
+    sfu_metric_inc("muted_audio_drop");
+    pthread_mutex_unlock(&sender_session->ingress_lock);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
+
+  uint8_t twcc_recv_extmap_id = pt_msnap.twcc_recv_extmap_id;
   if (sender_session->twcc_recv && twcc_recv_extmap_id != 0 && m.rtp.extension) {
     uint16_t twcc_seq = 0;
     if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, twcc_recv_extmap_id, &twcc_seq)) {
@@ -445,9 +455,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-  sfu_media_snapshot_t pt_msnap = sfu_session_load_media(sender_session);
-  uint8_t in_pt = m.rtp.payload_type;
-  bool is_video_pt = (in_pt == pt_msnap.video_pt) || (in_pt == pt_msnap.video_rtx_pt);
   bool send_negotiated = is_video_pt ? atomic_load_explicit(&sender_session->video_send_negotiated, memory_order_acquire)
                                      : atomic_load_explicit(&sender_session->audio_send_negotiated, memory_order_acquire);
   bool learned = false;
