@@ -659,11 +659,15 @@
                     : ensureParticipant(id, { isLocal: isSelf, label });
                 p.peerId = peerId;
                 p.role = role;
+                p.isMute = !!mergedMember.is_mute;
                 if (!p.hasVideo) {
                     p.video.style.display = "none";
                     p.avatar.style.display = "flex";
                 }
-                p.badges.textContent = role === "audience" ? "Audience" : "Speaker";
+                const badges = [];
+                if (role === "audience") badges.push("Audience");
+                if (p.isMute) badges.push("Muted");
+                p.badges.textContent = badges.join(" · ");
 
                 for (const midValue of [member.mid_audio, member.mid_video]) {
                     if (midValue == null || String(midValue) === "0") continue;
@@ -1029,6 +1033,9 @@
                     const icon = local.nameLabel.querySelector(".mic-icon");
                     icon.classList.toggle("live", micEnabled);
                     icon.classList.toggle("muted", !micEnabled);
+                }
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "mute", is_mute: !micEnabled }));
                 }
             }
 
