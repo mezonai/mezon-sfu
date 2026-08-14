@@ -22,6 +22,7 @@ static void forward_local(sfu_worker_t *w, sfu_peer_session_t *sender_session, s
                           uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video) {
   sfu_egress_media_t media = {
       .publisher = sender_session,
+      .source = m->source,
       .video_ssrc = video_ssrc,
       .video_rtx_ssrc = video_rtx_ssrc,
       .video_pt = video_pt,
@@ -108,6 +109,7 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
   target->video_rtx_ssrc = video_rtx_ssrc;
   target->video_pt = video_pt;
   target->video_rtx_pt = video_rtx_pt;
+  target->source = (uint8_t)m->source;
   target->has_video = has_video;
 }
 
@@ -135,7 +137,8 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       sfu_subscriptions_snapshot_release(legacy);
     }
   } else {
-    sfu_video_route_snapshot_t *video = sfu_session_video_fanout_acquire(sender_session);
+    bool is_screen = m->source == SFU_MEDIA_SCREEN;
+    sfu_video_route_snapshot_t *video = is_screen ? sfu_session_screen_fanout_acquire(sender_session) : sfu_session_video_fanout_acquire(sender_session);
     if (video) {
       for (uint32_t i = 0; i < video->count; i++) {
         const sfu_video_route_entry_t *entry = &video->entries[i];
@@ -147,9 +150,11 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       sfu_receiver_snapshot_t *legacy = sfu_session_fanout_targets_acquire(sender_session);
       for (uint32_t i = 0; legacy && i < legacy->count; i++) {
         const sfu_receiver_entry_t *entry = &legacy->entries[i];
-        if (entry->has_video && entry->video_active) {
-          route_target(w, sender_session, m, entry->subscriber, entry->video_ssrc, entry->video_rtx_ssrc, entry->video_pt, entry->video_rtx_pt,
-                       entry->has_video, builders, &remote_source);
+        bool active = is_screen ? entry->has_screen && entry->screen_active : entry->has_video && entry->video_active;
+        if (active) {
+          route_target(w, sender_session, m, entry->subscriber, is_screen ? entry->screen_ssrc : entry->video_ssrc,
+                       is_screen ? entry->screen_rtx_ssrc : entry->video_rtx_ssrc, is_screen ? entry->screen_pt : entry->video_pt,
+                       is_screen ? entry->screen_rtx_pt : entry->video_rtx_pt, is_screen ? entry->has_screen : entry->has_video, builders, &remote_source);
         }
       }
       sfu_subscriptions_snapshot_release(legacy);

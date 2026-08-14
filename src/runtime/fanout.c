@@ -150,6 +150,7 @@ bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worke
   job->video_rtx_ssrc = video_rtx_ssrc;
   job->video_pt = video_pt;
   job->video_rtx_pt = video_rtx_pt;
+  job->source = (uint8_t)(is_audio ? SFU_MEDIA_AUDIO : SFU_MEDIA_VIDEO);
   job->has_video = has_video;
   job->is_audio = is_audio;
   job->has_svc = has_svc;
@@ -229,7 +230,8 @@ unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, uns
   return drained;
 }
 
-bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher) {
+bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker,
+                                                         sfu_peer_session_t *publisher, sfu_media_kind_t source) {
   if (!mesh || dst_worker >= mesh->worker_count || !publisher) {
     return false;
   }
@@ -241,6 +243,7 @@ bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t 
 
   job->kind = SFU_FANOUT_JOB_KEYFRAME_REQUEST;
   job->publisher = publisher;
+  job->source = (uint8_t)source;
 
   atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
 
@@ -253,6 +256,10 @@ bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t 
   }
 
   return true;
+}
+
+bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher) {
+  return sfu_fanout_mesh_enqueue_keyframe_request_for_source(mesh, src_worker, dst_worker, publisher, SFU_MEDIA_VIDEO);
 }
 
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job) { sfu_pool_free(&mesh->job_pools[job->pool_dst], job->pool_index); }

@@ -900,11 +900,7 @@
 
                     if (!localTracksAdded && currentJoinMode === "speaker" && localStream) {
                         const audioTrack = localStream.getAudioTracks()[0];
-                        const videoTrack =
-                            (screenSharing &&
-                                screenStream &&
-                                screenStream.getVideoTracks()[0]) ||
-                            localStream.getVideoTracks()[0];
+                        const videoTrack = localStream.getVideoTracks()[0];
                         if (audioTrack) {
                             const audioTc = pc.getTransceivers().find(
                                 (t) => t.mid === "0" || (t.receiver && t.receiver.track && t.receiver.track.kind === "audio")
@@ -918,9 +914,13 @@
                         }
                         if (videoTrack) {
                             await enableSvcForVideoSender(pc, videoTrack);
-                            if (screenSharing) {
-                                const sender = findUplinkVideoSender();
-                                if (sender) await applyScreenEncodingParams(sender);
+                            if (screenSharing && screenStream) {
+                                const screenTrack = screenStream.getVideoTracks()[0];
+                                const sender = findUplinkVideoSender("2");
+                                if (screenTrack && sender) {
+                                    await sender.replaceTrack(screenTrack);
+                                    await applyScreenEncodingParams(sender);
+                                }
                             }
                         }
                         localTracksAdded = true;
@@ -930,9 +930,9 @@
                         screenStream &&
                         currentJoinMode === "speaker"
                     ) {
-                        // Renegotiation while already sharing: keep screen on mid:1.
+                        // Renegotiation while already sharing: keep screen on mid:2.
                         const screenTrack = screenStream.getVideoTracks()[0];
-                        const sender = findUplinkVideoSender();
+                        const sender = findUplinkVideoSender("2");
                         if (screenTrack && sender && sender.track !== screenTrack) {
                             try {
                                 await sender.replaceTrack(screenTrack);
@@ -1039,17 +1039,13 @@
                 }
             }
 
-            function sendHook(type) {
+            function sendHook(type, extra = {}) {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type }));
+                    ws.send(JSON.stringify({ type, ...extra }));
                 }
             }
 
             function toggleCam() {
-                if (screenSharing) {
-                    setConnState("stop screen share to toggle camera", "warn");
-                    return;
-                }
                 camEnabled = !camEnabled;
                 localStream
                     .getVideoTracks()
@@ -1067,25 +1063,16 @@
                 sendHook(camEnabled ? "publish" : "unpublish");
             }
 
-            function findUplinkVideoSender() {
+            function findUplinkVideoSender(mid = "1") {
                 if (!pc) return null;
                 const tc =
-                    pc.getTransceivers().find((t) => t.mid === "1") ||
-                    pc.getTransceivers().find(
+                    pc.getTransceivers().find((t) => t.mid === mid) ||
+                    (mid === "1" ? pc.getTransceivers().find(
                         (t) =>
                             t.sender &&
                             t.sender.track &&
                             t.sender.track.kind === "video"
-                    ) ||
-                    pc.getTransceivers().find(
-                        (t) =>
-                            t.receiver &&
-                            t.receiver.track &&
-                            t.receiver.track.kind === "video" &&
-                            (t.direction === "sendonly" ||
-                                t.direction === "sendrecv" ||
-                                t.direction === "inactive")
-                    );
+                    ) : null);
                 return tc ? tc.sender : null;
             }
 
@@ -1180,23 +1167,10 @@
                     }
                 }
 
-                const sender = findUplinkVideoSender();
+                const sender = findUplinkVideoSender("2");
                 if (!sender) {
-                    // No negotiated video uplink yet — keep stream and wait for offer attach.
-                    console.warn("No video sender yet; screen track will attach on next offer");
+                    console.warn("No screen sender on MID 2 yet; track will attach on next offer");
                 } else {
-                    // Remember camera track currently on the sender (or from localStream).
-                    cameraTrackBackup =
-                        (sender.track &&
-                            sender.track !== screenTrack &&
-                            sender.track.kind === "video" &&
-                            (!localStream ||
-                                localStream.getVideoTracks().indexOf(sender.track) >= 0)
-                            ? sender.track
-                            : null) ||
-                        (localStream ? localStream.getVideoTracks()[0] : null) ||
-                        null;
-
                     try {
                         await sender.replaceTrack(screenTrack);
                         const tc = pc.getTransceivers().find((t) => t.sender === sender);
@@ -1228,7 +1202,7 @@
                     setTileStream(local, new MediaStream([screenTrack]), true);
                 }
 
-                sendHook("share_screen");
+                sendHook("share_screen", { active: true });
                 setConnState("sharing screen", "ok");
             }
 
@@ -1251,37 +1225,14 @@
                     screenStream = null;
                 }
 
-                const sender = findUplinkVideoSender();
-                let restoreTrack = cameraTrackBackup;
-                if (
-                    !restoreTrack &&
-                    localStream &&
-                    localStream.getVideoTracks().length > 0
-                ) {
-                    restoreTrack = localStream.getVideoTracks()[0];
-                }
-
-                // Prefer a still-live camera track.
-                if (restoreTrack && restoreTrack.readyState === "ended") {
-                    restoreTrack = null;
-                }
-                if (
-                    !restoreTrack &&
-                    localStream &&
-                    localStream.getVideoTracks().length > 0
-                ) {
-                    const cam = localStream.getVideoTracks()[0];
-                    if (cam && cam.readyState === "live") restoreTrack = cam;
-                }
+                const sender = findUplinkVideoSender("2");
+                const restoreTrack = localStream && localStream.getVideoTracks().length > 0 ? localStream.getVideoTracks()[0] : null;
 
                 if (sender) {
                     try {
-                        await sender.replaceTrack(restoreTrack || null);
-                        if (restoreTrack && camEnabled) {
-                            await applyVideoEncodingParams(pc);
-                        }
+                        await sender.replaceTrack(null);
                     } catch (e) {
-                        console.warn("restore camera after screen share failed:", e);
+                        console.warn("detach screen track failed:", e);
                     }
                 }
 
@@ -1303,6 +1254,7 @@
                     }
                 }
 
+                sendHook("share_screen", { active: false });
                 if (!opts.fromTrackEnded) {
                     setConnState("screen share stopped", "ok");
                 } else {
@@ -1785,11 +1737,15 @@
                             if (remoteCandidates.length === 1) mappedPeerId = remoteCandidates[0][0];
                         }
                         const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
-                        const id = mappedMember
+                        const baseId = mappedMember
                             ? memberTileId(mappedMember)
                             : publisherIdentity && publisherIdentity.userId !== "0"
                                 ? "user-" + publisherIdentity.userId
                                 : (mid ? "mid-" + mid : (streamId || track.id));
+                        const isScreenTrack = track.kind === "video" &&
+                            ((track.id && track.id.toLowerCase().includes("screen")) ||
+                             (streamId && streamId.toLowerCase().includes("screen")));
+                        const id = track.kind === "video" ? baseId + (isScreenTrack ? "-screen" : "-camera") : baseId;
 
                         if (track.kind === "video") {
                             const label = "Peer " + id.substring(0, 8);
@@ -1936,11 +1892,7 @@
                             setPttButtonPressed(true);
                             try {
                                 const audioTrack = localStream.getAudioTracks()[0];
-                                const videoTrack =
-                                    (screenSharing &&
-                                        screenStream &&
-                                        screenStream.getVideoTracks()[0]) ||
-                                    localStream.getVideoTracks()[0];
+                                const videoTrack = localStream.getVideoTracks()[0];
 
                                 const audioTc = pc.getTransceivers().find(t =>
                                     t.mid === "0" ||
@@ -1956,9 +1908,13 @@
 
                                 if (videoTrack) {
                                     await enableSvcForVideoSender(pc, videoTrack);
-                                    if (screenSharing) {
-                                        const sender = findUplinkVideoSender();
-                                        if (sender) await applyScreenEncodingParams(sender);
+                                    if (screenSharing && screenStream) {
+                                        const screenTrack = screenStream.getVideoTracks()[0];
+                                        const sender = findUplinkVideoSender("2");
+                                        if (screenTrack && sender) {
+                                            await sender.replaceTrack(screenTrack);
+                                            await applyScreenEncodingParams(sender);
+                                        }
                                     }
                                 }
                                 localTracksAdded = true;

@@ -31,7 +31,7 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   s->uplink_video.owner = s;
   s->uplink_audio.active = true;
   s->uplink_video.active = true;
-  s->next_remote_mid = 2;
+  s->next_remote_mid = SFU_REMOTE_MID_BASE;
   return s;
 }
 
@@ -209,7 +209,7 @@ static void test_audience_role_asymmetry_and_transition(void) {
   /* Audience receives the speaker SDP source but never owns an RTP fanout
    * snapshot. The speaker forwards to the audience. */
   assert(receiver_count(audience) == 1);
-  assert(audience->next_remote_mid == 4);
+  assert(audience->next_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   assert(subscribes_to(audience, speaker));
   assert(receiver_count(speaker) == 0);
   assert(fanout_target_count(speaker) == 1);
@@ -219,8 +219,9 @@ static void test_audience_role_asymmetry_and_transition(void) {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(audience);
     assert(snap != NULL && snap->count == 1);
     assert(snap->entries[0].subscriber == speaker);
-    assert(snap->entries[0].mid_audio == 2);
-    assert(snap->entries[0].mid_video == 3);
+    assert(snap->entries[0].mid_audio == SFU_REMOTE_MID_BASE);
+    assert(snap->entries[0].mid_video == SFU_REMOTE_MID_BASE + 1);
+    assert(snap->entries[0].mid_screen == SFU_REMOTE_MID_BASE + 2);
     assert(snap->entries[0].audio_active);
     assert(snap->entries[0].video_active);
     assert(snap->entries[0].audio_ssrc == 1111);
