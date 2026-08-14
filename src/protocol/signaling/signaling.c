@@ -1301,12 +1301,32 @@ static sfu_peer_session_t *membership_queue_pop(sfu_membership_queue_t *queue) {
 }
 
 typedef struct {
+  sfu_peer_session_t *session;
   uint32_t peer_id;
+  uint32_t mid_audio;
+  uint32_t mid_video;
   int64_t user_id;
   int fd;
   bool is_audience;
   char ufrag[32];
 } membership_view_t;
+
+static void membership_find_mids(sfu_peer_session_t *receiver, sfu_peer_session_t *source, uint32_t *mid_audio, uint32_t *mid_video) {
+  *mid_audio = 0;
+  *mid_video = 0;
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(receiver);
+  if (!snap) {
+    return;
+  }
+  for (uint32_t i = 0; i < snap->count; i++) {
+    if (snap->entries[i].subscriber == source) {
+      *mid_audio = snap->entries[i].mid_audio;
+      *mid_video = snap->entries[i].mid_video;
+      break;
+    }
+  }
+  sfu_subscriptions_snapshot_release(snap);
+}
 
 static void flush_membership_events(sfu_signaling_server_t *s) {
   sfu_peer_session_t *joined;
@@ -1324,7 +1344,9 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         if (!peer || !sfu_session_accepts_work(peer) || peer->fd < 0) {
           continue;
         }
+        atomic_fetch_add_explicit(&peer->refcount, 1, memory_order_relaxed);
         members[count] = (membership_view_t){
+            .session = peer,
             .peer_id = peer->peer_id,
             .user_id = peer->user_id,
             .fd = peer->fd,
@@ -1336,6 +1358,11 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         count++;
       }
       pthread_mutex_unlock(&room->lock);
+      for (uint32_t i = 0; i < count; i++) {
+        if (members[i].session != joined) {
+          membership_find_mids(joined, members[i].session, &members[i].mid_audio, &members[i].mid_video);
+        }
+      }
     }
 
     if (room && joined->fd >= 0) {
@@ -1348,8 +1375,10 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         off = (size_t)n;
         for (uint32_t i = 0; i < count; i++) {
           n = snprintf(snapshot + off, sizeof(snapshot) - off,
-                       "%s{\"peer_id\":%u,\"user_id\":\"%" PRId64 "\",\"role\":\"%s\",\"ufrag\":\"%s\"}", i ? "," : "", members[i].peer_id,
-                       members[i].user_id, members[i].is_audience ? "audience" : "speaker", members[i].ufrag);
+                       "%s{\"peer_id\":%u,\"user_id\":\"%" PRId64
+                       "\",\"role\":\"%s\",\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}",
+                       i ? "," : "", members[i].peer_id, members[i].user_id, members[i].is_audience ? "audience" : "speaker", members[i].ufrag,
+                       members[i].mid_audio, members[i].mid_video);
           if (n < 0 || (size_t)n >= sizeof(snapshot) - off) {
             off = 0;
             break;
@@ -1364,19 +1393,27 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         }
       }
 
-      char event[256];
       bool joined_audience = atomic_load_explicit(&joined->is_audience, memory_order_acquire);
-      n = snprintf(event, sizeof(event),
-                   "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
-                   "\",\"role\":\"%s\",\"ufrag\":\"%s\"}}",
-                   count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined->cold ? joined->cold->ufrag : "");
-      if (n > 0 && (size_t)n < sizeof(event)) {
-        for (uint32_t i = 0; i < count; i++) {
-          if (members[i].peer_id != joined->peer_id) {
-            (void)sfu_ws_send_text(members[i].fd, event, (size_t)n);
-          }
+      for (uint32_t i = 0; i < count; i++) {
+        if (members[i].peer_id == joined->peer_id) {
+          continue;
+        }
+        uint32_t mid_audio = 0;
+        uint32_t mid_video = 0;
+        membership_find_mids(members[i].session, joined, &mid_audio, &mid_video);
+        char event[320];
+        n = snprintf(event, sizeof(event),
+                     "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
+                     "\",\"role\":\"%s\",\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}}",
+                     count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined->cold ? joined->cold->ufrag : "", mid_audio,
+                     mid_video);
+        if (n > 0 && (size_t)n < sizeof(event)) {
+          (void)sfu_ws_send_text(members[i].fd, event, (size_t)n);
         }
       }
+    }
+    for (uint32_t i = 0; i < count; i++) {
+      sfu_session_release(members[i].session);
     }
     sfu_session_release(joined);
   }
