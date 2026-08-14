@@ -1,6 +1,6 @@
+#include <inttypes.h>
 #include <nats/status.h>
 #include <stdbool.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,10 +154,10 @@ int main(int argc, char **argv) {
 
   uint64_t packet_pool_bytes = (uint64_t)g_sfu_config.packet_pool_capacity * ((uint64_t)sizeof(sfu_packet_t) + g_sfu_config.packet_buf_size);
   uint64_t provided_buffer_bytes = (uint64_t)g_sfu_config.provided_buf_count * sfu_ring_recv_slot_size(g_sfu_config.packet_buf_size);
-  uint64_t queue_slot_bytes = (uint64_t)worker_count *
-                              ((uint64_t)g_sfu_config.worker_queue_capacity + g_sfu_config.release_queue_capacity +
-                               (uint64_t)worker_count * g_sfu_config.fanout_ring_capacity) *
-                              sizeof(void *);
+  uint64_t queue_slot_bytes =
+      (uint64_t)worker_count *
+      ((uint64_t)g_sfu_config.worker_queue_capacity + g_sfu_config.release_queue_capacity + (uint64_t)worker_count * g_sfu_config.fanout_ring_capacity) *
+      sizeof(void *);
   SFU_LOG_INFO("configured capacity estimate: packet_pool=%" PRIu64 " MiB provided_recv=%" PRIu64 " MiB queue_slots=%" PRIu64 " MiB",
                packet_pool_bytes / (1024 * 1024), provided_buffer_bytes / (1024 * 1024), queue_slot_bytes / (1024 * 1024));
 
@@ -251,8 +251,8 @@ cleanup:
     sfu_scheduler_destroy(scheduler);
   }
   for (uint32_t i = 0; i < workers_initialized; i++) {
-    SFU_LOG_INFO("worker %u queue usage: inbox_high_water=%u/%u inbox_push_failures=%" PRIu64 " release_high_water=%u/%u",
-                 i, sfu_spsc_ring_high_water(&workers[i].inbox), workers[i].inbox.capacity, sfu_spsc_ring_push_failures(&workers[i].inbox),
+    SFU_LOG_INFO("worker %u queue usage: inbox_high_water=%u/%u inbox_push_failures=%" PRIu64 " release_high_water=%u/%u", i,
+                 sfu_spsc_ring_high_water(&workers[i].inbox), workers[i].inbox.capacity, sfu_spsc_ring_push_failures(&workers[i].inbox),
                  sfu_spsc_ring_high_water(&workers[i].release_to_dispatcher), workers[i].release_to_dispatcher.capacity);
     sfu_worker_destroy(&workers[i]);
   }
@@ -270,8 +270,8 @@ cleanup:
   }
   if (packet_pool_initialized) {
     SFU_LOG_INFO("packet pool usage: meta_high_water=%u/%u data_high_water=%u/%u meta_alloc_failures=%" PRIu64 " data_alloc_failures=%" PRIu64,
-                 sfu_pool_high_water(&pp->meta), pp->meta.capacity, sfu_pool_high_water(&pp->data), pp->data.capacity,
-                 sfu_pool_alloc_failures(&pp->meta), sfu_pool_alloc_failures(&pp->data));
+                 sfu_pool_high_water(&pp->meta), pp->meta.capacity, sfu_pool_high_water(&pp->data), pp->data.capacity, sfu_pool_alloc_failures(&pp->meta),
+                 sfu_pool_alloc_failures(&pp->data));
     sfu_packet_pool_destroy(pp);
   }
   if (fd >= 0) {

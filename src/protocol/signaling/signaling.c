@@ -154,8 +154,8 @@ static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_signaling
 }
 
 static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s) {
-  int offer_len = sfu_sdp_build_offer(session, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint,
-                                      s->scratch.sdp, SFU_SIGNALING_SDP_CAP);
+  int offer_len = sfu_sdp_build_offer(session, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, s->scratch.sdp,
+                                      SFU_SIGNALING_SDP_CAP);
   if (offer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build server-initiated SDP offer (fd=%d)", fd);
     return false;
@@ -954,8 +954,8 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     if (response_len > 0 && (size_t)response_len < sizeof(response)) {
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
-    SFU_LOG_WARN("signaling: route registration failed for ufrag=%s fd=%d room_id=%" PRIu64 " outcome=%d", c->client_ufrag, c->fd,
-                 c->joined_room_id, register_result);
+    SFU_LOG_WARN("signaling: route registration failed for ufrag=%s fd=%d room_id=%" PRIu64 " outcome=%d", c->client_ufrag, c->fd, c->joined_room_id,
+                 register_result);
     return;
   }
   SFU_LOG_INFO("signaling: atomically registered answer ufrag=%s -> room_id=%" PRIu64 " generation=%u", c->client_ufrag, c->joined_room_id, answer_generation);
@@ -983,8 +983,7 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   bool role_changed = false;
   bool media_changed = false;
   bool newly_bound = false;
-  if (sfu_routing_table_reconcile_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, session, &role_changed,
-                                         &media_changed)) {
+  if (sfu_routing_table_reconcile_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, session, &role_changed, &media_changed)) {
     if (!session->room) {
       room_add_peer(c->joined_room, session);
       newly_bound = session->room == c->joined_room;
@@ -1023,8 +1022,7 @@ static void broadcast_peer_updated(sfu_room_t *room, sfu_peer_session_t *session
   bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
   bool is_mute = atomic_load_explicit(&session->is_mute, memory_order_acquire);
   char event[288];
-  int n = snprintf(event, sizeof(event),
-                   "{\"type\":\"peer_updated\",\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64 "\",\"role\":\"%s\",\"is_mute\":%s}}",
+  int n = snprintf(event, sizeof(event), "{\"type\":\"peer_updated\",\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64 "\",\"role\":\"%s\",\"is_mute\":%s}}",
                    session->peer_id, session->user_id, is_audience ? "audience" : "speaker", is_mute ? "true" : "false");
   if (n > 0 && (size_t)n < sizeof(event)) {
     for (uint32_t i = 0; i < count; i++) {
@@ -1114,8 +1112,7 @@ static void handle_visibility(sfu_client_conn_t *c, const char *buf, size_t n) {
   sfu_session_release(session);
 
   char response[96];
-  int response_len =
-      snprintf(response, sizeof(response), "{\"type\":\"visibility_changed\",\"visible\":%s}", visible ? "true" : "false");
+  int response_len = snprintf(response, sizeof(response), "{\"type\":\"visibility_changed\",\"visible\":%s}", visible ? "true" : "false");
   if (response_len > 0 && (size_t)response_len < sizeof(response)) {
     sfu_ws_send_text(c->fd, response, (size_t)response_len);
   }
@@ -1403,14 +1400,13 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
       char *snapshot = s->scratch.json;
       size_t off = 0;
       int n = snprintf(snapshot, SFU_SIGNALING_JSON_CAP,
-                       "{\"type\":\"room_snapshot\",\"room\":\"%" PRIu64 "\",\"self_peer_id\":%u,\"participant_count\":%u,\"members\":[",
-                       room_id, joined->peer_id, count);
+                       "{\"type\":\"room_snapshot\",\"room\":\"%" PRIu64 "\",\"self_peer_id\":%u,\"participant_count\":%u,\"members\":[", room_id,
+                       joined->peer_id, count);
       if (n > 0 && (size_t)n < SFU_SIGNALING_JSON_CAP) {
         off = (size_t)n;
         for (uint32_t i = 0; i < count; i++) {
           n = snprintf(snapshot + off, SFU_SIGNALING_JSON_CAP - off,
-                       "%s{\"peer_id\":%u,\"user_id\":\"%" PRId64
-                       "\",\"role\":\"%s\",\"is_mute\":%s,\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}",
+                       "%s{\"peer_id\":%u,\"user_id\":\"%" PRId64 "\",\"role\":\"%s\",\"is_mute\":%s,\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}",
                        i ? "," : "", members[i].peer_id, members[i].user_id, members[i].is_audience ? "audience" : "speaker",
                        members[i].is_mute ? "true" : "false", members[i].ufrag, members[i].mid_audio, members[i].mid_video);
           if (n < 0 || (size_t)n >= SFU_SIGNALING_JSON_CAP - off) {
@@ -1438,10 +1434,10 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         bool joined_mute = atomic_load_explicit(&joined->is_mute, memory_order_acquire);
         char event[352];
         int event_len = snprintf(event, sizeof(event),
-                         "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
-                         "\",\"role\":\"%s\",\"is_mute\":%s,\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}}",
-                         count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined_mute ? "true" : "false",
-                         joined->cold ? joined->cold->ufrag : "", mid_audio, mid_video);
+                                 "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
+                                 "\",\"role\":\"%s\",\"is_mute\":%s,\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}}",
+                                 count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined_mute ? "true" : "false",
+                                 joined->cold ? joined->cold->ufrag : "", mid_audio, mid_video);
         if (event_len > 0 && (size_t)event_len < sizeof(event)) {
           (void)sfu_ws_send_text(members[i].fd, event, (size_t)event_len);
         }

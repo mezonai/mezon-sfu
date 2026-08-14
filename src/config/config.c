@@ -50,13 +50,13 @@ int sfu_config_validate(const sfu_config_t *config) {
   if (!config) {
     return -1;
   }
-#define REQUIRE_POWER_OF_TWO(field)                                                                                                                        \
-  do {                                                                                                                                                     \
-    uint32_t value = config->field;                                                                                                                         \
-    if (value == 0 || (value & (value - 1)) != 0) {                                                                                                        \
-      SFU_LOG_ERROR(#field " must be a non-zero power of two (got %u)", value);                                                                            \
-      return -1;                                                                                                                                           \
-    }                                                                                                                                                      \
+#define REQUIRE_POWER_OF_TWO(field)                                             \
+  do {                                                                          \
+    uint32_t value = config->field;                                             \
+    if (value == 0 || (value & (value - 1)) != 0) {                             \
+      SFU_LOG_ERROR(#field " must be a non-zero power of two (got %u)", value); \
+      return -1;                                                                \
+    }                                                                           \
   } while (0)
 
   if (config->media_port == 0 || config->signaling_port == 0 || config->packet_buf_size < 1200 || config->packet_pool_capacity == 0) {

@@ -75,8 +75,7 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
 static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset);
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, sfu_video_codec_t codec, uint8_t video_pt, uint8_t rtx_pt);
 static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc, int64_t user_id, uint32_t peer_id);
-static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc, int64_t user_id,
-                                     uint32_t peer_id);
+static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id);
 
 static int append_bundled_transport_headers(char *out, size_t out_cap, size_t *offset, const char *host, const char *ufrag, const char *pwd,
                                             const char *fingerprint) {
@@ -133,8 +132,8 @@ static int append_bundle_group(char *out, size_t out_cap, size_t *offset, uint32
   return 0;
 }
 
-static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, uint16_t port, const char *transport, size_t transport_len, uint32_t mid,
-                                bool live, const sfu_sdp_receiver_view_t *slot) {
+static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, uint16_t port, const char *transport, size_t transport_len, uint32_t mid, bool live,
+                                const sfu_sdp_receiver_view_t *slot) {
   char buf[256];
   int n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, offset, buf, (size_t)n) != 0) {
@@ -783,8 +782,8 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
     if (append_bundled_audio(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_audio, audio_live, found ? &slot : NULL) != 0) {
       goto fail;
     }
-    if (append_bundled_video(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_video, video_live, found ? &slot : NULL,
-                             local_video_pt, local_rtx_pt) != 0) {
+    if (append_bundled_video(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_video, video_live, found ? &slot : NULL, local_video_pt,
+                             local_rtx_pt) != 0) {
       goto fail;
     }
   }

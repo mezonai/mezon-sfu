@@ -3,17 +3,9 @@
 
 #include <string.h>
 
-/*
- * head/tail are monotonically increasing counters (never wrapped
- * directly); only array indexing wraps them via `& mask`. This lets us
- * distinguish full vs. empty without sacrificing a slot:
- *   empty: tail == head
- *   full:  tail - head == capacity
- */
-
 int sfu_spsc_ring_init(sfu_spsc_ring_t *ring, uint32_t capacity_pow2) {
   if (capacity_pow2 == 0 || (capacity_pow2 & (capacity_pow2 - 1)) != 0) {
-    return -1; /* must be a power of two */
+    return -1;
   }
 
   memset(ring, 0, sizeof(*ring));
@@ -43,7 +35,7 @@ bool sfu_spsc_ring_push(sfu_spsc_ring_t *ring, void *item) {
 
   if (tail - head >= ring->capacity) {
     atomic_fetch_add_explicit(&ring->push_failures, 1, memory_order_relaxed);
-    return false; /* full */
+    return false;
   }
 
   ring->slots[tail & ring->mask] = item;
@@ -53,8 +45,6 @@ bool sfu_spsc_ring_push(sfu_spsc_ring_t *ring, void *item) {
   while (depth > high && !atomic_compare_exchange_weak_explicit(&ring->high_water, &high, depth, memory_order_relaxed, memory_order_relaxed)) {
   }
 
-  /* release: publish the slot write before advancing tail, so the
-   * consumer's acquire-load of tail is guaranteed to see the item. */
   atomic_store_explicit(&ring->tail, tail + 1, memory_order_release);
   return true;
 }
@@ -64,7 +54,7 @@ bool sfu_spsc_ring_pop(sfu_spsc_ring_t *ring, void **out_item) {
   uint32_t tail = atomic_load_explicit(&ring->tail, memory_order_acquire);
 
   if (head == tail) {
-    return false; /* empty */
+    return false;
   }
 
   *out_item = ring->slots[head & ring->mask];

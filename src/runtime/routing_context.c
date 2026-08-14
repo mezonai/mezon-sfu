@@ -31,7 +31,7 @@ static sfu_routing_entry_t *find_entry_locked(sfu_routing_table_t *table, const 
 }
 
 sfu_routing_register_result_t sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
-                                                                 const sfu_pending_answer_t *answer, uint32_t *out_generation) {
+                                                                const sfu_pending_answer_t *answer, uint32_t *out_generation) {
   if (!table || !client_ufrag || client_ufrag[0] == '\0' || !room || fd < 0 || !answer) {
     return SFU_ROUTING_REGISTER_INVALID_ARGUMENT;
   }

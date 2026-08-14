@@ -37,9 +37,6 @@ sfu_packet_t *sfu_packet_pool_alloc(sfu_packet_pool_t *pp) {
     return NULL;
   }
 
-  /* meta and data pools are sized identically 1:1, but indices can
-   * diverge under concurrent alloc/free churn -- store data's own
-   * index rather than assuming meta_idx == data_idx. */
   uint32_t prior_gen = atomic_load_explicit(&pkt->generation, memory_order_relaxed);
   memset(pkt, 0, sizeof(*pkt));
   atomic_store_explicit(&pkt->generation, prior_gen, memory_order_relaxed);

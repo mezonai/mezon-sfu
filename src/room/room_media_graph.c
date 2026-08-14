@@ -187,8 +187,7 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
   if (combined) {
     for (uint32_t i = 0; i < combined->count; i++) {
       audio_count += combined->entries[i].has_audio && combined->entries[i].audio_active;
-      if (combined->entries[i].has_video && combined->entries[i].video_active &&
-          sfu_session_ensure_video_runtime(combined->entries[i].subscriber)) {
+      if (combined->entries[i].has_video && combined->entries[i].video_active && sfu_session_ensure_video_runtime(combined->entries[i].subscriber)) {
         video_count++;
       }
     }
@@ -235,9 +234,7 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
   return true;
 }
 
-static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
-  sfu_session_publish_receivers(owner, new_snap);
-}
+static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) { sfu_session_publish_receivers(owner, new_snap); }
 
 static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
   if (!publish_split_fanout(owner, new_snap)) {
@@ -256,8 +253,8 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     return;
   }
   if (peer->room) {
-    SFU_LOG_WARN("peer %u already belongs to room %" PRIu64 "; refusing add to room %" PRIu64, peer->peer_id,
-                 ((sfu_room_t *)peer->room)->room_id, room->room_id);
+    SFU_LOG_WARN("peer %u already belongs to room %" PRIu64 "; refusing add to room %" PRIu64, peer->peer_id, ((sfu_room_t *)peer->room)->room_id,
+                 room->room_id);
     pthread_mutex_unlock(&room->lock);
     return;
   }
