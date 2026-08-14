@@ -457,6 +457,7 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
   assert(session != NULL);
 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
+  uint32_t receiver_count = snap ? snap->count : 0;
 
   uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
   uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
