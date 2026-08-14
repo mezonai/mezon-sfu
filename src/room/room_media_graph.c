@@ -373,8 +373,13 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
 
   pthread_mutex_lock(&peer->media_lock);
   if (is_audience) {
+    peer->uplink_audio.ssrc = 0;
     peer->uplink_audio.active = false;
+    peer->uplink_video.ssrc = 0;
+    peer->uplink_video.rtx_ssrc = 0;
     peer->uplink_video.active = false;
+    peer->screen.ssrc = 0;
+    peer->screen.rtx_ssrc = 0;
     peer->screen.active = false;
   } else {
     if (peer->uplink_audio.ssrc != 0) {

@@ -292,6 +292,51 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   cleanup_mock_session(&session, remotes);
 }
 
+static void test_screen_only_remote_offer(void) {
+  sfu_peer_session_t session;
+  sfu_transceiver_t audio[SFU_MAX_REMOTE_SLOTS], video[SFU_MAX_REMOTE_SLOTS];
+  sfu_peer_session_t remotes[SFU_MAX_REMOTE_SLOTS];
+  setup_mock_session(&session, audio, video, remotes);
+
+  atomic_store(&session.is_audience, true);
+  atomic_store(&session.next_remote_mid, SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  remotes[0].user_id = 42;
+  remotes[0].peer_id = 7;
+  snprintf(remotes[0].cold->ufrag, sizeof(remotes[0].cold->ufrag), "screenUfrag");
+
+  sfu_receiver_snapshot_t *snap = atomic_load(&session.receivers);
+  assert(snap != NULL && snap->count > 0);
+  sfu_receiver_entry_t *entry = &snap->entries[0];
+  entry->publisher_user_id = remotes[0].user_id;
+  entry->publisher_peer_id = remotes[0].peer_id;
+  entry->has_audio = false;
+  entry->has_video = false;
+  entry->has_screen = true;
+  entry->screen_ssrc = 4444;
+  entry->screen_rtx_ssrc = 5555;
+  entry->screen_pt = 96;
+  entry->screen_rtx_pt = 97;
+  entry->screen_codec = SFU_VIDEO_CODEC_VP8;
+  entry->screen_active = true;
+  snprintf(entry->subscriber_ufrag, sizeof(entry->subscriber_ufrag), "%s", remotes[0].cold->ufrag);
+
+  char offer[4096];
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+
+  assert(count_occurrences(offer, "a=sendonly") == 1);
+  assert(count_occurrences(offer, "a=inactive") == 5);
+  assert(contains(offer, "a=mid:5\r\n"));
+  assert(contains(offer, "a=ssrc:4444 msid:u42-p7 screen-u42-p7"));
+  assert(contains(offer, "a=msid:u42-p7 screen-u42-p7"));
+  assert(contains(offer, "a=ssrc-group:FID 4444 5555"));
+  assert(!contains(offer, "a=ssrc:1111"));
+  assert(!contains(offer, "a=ssrc:2222"));
+
+  cleanup_mock_session(&session, remotes);
+}
+
 static void test_twcc_extmap_extraction(void) {
   extern uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len);
 
@@ -703,6 +748,7 @@ int main(void) {
   test_initial_offer_role_directions();
   test_renegotiation_offer_role_directions();
   test_audience_offer_with_active_remote_speaker();
+  test_screen_only_remote_offer();
   test_299_audio_only_remote_offer();
   test_twcc_extmap_extraction();
   test_answer_media_is_scoped_by_mid_and_direction();

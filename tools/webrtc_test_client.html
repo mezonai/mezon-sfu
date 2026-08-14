@@ -581,6 +581,29 @@
                 return userId !== "0" ? "user-" + userId : "peer-" + String(member.peer_id);
             }
 
+            function isLocalUplinkMid(mid) {
+                return mid === "0" || mid === "1" || mid === "2";
+            }
+
+            function remoteKindFromMid(mid) {
+                const n = Number(mid);
+                if (!Number.isFinite(n) || n < 3) return null;
+                const slot = (n - 3) % 3;
+                if (slot === 0) return "audio";
+                if (slot === 1) return "camera";
+                return "screen";
+            }
+
+            function memberMids(member) {
+                return [member && member.mid_audio, member && member.mid_video, member && member.mid_screen];
+            }
+
+            function mediaTileId(baseId, mid, trackKind = null, isScreen = false) {
+                const kind = remoteKindFromMid(mid);
+                if (trackKind === "audio" || kind === "audio") return baseId;
+                return baseId + (isScreen || kind === "screen" ? "-screen" : "-camera");
+            }
+
             function parsePublisherStreamId(streamId) {
                 const match = /^u(-?\d+)-p(\d+)$/.exec(String(streamId || ""));
                 return match ? { userId: match[1], peerId: match[2] } : null;
@@ -645,7 +668,7 @@
                 mergedMember.tileId = id;
                 membersByPeerId.set(peerId, mergedMember);
                 if (member.ufrag) peerIdByUfrag.set(String(member.ufrag), peerId);
-                for (const midValue of [member.mid_audio, member.mid_video]) {
+                for (const midValue of memberMids(member)) {
                     if (midValue != null && String(midValue) !== "0") {
                         peerIdByMid.set(String(midValue), peerId);
                     }
@@ -669,17 +692,21 @@
                 if (p.isMute) badges.push("Muted");
                 p.badges.textContent = badges.join(" · ");
 
-                for (const midValue of [member.mid_audio, member.mid_video]) {
+                for (const midValue of memberMids(member)) {
                     if (midValue == null || String(midValue) === "0") continue;
-                    const oldId = "mid-" + String(midValue);
+                    const targetId = mediaTileId(id, midValue);
+                    const oldId = mediaTileId("mid-" + String(midValue), midValue);
                     const old = participants.get(oldId);
-                    if (old && old !== p) {
-                        if (old.stream) setTileStream(p, old.stream, old.hasVideo);
-                        document
-                            .querySelectorAll(`audio[data-owner="${CSS.escape(oldId)}"]`)
-                            .forEach((el) => { el.dataset.owner = id; });
-                        removeTile(oldId);
-                    }
+                    if (!old || oldId === targetId) continue;
+                    const target = targetId === id ? p : ensureParticipant(targetId, {
+                        isLocal: isSelf,
+                        label: remoteKindFromMid(midValue) === "screen" ? label + " screen" : label,
+                    });
+                    if (old.stream) setTileStream(target, old.stream, old.hasVideo);
+                    document
+                        .querySelectorAll(`audio[data-owner="${CSS.escape(oldId)}"]`)
+                        .forEach((el) => { el.dataset.owner = targetId; });
+                    removeTile(oldId);
                 }
                 return p;
             }
@@ -690,7 +717,10 @@
                 peerIdByMid.clear();
                 const liveIds = new Set();
                 for (const member of msg.members || []) {
-                    liveIds.add(memberTileId(member));
+                    const baseId = memberTileId(member);
+                    liveIds.add(baseId);
+                    liveIds.add(baseId + "-camera");
+                    liveIds.add(baseId + "-screen");
                     upsertMember(member, String(member.peer_id) === String(msg.self_peer_id));
                 }
                 for (const id of [...participants.keys()]) {
@@ -715,7 +745,11 @@
                     const tileId = member ? memberTileId(member) : "peer-" + peerId;
                     membersByPeerId.delete(peerId);
                     const tileStillUsed = [...membersByPeerId.values()].some((other) => memberTileId(other) === tileId);
-                    if (!tileStillUsed) removeTile(tileId);
+                    if (!tileStillUsed) {
+                        removeTile(tileId);
+                        removeTile(tileId + "-camera");
+                        removeTile(tileId + "-screen");
+                    }
                 }
                 const mids = [];
                 const addMid = (v) => {
@@ -724,6 +758,7 @@
                 };
                 addMid(msg.mid_video);
                 addMid(msg.mid_audio);
+                addMid(msg.mid_screen);
 
                 for (const mid of mids) {
                     peerIdByMid.delete(mid);
@@ -741,7 +776,7 @@
                 // peer_left, so this path only runs on leave.
                 if (mids.length === 0 && pc) {
                     for (const t of pc.getTransceivers()) {
-                        if (!t.mid || t.mid === "0" || t.mid === "1") continue;
+                        if (!t.mid || isLocalUplinkMid(t.mid)) continue;
                         const dir = t.currentDirection || t.direction;
                         if (dir === "inactive" || dir === "stopped") {
                             leftRemoteMids.add(String(t.mid));
@@ -832,12 +867,15 @@
             function resyncRemoteMedia(pc) {
                 if (!pc) return;
                 for (const t of pc.getTransceivers()) {
-                    if (!t.mid || t.mid === "0" || t.mid === "1") continue;
+                    if (!t.mid || isLocalUplinkMid(t.mid)) continue;
                     // Publisher left: keep historical inactive m-line, no tile.
                     if (leftRemoteMids.has(String(t.mid))) continue;
                     const track = t.receiver && t.receiver.track;
                     if (!track || track.readyState === "ended") continue;
-                    const id = "mid-" + t.mid;
+                    const mappedPeerId = peerIdByMid.get(String(t.mid));
+                    const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
+                    const baseId = mappedMember ? memberTileId(mappedMember) : "mid-" + t.mid;
+                    const id = mediaTileId(baseId, t.mid, track.kind);
                     if (track.kind === "video") {
                         // Do not invent a tile for an already-inactive remote mid
                         // unless we already had one (demote → avatar). Leave must
@@ -1198,9 +1236,14 @@
                 updateLocalScreenBadge(true);
 
                 const local = participants.get("local");
-                if (local) {
-                    setTileStream(local, new MediaStream([screenTrack]), true);
+                if (local && camEnabled && localStream) {
+                    setTileStream(local, localStream, localStream.getVideoTracks().length > 0);
                 }
+                const screenTile = ensureParticipant("local-screen", {
+                    isLocal: true,
+                    label: "Your screen",
+                });
+                setTileStream(screenTile, new MediaStream([screenTrack]), true);
 
                 sendHook("share_screen", { active: true });
                 setConnState("sharing screen", "ok");
@@ -1240,6 +1283,7 @@
                 screenSharing = false;
                 setScreenButtonActive(false);
                 updateLocalScreenBadge(false);
+                removeTile("local-screen");
 
                 const local = participants.get("local");
                 if (local) {
@@ -1450,6 +1494,10 @@
                     pc.getTransceivers().find((t) => t.mid === "1") || transceiver;
 
                 forceVideoCodec(uplink, selectedCodec);
+                const screenTc = pc.getTransceivers().find((t) => t.mid === "2");
+                if (screenTc) {
+                    forceVideoCodec(screenTc, selectedCodec);
+                }
 
                 if (videoTrack && "contentHint" in videoTrack) {
                     try {
@@ -1721,6 +1769,9 @@
                         // with new tracks, so stream id alone cannot tell peers
                         // (or incarnations of the same peer) apart.
                         const mid = event.transceiver && event.transceiver.mid;
+                        if (isLocalUplinkMid(mid)) {
+                            return;
+                        }
                         if (mid && leftRemoteMids.has(String(mid))) {
                             console.log("ontrack ignored for left remote mid", mid);
                             return;
@@ -1743,9 +1794,10 @@
                                 ? "user-" + publisherIdentity.userId
                                 : (mid ? "mid-" + mid : (streamId || track.id));
                         const isScreenTrack = track.kind === "video" &&
-                            ((track.id && track.id.toLowerCase().includes("screen")) ||
+                            (remoteKindFromMid(mid) === "screen" ||
+                             (track.id && track.id.toLowerCase().includes("screen")) ||
                              (streamId && streamId.toLowerCase().includes("screen")));
-                        const id = track.kind === "video" ? baseId + (isScreenTrack ? "-screen" : "-camera") : baseId;
+                        const id = mediaTileId(baseId, mid, track.kind, isScreenTrack);
 
                         if (track.kind === "video") {
                             const label = "Peer " + id.substring(0, 8);

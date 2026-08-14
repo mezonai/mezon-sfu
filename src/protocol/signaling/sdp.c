@@ -462,7 +462,7 @@ static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t 
     return false;
   }
   const sfu_receiver_entry_t *e = &snap->entries[i];
-  if (!e->has_audio && !e->has_video) {
+  if (!e->has_audio && !e->has_video && !e->has_screen) {
     return false;
   }
   view->publisher_user_id = e->publisher_user_id;
