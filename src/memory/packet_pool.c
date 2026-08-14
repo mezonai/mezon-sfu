@@ -1,5 +1,6 @@
 #include "memory/packet_pool.h"
 #include "memory/refcount.h"
+#include "util/metrics.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -25,11 +26,13 @@ sfu_packet_t *sfu_packet_pool_alloc(sfu_packet_pool_t *pp) {
 
   sfu_packet_t *pkt = sfu_pool_alloc(&pp->meta, &meta_idx);
   if (!pkt) {
+    sfu_metric_inc("packet_meta_pool_exhausted");
     return NULL;
   }
 
   void *buf = sfu_pool_alloc(&pp->data, &data_idx);
   if (!buf) {
+    sfu_metric_inc("packet_pool_exhausted");
     sfu_pool_free(&pp->meta, meta_idx);
     return NULL;
   }
@@ -65,6 +68,7 @@ sfu_packet_t *sfu_packet_pool_alloc_meta(sfu_packet_pool_t *pp) {
   uint32_t meta_idx;
   sfu_packet_t *pkt = sfu_pool_alloc(&pp->meta, &meta_idx);
   if (!pkt) {
+    sfu_metric_inc("packet_meta_pool_exhausted");
     return NULL;
   }
 

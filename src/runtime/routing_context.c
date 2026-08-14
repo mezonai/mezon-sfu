@@ -101,6 +101,25 @@ bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *clie
   return true;
 }
 
+bool sfu_routing_table_peek_route(sfu_routing_table_t *table, const char *client_ufrag, sfu_routing_snapshot_t *out) {
+  if (!table || !client_ufrag || !out) {
+    return false;
+  }
+  pthread_mutex_lock(&table->mutex);
+  sfu_routing_entry_t *entry = find_entry_locked(table, client_ufrag);
+  if (!entry) {
+    pthread_mutex_unlock(&table->mutex);
+    return false;
+  }
+  out->room = entry->room;
+  out->worker_index = entry->worker_index;
+  out->fd = entry->fd;
+  out->has_owner = entry->has_owner;
+  out->pending_generation = entry->pending_answer.valid ? entry->pending_answer.generation : 0;
+  pthread_mutex_unlock(&table->mutex);
+  return true;
+}
+
 bool sfu_routing_table_reconcile_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,
                                         sfu_peer_session_t *session, bool *role_changed, bool *media_changed) {
   if (!table || !client_ufrag || !room || fd < 0 || generation == 0 || !session) {

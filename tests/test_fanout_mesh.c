@@ -1,4 +1,6 @@
 #include "runtime/fanout.h"
+#include "memory/refcount.h"
+#include "peer/session.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
@@ -14,7 +16,15 @@ typedef struct {
 static void collect(void *user_data, sfu_fanout_job_t *job) {
   collector_t *c = (collector_t *)user_data;
   c->count++;
-  c->last_dst = job->dst;
+  if (job->kind == SFU_FANOUT_JOB_BATCH) {
+    assert(job->target_count > 0 && job->target_count <= SFU_FANOUT_BATCH_CAP);
+    for (uint8_t i = 0; i < job->target_count; i++) {
+      sfu_session_release(job->targets[i].subscriber);
+    }
+    assert(!sfu_packet_release(job->pkt));
+  } else {
+    c->last_dst = job->dst;
+  }
   sfu_fanout_mesh_free_job(c->mesh, job);
 }
 
@@ -83,6 +93,27 @@ int main(void) {
   c.count = 0;
   drained = sfu_fanout_mesh_drain(&mesh, 2, 100, collect, &c);
   assert(drained == 1);
+
+  /* One batch job carries several subscribers while retaining each target
+   * exactly once and sharing one immutable source packet. */
+  sfu_peer_session_t subscribers[2];
+  memset(subscribers, 0, sizeof(subscribers));
+  atomic_store(&subscribers[0].refcount, 2);
+  atomic_store(&subscribers[1].refcount, 2);
+  atomic_store(&fake_pkt.refcount, 2);
+  sfu_fanout_target_t targets[2] = {
+      {.subscriber = &subscribers[0], .dst = s1, .dst_len = sizeof(struct sockaddr_in)},
+      {.subscriber = &subscribers[1], .dst = s2, .dst_len = sizeof(struct sockaddr_in)},
+  };
+  assert(sfu_fanout_mesh_enqueue_forward_batch(&mesh, 0, 1, &fake_pkt, NULL, targets, 2, true, NULL, false, false));
+  assert(atomic_load(&subscribers[0].refcount) == 3);
+  assert(atomic_load(&subscribers[1].refcount) == 3);
+  c.count = 0;
+  drained = sfu_fanout_mesh_drain(&mesh, 1, 16, collect, &c);
+  assert(drained == 1 && c.count == 1);
+  assert(atomic_load(&subscribers[0].refcount) == 2);
+  assert(atomic_load(&subscribers[1].refcount) == 2);
+  assert(atomic_load(&fake_pkt.refcount) == 1);
 
   sfu_fanout_mesh_destroy(&mesh);
   printf("test_fanout_mesh: OK\n");

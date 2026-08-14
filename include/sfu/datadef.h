@@ -155,6 +155,35 @@ struct sfu_receiver_snapshot {
   sfu_receiver_entry_t entries[];
 };
 
+typedef struct sfu_audio_route_entry {
+  sfu_peer_session_t *subscriber;
+} sfu_audio_route_entry_t;
+
+typedef struct sfu_audio_route_snapshot {
+  _Atomic uint32_t refcount;
+  uint64_t generation;
+  uint32_t count;
+  uint32_t capacity;
+  sfu_audio_route_entry_t entries[];
+} sfu_audio_route_snapshot_t;
+
+typedef struct sfu_video_route_entry {
+  sfu_peer_session_t *subscriber;
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  bool has_video;
+} sfu_video_route_entry_t;
+
+typedef struct sfu_video_route_snapshot {
+  _Atomic uint32_t refcount;
+  uint64_t generation;
+  uint32_t count;
+  uint32_t capacity;
+  sfu_video_route_entry_t entries[];
+} sfu_video_route_snapshot_t;
+
 typedef struct sfu_media_snapshot {
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
@@ -167,6 +196,13 @@ typedef struct sfu_media_snapshot {
   bool audio_active;
   bool video_active;
 } sfu_media_snapshot_t;
+
+typedef enum {
+  SFU_VIDEO_RUNTIME_UNINITIALIZED = 0,
+  SFU_VIDEO_RUNTIME_INITIALIZING,
+  SFU_VIDEO_RUNTIME_READY,
+  SFU_VIDEO_RUNTIME_FAILED,
+} sfu_video_runtime_state_t;
 
 typedef struct sfu_pacer {
   uint64_t sent[SFU_PACER_CLASS_COUNT];
@@ -200,6 +236,8 @@ typedef struct sfu_peer_session {
   sfu_peer_session_cold_t *cold;
   _Atomic(sfu_receiver_snapshot_t *) receivers;
   _Atomic(sfu_receiver_snapshot_t *) fanout_targets;
+  _Atomic(sfu_audio_route_snapshot_t *) audio_fanout_targets;
+  _Atomic(sfu_video_route_snapshot_t *) video_fanout_targets;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
@@ -228,6 +266,7 @@ typedef struct sfu_peer_session {
   _Atomic uint32_t refcount;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t lifecycle;
+  _Atomic uint8_t video_runtime_state;
   _Atomic bool accepts_work;
   uint8_t state;
   uint8_t fir_seq;

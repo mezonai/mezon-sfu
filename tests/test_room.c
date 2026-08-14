@@ -64,6 +64,20 @@ static bool fanout_targets(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
   return found;
 }
 
+static uint32_t audio_route_count(sfu_peer_session_t *peer) {
+  sfu_audio_route_snapshot_t *snap = sfu_session_audio_fanout_acquire(peer);
+  uint32_t n = snap ? snap->count : 0;
+  sfu_audio_route_snapshot_release(snap);
+  return n;
+}
+
+static uint32_t video_route_count(sfu_peer_session_t *peer) {
+  sfu_video_route_snapshot_t *snap = sfu_session_video_fanout_acquire(peer);
+  uint32_t n = snap ? snap->count : 0;
+  sfu_video_route_snapshot_release(snap);
+  return n;
+}
+
 static bool subscribes_to(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(peer);
   bool found = false;
@@ -96,6 +110,17 @@ static void test_add_remove(void) {
   assert(receiver_count(b) == 1);
   assert(subscribes_to(a, b));
   assert(subscribes_to(b, a));
+  assert(audio_route_count(a) == 1 && audio_route_count(b) == 1);
+  assert(video_route_count(a) == 1 && video_route_count(b) == 1);
+
+  b->uplink_video.active = false;
+  room_refresh_peer_streams(&room, b);
+  assert(receiver_count(a) == 1); /* stable SDP slot remains */
+  assert(video_route_count(b) == 0); /* inactive source omitted from hot path */
+  assert(audio_route_count(b) == 1);
+  b->uplink_video.active = true;
+  room_refresh_peer_streams(&room, b);
+  assert(video_route_count(b) == 1);
 
   room_add_peer(&room, c);
   assert(receiver_count(a) == 2);

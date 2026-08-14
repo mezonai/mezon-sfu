@@ -11,6 +11,7 @@
 #include "sfu/datadef.h"
 #include "util/alloc.h"
 #include "util/log.h"
+#include "util/metrics.h"
 
 #define SFU_DISPATCH_SQ_ENTRIES 1024
 #define SFU_DISPATCH_CQ_ENTRIES 4096
@@ -18,20 +19,66 @@
 #define SFU_DISPATCH_IDLE_SLEEP_US 100
 
 #define SFU_PENDING_FREE_SWEEP_INTERVAL_SEC 1
+#define SFU_SMALL_ROOM_AFFINITY_MAX 8
+
+static bool affinity_addr_equal(const sfu_affinity_entry_t *entry, uint32_t hash, const struct sockaddr_storage *addr, socklen_t addr_len) {
+  return entry->valid && entry->hash == hash && entry->addr_len == addr_len && memcmp(&entry->addr, addr, addr_len) == 0;
+}
+
+static uint32_t scheduler_select_worker(sfu_scheduler_t *s, sfu_packet_t *pkt, uint32_t hash) {
+  uint32_t fallback = hash % s->worker_count;
+  bool is_stun = sfu_stun_is_stun_packet(pkt->data, pkt->len);
+  sfu_affinity_entry_t *entry = &s->affinity[hash & (SFU_AFFINITY_CACHE_CAP - 1)];
+  bool cache_hit = affinity_addr_equal(entry, hash, &pkt->peer_addr, pkt->peer_addr_len);
+  if (cache_hit && !is_stun) {
+    entry->last_seen_ns = pkt->recv_ts_ns;
+    return entry->worker_index;
+  }
+
+  uint32_t selected = cache_hit ? entry->worker_index : fallback;
+  if (s->routing_table && s->ice_creds && is_stun) {
+    char client_ufrag[32];
+    if (sfu_stun_extract_client_ufrag(pkt->data, pkt->len, s->ice_creds->ufrag, client_ufrag, sizeof(client_ufrag))) {
+      sfu_routing_snapshot_t route;
+      if (sfu_routing_table_peek_route(s->routing_table, client_ufrag, &route) && route.room) {
+        pthread_mutex_lock(&route.room->lock);
+        uint32_t peer_count = route.room->peer_count;
+        uint64_t room_id = route.room->room_id;
+        pthread_mutex_unlock(&route.room->lock);
+        if (peer_count <= SFU_SMALL_ROOM_AFFINITY_MAX) {
+          selected = fnv1a(&room_id, sizeof(room_id)) % s->worker_count;
+        } else if (route.has_owner && route.worker_index < s->worker_count) {
+          selected = route.worker_index;
+        }
+      }
+    }
+  }
+
+  memset(entry, 0, sizeof(*entry));
+  entry->addr = pkt->peer_addr;
+  entry->addr_len = pkt->peer_addr_len;
+  entry->hash = hash;
+  entry->worker_index = selected;
+  entry->last_seen_ns = pkt->recv_ts_ns;
+  entry->valid = true;
+  return selected;
+}
 
 static uint64_t scheduler_worker_generation(void *context, uint32_t worker_index) {
   sfu_worker_t *workers = context;
   return __atomic_load_n(&workers[worker_index].generation, __ATOMIC_ACQUIRE);
 }
 
-int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count, int recv_bgid,
-                       uint32_t buf_count, uint32_t buf_size) {
+int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count,
+                       sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds, int recv_bgid, uint32_t buf_count, uint32_t buf_size) {
   memset(s, 0, sizeof(*s));
   s->core_id = core_id;
   s->fd = fd;
   s->pp = pp;
   s->workers = workers;
   s->worker_count = worker_count;
+  s->routing_table = routing_table;
+  s->ice_creds = ice_creds;
 
   if (sfu_ring_init(&s->recv_ring, fd, SFU_DISPATCH_SQ_ENTRIES, SFU_DISPATCH_CQ_ENTRIES, buf_count, buf_size, recv_bgid, true) != 0) {
     SFU_LOG_ERROR("scheduler: failed to init recv ring");
@@ -80,9 +127,10 @@ static void on_recv(void *user_data, sfu_packet_t *pkt) {
   }
 
   uint32_t h = fnv1a(&pkt->peer_addr, pkt->peer_addr_len);
-  uint32_t worker_idx = h % s->worker_count;
+  uint32_t worker_idx = scheduler_select_worker(s, pkt, h);
 
   if (!sfu_spsc_ring_push(&s->workers[worker_idx].inbox, pkt)) {
+    sfu_metric_inc("worker_inbox_full");
     SFU_LOG_WARN("worker %u inbox full, dropping packet", worker_idx);
     sfu_ring_release_packet(&s->recv_ring, s->pp, pkt);
   }
@@ -146,7 +194,7 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
 }
 
 sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id) {
-  if (!session || !session->schedulers || publisher_id == 0) {
+  if (!session || !sfu_session_video_runtime_ready(session) || !session->schedulers || publisher_id == 0) {
     return NULL;
   }
 

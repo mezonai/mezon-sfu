@@ -100,6 +100,15 @@ static int append_bundled_transport_headers(char *out, size_t out_cap, size_t *o
   return append_line(out, out_cap, offset, "a=setup:passive");
 }
 
+static int append_fragment(char *out, size_t out_cap, size_t *offset, const char *fragment, size_t fragment_len) {
+  if (*offset + fragment_len >= out_cap) {
+    return -1;
+  }
+  memcpy(out + *offset, fragment, fragment_len);
+  *offset += fragment_len;
+  return 0;
+}
+
 static int append_bundle_group(char *out, size_t out_cap, size_t *offset, uint32_t next_remote_mid) {
   if (*offset + 20 >= out_cap) {
     return -1;
@@ -124,14 +133,14 @@ static int append_bundle_group(char *out, size_t out_cap, size_t *offset, uint32
   return 0;
 }
 
-static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, const char *host, uint16_t port, const char *ufrag, const char *pwd,
-                                const char *fingerprint, uint32_t mid, bool live, const sfu_sdp_receiver_view_t *slot) {
+static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, uint16_t port, const char *transport, size_t transport_len, uint32_t mid,
+                                bool live, const sfu_sdp_receiver_view_t *slot) {
   char buf[256];
   int n = snprintf(buf, sizeof(buf), "m=audio %u UDP/TLS/RTP/SAVPF 111", port);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, offset, buf, (size_t)n) != 0) {
     return -1;
   }
-  if (append_bundled_transport_headers(out, out_cap, offset, host, ufrag, pwd, fingerprint) != 0) {
+  if (append_fragment(out, out_cap, offset, transport, transport_len) != 0) {
     return -1;
   }
   if (append_line(out, out_cap, offset, live ? "a=sendonly" : "a=inactive") != 0) {
@@ -153,9 +162,8 @@ static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, const
   return 0;
 }
 
-static int append_bundled_video(char *out, size_t out_cap, size_t *offset, const char *host, uint16_t port, const char *ufrag, const char *pwd,
-                                const char *fingerprint, uint32_t mid, bool live, const sfu_sdp_receiver_view_t *slot, uint8_t fallback_pt,
-                                uint8_t fallback_rtx_pt) {
+static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint16_t port, const char *transport, size_t transport_len, uint32_t mid, bool live,
+                                const sfu_sdp_receiver_view_t *slot, uint8_t fallback_pt, uint8_t fallback_rtx_pt) {
   char buf[256];
   uint8_t video_pt = (live && slot && slot->video_pt != 0) ? slot->video_pt : fallback_pt;
   uint8_t rtx_pt = (live && slot && slot->video_rtx_pt != 0) ? slot->video_rtx_pt : fallback_rtx_pt;
@@ -168,7 +176,7 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, const
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, offset, buf, (size_t)n) != 0) {
     return -1;
   }
-  if (append_bundled_transport_headers(out, out_cap, offset, host, ufrag, pwd, fingerprint) != 0) {
+  if (append_fragment(out, out_cap, offset, transport, transport_len) != 0) {
     return -1;
   }
   if (append_line(out, out_cap, offset, live ? "a=sendonly" : "a=inactive") != 0) {
@@ -655,6 +663,28 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
+  char bundled_transport[512];
+  size_t bundled_transport_len = 0;
+  if (append_bundled_transport_headers(bundled_transport, sizeof(bundled_transport), &bundled_transport_len, host, ufrag, pwd, fingerprint) != 0) {
+    goto fail;
+  }
+  int16_t mid_index[SFU_MAX_REMOTE_SLOTS];
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    mid_index[i] = -1;
+  }
+  for (uint32_t i = 0; i < receiver_count; i++) {
+    uint32_t mid = snap->entries[i].mid_audio;
+    if (mid < 2 || (mid & 1u) != 0) {
+      SFU_LOG_WARN("SDP_BUILD: invalid audio mid %u", mid);
+      goto fail;
+    }
+    uint32_t slot = (mid - 2) / 2;
+    if (slot >= SFU_MAX_REMOTE_SLOTS || mid_index[slot] >= 0) {
+      SFU_LOG_WARN("SDP_BUILD: duplicate/out-of-range audio mid %u", mid);
+      goto fail;
+    }
+    mid_index[slot] = (int16_t)i;
+  }
   bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
   uint8_t local_video_pt = 0;
   uint8_t local_rtx_pt = 0;
@@ -720,7 +750,7 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     goto fail;
   }
-  if (append_bundled_transport_headers(out, out_cap, &off, host, ufrag, pwd, fingerprint) != 0) {
+  if (append_fragment(out, out_cap, &off, bundled_transport, bundled_transport_len) != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
@@ -744,26 +774,17 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
 
     sfu_sdp_receiver_view_t slot;
     memset(&slot, 0, sizeof(slot));
-    bool found = false;
-    for (uint32_t i = 0; i < receiver_count; i++) {
-      sfu_sdp_receiver_view_t candidate;
-      if (!sfu_sdp_receiver_view(snap, i, &candidate)) {
-        continue;
-      }
-      if (candidate.mid_audio == mid_audio) {
-        slot = candidate;
-        found = true;
-        break;
-      }
-    }
+    uint32_t map_slot = (mid_audio - 2) / 2;
+    int16_t entry_index = map_slot < SFU_MAX_REMOTE_SLOTS ? mid_index[map_slot] : -1;
+    bool found = entry_index >= 0 && sfu_sdp_receiver_view(snap, (uint32_t)entry_index, &slot);
 
     bool audio_live = found && slot.has_audio && slot.audio_active && slot.audio_ssrc != 0;
     bool video_live = found && slot.has_video && slot.video_active && slot.video_ssrc != 0;
-    if (append_bundled_audio(out, out_cap, &off, host, port, ufrag, pwd, fingerprint, mid_audio, audio_live, found ? &slot : NULL) != 0) {
+    if (append_bundled_audio(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_audio, audio_live, found ? &slot : NULL) != 0) {
       goto fail;
     }
-    if (append_bundled_video(out, out_cap, &off, host, port, ufrag, pwd, fingerprint, mid_video, video_live, found ? &slot : NULL, local_video_pt,
-                             local_rtx_pt) != 0) {
+    if (append_bundled_video(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_video, video_live, found ? &slot : NULL,
+                             local_video_pt, local_rtx_pt) != 0) {
       goto fail;
     }
   }

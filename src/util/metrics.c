@@ -5,9 +5,38 @@
 #include <string.h>
 
 static const char *const k_metric_names[] = {
-    "msg_trunc_drop",  "json_reject",         "rtcp_compound_malformed", "rtcp_member_unknown", "rtcp_twcc_bad",
-    "rtcp_nack_bad",   "rtcp_pli_bad",        "rtcp_nack_dropped",       "rtx_build_fail",      "rtcp_kf_unresolved",
-    "twcc_write_fail", "egress_protect_fail", "egress_send_full",        "pacer_dropped_enh",   "rtx_dropped_budget",
+    "msg_trunc_drop",
+    "json_reject",
+    "rtcp_compound_malformed",
+    "rtcp_member_unknown",
+    "rtcp_twcc_bad",
+    "rtcp_nack_bad",
+    "rtcp_pli_bad",
+    "rtcp_nack_dropped",
+    "rtx_build_fail",
+    "rtcp_kf_unresolved",
+    "twcc_write_fail",
+    "egress_protect_fail",
+    "egress_send_full",
+    "pacer_dropped_enh",
+    "rtx_dropped_budget",
+    "audience_rtp_drop",
+    "rtp_parse_fail",
+    "muted_audio_drop",
+    "unnegotiated_rtp_drop",
+    "vp9_descriptor_parse_fail",
+    "packet_pool_exhausted",
+    "packet_meta_pool_exhausted",
+    "worker_inbox_full",
+    "fanout_ring_full",
+    "fanout_job_pool_exhausted",
+    "release_queue_full",
+    "send_sq_full",
+    "egress_admission_drop",
+    "egress_output_alloc",
+    "egress_copied_bytes",
+    "fanout_batch_jobs",
+    "fanout_batch_targets",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };
@@ -32,12 +61,14 @@ void sfu_metrics_init(void) {
   }
 }
 
-void sfu_metric_inc(const char *name) {
+void sfu_metric_inc(const char *name) { sfu_metric_add(name, 1); }
+
+void sfu_metric_add(const char *name, uint64_t value) {
   int idx = find_metric(name);
   if (idx < 0) {
     return;
   }
-  atomic_fetch_add_explicit(&g_counters[idx], 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_counters[idx], value, memory_order_relaxed);
 }
 
 uint64_t sfu_metric_get(const char *name) {

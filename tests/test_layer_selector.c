@@ -66,6 +66,7 @@ static void test_switch_source_transaction(void) {
   static sfu_session_scheduler_slot_t slots[SFU_SESSION_SCHEDULER_CAP];
   memset(slots, 0, sizeof(slots));
   session.schedulers = slots;
+  atomic_store(&session.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
   /* Pre-existing per-publisher state for source 1 (the source being left). */
   sfu_subscriber_scheduler_t *old = sfu_session_scheduler_for(&session, 1);
   assert(old != NULL);

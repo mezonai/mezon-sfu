@@ -26,6 +26,8 @@ int sfu_spsc_ring_init(sfu_spsc_ring_t *ring, uint32_t capacity_pow2) {
   ring->mask = capacity_pow2 - 1;
   atomic_init(&ring->head, 0);
   atomic_init(&ring->tail, 0);
+  atomic_init(&ring->high_water, 0);
+  atomic_init(&ring->push_failures, 0);
 
   return 0;
 }
@@ -40,10 +42,16 @@ bool sfu_spsc_ring_push(sfu_spsc_ring_t *ring, void *item) {
   uint32_t head = atomic_load_explicit(&ring->head, memory_order_acquire);
 
   if (tail - head >= ring->capacity) {
+    atomic_fetch_add_explicit(&ring->push_failures, 1, memory_order_relaxed);
     return false; /* full */
   }
 
   ring->slots[tail & ring->mask] = item;
+
+  uint32_t depth = tail - head + 1;
+  uint32_t high = atomic_load_explicit(&ring->high_water, memory_order_relaxed);
+  while (depth > high && !atomic_compare_exchange_weak_explicit(&ring->high_water, &high, depth, memory_order_relaxed, memory_order_relaxed)) {
+  }
 
   /* release: publish the slot write before advancing tail, so the
    * consumer's acquire-load of tail is guaranteed to see the item. */

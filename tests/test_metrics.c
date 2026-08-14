@@ -52,8 +52,9 @@ static void test_snapshot_format(void) {
   sfu_metric_inc("json_reject");
   sfu_metric_inc("json_reject");
   sfu_metric_inc("json_reject");
+  sfu_metric_add("egress_copied_bytes", 1234);
 
-  char buf[512]; /* table grows as counters are added */
+  char buf[4096]; /* table grows as counters are added */
   size_t n = sfu_metrics_snapshot(buf, sizeof(buf));
   EXPECT(n > 0);
   EXPECT(n < sizeof(buf)); /* fits */
@@ -62,6 +63,7 @@ static void test_snapshot_format(void) {
   /* Expect one "name value\n" line per registered counter, in table order. */
   EXPECT(strstr(buf, "msg_trunc_drop 0\n") != NULL);
   EXPECT(strstr(buf, "json_reject 3\n") != NULL);
+  EXPECT(strstr(buf, "egress_copied_bytes 1234\n") != NULL);
 
   /* Every line is "name value" with a single space and trailing newline. */
   const char *p = buf;

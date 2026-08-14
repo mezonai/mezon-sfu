@@ -30,6 +30,12 @@ typedef struct sfu_membership_queue {
   pthread_mutex_t lock;
 } sfu_membership_queue_t;
 
+typedef struct sfu_signaling_scratch {
+  char *recv;
+  char *sdp;
+  char *json;
+} sfu_signaling_scratch_t;
+
 typedef struct sfu_signaling_server {
   int listen_fd;
   atomic_bool running;
@@ -43,13 +49,13 @@ typedef struct sfu_signaling_server {
   sfu_session_table_t *sessions;
   sfu_room_registry_t *room_registry;
   sfu_routing_table_t *routing_table;
+  sfu_signaling_scratch_t scratch;
   char media_host[64];
   uint16_t media_port;
   uint16_t _pad16;
 } sfu_signaling_server_t;
 
 typedef struct sfu_client_conn {
-  char pending_answer_sdp[SFU_SIGNALING_SDP_CAP];
   uv_poll_t poll_handle;
   uv_timer_t keepalive_timer;
   sfu_signaling_server_t *server;
@@ -58,8 +64,6 @@ typedef struct sfu_client_conn {
   uint64_t last_activity_ms;
   int64_t user_id;
   int fd;
-  int pending_answer_sdp_len;
-  int answer_retry_count;
   uint8_t ip_detected_from_header;
   uint8_t handles_open;
   char peer_ip[64];
