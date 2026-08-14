@@ -576,8 +576,15 @@
                 dot.className = "dot" + (level ? " " + level : "");
             }
 
+            function memberTileId(member) {
+                const userId = member && member.user_id != null ? String(member.user_id) : "0";
+                return userId !== "0" ? "user-" + userId : "peer-" + String(member.peer_id);
+            }
+
             function updateParticipantCount(authoritativeCount = null) {
-                const n = authoritativeCount == null ? membersByPeerId.size : authoritativeCount;
+                const uniqueTiles = new Set();
+                for (const member of membersByPeerId.values()) uniqueTiles.add(memberTileId(member));
+                const n = uniqueTiles.size;
                 document.getElementById("participantCount").textContent =
                     `· ${n} participant${n === 1 ? "" : "s"}`;
             }
@@ -627,9 +634,11 @@
                 const peerId = String(member.peer_id);
                 const existingMember = membersByPeerId.get(peerId);
                 isSelf = isSelf || !!(existingMember && existingMember.isSelf);
-                const id = "peer-" + peerId;
                 const role = member.role || "audience";
-                membersByPeerId.set(peerId, { ...existingMember, ...member, role, isSelf });
+                const mergedMember = { ...existingMember, ...member, role, isSelf };
+                const id = memberTileId(mergedMember);
+                mergedMember.tileId = id;
+                membersByPeerId.set(peerId, mergedMember);
                 if (member.ufrag) peerIdByUfrag.set(String(member.ufrag), peerId);
                 for (const midValue of [member.mid_audio, member.mid_video]) {
                     if (midValue != null && String(midValue) !== "0") {
@@ -672,11 +681,11 @@
                 peerIdByMid.clear();
                 const liveIds = new Set();
                 for (const member of msg.members || []) {
-                    liveIds.add("peer-" + String(member.peer_id));
+                    liveIds.add(memberTileId(member));
                     upsertMember(member, String(member.peer_id) === String(msg.self_peer_id));
                 }
                 for (const id of [...participants.keys()]) {
-                    if (id.startsWith("peer-") && !liveIds.has(id)) removeTile(id);
+                    if ((id.startsWith("peer-") || id.startsWith("user-")) && !liveIds.has(id)) removeTile(id);
                 }
                 updateParticipantCount(msg.participant_count);
             }
@@ -694,8 +703,10 @@
                     const peerId = String(msg.peer_id);
                     const member = membersByPeerId.get(peerId);
                     if (member && member.ufrag) peerIdByUfrag.delete(String(member.ufrag));
+                    const tileId = member ? memberTileId(member) : "peer-" + peerId;
                     membersByPeerId.delete(peerId);
-                    removeTile("peer-" + peerId);
+                    const tileStillUsed = [...membersByPeerId.values()].some((other) => memberTileId(other) === tileId);
+                    if (!tileStillUsed) removeTile(tileId);
                 }
                 const mids = [];
                 const addMid = (v) => {
@@ -1735,10 +1746,15 @@
                         const streamId = event.streams && event.streams.length > 0
                             ? event.streams[0].id
                             : null;
-                        const mappedPeerId = (mid ? peerIdByMid.get(String(mid)) : null)
+                        let mappedPeerId = (mid ? peerIdByMid.get(String(mid)) : null)
                             || (streamId ? peerIdByUfrag.get(String(streamId)) : null);
-                        const id = mappedPeerId
-                            ? "peer-" + mappedPeerId
+                        if (!mappedPeerId) {
+                            const remoteCandidates = [...membersByPeerId.entries()].filter(([, member]) => !member.isSelf && member.role === "speaker");
+                            if (remoteCandidates.length === 1) mappedPeerId = remoteCandidates[0][0];
+                        }
+                        const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
+                        const id = mappedMember
+                            ? memberTileId(mappedMember)
                             : (mid ? "mid-" + mid : (streamId || track.id));
 
                         if (track.kind === "video") {
