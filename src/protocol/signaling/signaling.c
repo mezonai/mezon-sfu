@@ -187,6 +187,32 @@ static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signal
   return true;
 }
 
+void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *peer) {
+  if (!room || !peer || !g_signaling_server || peer->room != room) {
+    return;
+  }
+  bool expected = false;
+  if (!atomic_compare_exchange_strong_explicit(&peer->membership_announced, &expected, true, memory_order_acq_rel, memory_order_acquire)) {
+    return;
+  }
+
+  atomic_fetch_add_explicit(&peer->refcount, 1, memory_order_relaxed);
+  sfu_membership_queue_t *queue = &g_signaling_server->membership_queue;
+  pthread_mutex_lock(&queue->lock);
+  if (queue->count >= SFU_MEMBERSHIP_QUEUE_CAP) {
+    pthread_mutex_unlock(&queue->lock);
+    atomic_store_explicit(&peer->membership_announced, false, memory_order_release);
+    sfu_session_release(peer);
+    SFU_LOG_WARN("signaling: membership queue full for peer %u", peer->peer_id);
+    return;
+  }
+  queue->items[queue->tail] = peer;
+  queue->tail = (queue->tail + 1) % SFU_MEMBERSHIP_QUEUE_CAP;
+  queue->count++;
+  pthread_mutex_unlock(&queue->lock);
+  uv_async_send(&g_signaling_server->renegotiation_waker);
+}
+
 void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
   if (!room || !g_signaling_server) {
     return;
@@ -247,6 +273,7 @@ static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
   const uint32_t peer_id = leaving->peer_id;
 
   pthread_mutex_lock(&room->lock);
+  uint32_t participant_count = room->peer_count > 0 ? room->peer_count - 1 : 0;
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *other = room->peers[i];
     if (!other || other == leaving || other->fd < 0 || !sfu_session_accepts_work(other)) {
@@ -269,10 +296,10 @@ static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
 
     char msg[320];
     int n = snprintf(msg, sizeof(msg),
-                     "{\"type\":\"peer_left\",\"ufrag\":\"%s\",\"user_id\":\"%" PRId64
+                     "{\"type\":\"peer_left\",\"participant_count\":%u,\"ufrag\":\"%s\",\"user_id\":\"%" PRId64
                      "\",\"peer_id\":%u,"
                      "\"mid_audio\":%u,\"mid_video\":%u}",
-                     ufrag, user_id, peer_id, mid_audio, mid_video);
+                     participant_count, ufrag, user_id, peer_id, mid_audio, mid_video);
     if (n > 0 && (size_t)n < sizeof(msg)) {
       if (sfu_ws_send_text(other->fd, msg, (size_t)n) != 0) {
         SFU_LOG_WARN("signaling: failed to send peer_left to fd=%d for leaving ufrag=%s", other->fd, ufrag);
@@ -969,6 +996,9 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     if (!session->room) {
       room_add_peer(c->joined_room, session);
       newly_bound = session->room == c->joined_room;
+      if (newly_bound) {
+        sfu_signaling_notify_peer_admitted(c->joined_room, session);
+      }
     }
     if (session->room && (media_changed || role_changed || newly_bound)) {
       SFU_LOG_INFO("answer: media/role changed for ufrag=%s generation=%u (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag,
@@ -981,6 +1011,32 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
   }
   sfu_session_release(session);
+}
+
+static void broadcast_peer_updated(sfu_room_t *room, sfu_peer_session_t *session, bool is_audience) {
+  if (!room || !session) {
+    return;
+  }
+  int fds[SFU_ROOM_MAX_PEERS];
+  uint32_t count = 0;
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->peer_count && count < SFU_ROOM_MAX_PEERS; i++) {
+    sfu_peer_session_t *peer = room->peers[i];
+    if (peer && peer->fd >= 0 && sfu_session_accepts_work(peer)) {
+      fds[count++] = peer->fd;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+
+  char event[256];
+  int n = snprintf(event, sizeof(event),
+                   "{\"type\":\"peer_updated\",\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64 "\",\"role\":\"%s\"}}",
+                   session->peer_id, session->user_id, is_audience ? "audience" : "speaker");
+  if (n > 0 && (size_t)n < sizeof(event)) {
+    for (uint32_t i = 0; i < count; i++) {
+      (void)sfu_ws_send_text(fds[i], event, (size_t)n);
+    }
+  }
 }
 
 static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n, bool push_to_talk) {
@@ -1018,6 +1074,7 @@ static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s,
     if (response_len > 0 && (size_t)response_len < sizeof(response)) {
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
+    broadcast_peer_updated(c->joined_room, session, is_audience);
     sfu_signaling_trigger_renegotiation(c->joined_room);
     emit_hook_event(is_audience ? "unpublish" : "publish", c->user_id, c->joined_room_id);
   }
@@ -1230,6 +1287,101 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
   }
 }
 
+static sfu_peer_session_t *membership_queue_pop(sfu_membership_queue_t *queue) {
+  pthread_mutex_lock(&queue->lock);
+  sfu_peer_session_t *session = NULL;
+  if (queue->count > 0) {
+    session = queue->items[queue->head];
+    queue->items[queue->head] = NULL;
+    queue->head = (queue->head + 1) % SFU_MEMBERSHIP_QUEUE_CAP;
+    queue->count--;
+  }
+  pthread_mutex_unlock(&queue->lock);
+  return session;
+}
+
+typedef struct {
+  uint32_t peer_id;
+  int64_t user_id;
+  int fd;
+  bool is_audience;
+  char ufrag[32];
+} membership_view_t;
+
+static void flush_membership_events(sfu_signaling_server_t *s) {
+  sfu_peer_session_t *joined;
+  while ((joined = membership_queue_pop(&s->membership_queue)) != NULL) {
+    sfu_room_t *room = (sfu_room_t *)joined->room;
+    membership_view_t members[SFU_ROOM_MAX_PEERS];
+    uint32_t count = 0;
+    uint64_t room_id = 0;
+
+    if (room) {
+      pthread_mutex_lock(&room->lock);
+      room_id = room->room_id;
+      for (uint32_t i = 0; i < room->peer_count && count < SFU_ROOM_MAX_PEERS; i++) {
+        sfu_peer_session_t *peer = room->peers[i];
+        if (!peer || !sfu_session_accepts_work(peer) || peer->fd < 0) {
+          continue;
+        }
+        members[count] = (membership_view_t){
+            .peer_id = peer->peer_id,
+            .user_id = peer->user_id,
+            .fd = peer->fd,
+            .is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire),
+        };
+        if (peer->cold) {
+          snprintf(members[count].ufrag, sizeof(members[count].ufrag), "%s", peer->cold->ufrag);
+        }
+        count++;
+      }
+      pthread_mutex_unlock(&room->lock);
+    }
+
+    if (room && joined->fd >= 0) {
+      char snapshot[SFU_SIGNALING_JSON_CAP];
+      size_t off = 0;
+      int n = snprintf(snapshot, sizeof(snapshot),
+                       "{\"type\":\"room_snapshot\",\"room\":\"%" PRIu64 "\",\"self_peer_id\":%u,\"participant_count\":%u,\"members\":[",
+                       room_id, joined->peer_id, count);
+      if (n > 0 && (size_t)n < sizeof(snapshot)) {
+        off = (size_t)n;
+        for (uint32_t i = 0; i < count; i++) {
+          n = snprintf(snapshot + off, sizeof(snapshot) - off,
+                       "%s{\"peer_id\":%u,\"user_id\":\"%" PRId64 "\",\"role\":\"%s\",\"ufrag\":\"%s\"}", i ? "," : "", members[i].peer_id,
+                       members[i].user_id, members[i].is_audience ? "audience" : "speaker", members[i].ufrag);
+          if (n < 0 || (size_t)n >= sizeof(snapshot) - off) {
+            off = 0;
+            break;
+          }
+          off += (size_t)n;
+        }
+        if (off > 0 && off + 2 < sizeof(snapshot)) {
+          snapshot[off++] = ']';
+          snapshot[off++] = '}';
+          snapshot[off] = '\0';
+          (void)sfu_ws_send_text(joined->fd, snapshot, off);
+        }
+      }
+
+      char event[256];
+      bool joined_audience = atomic_load_explicit(&joined->is_audience, memory_order_acquire);
+      n = snprintf(event, sizeof(event),
+                   "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
+                   "\",\"role\":\"%s\",\"ufrag\":\"%s\"}}",
+                   count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined->cold ? joined->cold->ufrag : "");
+      if (n > 0 && (size_t)n < sizeof(event)) {
+        for (uint32_t i = 0; i < count; i++) {
+          if (members[i].peer_id != joined->peer_id) {
+            (void)sfu_ws_send_text(members[i].fd, event, (size_t)n);
+          }
+        }
+      }
+    }
+    sfu_session_release(joined);
+  }
+}
+
 static sfu_peer_session_t *renegotiation_queue_pop(sfu_renegotiation_queue_t *queue) {
   pthread_mutex_lock(&queue->lock);
   sfu_peer_session_t *session = NULL;
@@ -1278,6 +1430,7 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
 static void on_renegotiation_wake(uv_async_t *handle) {
   sfu_signaling_server_t *s = handle->data;
   if (s && atomic_load(&s->running)) {
+    flush_membership_events(s);
     flush_pending_offers(s);
   }
 }
@@ -1347,10 +1500,15 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
   if (pthread_mutex_init(&s->renegotiation_queue.lock, NULL) != 0) {
     return -1;
   }
+  if (pthread_mutex_init(&s->membership_queue.lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->renegotiation_queue.lock);
+    return -1;
+  }
 
   s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (s->listen_fd < 0) {
     SFU_LOG_ERROR("signaling: socket() failed");
+    pthread_mutex_destroy(&s->membership_queue.lock);
     pthread_mutex_destroy(&s->renegotiation_queue.lock);
     return -1;
   }
@@ -1367,12 +1525,14 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
   if (bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
     SFU_LOG_ERROR("signaling: bind() to port %u failed", listen_port);
     close(s->listen_fd);
+    pthread_mutex_destroy(&s->membership_queue.lock);
     pthread_mutex_destroy(&s->renegotiation_queue.lock);
     return -1;
   }
   if (listen(s->listen_fd, 16) < 0) {
     SFU_LOG_ERROR("signaling: listen() failed");
     close(s->listen_fd);
+    pthread_mutex_destroy(&s->membership_queue.lock);
     pthread_mutex_destroy(&s->renegotiation_queue.lock);
     return -1;
   }
@@ -1381,6 +1541,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
   if (pthread_create(&s->thread, NULL, signaling_loop_main, s) != 0) {
     SFU_LOG_ERROR("signaling: failed to spawn accept loop thread");
     close(s->listen_fd);
+    pthread_mutex_destroy(&s->membership_queue.lock);
     pthread_mutex_destroy(&s->renegotiation_queue.lock);
     return -1;
   }
@@ -1409,6 +1570,10 @@ void sfu_signaling_server_stop(sfu_signaling_server_t *s) {
   while ((queued = renegotiation_queue_pop(&s->renegotiation_queue)) != NULL) {
     sfu_session_release(queued);
   }
+  while ((queued = membership_queue_pop(&s->membership_queue)) != NULL) {
+    sfu_session_release(queued);
+  }
+  pthread_mutex_destroy(&s->membership_queue.lock);
   pthread_mutex_destroy(&s->renegotiation_queue.lock);
 }
 

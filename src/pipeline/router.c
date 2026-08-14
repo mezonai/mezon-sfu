@@ -37,7 +37,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
 
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
     if (!enc) {
-      SFU_LOG_WARN("worker %u: packet pool exhausted", w->worker_index);
+      SFU_LOG_WARN("worker %u: packet pool exhausted, dropping frame for all subscribers", w->worker_index);
       continue;
     }
     if (pkt->len > enc->cap) {
@@ -64,14 +64,15 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       media.svc = m->svc;
     }
 
-    if (sub_session->worker_id == w->worker_index) {
+    uint16_t owner_worker = sfu_session_owner_worker(sub_session);
+    if (owner_worker == w->worker_index) {
       (void)sfu_egress_process(w, sub_session, enc, &sub_session->cold->addr, sub_session->cold->addr_len, &media);
       continue;
     }
 
     atomic_fetch_add_explicit(&sub_session->refcount, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&sender_session->refcount, 1, memory_order_relaxed);
-    if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, sub_session->worker_id, enc, sub_session, sender_session, &sub_session->cold->addr,
+    if (!sfu_fanout_mesh_enqueue_forward(w->mesh, w->worker_index, owner_worker, enc, sub_session, sender_session, &sub_session->cold->addr,
                                          sub_session->cold->addr_len, slot->video_ssrc, slot->video_rtx_ssrc, slot->video_pt, slot->video_rtx_pt,
                                          slot->has_video, m->is_audio, m->has_svc ? &m->svc : NULL, m->has_svc, m->is_keyframe)) {
       SFU_LOG_WARN("worker %u: fanout queue full", w->worker_index);
