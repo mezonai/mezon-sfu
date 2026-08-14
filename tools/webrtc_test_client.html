@@ -491,6 +491,7 @@
             const participants = new Map();
             const membersByPeerId = new Map();
             const peerIdByUfrag = new Map();
+            const peerIdByMid = new Map();
             // Remote mids whose publisher left the room. Historical SDP keeps those
             // m-lines as inactive tombstones; without this set, resyncRemoteMedia
             // would recreate empty tiles after peer_left.
@@ -630,6 +631,11 @@
                 const role = member.role || "audience";
                 membersByPeerId.set(peerId, { ...existingMember, ...member, role, isSelf });
                 if (member.ufrag) peerIdByUfrag.set(String(member.ufrag), peerId);
+                for (const midValue of [member.mid_audio, member.mid_video]) {
+                    if (midValue != null && String(midValue) !== "0") {
+                        peerIdByMid.set(String(midValue), peerId);
+                    }
+                }
 
                 const label = member.user_id && member.user_id !== "0"
                     ? `User ${member.user_id}`
@@ -644,12 +650,26 @@
                     p.avatar.style.display = "flex";
                 }
                 p.badges.textContent = role === "audience" ? "Audience" : "Speaker";
+
+                for (const midValue of [member.mid_audio, member.mid_video]) {
+                    if (midValue == null || String(midValue) === "0") continue;
+                    const oldId = "mid-" + String(midValue);
+                    const old = participants.get(oldId);
+                    if (old && old !== p) {
+                        if (old.stream) setTileStream(p, old.stream, old.hasVideo);
+                        document
+                            .querySelectorAll(`audio[data-owner="${CSS.escape(oldId)}"]`)
+                            .forEach((el) => { el.dataset.owner = id; });
+                        removeTile(oldId);
+                    }
+                }
                 return p;
             }
 
             function handleRoomSnapshot(msg) {
                 membersByPeerId.clear();
                 peerIdByUfrag.clear();
+                peerIdByMid.clear();
                 const liveIds = new Set();
                 for (const member of msg.members || []) {
                     liveIds.add("peer-" + String(member.peer_id));
@@ -686,6 +706,7 @@
                 addMid(msg.mid_audio);
 
                 for (const mid of mids) {
+                    peerIdByMid.delete(mid);
                     leftRemoteMids.add(mid);
                     removeTile("mid-" + mid);
                     document
@@ -1714,7 +1735,8 @@
                         const streamId = event.streams && event.streams.length > 0
                             ? event.streams[0].id
                             : null;
-                        const mappedPeerId = streamId ? peerIdByUfrag.get(String(streamId)) : null;
+                        const mappedPeerId = (mid ? peerIdByMid.get(String(mid)) : null)
+                            || (streamId ? peerIdByUfrag.get(String(streamId)) : null);
                         const id = mappedPeerId
                             ? "peer-" + mappedPeerId
                             : (mid ? "mid-" + mid : (streamId || track.id));
