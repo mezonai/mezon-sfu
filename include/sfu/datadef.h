@@ -21,9 +21,9 @@ _Static_assert(SFU_SRTP_KEY_MATERIAL_LEN >= 88, "GCM-256 DTLS-SRTP exporter writ
 #define SFU_MAX_UPLINK_TRANSCEIVERS 3      /* audio, camera, screen */
 #define SFU_REMOTE_TRANSCEIVERS_PER_SLOT 2 /* audio + video */
 
-#define SFU_SIGNALING_RECV_CAP 16384
-#define SFU_SIGNALING_SDP_CAP 16384
-#define SFU_SIGNALING_JSON_CAP 65536
+#define SFU_SIGNALING_RECV_CAP 262144
+#define SFU_SIGNALING_SDP_CAP 262144
+#define SFU_SIGNALING_JSON_CAP 524288
 
 #define SFU_HASH_EMPTY UINT32_MAX
 #define SFU_HASH_DELETED (UINT32_MAX - 1)
@@ -131,6 +131,8 @@ typedef struct sfu_transceiver {
 typedef struct sfu_receiver_entry {
   sfu_peer_session_t *subscriber;
   char subscriber_ufrag[32];
+  int64_t publisher_user_id;
+  uint32_t publisher_peer_id;
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;

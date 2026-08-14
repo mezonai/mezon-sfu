@@ -15,6 +15,8 @@ static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *tar
   } else {
     e->subscriber_ufrag[0] = '\0';
   }
+  e->publisher_user_id = media_source->user_id;
+  e->publisher_peer_id = media_source->peer_id;
 
   pthread_mutex_lock(&media_source->media_lock);
   e->audio_ssrc = media_source->uplink_audio.ssrc;

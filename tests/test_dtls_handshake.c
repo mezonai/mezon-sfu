@@ -83,16 +83,23 @@ int main(void) {
   assert(server_done);
   assert(server_conn.established);
 
-  /* Both sides must derive byte-identical SRTP keying material from
-   * the same DTLS master secret -- this is the actual point of DTLS-
-   * SRTP (RFC 5764), not just "the handshake completed". */
-  uint8_t client_material[SFU_SRTP_KEY_MATERIAL_LEN];
-  assert(SSL_export_keying_material(client_ssl, client_material, SFU_SRTP_KEY_MATERIAL_LEN, "EXTRACTOR-dtls_srtp", 19, NULL, 0, 0) == 1);
-  assert(memcmp(client_material, server_conn.srtp_keying_material, SFU_SRTP_KEY_MATERIAL_LEN) == 0);
-
-  /* Both sides must have agreed on the same SRTP protection profile. */
+  /* Both sides must derive byte-identical SRTP keying material for the
+   * negotiated profile. Exporter lengths differ by profile. */
   const SRTP_PROTECTION_PROFILE *client_profile = SSL_get_selected_srtp_profile(client_ssl);
   assert(client_profile != NULL);
+  size_t material_len = 60;
+  if (client_profile->id == 0x0007) {
+    material_len = 56;
+  } else if (client_profile->id == 0x0008) {
+    material_len = 88;
+  }
+  assert(material_len <= SFU_SRTP_KEY_MATERIAL_LEN);
+
+  uint8_t client_material[SFU_SRTP_KEY_MATERIAL_LEN] = {0};
+  assert(SSL_export_keying_material(client_ssl, client_material, material_len, "EXTRACTOR-dtls_srtp", 19, NULL, 0, 0) == 1);
+  assert(memcmp(client_material, server_conn.srtp_keying_material, material_len) == 0);
+
+  /* Both sides must have agreed on the same SRTP protection profile. */
   assert(strcmp(client_profile->name, "SRTP_AES128_CM_SHA1_80") == 0);
 
   SSL_free(client_ssl);

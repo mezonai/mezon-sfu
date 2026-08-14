@@ -72,6 +72,13 @@ int64_t sfu_pacer_debt_after(const sfu_pacer_t *p, uint32_t bytes, int64_t now_u
 }
 
 bool sfu_pacer_should_send(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, int64_t *inout_now_us) {
+  /* Audio is latency-sensitive and has no enhancement layer to shed. It is
+   * admitted independently so a large audio room neither drops speech nor
+   * drives the video token bucket into debt. */
+  if (cls == SFU_PACER_CLASS_AUDIO) {
+    p->sent[cls]++;
+    return true;
+  }
   if (!p->active) {
     return true;
   }

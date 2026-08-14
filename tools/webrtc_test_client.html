@@ -581,6 +581,11 @@
                 return userId !== "0" ? "user-" + userId : "peer-" + String(member.peer_id);
             }
 
+            function parsePublisherStreamId(streamId) {
+                const match = /^u(-?\d+)-p(\d+)$/.exec(String(streamId || ""));
+                return match ? { userId: match[1], peerId: match[2] } : null;
+            }
+
             function updateParticipantCount(authoritativeCount = null) {
                 const uniqueTiles = new Set();
                 for (const member of membersByPeerId.values()) uniqueTiles.add(memberTileId(member));
@@ -1764,7 +1769,9 @@
                         const streamId = event.streams && event.streams.length > 0
                             ? event.streams[0].id
                             : null;
-                        let mappedPeerId = (mid ? peerIdByMid.get(String(mid)) : null)
+                        const publisherIdentity = parsePublisherStreamId(streamId);
+                        let mappedPeerId = (publisherIdentity && publisherIdentity.peerId)
+                            || (mid ? peerIdByMid.get(String(mid)) : null)
                             || (streamId ? peerIdByUfrag.get(String(streamId)) : null);
                         if (!mappedPeerId) {
                             const remoteCandidates = [...membersByPeerId.entries()].filter(([, member]) => !member.isSelf && member.role === "speaker");
@@ -1773,7 +1780,9 @@
                         const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
                         const id = mappedMember
                             ? memberTileId(mappedMember)
-                            : (mid ? "mid-" + mid : (streamId || track.id));
+                            : publisherIdentity && publisherIdentity.userId !== "0"
+                                ? "user-" + publisherIdentity.userId
+                                : (mid ? "mid-" + mid : (streamId || track.id));
 
                         if (track.kind === "video") {
                             const label = "Peer " + id.substring(0, 8);

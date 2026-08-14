@@ -138,6 +138,8 @@ static void sync_mock_snapshot(sfu_peer_session_t *session, sfu_transceiver_t *a
   assert(snap != NULL);
   for (uint32_t i = 0; i < snap->count; i++) {
     sfu_receiver_entry_t *e = &snap->entries[i];
+    e->publisher_user_id = audio[i].owner->user_id;
+    e->publisher_peer_id = audio[i].owner->peer_id;
     e->audio_ssrc = audio[i].ssrc;
     e->video_ssrc = video[i].ssrc;
     e->video_rtx_ssrc = video[i].rtx_ssrc;
@@ -219,6 +221,8 @@ static void test_audience_offer_with_active_remote_speaker(void) {
 
   atomic_store(&session.is_audience, true);
   session.next_remote_mid = 4;
+  remotes[0].user_id = 1843252237590073344LL;
+  remotes[0].peer_id = 9;
   snprintf(remotes[0].cold->ufrag, sizeof(remotes[0].cold->ufrag), "speakerUfrag");
   audio[0].ssrc = 1111;
   audio[0].active = true;
@@ -244,7 +248,11 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   assert(contains(offer, "a=mid:2"));
   assert(contains(offer, "a=mid:3"));
   assert(contains(offer, "a=ssrc:1111"));
+  assert(contains(offer, "a=ssrc:1111 msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
+  assert(contains(offer, "a=msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
   assert(contains(offer, "a=ssrc:2222"));
+  assert(contains(offer, "a=ssrc:2222 msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
+  assert(contains(offer, "a=msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
   assert(contains(offer, "a=ssrc-group:FID 2222 3333"));
 
   video[0].ssrc = 0;
@@ -497,6 +505,50 @@ static void test_concurrent_build_vs_teardown(void) {
   printf("test_sdp: concurrent build vs teardown OK (build_failures=%d)\n", atomic_load(&ctx.build_failures));
 }
 
+static void test_299_audio_only_remote_offer(void) {
+  sfu_peer_session_t session;
+  sfu_transceiver_t audio[SFU_MAX_REMOTE_SLOTS], video[SFU_MAX_REMOTE_SLOTS];
+  sfu_peer_session_t remotes[SFU_MAX_REMOTE_SLOTS];
+  setup_mock_session(&session, audio, video, remotes);
+
+  atomic_store(&session.is_audience, false);
+  atomic_store(&session.next_remote_mid, 2 + SFU_MAX_REMOTE_SLOTS * 2);
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    remotes[i].user_id = 1000000 + (int64_t)i;
+    remotes[i].peer_id = i + 1;
+    snprintf(remotes[i].cold->ufrag, sizeof(remotes[i].cold->ufrag), "peer%u", i + 1);
+    audio[i].ssrc = 10000 + i;
+    audio[i].active = true;
+    video[i].active = false;
+  }
+  sync_mock_snapshot(&session, audio, video);
+
+  char *offer = malloc(SFU_SIGNALING_SDP_CAP);
+  assert(offer != NULL);
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
+                                "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", offer,
+                                SFU_SIGNALING_SDP_CAP);
+  assert(len > 0 && (size_t)len < SFU_SIGNALING_SDP_CAP);
+  offer[len] = '\0';
+
+  assert(count_occurrences(offer, "m=audio") == SFU_ROOM_MAX_PEERS);
+  assert(count_occurrences(offer, "m=video") == SFU_ROOM_MAX_PEERS);
+  assert(count_occurrences(offer, "a=mid:") == SFU_ROOM_MAX_PEERS * 2);
+  assert(count_occurrences(offer, "a=ice-ufrag:sfuUfrag") == SFU_ROOM_MAX_PEERS * 2);
+  assert(count_occurrences(offer, "a=fingerprint:sha-256") == SFU_ROOM_MAX_PEERS * 2);
+  assert(count_occurrences(offer, "a=setup:passive") == SFU_ROOM_MAX_PEERS * 2);
+  assert(count_occurrences(offer, "a=candidate:") == 1);
+  assert(count_occurrences(offer, "a=end-of-candidates") == 1);
+  assert(count_occurrences(offer, "a=sendonly") == SFU_MAX_REMOTE_SLOTS);
+  assert(count_occurrences(offer, "a=inactive") == SFU_MAX_REMOTE_SLOTS);
+  assert(contains(offer, "a=group:BUNDLE 0 1 2 3"));
+  assert(contains(offer, " 598 599\r\n"));
+  assert(contains(offer, "a=msid:u1000000-p1 audio-u1000000-p1"));
+
+  free(offer);
+  cleanup_mock_session(&session, remotes);
+}
+
 int main(void) {
   char answer[8192];
 
@@ -582,13 +634,8 @@ int main(void) {
       {"publisher RTX fmtp apt injected (121 -> 120)", contains(answer, "a=fmtp:121 apt=120")},
       {"offered Chrome PT 96 removed", !contains(answer, "a=rtpmap:96 VP8/90000")},
       {"offered Chrome PT 97 removed", !contains(answer, "a=rtpmap:97 rtx/90000")},
-      {"remote video SSRC injected", contains(answer, "a=ssrc:987654321 cname:remote-peer")},
-      {"remote rtx SSRC FID group injected", contains(answer, "a=ssrc-group:FID 987654321 987654322")},
-      /* CC-11: the answer's sendonly video section must offer the
-       * transport-wide CC contract so the subscriber can report TWCC
-       * feedback for the stream it receives. */
-      {"transport-cc extmap offered", contains(answer, "a=extmap:5 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01")},
-      {"transport-cc rtcp-fb offered", contains(answer, "a=rtcp-fb:120 transport-cc")},
+      {"answer does not introduce remote SSRC", !contains(answer, "a=ssrc:987654321 cname:remote-peer")},
+      {"answer does not introduce remote FID", !contains(answer, "a=ssrc-group:FID 987654321 987654322")},
   };
 
   all_ok = 1;
@@ -599,6 +646,23 @@ int main(void) {
     }
   }
   assert(all_ok);
+
+  /* Remote media is introduced only by a subsequent server offer. */
+  atomic_store(&session2.next_remote_mid, 4);
+  r2[0].user_id = 77;
+  r2[0].peer_id = 9;
+  sync_mock_snapshot(&session2, a2, v2);
+  char server_offer[8192];
+  len = sfu_sdp_build_offer(&session2, "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
+                            "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", server_offer,
+                            sizeof(server_offer));
+  assert(len > 0);
+  server_offer[len] = '\0';
+  assert(contains(server_offer, "a=ssrc:987654321 cname:remote-peer"));
+  assert(contains(server_offer, "a=ssrc-group:FID 987654321 987654322"));
+  assert(contains(server_offer, "a=msid:u77-p9 video-u77-p9"));
+  assert(count_occurrences(server_offer, "a=ice-ufrag:XKrsH3xm") == 4);
+  assert(count_occurrences(server_offer, "a=fingerprint:sha-256") == 4);
 
   /* An offer with no m= line must fail cleanly, not crash or emit
    * a bogus answer. */
@@ -612,6 +676,7 @@ int main(void) {
   test_initial_offer_role_directions();
   test_renegotiation_offer_role_directions();
   test_audience_offer_with_active_remote_speaker();
+  test_299_audio_only_remote_offer();
   test_twcc_extmap_extraction();
   test_answer_media_is_scoped_by_mid_and_direction();
   test_concurrent_build_vs_teardown();

@@ -31,10 +31,6 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       continue;
     }
 
-    if (!sub_session->schedulers) {
-      continue;
-    }
-
     sfu_packet_t *enc = sfu_packet_pool_alloc(w->pp);
     if (!enc) {
       SFU_LOG_WARN("worker %u: packet pool exhausted, dropping frame for all subscribers", w->worker_index);
