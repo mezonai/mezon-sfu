@@ -290,6 +290,7 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
       peer->uplink_video.active = true;
     }
   }
+  sfu_session_publish_media(peer);
   pthread_mutex_unlock(&peer->media_lock);
 
   if (is_audience) {

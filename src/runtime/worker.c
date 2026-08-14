@@ -9,6 +9,7 @@
 #include "runtime/fanout_job.h"
 #include "runtime/signal.h"
 #include "runtime/timer.h"
+#include "util/alloc.h"
 #include "util/log.h"
 
 #define SFU_WORKER_SEND_SQ_ENTRIES 1024
@@ -17,16 +18,55 @@
 #define SFU_WORKER_IDLE_SLEEP_US 200
 #define SFU_WORKER_TWCC_FLUSH_INTERVAL_US 15000LL
 
-typedef struct {
-  sfu_worker_t *w;
-} twcc_flush_ctx_t;
+bool sfu_worker_register_session(sfu_worker_t *w, sfu_peer_session_t *s) {
+  if (!w || !s) {
+    return false;
+  }
+  pthread_mutex_lock(&w->local_sessions_lock);
+  for (uint32_t i = 0; i < w->local_session_count; i++) {
+    if (w->local_sessions[i] == s) {
+      pthread_mutex_unlock(&w->local_sessions_lock);
+      return true;
+    }
+  }
+  if (w->local_session_count == w->local_session_capacity) {
+    uint32_t capacity = w->local_session_capacity ? w->local_session_capacity * 2 : 64;
+    if (capacity > SFU_SESSION_TABLE_MAX) {
+      capacity = SFU_SESSION_TABLE_MAX;
+    }
+    if (capacity <= w->local_session_capacity) {
+      pthread_mutex_unlock(&w->local_sessions_lock);
+      return false;
+    }
+    sfu_peer_session_t **sessions = SFU_REALLOC(w->local_sessions, (size_t)capacity * sizeof(*sessions));
+    if (!sessions) {
+      pthread_mutex_unlock(&w->local_sessions_lock);
+      return false;
+    }
+    w->local_sessions = sessions;
+    w->local_session_capacity = capacity;
+  }
+  atomic_fetch_add_explicit(&s->refcount, 1, memory_order_relaxed);
+  w->local_sessions[w->local_session_count++] = s;
+  pthread_mutex_unlock(&w->local_sessions_lock);
+  return true;
+}
 
-static void twcc_flush_one(sfu_peer_session_t *s, void *user) {
-  twcc_flush_ctx_t *ctx = (twcc_flush_ctx_t *)user;
-  if (s->worker_id != ctx->w->worker_index) {
+void sfu_worker_unregister_session(sfu_worker_t *w, sfu_peer_session_t *s) {
+  if (!w || !s) {
     return;
   }
-  sfu_session_maybe_send_twcc_feedback(ctx->w, s);
+  sfu_peer_session_t *removed = NULL;
+  pthread_mutex_lock(&w->local_sessions_lock);
+  for (uint32_t i = 0; i < w->local_session_count; i++) {
+    if (w->local_sessions[i] == s) {
+      removed = w->local_sessions[i];
+      w->local_sessions[i] = w->local_sessions[--w->local_session_count];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&w->local_sessions_lock);
+  sfu_session_release(removed);
 }
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
@@ -44,14 +84,20 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
   w->routing_table = routing_table;
   w->scheduler = scheduler;
 
+  if (pthread_mutex_init(&w->local_sessions_lock, NULL) != 0) {
+    return -1;
+  }
+
   if (sfu_spsc_ring_init(&w->inbox, inbox_capacity) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init inbox ring", worker_index);
+    pthread_mutex_destroy(&w->local_sessions_lock);
     return -1;
   }
 
   if (sfu_spsc_ring_init(&w->release_to_dispatcher, g_sfu_config.release_queue_capacity) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init release queue", worker_index);
     sfu_spsc_ring_destroy(&w->inbox);
+    pthread_mutex_destroy(&w->local_sessions_lock);
     return -1;
   }
 
@@ -59,6 +105,7 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
     SFU_LOG_ERROR("worker %u: failed to init send ring", worker_index);
     sfu_spsc_ring_destroy(&w->release_to_dispatcher);
     sfu_spsc_ring_destroy(&w->inbox);
+    pthread_mutex_destroy(&w->local_sessions_lock);
     return -1;
   }
 
@@ -66,6 +113,19 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
 }
 
 void sfu_worker_destroy(sfu_worker_t *w) {
+  pthread_mutex_lock(&w->local_sessions_lock);
+  for (uint32_t i = 0; i < w->local_session_count; i++) {
+    sfu_session_release(w->local_sessions[i]);
+  }
+  SFU_FREE(w->local_sessions);
+  SFU_FREE(w->twcc_scratch);
+  w->local_sessions = NULL;
+  w->twcc_scratch = NULL;
+  w->local_session_count = 0;
+  w->local_session_capacity = 0;
+  w->twcc_scratch_capacity = 0;
+  pthread_mutex_unlock(&w->local_sessions_lock);
+  pthread_mutex_destroy(&w->local_sessions_lock);
   sfu_ring_destroy(&w->send_ring);
   sfu_spsc_ring_destroy(&w->release_to_dispatcher);
   sfu_spsc_ring_destroy(&w->inbox);
@@ -97,9 +157,42 @@ static void *worker_thread_main(void *arg) {
     bool flushed_twcc = false;
     if (now_us - w->last_twcc_flush_us >= SFU_WORKER_TWCC_FLUSH_INTERVAL_US) {
       w->last_twcc_flush_us = now_us;
-      twcc_flush_ctx_t ctx = {w};
-      if (sfu_session_table_foreach(w->sessions, twcc_flush_one, &ctx) > 0) {
-        flushed_twcc = true;
+      /* Snapshot and pin eligible sessions under the registry lock, then do
+       * feedback/SRTP/send work without holding the control-plane mutex. */
+      uint32_t twcc_count = 0;
+      pthread_mutex_lock(&w->local_sessions_lock);
+      if (w->twcc_scratch_capacity < w->local_session_count) {
+        uint32_t capacity = w->local_session_capacity;
+        sfu_peer_session_t **scratch = SFU_REALLOC(w->twcc_scratch, (size_t)capacity * sizeof(*scratch));
+        if (scratch) {
+          w->twcc_scratch = scratch;
+          w->twcc_scratch_capacity = capacity;
+        }
+      }
+      for (uint32_t li = 0; li < w->local_session_count;) {
+        sfu_peer_session_t *ls = w->local_sessions[li];
+        if (!ls || !sfu_session_accepts_work(ls) || sfu_session_owner_worker(ls) != w->worker_index) {
+          w->local_sessions[li] = w->local_sessions[--w->local_session_count];
+          pthread_mutex_unlock(&w->local_sessions_lock);
+          sfu_session_release(ls);
+          pthread_mutex_lock(&w->local_sessions_lock);
+          continue;
+        }
+        if (twcc_count < w->twcc_scratch_capacity) {
+          atomic_fetch_add_explicit(&ls->refcount, 1, memory_order_relaxed);
+          w->twcc_scratch[twcc_count++] = ls;
+        }
+        li++;
+      }
+      pthread_mutex_unlock(&w->local_sessions_lock);
+
+      for (uint32_t li = 0; li < twcc_count; li++) {
+        sfu_peer_session_t *ls = w->twcc_scratch[li];
+        if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
+          sfu_session_maybe_send_twcc_feedback(w, ls);
+          flushed_twcc = true;
+        }
+        sfu_session_release(ls);
       }
     }
 

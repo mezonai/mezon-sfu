@@ -31,6 +31,14 @@ typedef struct sfu_worker {
   uint32_t worker_index;
   int core_id;
   int fd;
+
+  /* Retained per-worker registry; protected for signaling/worker control transfer. */
+  sfu_peer_session_t **local_sessions;
+  uint32_t local_session_count;
+  uint32_t local_session_capacity;
+  sfu_peer_session_t **twcc_scratch;
+  uint32_t twcc_scratch_capacity;
+  pthread_mutex_t local_sessions_lock;
 } sfu_worker_t;
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
@@ -41,5 +49,13 @@ void sfu_worker_destroy(sfu_worker_t *w);
 
 int sfu_worker_start(sfu_worker_t *w);
 void sfu_worker_join(sfu_worker_t *w);
+
+/**
+ * Register/unregister a session with this worker's local list.
+ * Called when worker_id is assigned (STUN nomination) and on session close.
+ * Only the owning worker thread calls these — no lock needed.
+ */
+bool sfu_worker_register_session(sfu_worker_t *w, sfu_peer_session_t *s);
+void sfu_worker_unregister_session(sfu_worker_t *w, sfu_peer_session_t *s);
 
 #endif /* SFU_RUNTIME_WORKER_H */

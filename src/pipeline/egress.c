@@ -46,9 +46,8 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
                              media->video_ssrc, atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
   }
 
-  pthread_mutex_lock(&sub_session->media_lock);
-  uint8_t twcc_send_extmap_id = sub_session->twcc_send_extmap_id;
-  pthread_mutex_unlock(&sub_session->media_lock);
+  sfu_media_snapshot_t egress_msnap = sfu_session_load_media(sub_session);
+  uint8_t twcc_send_extmap_id = egress_msnap.twcc_send_extmap_id;
   if (twcc_send_extmap_id != 0) {
     uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
     size_t new_len = (size_t)enc_len;
@@ -79,7 +78,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
 bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                         const sfu_egress_media_t *media) {
-  if (!w || !sub_session || !pkt || !dst || !media || sub_session->worker_id != w->worker_index) {
+  if (!w || !sub_session || !pkt || !dst || !media || sfu_session_owner_worker(sub_session) != w->worker_index) {
     if (w && pkt) {
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     }

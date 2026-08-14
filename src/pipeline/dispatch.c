@@ -173,14 +173,27 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   pthread_mutex_lock(&session->answer_lock);
-  uint16_t previous_worker = session->worker_id;
-  if (nominated && (rebind_result == SFU_SESSION_REBIND_APPLIED || session->state != SFU_SESSION_ESTABLISHED || session->worker_id == UINT16_MAX)) {
-    session->worker_id = w->worker_index;
+  pthread_mutex_lock(&session->ingress_lock);
+  uint16_t previous_worker = sfu_session_owner_worker(session);
+  bool transfer_owner = nominated &&
+                        (rebind_result == SFU_SESSION_REBIND_APPLIED || session->state != SFU_SESSION_ESTABLISHED || previous_worker == SFU_SESSION_OWNER_NONE);
+  if (transfer_owner && previous_worker != w->worker_index) {
+    if (!sfu_worker_register_session(w, session)) {
+      SFU_LOG_ERROR("worker %u: failed to retain peer %u in local registry", w->worker_index, session->peer_id);
+      transfer_owner = false;
+    } else {
+      sfu_session_set_owner_worker(session, (uint16_t)w->worker_index);
+      if (previous_worker != SFU_SESSION_OWNER_NONE && previous_worker < w->scheduler->worker_count) {
+        sfu_worker_unregister_session(&w->scheduler->workers[previous_worker], session);
+      }
+    }
   }
+  uint16_t current_worker = sfu_session_owner_worker(session);
+  pthread_mutex_unlock(&session->ingress_lock);
   pthread_mutex_unlock(&session->answer_lock);
   if (rebind_result == SFU_SESSION_REBIND_APPLIED) {
     SFU_LOG_INFO("worker %u: authenticated ICE address rebind applied ufrag=%s peer_id=%u target=%s:%u worker=%u->%u state=%d", w->worker_index,
-                 client_ufrag, session->peer_id, ip, port, previous_worker, session->worker_id, session->state);
+                 client_ufrag, session->peer_id, ip, port, previous_worker, current_worker, session->state);
   }
 
   if (session->room && (newly_bound || role_changed || media_changed)) {
