@@ -236,6 +236,11 @@ void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
     bool enqueue = false;
     pthread_mutex_lock(&session->negotiation_lock);
     session->renegotiation_pending = true;
+    if (session->state != SFU_SESSION_ESTABLISHED) {
+      pthread_mutex_unlock(&session->negotiation_lock);
+      sfu_session_release(session);
+      continue;
+    }
     if (!session->negotiation_needed) {
       session->negotiation_needed = true;
       enqueue = true;
@@ -823,7 +828,6 @@ static void handle_pong(sfu_client_conn_t *c) {
 
 static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
   char room_str[32] = {0};
-  char str_user_id[32] = {0};
   char role_str[16] = {0};
   char token[4096];
   uint64_t room_id = 0;
@@ -834,24 +838,28 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
   }
 
   const char *jwt_secret = g_sfu_config.jwt_secret;
-  if (jwt_secret[0] != '\0') {
-    int token_len = sfu_json_extract_string(buf, n, "token", token, sizeof(token));
-    if (token_len < 0) {
-      SFU_LOG_WARN("signaling: join missing token (fd=%d)", c->fd);
-      sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"missing_token\"}", 42);
-      return;
-    }
-    if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &user_id) != 0) {
-      SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
-      sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
-      return;
-    }
-    c->user_id = user_id;
-    SFU_LOG_INFO("signaling: join JWT ok user_id=%" PRId64 " (fd=%d)", user_id, c->fd);
-  } else if (sfu_json_extract_string(buf, n, "user_id", str_user_id, sizeof(str_user_id)) >= 0) {
-    user_id = (int64_t)strtoll(str_user_id, NULL, 10);
-    c->user_id = user_id;
+  if (jwt_secret[0] == '\0') {
+    SFU_LOG_ERROR("signaling: jwt_secret is empty; rejecting join (fd=%d)", c->fd);
+    sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"auth_not_configured\"}", 48);
+    disconnect_client(c);
+    return;
   }
+
+  int token_len = sfu_json_extract_string(buf, n, "token", token, sizeof(token));
+  if (token_len < 0) {
+    SFU_LOG_WARN("signaling: join missing token (fd=%d)", c->fd);
+    sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"missing_token\"}", 42);
+    disconnect_client(c);
+    return;
+  }
+  if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &user_id) != 0) {
+    SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
+    sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
+    disconnect_client(c);
+    return;
+  }
+  c->user_id = user_id;
+  SFU_LOG_INFO("signaling: join JWT ok user_id=%" PRId64 " (fd=%d)", user_id, c->fd);
 
   c->is_audience = false;
   if (sfu_json_extract_string(buf, n, "role", role_str, sizeof(role_str)) >= 0) {
@@ -1440,6 +1448,12 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
     bool send = false;
     pthread_mutex_lock(&session->negotiation_lock);
     session->negotiation_needed = false;
+    if (session->state != SFU_SESSION_ESTABLISHED) {
+      session->renegotiation_pending = true;
+      pthread_mutex_unlock(&session->negotiation_lock);
+      sfu_session_release(session);
+      continue;
+    }
     if (session->renegotiation_pending && !session->offer_outstanding && sfu_session_accepts_work(session) && session->fd >= 0) {
       session->renegotiation_pending = false;
       session->offer_outstanding = true;
