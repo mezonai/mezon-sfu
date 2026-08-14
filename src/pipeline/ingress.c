@@ -445,7 +445,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-  /* Fast lock-free classification via atomic media snapshot. */
   sfu_media_snapshot_t pt_msnap = sfu_session_load_media(sender_session);
   uint8_t in_pt = m.rtp.payload_type;
   bool is_video_pt = (in_pt == pt_msnap.video_pt) || (in_pt == pt_msnap.video_rtx_pt);
@@ -460,7 +459,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  /* Check if SSRC learning is needed (lock-free fast path). */
   bool need_learn = false;
   if (is_video_pt) {
     if (in_pt == pt_msnap.video_rtx_pt) {
@@ -478,7 +476,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-  /* Slow path: take media_lock only when SSRC learning is required. */
   if (need_learn) {
     pthread_mutex_lock(&sender_session->media_lock);
     if (is_video_pt) {

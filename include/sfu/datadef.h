@@ -152,18 +152,13 @@ struct sfu_receiver_snapshot {
   sfu_receiver_entry_t entries[];
 };
 
-/**
- * Media snapshot for lock-free reads in the hot path via seqlock.
- * Writers (SDP answer apply) update fields under media_lock and bump the
- * generation counter.  Readers retry if the generation changed during read.
- */
 typedef struct sfu_media_snapshot {
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
-  uint8_t video_codec;  /* sfu_video_codec_t */
+  sfu_video_codec_t video_codec;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
   bool audio_active;
@@ -206,13 +201,13 @@ typedef struct sfu_peer_session {
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
-  _Atomic uint64_t media_snap_words[3]; /* atomic packed payload protected by media_snap_seq */
-  _Atomic uint32_t media_snap_seq;      /* seqlock generation: odd = write in progress */
+  _Atomic uint64_t media_snap_words[3];
+  _Atomic uint32_t media_snap_seq;
   pthread_mutex_t answer_lock;
   pthread_mutex_t negotiation_lock;
   pthread_mutex_t media_lock;
   pthread_mutex_t snapshot_lock;
-  pthread_mutex_t ingress_lock; /* serializes owner handoff with packet processing */
+  pthread_mutex_t ingress_lock;
   uint8_t pt_map[128];
   int64_t user_id;
   int64_t last_pli_time;
@@ -221,7 +216,7 @@ typedef struct sfu_peer_session {
   _Atomic uint32_t next_remote_mid;
   _Atomic uint32_t applied_answer_generation;
   int fd;
-  _Atomic uint64_t worker_owner; /* packed generation:48 | worker_id:16 */
+  _Atomic uint64_t worker_owner;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
   int64_t twcc_last_feedback_ref_us;

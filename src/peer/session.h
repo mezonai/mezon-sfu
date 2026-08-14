@@ -43,10 +43,6 @@ void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_
 
 static inline bool sfu_session_accepts_work(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->accepts_work, memory_order_acquire); }
 
-/**
- * Load the media snapshot via seqlock (lock-free, hot path).
- * Retries if a concurrent write is detected.
- */
 static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session_t *s) {
   sfu_media_snapshot_t snap;
   uint64_t words[3];
@@ -65,10 +61,6 @@ static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session
   return snap;
 }
 
-/**
- * Publish a new media snapshot via seqlock.
- * Must be called under media_lock to serialize concurrent writers.
- */
 static inline void sfu_session_publish_media(sfu_peer_session_t *s) {
   sfu_media_snapshot_t snap = {
       .audio_ssrc = s->uplink_audio.ssrc,
@@ -93,13 +85,9 @@ static inline void sfu_session_publish_media(sfu_peer_session_t *s) {
 
 #define SFU_SESSION_OWNER_NONE UINT16_MAX
 
-static inline uint16_t sfu_session_owner_worker(const sfu_peer_session_t *s) {
-  return (uint16_t)atomic_load_explicit(&s->worker_owner, memory_order_acquire);
-}
+static inline uint16_t sfu_session_owner_worker(const sfu_peer_session_t *s) { return (uint16_t)atomic_load_explicit(&s->worker_owner, memory_order_acquire); }
 
-static inline uint64_t sfu_session_owner_generation(const sfu_peer_session_t *s) {
-  return atomic_load_explicit(&s->worker_owner, memory_order_acquire) >> 16;
-}
+static inline uint64_t sfu_session_owner_generation(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->worker_owner, memory_order_acquire) >> 16; }
 
 static inline uint64_t sfu_session_set_owner_worker(sfu_peer_session_t *s, uint16_t worker_id) {
   uint64_t old = atomic_load_explicit(&s->worker_owner, memory_order_relaxed);

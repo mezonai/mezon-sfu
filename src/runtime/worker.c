@@ -157,8 +157,6 @@ static void *worker_thread_main(void *arg) {
     bool flushed_twcc = false;
     if (now_us - w->last_twcc_flush_us >= SFU_WORKER_TWCC_FLUSH_INTERVAL_US) {
       w->last_twcc_flush_us = now_us;
-      /* Snapshot and pin eligible sessions under the registry lock, then do
-       * feedback/SRTP/send work without holding the control-plane mutex. */
       uint32_t twcc_count = 0;
       pthread_mutex_lock(&w->local_sessions_lock);
       if (w->twcc_scratch_capacity < w->local_session_count) {
