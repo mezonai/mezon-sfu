@@ -22,7 +22,7 @@
 
 #define SFU_SIGNALING_RECV_CAP 16384
 #define SFU_SIGNALING_SDP_CAP 16384
-#define SFU_SIGNALING_JSON_CAP 32768
+#define SFU_SIGNALING_JSON_CAP 65536
 
 #define SFU_HASH_EMPTY UINT32_MAX
 #define SFU_HASH_DELETED (UINT32_MAX - 1)
@@ -238,6 +238,7 @@ typedef struct sfu_peer_session {
   bool renegotiation_pending;
   uint32_t offer_generation;
   _Atomic bool uplink_ssrc_dirty;
+  _Atomic bool membership_announced;
 } sfu_peer_session_t;
 
 typedef struct sfu_hash_slot {

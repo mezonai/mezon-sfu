@@ -489,6 +489,8 @@
             let audioCtx = null;
 
             const participants = new Map();
+            const membersByPeerId = new Map();
+            const peerIdByUfrag = new Map();
             // Remote mids whose publisher left the room. Historical SDP keeps those
             // m-lines as inactive tombstones; without this set, resyncRemoteMedia
             // would recreate empty tiles after peer_left.
@@ -573,8 +575,8 @@
                 dot.className = "dot" + (level ? " " + level : "");
             }
 
-            function updateParticipantCount() {
-                const n = participants.size;
+            function updateParticipantCount(authoritativeCount = null) {
+                const n = authoritativeCount == null ? membersByPeerId.size : authoritativeCount;
                 document.getElementById("participantCount").textContent =
                     `· ${n} participant${n === 1 ? "" : "s"}`;
             }
@@ -619,10 +621,62 @@
                 updateParticipantCount();
             }
 
+            function upsertMember(member, isSelf = false) {
+                if (!member || member.peer_id == null) return null;
+                const peerId = String(member.peer_id);
+                const existingMember = membersByPeerId.get(peerId);
+                isSelf = isSelf || !!(existingMember && existingMember.isSelf);
+                const id = "peer-" + peerId;
+                const role = member.role || "audience";
+                membersByPeerId.set(peerId, { ...existingMember, ...member, role, isSelf });
+                if (member.ufrag) peerIdByUfrag.set(String(member.ufrag), peerId);
+
+                const label = member.user_id && member.user_id !== "0"
+                    ? `User ${member.user_id}`
+                    : `Peer ${peerId}`;
+                let p = isSelf && participants.has("local")
+                    ? participants.get("local")
+                    : ensureParticipant(id, { isLocal: isSelf, label });
+                p.peerId = peerId;
+                p.role = role;
+                if (!p.hasVideo) {
+                    p.video.style.display = "none";
+                    p.avatar.style.display = "flex";
+                }
+                p.badges.textContent = role === "audience" ? "Audience" : "Speaker";
+                return p;
+            }
+
+            function handleRoomSnapshot(msg) {
+                membersByPeerId.clear();
+                peerIdByUfrag.clear();
+                const liveIds = new Set();
+                for (const member of msg.members || []) {
+                    liveIds.add("peer-" + String(member.peer_id));
+                    upsertMember(member, String(member.peer_id) === String(msg.self_peer_id));
+                }
+                for (const id of [...participants.keys()]) {
+                    if (id.startsWith("peer-") && !liveIds.has(id)) removeTile(id);
+                }
+                updateParticipantCount(msg.participant_count);
+            }
+
+            function handlePeerJoined(msg) {
+                upsertMember(msg.peer, false);
+                updateParticipantCount(msg.participant_count);
+            }
+
             /* Leave (not demote): server sends peer_left with the remote mids
              * that were allocated for the departing publisher on this client.
              * Demote keeps the same mids inactive for push-to-talk re-promote. */
             function handlePeerLeft(msg) {
+                if (msg.peer_id != null) {
+                    const peerId = String(msg.peer_id);
+                    const member = membersByPeerId.get(peerId);
+                    if (member && member.ufrag) peerIdByUfrag.delete(String(member.ufrag));
+                    membersByPeerId.delete(peerId);
+                    removeTile("peer-" + peerId);
+                }
                 const mids = [];
                 const addMid = (v) => {
                     if (v == null || v === "" || v === 0 || v === "0") return;
@@ -660,6 +714,7 @@
                     }
                 }
 
+                updateParticipantCount(msg.participant_count);
                 console.log(
                     "peer_left:",
                     msg.ufrag || "",
@@ -1656,11 +1711,13 @@
                             console.log("ontrack ignored for left remote mid", mid);
                             return;
                         }
-                        const id = mid
-                            ? "mid-" + mid
-                            : (event.streams && event.streams.length > 0
-                                ? event.streams[0].id
-                                : track.id);
+                        const streamId = event.streams && event.streams.length > 0
+                            ? event.streams[0].id
+                            : null;
+                        const mappedPeerId = streamId ? peerIdByUfrag.get(String(streamId)) : null;
+                        const id = mappedPeerId
+                            ? "peer-" + mappedPeerId
+                            : (mid ? "mid-" + mid : (streamId || track.id));
 
                         if (track.kind === "video") {
                             const label = "Peer " + id.substring(0, 8);
@@ -1764,6 +1821,22 @@
 
                         if (msg.type === "joined") {
                             setConnState("awaiting offer…", "warn");
+                            return;
+                        }
+
+                        if (msg.type === "room_snapshot") {
+                            handleRoomSnapshot(msg);
+                            return;
+                        }
+
+                        if (msg.type === "peer_joined") {
+                            handlePeerJoined(msg);
+                            return;
+                        }
+
+                        if (msg.type === "peer_updated") {
+                            upsertMember(msg.peer, false);
+                            updateParticipantCount();
                             return;
                         }
 
