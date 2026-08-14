@@ -72,6 +72,11 @@ int main(int argc, char **argv) {
   sfu_config_load_ini(config_file);
   sfu_log_set_level(g_sfu_config.log_level);
 
+  if (g_sfu_config.jwt_secret[0] == '\0') {
+    SFU_LOG_ERROR("jwt_secret is empty; set [server] jwt_secret in %s", config_file);
+    return 1;
+  }
+
   SFU_LOG_INFO("mezon-sfu %s starting (unified signaling & media configuration)", SFU_VERSION_STRING);
 
   uint16_t port = (positional_count > 0) ? parse_port(argc, argv, positional[0], g_sfu_config.media_port) : g_sfu_config.media_port;

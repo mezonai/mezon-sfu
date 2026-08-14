@@ -1693,6 +1693,24 @@
                 }));
             }
 
+            function abortJoin(reason) {
+                setJoinStatus(reason || "Join failed", true);
+                document.getElementById("meetingRoom").style.display = "none";
+                document.getElementById("joinScreen").style.display = "flex";
+                joinBtn.disabled = false;
+                if (ws) {
+                    try { ws.close(); } catch (_) {}
+                    ws = null;
+                }
+                if (pc) {
+                    try { pc.close(); } catch (_) {}
+                    pc = null;
+                }
+                localTracksAdded = false;
+                isNegotiating = false;
+                pendingOfferSdp = null;
+            }
+
             async function connectAndJoin() {
                 let wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
@@ -1824,9 +1842,7 @@
                     ws = new WebSocket(wsUrl);
 
                     ws.onopen = () => {
-                        document.getElementById("joinScreen").style.display = "none";
-                        document.getElementById("meetingRoom").style.display = "flex";
-                        document.getElementById("roomLabel").textContent = roomId;
+                        setJoinStatus("Joining room…");
                         setConnState("joining…", "warn");
 
                         // Pass the selected role (speaker or audience) to the SFU
@@ -1842,7 +1858,15 @@
                         console.log("Signaling received:", msg);
 
                         if (msg.type === "error") {
-                            setConnState("error: " + msg.message, "err");
+                            const detail = msg.message || "unknown_error";
+                            const friendly = detail === "missing_token"
+                                ? "Join failed: missing token"
+                                : detail === "invalid_token"
+                                    ? "Join failed: invalid token"
+                                    : detail === "auth_not_configured"
+                                        ? "Join failed: server jwt_secret is not configured"
+                                        : "Join failed: " + detail;
+                            abortJoin(friendly);
                             return;
                         }
 
@@ -1858,6 +1882,9 @@
                         }
 
                         if (msg.type === "joined") {
+                            document.getElementById("joinScreen").style.display = "none";
+                            document.getElementById("meetingRoom").style.display = "flex";
+                            document.getElementById("roomLabel").textContent = roomId;
                             setConnState("awaiting offer…", "warn");
                             return;
                         }
@@ -1959,12 +1986,24 @@
                     };
 
                     ws.onclose = () => {
+                        const stillOnJoin = document.getElementById("joinScreen").style.display !== "none";
+                        if (stillOnJoin) {
+                            if (joinBtn.disabled) {
+                                abortJoin("Connection closed before join completed");
+                            }
+                            return;
+                        }
                         setConnState("disconnected", "err");
                         localTracksAdded = false;
                         isNegotiating = false;
                         pendingOfferSdp = null;
                     };
                     ws.onerror = () => {
+                        const stillOnJoin = document.getElementById("joinScreen").style.display !== "none";
+                        if (stillOnJoin) {
+                            abortJoin("Signaling connection error");
+                            return;
+                        }
                         setConnState("signaling error", "err");
                     };
 
