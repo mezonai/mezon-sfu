@@ -64,9 +64,13 @@ static void test_audio_never_dropped_under_debt(void) {
   assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
   assert(p.balance_bytes < 0);
 
-  /* Audio and RTX always borrow through: only enhancement video drops. */
+  /* Audio bypasses the video token bucket; RTX still borrows through it. */
+  int64_t video_debt = p.balance_bytes;
   for (int i = 0; i < 10; i++) {
     assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_AUDIO, 200, &now));
+  }
+  assert(p.balance_bytes == video_debt);
+  for (int i = 0; i < 10; i++) {
     assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_RTX, 1000, &now));
   }
   assert(p.sent[SFU_PACER_CLASS_AUDIO] == 10);

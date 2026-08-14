@@ -21,6 +21,8 @@ static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
 }
 
 typedef struct sfu_sdp_receiver_view {
+  int64_t publisher_user_id;
+  uint32_t publisher_peer_id;
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;

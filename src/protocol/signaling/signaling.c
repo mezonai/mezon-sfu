@@ -121,70 +121,94 @@ static sfu_signaling_server_t *g_signaling_server = NULL;
 
 
 static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_signaling_server_t *s) {
-  char offer[SFU_SIGNALING_SDP_CAP];
+  char *offer = SFU_MALLOC(SFU_SIGNALING_SDP_CAP);
+  char *escaped = SFU_MALLOC(SFU_SIGNALING_JSON_CAP);
+  char *response = SFU_MALLOC(SFU_SIGNALING_JSON_CAP + 64u);
+  if (!offer || !escaped || !response) {
+    SFU_LOG_ERROR("signaling: failed to allocate initial offer buffers (fd=%d)", fd);
+    SFU_FREE(response);
+    SFU_FREE(escaped);
+    SFU_FREE(offer);
+    return false;
+  }
 
+  bool sent = false;
   int offer_len = sfu_sdp_build_initial_offer(s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, is_audience,
-                                              offer, sizeof(offer));
-
+                                              offer, SFU_SIGNALING_SDP_CAP);
   if (offer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build initial SDP offer (fd=%d)", fd);
-    return false;
+    goto cleanup;
   }
 
-  char escaped[SFU_SIGNALING_JSON_CAP];
-  int escaped_len = sfu_json_escape(offer, (size_t)offer_len, escaped, sizeof(escaped));
-
+  int escaped_len = sfu_json_escape(offer, (size_t)offer_len, escaped, SFU_SIGNALING_JSON_CAP);
   if (escaped_len < 0) {
     SFU_LOG_WARN("signaling: offer too large (fd=%d)", fd);
-    return false;
+    goto cleanup;
   }
 
-  char response[SFU_SIGNALING_JSON_CAP + 64];
-  int response_len = snprintf(response, sizeof(response), "{\"type\":\"offer\",\"sdp\":\"%s\"}", escaped);
-
-  if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
-    return false;
+  int response_len = snprintf(response, SFU_SIGNALING_JSON_CAP + 64u, "{\"type\":\"offer\",\"sdp\":\"%s\"}", escaped);
+  if (response_len < 0 || (size_t)response_len >= SFU_SIGNALING_JSON_CAP + 64u) {
+    goto cleanup;
   }
 
   if (sfu_ws_send_text(fd, response, (size_t)response_len) != 0) {
     SFU_LOG_WARN("signaling: failed to send initial offer (fd=%d)", fd);
-    return false;
+    goto cleanup;
   }
 
   SFU_LOG_INFO("signaling: sent initial server offer (fd=%d)", fd);
+  sent = true;
 
-  return true;
+cleanup:
+  SFU_FREE(response);
+  SFU_FREE(escaped);
+  SFU_FREE(offer);
+  return sent;
 }
 
 static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s) {
-  char offer[SFU_SIGNALING_SDP_CAP];
+  char *offer = SFU_MALLOC(SFU_SIGNALING_SDP_CAP);
+  char *escaped = SFU_MALLOC(SFU_SIGNALING_JSON_CAP);
+  char *response = SFU_MALLOC(SFU_SIGNALING_JSON_CAP + 64u);
+  if (!offer || !escaped || !response) {
+    SFU_LOG_ERROR("signaling: failed to allocate renegotiation offer buffers (fd=%d)", fd);
+    SFU_FREE(response);
+    SFU_FREE(escaped);
+    SFU_FREE(offer);
+    return false;
+  }
+
+  bool sent = false;
   int offer_len =
-      sfu_sdp_build_offer(session, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, offer, sizeof(offer));
+      sfu_sdp_build_offer(session, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, offer, SFU_SIGNALING_SDP_CAP);
   if (offer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build server-initiated SDP offer (fd=%d)", fd);
-    return false;
+    goto cleanup;
   }
 
-  char escaped[SFU_SIGNALING_JSON_CAP];
-  int escaped_len = sfu_json_escape(offer, (size_t)offer_len, escaped, sizeof(escaped));
+  int escaped_len = sfu_json_escape(offer, (size_t)offer_len, escaped, SFU_SIGNALING_JSON_CAP);
   if (escaped_len < 0) {
     SFU_LOG_WARN("signaling: offer too large to escape into JSON message (fd=%d)", fd);
-    return false;
+    goto cleanup;
   }
 
-  char response[SFU_SIGNALING_JSON_CAP + 64];
-  int response_len = snprintf(response, sizeof(response), "{\"type\":\"offer\",\"sdp\":\"%s\"}", escaped);
-  if (response_len < 0 || (size_t)response_len >= sizeof(response)) {
+  int response_len = snprintf(response, SFU_SIGNALING_JSON_CAP + 64u, "{\"type\":\"offer\",\"sdp\":\"%s\"}", escaped);
+  if (response_len < 0 || (size_t)response_len >= SFU_SIGNALING_JSON_CAP + 64u) {
     SFU_LOG_WARN("signaling: offer message too large to send (fd=%d)", fd);
-    return false;
+    goto cleanup;
   }
 
   if (sfu_ws_send_text(fd, response, (size_t)response_len) != 0) {
     SFU_LOG_WARN("signaling: failed to send server-initiated offer over WebSocket (fd=%d)", fd);
-    return false;
+    goto cleanup;
   }
+  sent = true;
 
-  return true;
+cleanup:
+  SFU_FREE(response);
+  SFU_FREE(escaped);
+  SFU_FREE(offer);
+  return sent;
 }
 
 void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *peer) {
@@ -1219,9 +1243,15 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
     return;
   }
 
-  char buf[SFU_SIGNALING_RECV_CAP];
-  ssize_t n = sfu_ws_recv_text(c->fd, buf, sizeof(buf));
+  char *buf = SFU_MALLOC(SFU_SIGNALING_RECV_CAP);
+  if (!buf) {
+    SFU_LOG_ERROR("signaling: failed to allocate receive buffer fd=%d", c->fd);
+    disconnect_client(c);
+    return;
+  }
+  ssize_t n = sfu_ws_recv_text(c->fd, buf, SFU_SIGNALING_RECV_CAP);
   if (n < 0) {
+    SFU_FREE(buf);
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       return;
     }
@@ -1229,12 +1259,14 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
     return;
   }
   if (n == 0) {
+    SFU_FREE(buf);
     disconnect_client(c);
     return;
   }
 
   mark_client_activity(c);
   dispatch_client_message(c, s, buf, (size_t)n);
+  SFU_FREE(buf);
 }
 
 static void on_server_readable(uv_poll_t *handle, int status, int events) {
@@ -1378,31 +1410,36 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
     }
 
     if (room && joined->fd >= 0) {
-      char snapshot[SFU_SIGNALING_JSON_CAP];
-      size_t off = 0;
-      int n = snprintf(snapshot, sizeof(snapshot),
-                       "{\"type\":\"room_snapshot\",\"room\":\"%" PRIu64 "\",\"self_peer_id\":%u,\"participant_count\":%u,\"members\":[",
-                       room_id, joined->peer_id, count);
-      if (n > 0 && (size_t)n < sizeof(snapshot)) {
-        off = (size_t)n;
-        for (uint32_t i = 0; i < count; i++) {
-          n = snprintf(snapshot + off, sizeof(snapshot) - off,
-                       "%s{\"peer_id\":%u,\"user_id\":\"%" PRId64
-                       "\",\"role\":\"%s\",\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}",
-                       i ? "," : "", members[i].peer_id, members[i].user_id, members[i].is_audience ? "audience" : "speaker", members[i].ufrag,
-                       members[i].mid_audio, members[i].mid_video);
-          if (n < 0 || (size_t)n >= sizeof(snapshot) - off) {
-            off = 0;
-            break;
+      char *snapshot = SFU_MALLOC(SFU_SIGNALING_JSON_CAP);
+      if (snapshot) {
+        size_t off = 0;
+        int n = snprintf(snapshot, SFU_SIGNALING_JSON_CAP,
+                         "{\"type\":\"room_snapshot\",\"room\":\"%" PRIu64 "\",\"self_peer_id\":%u,\"participant_count\":%u,\"members\":[",
+                         room_id, joined->peer_id, count);
+        if (n > 0 && (size_t)n < SFU_SIGNALING_JSON_CAP) {
+          off = (size_t)n;
+          for (uint32_t i = 0; i < count; i++) {
+            n = snprintf(snapshot + off, SFU_SIGNALING_JSON_CAP - off,
+                         "%s{\"peer_id\":%u,\"user_id\":\"%" PRId64
+                         "\",\"role\":\"%s\",\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u}",
+                         i ? "," : "", members[i].peer_id, members[i].user_id, members[i].is_audience ? "audience" : "speaker", members[i].ufrag,
+                         members[i].mid_audio, members[i].mid_video);
+            if (n < 0 || (size_t)n >= SFU_SIGNALING_JSON_CAP - off) {
+              off = 0;
+              break;
+            }
+            off += (size_t)n;
           }
-          off += (size_t)n;
+          if (off > 0 && off + 2 < SFU_SIGNALING_JSON_CAP) {
+            snapshot[off++] = ']';
+            snapshot[off++] = '}';
+            snapshot[off] = '\0';
+            (void)sfu_ws_send_text(joined->fd, snapshot, off);
+          }
         }
-        if (off > 0 && off + 2 < sizeof(snapshot)) {
-          snapshot[off++] = ']';
-          snapshot[off++] = '}';
-          snapshot[off] = '\0';
-          (void)sfu_ws_send_text(joined->fd, snapshot, off);
-        }
+        SFU_FREE(snapshot);
+      } else {
+        SFU_LOG_ERROR("signaling: failed to allocate room snapshot buffer for peer %u", joined->peer_id);
       }
 
       bool joined_audience = atomic_load_explicit(&joined->is_audience, memory_order_acquire);
