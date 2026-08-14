@@ -17,6 +17,8 @@ int main(void) {
   assert(sfu_spsc_ring_push(&ring, &c));
   assert(sfu_spsc_ring_push(&ring, &d));
   assert(sfu_spsc_ring_push(&ring, &e) == false); /* full at capacity=4 */
+  assert(sfu_spsc_ring_high_water(&ring) == 4);
+  assert(sfu_spsc_ring_push_failures(&ring) == 1);
 
   assert(sfu_spsc_ring_pop(&ring, &out) && out == &a);
   assert(sfu_spsc_ring_pop(&ring, &out) && out == &b);

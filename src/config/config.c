@@ -46,6 +46,36 @@ void sfu_config_set_defaults(void) {
   g_sfu_config.release_queue_capacity = 8192;
 }
 
+int sfu_config_validate(const sfu_config_t *config) {
+  if (!config) {
+    return -1;
+  }
+#define REQUIRE_POWER_OF_TWO(field)                                             \
+  do {                                                                          \
+    uint32_t value = config->field;                                             \
+    if (value == 0 || (value & (value - 1)) != 0) {                             \
+      SFU_LOG_ERROR(#field " must be a non-zero power of two (got %u)", value); \
+      return -1;                                                                \
+    }                                                                           \
+  } while (0)
+
+  if (config->media_port == 0 || config->signaling_port == 0 || config->packet_buf_size < 1200 || config->packet_pool_capacity == 0) {
+    SFU_LOG_ERROR("invalid ports or packet buffers (media=%u signaling=%u packet_buf_size=%u packet_pool_capacity=%u)", config->media_port,
+                  config->signaling_port, config->packet_buf_size, config->packet_pool_capacity);
+    return -1;
+  }
+  REQUIRE_POWER_OF_TWO(provided_buf_count);
+  REQUIRE_POWER_OF_TWO(worker_queue_capacity);
+  REQUIRE_POWER_OF_TWO(fanout_ring_capacity);
+  REQUIRE_POWER_OF_TWO(release_queue_capacity);
+  if (config->fanout_job_pool_capacity < config->fanout_ring_capacity) {
+    SFU_LOG_ERROR("fanout_job_pool_capacity (%u) must be >= fanout_ring_capacity (%u)", config->fanout_job_pool_capacity, config->fanout_ring_capacity);
+    return -1;
+  }
+#undef REQUIRE_POWER_OF_TWO
+  return 0;
+}
+
 int sfu_config_load_ini(const char *filepath) {
   sfu_config_set_defaults();
 

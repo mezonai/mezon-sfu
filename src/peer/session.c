@@ -32,8 +32,15 @@ typedef struct {
 
 #define SFU_SESSION_KF_THROTTLE_MS 1000
 #define SFU_SNAPSHOT_HAZARD_SLOTS 256
+#define SFU_BWE_START_BPS 1500000u
+#define SFU_BWE_MIN_BPS 100000u
+#define SFU_BWE_MAX_BPS 5000000u
 
-static _Atomic(sfu_receiver_snapshot_t *) snapshot_hazards[SFU_SNAPSHOT_HAZARD_SLOTS];
+typedef struct {
+  _Atomic uint32_t refcount;
+} sfu_snapshot_ref_t;
+
+static _Atomic(void *) snapshot_hazards[SFU_SNAPSHOT_HAZARD_SLOTS];
 static _Atomic bool snapshot_hazard_claimed[SFU_SNAPSHOT_HAZARD_SLOTS];
 static pthread_key_t snapshot_hazard_key;
 static pthread_once_t snapshot_hazard_key_once = PTHREAD_ONCE_INIT;
@@ -49,7 +56,7 @@ static void snapshot_hazard_thread_exit(void *value) {
 
 static void snapshot_hazard_make_key(void) { (void)pthread_key_create(&snapshot_hazard_key, snapshot_hazard_thread_exit); }
 
-static _Atomic(sfu_receiver_snapshot_t *) *snapshot_hazard_for_thread(void) {
+static _Atomic(void *) *snapshot_hazard_for_thread(void) {
   pthread_once(&snapshot_hazard_key_once, snapshot_hazard_make_key);
   void *value = pthread_getspecific(snapshot_hazard_key);
   if (value) {
@@ -69,33 +76,33 @@ static _Atomic(sfu_receiver_snapshot_t *) *snapshot_hazard_for_thread(void) {
   return NULL;
 }
 
-static sfu_receiver_snapshot_t *snapshot_acquire(const sfu_peer_session_t *owner, const _Atomic(sfu_receiver_snapshot_t *) *source) {
-  _Atomic(sfu_receiver_snapshot_t *) *hazard = snapshot_hazard_for_thread();
+static void *snapshot_acquire(const sfu_peer_session_t *owner, const _Atomic(void *) *source) {
+  _Atomic(void *) *hazard = snapshot_hazard_for_thread();
   if (!hazard) {
     pthread_mutex_lock((pthread_mutex_t *)&owner->snapshot_lock);
-    sfu_receiver_snapshot_t *snap = atomic_load_explicit(source, memory_order_acquire);
+    void *snap = atomic_load_explicit(source, memory_order_acquire);
     if (snap) {
-      atomic_fetch_add_explicit(&snap->refcount, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&((sfu_snapshot_ref_t *)snap)->refcount, 1, memory_order_relaxed);
     }
     pthread_mutex_unlock((pthread_mutex_t *)&owner->snapshot_lock);
     return snap;
   }
   for (;;) {
-    sfu_receiver_snapshot_t *snap = atomic_load_explicit(source, memory_order_seq_cst);
+    void *snap = atomic_load_explicit(source, memory_order_seq_cst);
     atomic_store_explicit(hazard, snap, memory_order_seq_cst);
     if (atomic_load_explicit(source, memory_order_seq_cst) != snap) {
       atomic_store_explicit(hazard, NULL, memory_order_seq_cst);
       continue;
     }
     if (snap) {
-      atomic_fetch_add_explicit(&snap->refcount, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&((sfu_snapshot_ref_t *)snap)->refcount, 1, memory_order_relaxed);
     }
     atomic_store_explicit(hazard, NULL, memory_order_seq_cst);
     return snap;
   }
 }
 
-static void snapshot_wait_unhazarded(sfu_receiver_snapshot_t *snap) {
+static void snapshot_wait_unhazarded(void *snap) {
   if (!snap) {
     return;
   }
@@ -112,6 +119,53 @@ static void snapshot_wait_unhazarded(sfu_receiver_snapshot_t *snap) {
     }
     sched_yield();
   }
+}
+
+bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session) {
+  if (!session) {
+    return false;
+  }
+  if (sfu_session_video_runtime_ready(session)) {
+    return true;
+  }
+
+  pthread_mutex_lock(&session->media_lock);
+  if (sfu_session_video_runtime_ready(session)) {
+    pthread_mutex_unlock(&session->media_lock);
+    return true;
+  }
+  atomic_store_explicit(&session->video_runtime_state, SFU_VIDEO_RUNTIME_INITIALIZING, memory_order_release);
+
+  gcc_bwe_context_t *gcc = SFU_CALLOC(1, sizeof(*gcc));
+  sfu_twcc_history_t *history = SFU_CALLOC(1, sizeof(*history));
+  sfu_twcc_recv_tracker_t *recv = SFU_CALLOC(1, sizeof(*recv));
+  sfu_session_scheduler_slot_t *schedulers = SFU_CALLOC(SFU_SESSION_SCHEDULER_CAP, sizeof(*schedulers));
+  sfu_rtx_cache_t *rtx = SFU_CALLOC(1, sizeof(*rtx));
+  bool ok = gcc && history && recv && schedulers && rtx && sfu_rtx_cache_init(rtx) == 0;
+  if (!ok) {
+    if (rtx) {
+      SFU_FREE(rtx);
+    }
+    SFU_FREE(schedulers);
+    SFU_FREE(recv);
+    SFU_FREE(history);
+    SFU_FREE(gcc);
+    atomic_store_explicit(&session->video_runtime_state, SFU_VIDEO_RUNTIME_FAILED, memory_order_release);
+    pthread_mutex_unlock(&session->media_lock);
+    return false;
+  }
+
+  gcc_bwe_init(gcc, SFU_BWE_START_BPS, SFU_BWE_MIN_BPS, SFU_BWE_MAX_BPS);
+  sfu_twcc_history_init(history);
+  sfu_twcc_recv_tracker_init(recv);
+  session->gcc_ctx = gcc;
+  session->twcc_history = history;
+  session->twcc_recv = recv;
+  session->schedulers = schedulers;
+  session->rtx_cache = rtx;
+  atomic_store_explicit(&session->video_runtime_state, SFU_VIDEO_RUNTIME_READY, memory_order_release);
+  pthread_mutex_unlock(&session->media_lock);
+  return true;
 }
 
 int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
@@ -133,8 +187,14 @@ int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
   t->dtls_ctx = dtls_ctx;
 
   pthread_rwlockattr_t rwattr;
-  if (pthread_rwlockattr_init(&rwattr) != 0 ||
-      pthread_rwlockattr_setkind_np(&rwattr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP) != 0) {
+  if (pthread_rwlockattr_init(&rwattr) != 0) {
+    SFU_FREE(t->sessions);
+    t->sessions = NULL;
+    t->capacity = 0;
+    return -1;
+  }
+  if (pthread_rwlockattr_setkind_np(&rwattr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP) != 0) {
+    pthread_rwlockattr_destroy(&rwattr);
     SFU_FREE(t->sessions);
     t->sessions = NULL;
     t->capacity = 0;
@@ -181,7 +241,7 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
 }
 
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s) {
-  return s ? snapshot_acquire(s, &s->receivers) : NULL;
+  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->receivers) : NULL;
 }
 
 void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap) {
@@ -208,7 +268,7 @@ void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snaps
 }
 
 sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s) {
-  return s ? snapshot_acquire(s, &s->fanout_targets) : NULL;
+  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->fanout_targets) : NULL;
 }
 
 void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
@@ -218,6 +278,60 @@ void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_
   pthread_mutex_unlock(&owner->snapshot_lock);
   snapshot_wait_unhazarded(old);
   sfu_subscriptions_snapshot_release(old);
+}
+
+sfu_audio_route_snapshot_t *sfu_session_audio_fanout_acquire(const sfu_peer_session_t *s) {
+  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->audio_fanout_targets) : NULL;
+}
+
+void sfu_audio_route_snapshot_release(sfu_audio_route_snapshot_t *snap) {
+  if (!snap) {
+    return;
+  }
+  uint32_t prev = atomic_fetch_sub_explicit(&snap->refcount, 1, memory_order_acq_rel);
+  assert(prev != 0 && "audio route snapshot refcount underflow");
+  if (prev == 1) {
+    for (uint32_t i = 0; i < snap->count; i++) {
+      sfu_session_release(snap->entries[i].subscriber);
+    }
+    SFU_FREE(snap);
+  }
+}
+
+void sfu_session_publish_audio_fanout(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_audio_route_snapshot_t *old = atomic_load_explicit(&owner->audio_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->audio_fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  snapshot_wait_unhazarded(old);
+  sfu_audio_route_snapshot_release(old);
+}
+
+sfu_video_route_snapshot_t *sfu_session_video_fanout_acquire(const sfu_peer_session_t *s) {
+  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->video_fanout_targets) : NULL;
+}
+
+void sfu_video_route_snapshot_release(sfu_video_route_snapshot_t *snap) {
+  if (!snap) {
+    return;
+  }
+  uint32_t prev = atomic_fetch_sub_explicit(&snap->refcount, 1, memory_order_acq_rel);
+  assert(prev != 0 && "video route snapshot refcount underflow");
+  if (prev == 1) {
+    for (uint32_t i = 0; i < snap->count; i++) {
+      sfu_session_release(snap->entries[i].subscriber);
+    }
+    SFU_FREE(snap);
+  }
+}
+
+void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->video_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->video_fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  snapshot_wait_unhazarded(old);
+  sfu_video_route_snapshot_release(old);
 }
 
 static void sfu_session_free_resources(sfu_peer_session_t *s) {
@@ -247,6 +361,20 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   pthread_mutex_unlock(&s->snapshot_lock);
   snapshot_wait_unhazarded(snap);
   sfu_subscriptions_snapshot_release(snap);
+
+  pthread_mutex_lock(&s->snapshot_lock);
+  sfu_audio_route_snapshot_t *audio_routes = atomic_load_explicit(&s->audio_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&s->audio_fanout_targets, NULL, memory_order_release);
+  pthread_mutex_unlock(&s->snapshot_lock);
+  snapshot_wait_unhazarded(audio_routes);
+  sfu_audio_route_snapshot_release(audio_routes);
+
+  pthread_mutex_lock(&s->snapshot_lock);
+  sfu_video_route_snapshot_t *video_routes = atomic_load_explicit(&s->video_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&s->video_fanout_targets, NULL, memory_order_release);
+  pthread_mutex_unlock(&s->snapshot_lock);
+  snapshot_wait_unhazarded(video_routes);
+  sfu_video_route_snapshot_release(video_routes);
 
   if (s->rtx_cache) {
     sfu_rtx_cache_destroy(s->rtx_cache);
@@ -519,48 +647,9 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     s->peer_id = id;
   }
 
-  const uint32_t k_bwe_start_bps = 1500000;
-  const uint32_t k_bwe_min_bps = 100000;
-  const uint32_t k_bwe_max_bps = 5000000;
-
-  s->gcc_ctx = SFU_CALLOC(1, sizeof(gcc_bwe_context_t));
-  if (s->gcc_ctx) {
-    gcc_bwe_init(s->gcc_ctx, k_bwe_start_bps, k_bwe_min_bps, k_bwe_max_bps);
-  }
-
-  s->twcc_history = SFU_CALLOC(1, sizeof(sfu_twcc_history_t));
-  if (s->twcc_history) {
-    sfu_twcc_history_init(s->twcc_history);
-  }
-
-  s->twcc_recv = SFU_CALLOC(1, sizeof(sfu_twcc_recv_tracker_t));
-  if (s->twcc_recv) {
-    sfu_twcc_recv_tracker_init(s->twcc_recv);
-  }
-
-  s->schedulers = SFU_CALLOC(SFU_SESSION_SCHEDULER_CAP, sizeof(sfu_session_scheduler_slot_t));
-  if (!s->schedulers) {
-    SFU_LOG_ERROR("failed to allocate subscriber scheduler table for new peer session");
-  }
+  atomic_store_explicit(&s->video_runtime_state, SFU_VIDEO_RUNTIME_UNINITIALIZED, memory_order_relaxed);
   sfu_pacer_init(&s->pacer);
-  sfu_pacer_set_rate(&s->pacer, k_bwe_start_bps, (int64_t)sfu_now_us());
-
-  s->rtx_cache = SFU_CALLOC(1, sizeof(sfu_rtx_cache_t));
-  if (s->rtx_cache) {
-    if (sfu_rtx_cache_init(s->rtx_cache) != 0) {
-      SFU_FREE(s->rtx_cache);
-      s->rtx_cache = NULL;
-    }
-  }
-  if (!s->rtx_cache) {
-    SFU_LOG_ERROR("failed to init RTX cache for new peer session");
-    session_destroy_unpublished(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
-    pthread_rwlock_unlock(&t->lock);
-    return NULL;
-  }
+  sfu_pacer_set_rate(&s->pacer, SFU_BWE_START_BPS, (int64_t)sfu_now_us());
 
   if (sfu_dtls_conn_init(&s->cold->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");
@@ -885,6 +974,12 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
     atomic_store_explicit(&session->is_audience, answer->is_audience, memory_order_release);
   }
 
+  if (answer->video_sends && !answer->is_audience && !sfu_session_ensure_video_runtime(session)) {
+    SFU_LOG_ERROR("session %u: failed to initialize video runtime", session->peer_id);
+    pthread_mutex_unlock(&session->answer_lock);
+    return false;
+  }
+
   if (answer->audio_section_present) {
     atomic_store_explicit(&session->audio_send_negotiated, answer->audio_sends && !answer->is_audience, memory_order_release);
   }
@@ -1014,7 +1109,7 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
 }
 
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher) {
-  if (!w || !publisher || !publisher->twcc_recv) {
+  if (!w || !publisher || !sfu_session_video_runtime_ready(publisher) || !publisher->twcc_recv) {
     return;
   }
   if (sfu_session_owner_worker(publisher) != w->worker_index) {

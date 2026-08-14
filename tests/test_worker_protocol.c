@@ -166,6 +166,9 @@ static void fixture_init(fixture_t *f) {
   assert(f->cache != NULL);
   assert(sfu_rtx_cache_init(f->cache) == 0);
   f->session->rtx_cache = f->cache;
+  f->session->schedulers = SFU_CALLOC(SFU_SESSION_SCHEDULER_CAP, sizeof(*f->session->schedulers));
+  assert(f->session->schedulers != NULL);
+  atomic_store_explicit(&f->session->video_runtime_state, SFU_VIDEO_RUNTIME_READY, memory_order_release);
 
   f->w.pp = &f->pp;
   f->w.sessions = &f->sessions;

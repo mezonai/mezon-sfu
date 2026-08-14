@@ -3,6 +3,7 @@
 #include "sfu/config.h"
 #include "util/alloc.h"
 #include "util/log.h"
+#include "util/metrics.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -93,6 +94,7 @@ static sfu_fanout_job_t *mesh_job_alloc(sfu_fanout_mesh_t *mesh, uint32_t src_wo
   uint32_t job_idx;
   sfu_fanout_job_t *job = sfu_pool_alloc(&mesh->job_pools[dst_worker], &job_idx);
   if (!job) {
+    sfu_metric_inc("fanout_job_pool_exhausted");
     SFU_LOG_WARN("fanout mesh: job pool exhausted (worker %u -> %u)", src_worker, dst_worker);
     return NULL;
   }
@@ -117,6 +119,7 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
   job->kind = SFU_FANOUT_JOB_READY;
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
+    sfu_metric_inc("fanout_ring_full");
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
     sfu_fanout_mesh_free_job(mesh, job);
     return false;
@@ -153,11 +156,57 @@ bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worke
   job->is_keyframe = is_keyframe;
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
+    sfu_metric_inc("fanout_ring_full");
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
     sfu_fanout_mesh_free_job(mesh, job);
     return false;
   }
 
+  return true;
+}
+
+bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *source,
+                                           sfu_peer_session_t *publisher, const sfu_fanout_target_t *targets, uint8_t target_count, bool is_audio,
+                                           const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe) {
+  if (!source || !targets || target_count == 0 || target_count > SFU_FANOUT_BATCH_CAP) {
+    return false;
+  }
+  sfu_fanout_job_t *job = mesh_job_alloc(mesh, src_worker, dst_worker);
+  if (!job) {
+    return false;
+  }
+
+  job->pkt = source;
+  job->publisher = publisher;
+  job->is_audio = is_audio;
+  job->has_svc = has_svc;
+  job->is_keyframe = is_keyframe;
+  job->target_count = target_count;
+  job->kind = SFU_FANOUT_JOB_BATCH;
+  if (has_svc && svc) {
+    job->svc = *svc;
+  }
+  if (publisher) {
+    atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+  }
+  for (uint8_t i = 0; i < target_count; i++) {
+    job->targets[i] = targets[i];
+    atomic_fetch_add_explicit(&targets[i].subscriber->refcount, 1, memory_order_relaxed);
+  }
+
+  if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
+    sfu_metric_inc("fanout_ring_full");
+    for (uint8_t i = 0; i < target_count; i++) {
+      sfu_session_release(job->targets[i].subscriber);
+    }
+    if (publisher) {
+      sfu_session_release(publisher);
+    }
+    sfu_fanout_mesh_free_job(mesh, job);
+    return false;
+  }
+  sfu_metric_inc("fanout_batch_jobs");
+  sfu_metric_add("fanout_batch_targets", target_count);
   return true;
 }
 
@@ -196,6 +245,7 @@ bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t 
   atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
+    sfu_metric_inc("fanout_ring_full");
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
     sfu_session_release(publisher);
     sfu_fanout_mesh_free_job(mesh, job);

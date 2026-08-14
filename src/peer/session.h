@@ -33,6 +33,10 @@ void sfu_session_table_remove(sfu_session_table_t *t, sfu_peer_session_t *s);
 bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s, const struct sockaddr_storage *addr, socklen_t addr_len);
 bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *session);
 bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pending_answer_t *answer, int fd, bool *role_changed, bool *media_changed);
+bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session);
+static inline bool sfu_session_video_runtime_ready(const sfu_peer_session_t *session) {
+  return atomic_load_explicit(&session->video_runtime_state, memory_order_acquire) == SFU_VIDEO_RUNTIME_READY;
+}
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir);
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher);
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s);
@@ -40,10 +44,17 @@ void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap);
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
 sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s);
 void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
+sfu_audio_route_snapshot_t *sfu_session_audio_fanout_acquire(const sfu_peer_session_t *s);
+void sfu_audio_route_snapshot_release(sfu_audio_route_snapshot_t *snap);
+void sfu_session_publish_audio_fanout(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap);
+sfu_video_route_snapshot_t *sfu_session_video_fanout_acquire(const sfu_peer_session_t *s);
+void sfu_video_route_snapshot_release(sfu_video_route_snapshot_t *snap);
+void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
 
 static inline bool sfu_session_accepts_work(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->accepts_work, memory_order_acquire); }
 
 static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session_t *s) {
+  _Static_assert(sizeof(sfu_media_snapshot_t) <= sizeof(uint64_t) * 3, "media snapshot exceeds packed atomic storage");
   sfu_media_snapshot_t snap;
   uint64_t words[3];
   uint32_t seq0, seq1;
@@ -55,6 +66,7 @@ static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session
     words[0] = atomic_load_explicit(&s->media_snap_words[0], memory_order_relaxed);
     words[1] = atomic_load_explicit(&s->media_snap_words[1], memory_order_relaxed);
     words[2] = atomic_load_explicit(&s->media_snap_words[2], memory_order_relaxed);
+    atomic_thread_fence(memory_order_acquire);
     seq1 = atomic_load_explicit(&s->media_snap_seq, memory_order_acquire);
   } while (seq0 != seq1);
   memcpy(&snap, words, sizeof(snap));
@@ -62,6 +74,7 @@ static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session
 }
 
 static inline void sfu_session_publish_media(sfu_peer_session_t *s) {
+  _Static_assert(sizeof(sfu_media_snapshot_t) <= sizeof(uint64_t) * 3, "media snapshot exceeds packed atomic storage");
   sfu_media_snapshot_t snap = {
       .audio_ssrc = s->uplink_audio.ssrc,
       .video_ssrc = s->uplink_video.ssrc,

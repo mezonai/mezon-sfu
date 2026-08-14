@@ -19,8 +19,11 @@ int main(void) {
   }
 
   /* Pool should now be exhausted. */
+  assert(sfu_pool_in_use(&pool) == 8);
+  assert(sfu_pool_high_water(&pool) == 8);
   uint32_t extra_idx;
   assert(sfu_pool_alloc(&pool, &extra_idx) == NULL);
+  assert(sfu_pool_alloc_failures(&pool) == 1);
 
   /* Free half, then confirm exactly that many can be re-allocated. */
   for (int i = 0; i < 4; i++) {
@@ -32,8 +35,8 @@ int main(void) {
     assert(p != NULL);
   }
   assert(sfu_pool_alloc(&pool, &extra_idx) == NULL);
-
-  sfu_pool_destroy(&pool);
+  assert(sfu_pool_alloc_failures(&pool) == 2);
+  assert(sfu_pool_high_water(&pool) == 8);
   printf("test_memory_pool: OK\n");
   return 0;
 }

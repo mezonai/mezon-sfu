@@ -181,11 +181,69 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
   return snap;
 }
 
-static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
-  sfu_session_publish_receivers(owner, new_snap);
+static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_snapshot_t *combined) {
+  uint32_t audio_count = 0;
+  uint32_t video_count = 0;
+  if (combined) {
+    for (uint32_t i = 0; i < combined->count; i++) {
+      audio_count += combined->entries[i].has_audio && combined->entries[i].audio_active;
+      if (combined->entries[i].has_video && combined->entries[i].video_active && sfu_session_ensure_video_runtime(combined->entries[i].subscriber)) {
+        video_count++;
+      }
+    }
+  }
+
+  sfu_audio_route_snapshot_t *audio = SFU_CALLOC(1, sizeof(*audio) + (size_t)audio_count * sizeof(audio->entries[0]));
+  sfu_video_route_snapshot_t *video = SFU_CALLOC(1, sizeof(*video) + (size_t)video_count * sizeof(video->entries[0]));
+  if (!audio || !video) {
+    SFU_FREE(audio);
+    SFU_FREE(video);
+    return false;
+  }
+  atomic_store_explicit(&audio->refcount, 1, memory_order_relaxed);
+  atomic_store_explicit(&video->refcount, 1, memory_order_relaxed);
+  audio->generation = combined ? combined->generation : 0;
+  video->generation = combined ? combined->generation : 0;
+  audio->count = audio->capacity = audio_count;
+  video->count = video->capacity = video_count;
+
+  uint32_t audio_pos = 0;
+  uint32_t video_pos = 0;
+  if (combined) {
+    for (uint32_t i = 0; i < combined->count; i++) {
+      const sfu_receiver_entry_t *entry = &combined->entries[i];
+      if (entry->has_audio && entry->audio_active) {
+        audio->entries[audio_pos++].subscriber = entry->subscriber;
+        atomic_fetch_add_explicit(&entry->subscriber->refcount, 1, memory_order_relaxed);
+      }
+      if (entry->has_video && entry->video_active && sfu_session_video_runtime_ready(entry->subscriber)) {
+        sfu_video_route_entry_t *route = &video->entries[video_pos++];
+        route->subscriber = entry->subscriber;
+        route->video_ssrc = entry->video_ssrc;
+        route->video_rtx_ssrc = entry->video_rtx_ssrc;
+        route->video_pt = entry->video_pt;
+        route->video_rtx_pt = entry->video_rtx_pt;
+        route->has_video = entry->has_video;
+        atomic_fetch_add_explicit(&entry->subscriber->refcount, 1, memory_order_relaxed);
+      }
+    }
+  }
+
+  sfu_session_publish_audio_fanout(owner, audio);
+  sfu_session_publish_video_fanout(owner, video);
+  return true;
 }
 
-static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) { sfu_session_publish_fanout_targets(owner, new_snap); }
+static void snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) { sfu_session_publish_receivers(owner, new_snap); }
+
+static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
+  if (!publish_split_fanout(owner, new_snap)) {
+    SFU_LOG_ERROR("peer %u: failed to publish split fanout snapshots; using legacy graph", owner->peer_id);
+    sfu_session_publish_audio_fanout(owner, NULL);
+    sfu_session_publish_video_fanout(owner, NULL);
+  }
+  sfu_session_publish_fanout_targets(owner, new_snap);
+}
 
 void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_lock(&room->lock);
@@ -195,8 +253,8 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     return;
   }
   if (peer->room) {
-    SFU_LOG_WARN("peer %u already belongs to room %" PRIu64 "; refusing add to room %" PRIu64, peer->peer_id,
-                 ((sfu_room_t *)peer->room)->room_id, room->room_id);
+    SFU_LOG_WARN("peer %u already belongs to room %" PRIu64 "; refusing add to room %" PRIu64, peer->peer_id, ((sfu_room_t *)peer->room)->room_id,
+                 room->room_id);
     pthread_mutex_unlock(&room->lock);
     return;
   }
@@ -299,7 +357,7 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     if (empty) {
       empty->generation = 0;
     }
-    sfu_session_publish_fanout_targets(peer, empty);
+    fanout_snapshot_replace(peer, empty);
   }
 
   for (uint32_t i = 0; i < room->peer_count; i++) {
@@ -386,7 +444,7 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   if (empty) {
     empty->generation = 0;
   }
-  sfu_session_publish_fanout_targets(peer, empty);
+  fanout_snapshot_replace(peer, empty);
 
   peer->room = NULL;
   peer->negotiation_needed = false;
