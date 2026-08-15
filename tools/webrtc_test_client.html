@@ -1073,9 +1073,29 @@
                 } catch (err) {
                     console.error("Failed to answer server-initiated offer:", err);
                     setConnState("negotiation failed", "err");
+                    // If setRemoteDescription succeeded but createAnswer or
+                    // setLocalDescription failed, signalingState is stuck in
+                    // "have-remote-offer". Roll back so the next queued offer
+                    // can start from "stable".
+                    if (pc && pc.signalingState === "have-remote-offer") {
+                        try {
+                            await pc.setLocalDescription({ type: "rollback" });
+                        } catch (rb) {
+                            console.warn("rollback after failed answer:", rb);
+                        }
+                    }
                 } finally {
                     sdp = pendingOfferSdp;
                     pendingOfferSdp = null;
+                    if (sdp) {
+                        // Yield to the event loop between consecutive offer/answer
+                        // cycles. Chrome's SRTP demuxer needs a tick to finalize
+                        // SSRC-to-mid bindings from the previous setLocalDescription;
+                        // without this, the next setLocalDescription can fail with
+                        // "Failed to apply demuxer criteria" when the same SSRCs
+                        // appear on the same mid in back-to-back renegotiations.
+                        await new Promise((r) => setTimeout(r, 50));
+                    }
                 }
                 }
                 isNegotiating = false;
@@ -1499,9 +1519,6 @@
                         params.encodings[0].scaleResolutionDownBy = 1;
                         params.encodings[0].priority = "high";
                         params.encodings[0].networkPriority = "high";
-                        // minBitrate is best-effort; many Chrome builds strip it from
-                        // getParameters even when the encoder accepted the floor.
-                        params.encodings[0].minBitrate = 1_000_000;
                     } else {
                         if ("scalabilityMode" in params.encodings[0]) {
                             delete params.encodings[0].scalabilityMode;
@@ -1511,7 +1528,6 @@
                         params.encodings[0].scaleResolutionDownBy = 1;
                         params.encodings[0].priority = "high";
                         params.encodings[0].networkPriority = "high";
-                        params.encodings[0].minBitrate = 600_000;
                     }
                     await uplink.sender.setParameters(params);
                     const enc0 = (uplink.sender.getParameters().encodings || [{}])[0];

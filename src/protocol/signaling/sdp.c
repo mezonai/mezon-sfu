@@ -191,6 +191,35 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint1
     return -1;
   }
   if (!live) {
+    /* Chrome requires a=rtpmap for every PT listed in the m= line, even for
+       inactive sections. Without them setRemoteDescription fails with
+       "Failed to set remote video description send parameters". */
+    sfu_video_codec_t codec = SFU_VIDEO_CODEC_NONE;
+    if (slot) {
+      codec = screen ? slot->screen_codec : slot->video_codec;
+    }
+    if (codec == SFU_VIDEO_CODEC_NONE) {
+      codec = sfu_video_codec_from_pt(video_pt);
+    }
+    if (codec == SFU_VIDEO_CODEC_NONE) {
+      codec = SFU_VIDEO_CODEC_VP8;
+    }
+    const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9) ? "VP9" : (codec == SFU_VIDEO_CODEC_AV1) ? "AV1" : "VP8";
+    char attr[128];
+    n = snprintf(attr, sizeof(attr), "a=rtpmap:%u %s/90000", video_pt, codec_name);
+    if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+      return -1;
+    }
+    if (rtx_pt != 0) {
+      n = snprintf(attr, sizeof(attr), "a=rtpmap:%u rtx/90000", rtx_pt);
+      if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+        return -1;
+      }
+      n = snprintf(attr, sizeof(attr), "a=fmtp:%u apt=%u", rtx_pt, video_pt);
+      if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
+        return -1;
+      }
+    }
     return 0;
   }
   if (append_twcc_attributes(out, out_cap, offset) != 0) {
