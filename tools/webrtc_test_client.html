@@ -379,20 +379,14 @@
                         placeholder="e.g. my-server-secret"
                     />
                     <small style="color: var(--muted); display:block; margin-top:4px;">
-                        If set, a valid JWT is auto-generated from this secret + Room ID on join (overrides the token field below).
+                        Enter the server's jwt_secret. A valid JWT (room 101) is auto-generated on join.
                     </small>
                 </div>
                 <div class="form-group">
-                    <label for="jwtToken">JWT Token</label>
-                    <input
-                        type="text"
-                        id="jwtToken"
-                        value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODY2ODUxNzgsImlkZW50aXR5IjoiMTg0MzI1MjIzNzU5MDA3MzM0NCIsImlzcyI6IkFQSWNkZDI4UHpCMmFtcCIsIm1ldGFkYXRhIjoibG9uZ21hMzUwIiwibmJmIjoxNzg2NjgxNTc4LCJzdWIiOiIxODQzMjUyMjM3NTkwMDczMzQ0IiwidmlkZW8iOnsicm9vbSI6IjIwODc3NTc3OTc0ODI1NjU2MzIiLCJyb29tSm9pbiI6dHJ1ZX19.1jxODIAZhseAj1vCT1p9-3c-65nnq9Kb7kfVysxO3tk"
-                        style="font-size: 11px;"
-                    />
-                    <small style="color: var(--muted); display:block; margin-top:4px;">
-                        Paste a pre-generated token, or fill in JWT Secret above to auto-generate one.
-                    </small>
+                    <label>JWT Token</label>
+                    <div id="jwtToken" style="font-size: 11px; color: var(--muted); word-break: break-all; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 6px; min-height: 20px;">
+                        Auto-generated when JWT Secret is provided
+                    </div>
                 </div>
                 <div class="form-group">
                     <label for="displayName">Your name</label>
@@ -1798,7 +1792,7 @@
             async function connectAndJoin() {
                 let wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
-                let jwtToken = document.getElementById("jwtToken").value.trim();
+                let jwtToken = "";
                 const jwtSecret = document.getElementById("jwtSecret").value.trim();
                 const displayName =
                     document.getElementById("displayName").value.trim() ||
@@ -1814,12 +1808,15 @@
                     try {
                         const userId = Date.now().toString();
                         jwtToken = await generateJwt(jwtSecret, userId);
-                        document.getElementById("jwtToken").value = jwtToken;
+                        document.getElementById("jwtToken").textContent = jwtToken;
                         console.log("Auto-generated JWT for room=101 user=" + userId);
                     } catch (e) {
                         setJoinStatus("Failed to generate JWT: " + e.message, true);
                         return;
                     }
+                } else {
+                    setJoinStatus("Please enter a JWT Secret", true);
+                    return;
                 }
 
                 // Browsers block ws:// from https:// pages (mixed content). Prefer wss.
