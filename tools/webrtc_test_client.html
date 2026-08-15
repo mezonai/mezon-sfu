@@ -535,7 +535,7 @@
                 return btoa(binary).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
             }
 
-            async function generateJwt(secret, roomId, userId) {
+            async function generateJwt(secret, userId) {
                 const enc = new TextEncoder();
                 const header = { alg: "HS256", typ: "JWT" };
                 const now = Math.floor(Date.now() / 1000);
@@ -546,7 +546,7 @@
                     sub: String(userId),
                     iss: "mezon-sfu-test-client",
                     metadata: "",
-                    video: { room: String(roomId), roomJoin: true }
+                    video: { room: "101", roomJoin: true }
                 };
                 const headerB64 = b64urlEncode(enc.encode(JSON.stringify(header)));
                 const payloadB64 = b64urlEncode(enc.encode(JSON.stringify(payload)));
@@ -1813,9 +1813,9 @@
                 if (jwtSecret) {
                     try {
                         const userId = Date.now().toString();
-                        jwtToken = await generateJwt(jwtSecret, roomId, userId);
+                        jwtToken = await generateJwt(jwtSecret, userId);
                         document.getElementById("jwtToken").value = jwtToken;
-                        console.log("Auto-generated JWT for room=" + roomId + " user=" + userId);
+                        console.log("Auto-generated JWT for room=101 user=" + userId);
                     } catch (e) {
                         setJoinStatus("Failed to generate JWT: " + e.message, true);
                         return;
@@ -1959,7 +1959,6 @@
                         // Pass the selected role (speaker or audience) to the SFU
                         const joinMsg = {
                             type: "join",
-                            room: roomId,
                             role: currentJoinMode,
                         };
                         if (jwtToken) {
