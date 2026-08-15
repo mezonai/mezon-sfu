@@ -144,7 +144,7 @@ int main(void) {
     snprintf(payload, sizeof(payload), "{\"identity\":\"1\",\"exp\":%" PRId64 ",\"video\":{\"room\":\"101\",\"roomJoin\":true}}", exp);
     assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
     size_t len = strlen(token);
-    token[len - 1] = (token[len - 1] == 'A') ? 'B' : 'A';
+    token[len - 2] = (token[len - 2] == 'A') ? 'B' : 'A';
     int64_t user_id = 0;
     assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 101ULL, &user_id, NULL) != 0);
   }
