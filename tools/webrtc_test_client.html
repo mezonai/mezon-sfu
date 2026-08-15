@@ -372,6 +372,17 @@
                     <input type="text" id="roomId" value="101" />
                 </div>
                 <div class="form-group">
+                    <label for="jwtSecret">JWT Secret</label>
+                    <input
+                        type="text"
+                        id="jwtSecret"
+                        placeholder="e.g. my-server-secret"
+                    />
+                    <small style="color: var(--muted); display:block; margin-top:4px;">
+                        If set, a valid JWT is auto-generated from this secret + Room ID on join (overrides the token field below).
+                    </small>
+                </div>
+                <div class="form-group">
                     <label for="jwtToken">JWT Token</label>
                     <input
                         type="text"
@@ -380,7 +391,7 @@
                         style="font-size: 11px;"
                     />
                     <small style="color: var(--muted); display:block; margin-top:4px;">
-                        Leave empty to join without authentication.
+                        Paste a pre-generated token, or fill in JWT Secret above to auto-generate one.
                     </small>
                 </div>
                 <div class="form-group">
@@ -514,6 +525,40 @@
             const joinBtn = document.getElementById("joinBtn");
 
             let currentJoinMode = 'speaker';
+
+            // ---- JWT generation (Web Crypto API, no external deps) ----
+
+            function b64urlEncode(buf) {
+                const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                return btoa(binary).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+            }
+
+            async function generateJwt(secret, roomId, userId) {
+                const enc = new TextEncoder();
+                const header = { alg: "HS256", typ: "JWT" };
+                const now = Math.floor(Date.now() / 1000);
+                const payload = {
+                    exp: now + 86400,
+                    nbf: now - 60,
+                    identity: String(userId),
+                    sub: String(userId),
+                    iss: "mezon-sfu-test-client",
+                    metadata: "",
+                    video: { room: String(roomId), roomJoin: true }
+                };
+                const headerB64 = b64urlEncode(enc.encode(JSON.stringify(header)));
+                const payloadB64 = b64urlEncode(enc.encode(JSON.stringify(payload)));
+                const signingInput = headerB64 + "." + payloadB64;
+                const key = await crypto.subtle.importKey(
+                    "raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+                );
+                const sig = await crypto.subtle.sign("HMAC", key, enc.encode(signingInput));
+                return signingInput + "." + b64urlEncode(sig);
+            }
+
+            // ---- end JWT generation ----
 
             function toggleJoinOptions(event) {
                 event.stopPropagation();
@@ -1737,7 +1782,8 @@
             async function connectAndJoin() {
                 let wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
-                const jwtToken = document.getElementById("jwtToken").value.trim();
+                let jwtToken = document.getElementById("jwtToken").value.trim();
+                const jwtSecret = document.getElementById("jwtSecret").value.trim();
                 const displayName =
                     document.getElementById("displayName").value.trim() ||
                     "Guest";
@@ -1745,6 +1791,19 @@
                 if (!roomId) {
                     setJoinStatus("Please enter a Room ID", true);
                     return;
+                }
+
+                // Auto-generate JWT from secret if provided
+                if (jwtSecret) {
+                    try {
+                        const userId = Date.now().toString();
+                        jwtToken = await generateJwt(jwtSecret, roomId, userId);
+                        document.getElementById("jwtToken").value = jwtToken;
+                        console.log("Auto-generated JWT for room=" + roomId + " user=" + userId);
+                    } catch (e) {
+                        setJoinStatus("Failed to generate JWT: " + e.message, true);
+                        return;
+                    }
                 }
 
                 // Browsers block ws:// from https:// pages (mixed content). Prefer wss.
