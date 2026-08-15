@@ -857,15 +857,10 @@ static void handle_pong(sfu_client_conn_t *c) {
 }
 
 static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
-  char room_str[32] = {0};
   char role_str[16] = {0};
   char token[4096];
   uint64_t room_id = 0;
   int64_t user_id = 0;
-
-  if (sfu_json_extract_string(buf, n, "room", room_str, sizeof(room_str)) >= 0) {
-    room_id = (uint64_t)strtoull(room_str, NULL, 10);
-  }
 
   const char *jwt_secret = g_sfu_config.jwt_secret;
   if (jwt_secret[0] == '\0') {
@@ -883,15 +878,13 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
     return;
   }
   uint64_t token_room = 0;
-  if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, room_id, &user_id, &token_room) != 0) {
+  if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, 0, &user_id, &token_room) != 0) {
     SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
     sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
     disconnect_client(c);
     return;
   }
-  if (room_id == 0) {
-    room_id = token_room;
-  }
+  room_id = token_room;
   c->user_id = user_id;
   SFU_LOG_INFO("signaling: join JWT ok user_id=%" PRId64 " room=%" PRIu64 " (fd=%d)", user_id, room_id, c->fd);
 
