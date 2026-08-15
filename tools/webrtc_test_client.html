@@ -372,6 +372,18 @@
                     <input type="text" id="roomId" value="101" />
                 </div>
                 <div class="form-group">
+                    <label for="jwtToken">JWT Token</label>
+                    <input
+                        type="text"
+                        id="jwtToken"
+                        value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODY2ODUxNzgsImlkZW50aXR5IjoiMTg0MzI1MjIzNzU5MDA3MzM0NCIsImlzcyI6IkFQSWNkZDI4UHpCMmFtcCIsIm1ldGFkYXRhIjoibG9uZ21hMzUwIiwibmJmIjoxNzg2NjgxNTc4LCJzdWIiOiIxODQzMjUyMjM3NTkwMDczMzQ0IiwidmlkZW8iOnsicm9vbSI6IjIwODc3NTc3OTc0ODI1NjU2MzIiLCJyb29tSm9pbiI6dHJ1ZX19.1jxODIAZhseAj1vCT1p9-3c-65nnq9Kb7kfVysxO3tk"
+                        style="font-size: 11px;"
+                    />
+                    <small style="color: var(--muted); display:block; margin-top:4px;">
+                        Leave empty to join without authentication.
+                    </small>
+                </div>
+                <div class="form-group">
                     <label for="displayName">Your name</label>
                     <input type="text" id="displayName" value="Guest" />
                 </div>
@@ -581,6 +593,34 @@
                 return userId !== "0" ? "user-" + userId : "peer-" + String(member.peer_id);
             }
 
+            function isLocalUplinkMid(mid) {
+                return mid === "0" || mid === "1" || mid === "2";
+            }
+
+            function remoteKindFromMid(mid) {
+                const n = Number(mid);
+                if (!Number.isFinite(n) || n < 3) return null;
+                const slot = (n - 3) % 3;
+                if (slot === 0) return "audio";
+                if (slot === 1) return "camera";
+                return "screen";
+            }
+
+            function memberMids(member) {
+                return [member && member.mid_audio, member && member.mid_video, member && member.mid_screen];
+            }
+
+            function mediaTileId(baseId, mid, trackKind = null, isScreen = false) {
+                const kind = remoteKindFromMid(mid);
+                if (trackKind === "audio" || kind === "audio") return baseId;
+                return baseId + (isScreen || kind === "screen" ? "-screen" : "-camera");
+            }
+
+            function parsePublisherStreamId(streamId) {
+                const match = /^u(-?\d+)-p(\d+)$/.exec(String(streamId || ""));
+                return match ? { userId: match[1], peerId: match[2] } : null;
+            }
+
             function updateParticipantCount(authoritativeCount = null) {
                 const uniqueTiles = new Set();
                 for (const member of membersByPeerId.values()) uniqueTiles.add(memberTileId(member));
@@ -640,7 +680,7 @@
                 mergedMember.tileId = id;
                 membersByPeerId.set(peerId, mergedMember);
                 if (member.ufrag) peerIdByUfrag.set(String(member.ufrag), peerId);
-                for (const midValue of [member.mid_audio, member.mid_video]) {
+                for (const midValue of memberMids(member)) {
                     if (midValue != null && String(midValue) !== "0") {
                         peerIdByMid.set(String(midValue), peerId);
                     }
@@ -654,23 +694,31 @@
                     : ensureParticipant(id, { isLocal: isSelf, label });
                 p.peerId = peerId;
                 p.role = role;
+                p.isMute = !!mergedMember.is_mute;
                 if (!p.hasVideo) {
                     p.video.style.display = "none";
                     p.avatar.style.display = "flex";
                 }
-                p.badges.textContent = role === "audience" ? "Audience" : "Speaker";
+                const badges = [];
+                if (role === "audience") badges.push("Audience");
+                if (p.isMute) badges.push("Muted");
+                p.badges.textContent = badges.join(" · ");
 
-                for (const midValue of [member.mid_audio, member.mid_video]) {
+                for (const midValue of memberMids(member)) {
                     if (midValue == null || String(midValue) === "0") continue;
-                    const oldId = "mid-" + String(midValue);
+                    const targetId = mediaTileId(id, midValue);
+                    const oldId = mediaTileId("mid-" + String(midValue), midValue);
                     const old = participants.get(oldId);
-                    if (old && old !== p) {
-                        if (old.stream) setTileStream(p, old.stream, old.hasVideo);
-                        document
-                            .querySelectorAll(`audio[data-owner="${CSS.escape(oldId)}"]`)
-                            .forEach((el) => { el.dataset.owner = id; });
-                        removeTile(oldId);
-                    }
+                    if (!old || oldId === targetId) continue;
+                    const target = targetId === id ? p : ensureParticipant(targetId, {
+                        isLocal: isSelf,
+                        label: remoteKindFromMid(midValue) === "screen" ? label + " screen" : label,
+                    });
+                    if (old.stream) setTileStream(target, old.stream, old.hasVideo);
+                    document
+                        .querySelectorAll(`audio[data-owner="${CSS.escape(oldId)}"]`)
+                        .forEach((el) => { el.dataset.owner = targetId; });
+                    removeTile(oldId);
                 }
                 return p;
             }
@@ -681,7 +729,10 @@
                 peerIdByMid.clear();
                 const liveIds = new Set();
                 for (const member of msg.members || []) {
-                    liveIds.add(memberTileId(member));
+                    const baseId = memberTileId(member);
+                    liveIds.add(baseId);
+                    liveIds.add(baseId + "-camera");
+                    liveIds.add(baseId + "-screen");
                     upsertMember(member, String(member.peer_id) === String(msg.self_peer_id));
                 }
                 for (const id of [...participants.keys()]) {
@@ -706,7 +757,11 @@
                     const tileId = member ? memberTileId(member) : "peer-" + peerId;
                     membersByPeerId.delete(peerId);
                     const tileStillUsed = [...membersByPeerId.values()].some((other) => memberTileId(other) === tileId);
-                    if (!tileStillUsed) removeTile(tileId);
+                    if (!tileStillUsed) {
+                        removeTile(tileId);
+                        removeTile(tileId + "-camera");
+                        removeTile(tileId + "-screen");
+                    }
                 }
                 const mids = [];
                 const addMid = (v) => {
@@ -715,6 +770,7 @@
                 };
                 addMid(msg.mid_video);
                 addMid(msg.mid_audio);
+                addMid(msg.mid_screen);
 
                 for (const mid of mids) {
                     peerIdByMid.delete(mid);
@@ -732,7 +788,7 @@
                 // peer_left, so this path only runs on leave.
                 if (mids.length === 0 && pc) {
                     for (const t of pc.getTransceivers()) {
-                        if (!t.mid || t.mid === "0" || t.mid === "1") continue;
+                        if (!t.mid || isLocalUplinkMid(t.mid)) continue;
                         const dir = t.currentDirection || t.direction;
                         if (dir === "inactive" || dir === "stopped") {
                             leftRemoteMids.add(String(t.mid));
@@ -823,12 +879,15 @@
             function resyncRemoteMedia(pc) {
                 if (!pc) return;
                 for (const t of pc.getTransceivers()) {
-                    if (!t.mid || t.mid === "0" || t.mid === "1") continue;
+                    if (!t.mid || isLocalUplinkMid(t.mid)) continue;
                     // Publisher left: keep historical inactive m-line, no tile.
                     if (leftRemoteMids.has(String(t.mid))) continue;
                     const track = t.receiver && t.receiver.track;
                     if (!track || track.readyState === "ended") continue;
-                    const id = "mid-" + t.mid;
+                    const mappedPeerId = peerIdByMid.get(String(t.mid));
+                    const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
+                    const baseId = mappedMember ? memberTileId(mappedMember) : "mid-" + t.mid;
+                    const id = mediaTileId(baseId, t.mid, track.kind);
                     if (track.kind === "video") {
                         // Do not invent a tile for an already-inactive remote mid
                         // unless we already had one (demote → avatar). Leave must
@@ -891,11 +950,7 @@
 
                     if (!localTracksAdded && currentJoinMode === "speaker" && localStream) {
                         const audioTrack = localStream.getAudioTracks()[0];
-                        const videoTrack =
-                            (screenSharing &&
-                                screenStream &&
-                                screenStream.getVideoTracks()[0]) ||
-                            localStream.getVideoTracks()[0];
+                        const videoTrack = localStream.getVideoTracks()[0];
                         if (audioTrack) {
                             const audioTc = pc.getTransceivers().find(
                                 (t) => t.mid === "0" || (t.receiver && t.receiver.track && t.receiver.track.kind === "audio")
@@ -909,9 +964,13 @@
                         }
                         if (videoTrack) {
                             await enableSvcForVideoSender(pc, videoTrack);
-                            if (screenSharing) {
-                                const sender = findUplinkVideoSender();
-                                if (sender) await applyScreenEncodingParams(sender);
+                            if (screenSharing && screenStream) {
+                                const screenTrack = screenStream.getVideoTracks()[0];
+                                const sender = findUplinkVideoSender("2");
+                                if (screenTrack && sender) {
+                                    await sender.replaceTrack(screenTrack);
+                                    await applyScreenEncodingParams(sender);
+                                }
                             }
                         }
                         localTracksAdded = true;
@@ -921,9 +980,9 @@
                         screenStream &&
                         currentJoinMode === "speaker"
                     ) {
-                        // Renegotiation while already sharing: keep screen on mid:1.
+                        // Renegotiation while already sharing: keep screen on mid:2.
                         const screenTrack = screenStream.getVideoTracks()[0];
-                        const sender = findUplinkVideoSender();
+                        const sender = findUplinkVideoSender("2");
                         if (screenTrack && sender && sender.track !== screenTrack) {
                             try {
                                 await sender.replaceTrack(screenTrack);
@@ -1025,19 +1084,18 @@
                     icon.classList.toggle("live", micEnabled);
                     icon.classList.toggle("muted", !micEnabled);
                 }
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "mute", is_mute: !micEnabled }));
+                }
             }
 
-            function sendHook(type) {
+            function sendHook(type, extra = {}) {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type }));
+                    ws.send(JSON.stringify({ type, ...extra }));
                 }
             }
 
             function toggleCam() {
-                if (screenSharing) {
-                    setConnState("stop screen share to toggle camera", "warn");
-                    return;
-                }
                 camEnabled = !camEnabled;
                 localStream
                     .getVideoTracks()
@@ -1055,25 +1113,16 @@
                 sendHook(camEnabled ? "publish" : "unpublish");
             }
 
-            function findUplinkVideoSender() {
+            function findUplinkVideoSender(mid = "1") {
                 if (!pc) return null;
                 const tc =
-                    pc.getTransceivers().find((t) => t.mid === "1") ||
-                    pc.getTransceivers().find(
+                    pc.getTransceivers().find((t) => t.mid === mid) ||
+                    (mid === "1" ? pc.getTransceivers().find(
                         (t) =>
                             t.sender &&
                             t.sender.track &&
                             t.sender.track.kind === "video"
-                    ) ||
-                    pc.getTransceivers().find(
-                        (t) =>
-                            t.receiver &&
-                            t.receiver.track &&
-                            t.receiver.track.kind === "video" &&
-                            (t.direction === "sendonly" ||
-                                t.direction === "sendrecv" ||
-                                t.direction === "inactive")
-                    );
+                    ) : null);
                 return tc ? tc.sender : null;
             }
 
@@ -1168,23 +1217,10 @@
                     }
                 }
 
-                const sender = findUplinkVideoSender();
+                const sender = findUplinkVideoSender("2");
                 if (!sender) {
-                    // No negotiated video uplink yet — keep stream and wait for offer attach.
-                    console.warn("No video sender yet; screen track will attach on next offer");
+                    console.warn("No screen sender on MID 2 yet; track will attach on next offer");
                 } else {
-                    // Remember camera track currently on the sender (or from localStream).
-                    cameraTrackBackup =
-                        (sender.track &&
-                            sender.track !== screenTrack &&
-                            sender.track.kind === "video" &&
-                            (!localStream ||
-                                localStream.getVideoTracks().indexOf(sender.track) >= 0)
-                            ? sender.track
-                            : null) ||
-                        (localStream ? localStream.getVideoTracks()[0] : null) ||
-                        null;
-
                     try {
                         await sender.replaceTrack(screenTrack);
                         const tc = pc.getTransceivers().find((t) => t.sender === sender);
@@ -1212,11 +1248,16 @@
                 updateLocalScreenBadge(true);
 
                 const local = participants.get("local");
-                if (local) {
-                    setTileStream(local, new MediaStream([screenTrack]), true);
+                if (local && camEnabled && localStream) {
+                    setTileStream(local, localStream, localStream.getVideoTracks().length > 0);
                 }
+                const screenTile = ensureParticipant("local-screen", {
+                    isLocal: true,
+                    label: "Your screen",
+                });
+                setTileStream(screenTile, new MediaStream([screenTrack]), true);
 
-                sendHook("share_screen");
+                sendHook("share_screen", { active: true });
                 setConnState("sharing screen", "ok");
             }
 
@@ -1239,37 +1280,14 @@
                     screenStream = null;
                 }
 
-                const sender = findUplinkVideoSender();
-                let restoreTrack = cameraTrackBackup;
-                if (
-                    !restoreTrack &&
-                    localStream &&
-                    localStream.getVideoTracks().length > 0
-                ) {
-                    restoreTrack = localStream.getVideoTracks()[0];
-                }
-
-                // Prefer a still-live camera track.
-                if (restoreTrack && restoreTrack.readyState === "ended") {
-                    restoreTrack = null;
-                }
-                if (
-                    !restoreTrack &&
-                    localStream &&
-                    localStream.getVideoTracks().length > 0
-                ) {
-                    const cam = localStream.getVideoTracks()[0];
-                    if (cam && cam.readyState === "live") restoreTrack = cam;
-                }
+                const sender = findUplinkVideoSender("2");
+                const restoreTrack = localStream && localStream.getVideoTracks().length > 0 ? localStream.getVideoTracks()[0] : null;
 
                 if (sender) {
                     try {
-                        await sender.replaceTrack(restoreTrack || null);
-                        if (restoreTrack && camEnabled) {
-                            await applyVideoEncodingParams(pc);
-                        }
+                        await sender.replaceTrack(null);
                     } catch (e) {
-                        console.warn("restore camera after screen share failed:", e);
+                        console.warn("detach screen track failed:", e);
                     }
                 }
 
@@ -1277,6 +1295,7 @@
                 screenSharing = false;
                 setScreenButtonActive(false);
                 updateLocalScreenBadge(false);
+                removeTile("local-screen");
 
                 const local = participants.get("local");
                 if (local) {
@@ -1291,6 +1310,7 @@
                     }
                 }
 
+                sendHook("share_screen", { active: false });
                 if (!opts.fromTrackEnded) {
                     setConnState("screen share stopped", "ok");
                 } else {
@@ -1486,6 +1506,10 @@
                     pc.getTransceivers().find((t) => t.mid === "1") || transceiver;
 
                 forceVideoCodec(uplink, selectedCodec);
+                const screenTc = pc.getTransceivers().find((t) => t.mid === "2");
+                if (screenTc) {
+                    forceVideoCodec(screenTc, selectedCodec);
+                }
 
                 if (videoTrack && "contentHint" in videoTrack) {
                     try {
@@ -1714,6 +1738,7 @@
             async function connectAndJoin() {
                 let wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
+                const jwtToken = document.getElementById("jwtToken").value.trim();
                 const displayName =
                     document.getElementById("displayName").value.trim() ||
                     "Guest";
@@ -1757,6 +1782,9 @@
                         // with new tracks, so stream id alone cannot tell peers
                         // (or incarnations of the same peer) apart.
                         const mid = event.transceiver && event.transceiver.mid;
+                        if (isLocalUplinkMid(mid)) {
+                            return;
+                        }
                         if (mid && leftRemoteMids.has(String(mid))) {
                             console.log("ontrack ignored for left remote mid", mid);
                             return;
@@ -1764,16 +1792,25 @@
                         const streamId = event.streams && event.streams.length > 0
                             ? event.streams[0].id
                             : null;
-                        let mappedPeerId = (mid ? peerIdByMid.get(String(mid)) : null)
+                        const publisherIdentity = parsePublisherStreamId(streamId);
+                        let mappedPeerId = (publisherIdentity && publisherIdentity.peerId)
+                            || (mid ? peerIdByMid.get(String(mid)) : null)
                             || (streamId ? peerIdByUfrag.get(String(streamId)) : null);
                         if (!mappedPeerId) {
                             const remoteCandidates = [...membersByPeerId.entries()].filter(([, member]) => !member.isSelf && member.role === "speaker");
                             if (remoteCandidates.length === 1) mappedPeerId = remoteCandidates[0][0];
                         }
                         const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
-                        const id = mappedMember
+                        const baseId = mappedMember
                             ? memberTileId(mappedMember)
-                            : (mid ? "mid-" + mid : (streamId || track.id));
+                            : publisherIdentity && publisherIdentity.userId !== "0"
+                                ? "user-" + publisherIdentity.userId
+                                : (mid ? "mid-" + mid : (streamId || track.id));
+                        const isScreenTrack = track.kind === "video" &&
+                            (remoteKindFromMid(mid) === "screen" ||
+                             (track.id && track.id.toLowerCase().includes("screen")) ||
+                             (streamId && streamId.toLowerCase().includes("screen")));
+                        const id = mediaTileId(baseId, mid, track.kind, isScreenTrack);
 
                         if (track.kind === "video") {
                             const label = "Peer " + id.substring(0, 8);
@@ -1846,11 +1883,15 @@
                         setConnState("joining…", "warn");
 
                         // Pass the selected role (speaker or audience) to the SFU
-                        ws.send(JSON.stringify({
+                        const joinMsg = {
                             type: "join",
                             room: roomId,
                             role: currentJoinMode,
-                        }));
+                        };
+                        if (jwtToken) {
+                            joinMsg.token = jwtToken;
+                        }
+                        ws.send(JSON.stringify(joinMsg));
                     };
 
                     ws.onmessage = async (event) => {
@@ -1920,11 +1961,7 @@
                             setPttButtonPressed(true);
                             try {
                                 const audioTrack = localStream.getAudioTracks()[0];
-                                const videoTrack =
-                                    (screenSharing &&
-                                        screenStream &&
-                                        screenStream.getVideoTracks()[0]) ||
-                                    localStream.getVideoTracks()[0];
+                                const videoTrack = localStream.getVideoTracks()[0];
 
                                 const audioTc = pc.getTransceivers().find(t =>
                                     t.mid === "0" ||
@@ -1940,9 +1977,13 @@
 
                                 if (videoTrack) {
                                     await enableSvcForVideoSender(pc, videoTrack);
-                                    if (screenSharing) {
-                                        const sender = findUplinkVideoSender();
-                                        if (sender) await applyScreenEncodingParams(sender);
+                                    if (screenSharing && screenStream) {
+                                        const screenTrack = screenStream.getVideoTracks()[0];
+                                        const sender = findUplinkVideoSender("2");
+                                        if (screenTrack && sender) {
+                                            await sender.replaceTrack(screenTrack);
+                                            await applyScreenEncodingParams(sender);
+                                        }
                                     }
                                 }
                                 localTracksAdded = true;

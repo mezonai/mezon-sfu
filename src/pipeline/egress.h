@@ -14,6 +14,7 @@ typedef struct sfu_worker sfu_worker_t;
 typedef struct sfu_egress_media {
   sfu_peer_session_t *publisher;
   sfu_svc_descriptor_t svc;
+  sfu_media_kind_t source;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
   uint8_t video_pt;
@@ -26,5 +27,7 @@ typedef struct sfu_egress_media {
 
 bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                         const sfu_egress_media_t *media);
+bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, const struct sockaddr_storage *dst,
+                                  socklen_t dst_len, const sfu_egress_media_t *media);
 
 #endif /* SFU_PIPELINE_EGRESS_H */

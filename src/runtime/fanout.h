@@ -11,10 +11,25 @@
 #include "sfu/packet.h"
 #include "util/ringbuffer.h"
 
+#define SFU_FANOUT_BATCH_CAP 16
+
+typedef struct sfu_fanout_target {
+  struct sockaddr_storage dst;
+  socklen_t dst_len;
+  sfu_peer_session_t *subscriber;
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  uint8_t source;
+  bool has_video;
+} sfu_fanout_target_t;
+
 typedef enum sfu_fanout_job_kind {
   SFU_FANOUT_JOB_READY = 0,
   SFU_FANOUT_JOB_FORWARD = 1,
   SFU_FANOUT_JOB_KEYFRAME_REQUEST = 2,
+  SFU_FANOUT_JOB_BATCH = 3,
 } sfu_fanout_job_kind_t;
 
 typedef struct sfu_fanout_job {
@@ -30,10 +45,13 @@ typedef struct sfu_fanout_job {
   uint32_t pool_dst;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
+  uint8_t source;
   bool has_video;
   bool is_audio;
   bool has_svc;
   bool is_keyframe;
+  uint8_t target_count;
+  sfu_fanout_target_t targets[SFU_FANOUT_BATCH_CAP];
   uint8_t kind;
 } sfu_fanout_job_t;
 
@@ -55,6 +73,11 @@ bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worke
                                      sfu_peer_session_t *publisher, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
                                      uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, bool is_audio,
                                      const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe);
+bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *source,
+                                           sfu_peer_session_t *publisher, const sfu_fanout_target_t *targets, uint8_t target_count, bool is_audio,
+                                           const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe);
+bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker,
+                                                         sfu_peer_session_t *publisher, sfu_media_kind_t source);
 bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher);
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data);
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job);

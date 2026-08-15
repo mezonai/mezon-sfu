@@ -11,6 +11,7 @@ typedef struct sfu_worker sfu_worker_t;
 typedef struct sfu_ingress_media {
   sfu_packet_t *pkt;
   sfu_rtp_packet_t rtp;
+  sfu_media_kind_t source;
   bool is_audio;
   bool has_svc;
   bool is_keyframe;

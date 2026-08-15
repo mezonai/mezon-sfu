@@ -8,6 +8,57 @@
 #define RTP_EXT_ONE_BYTE_PROFILE 0xBEDEu
 #define RTP_EXT_TWO_BYTE_PROFILE 0x1000u /* 0x100<n>; low nibble is appbits */
 
+bool sfu_rtp_ext_read_mid(uint16_t extension_profile, const uint8_t *ext, size_t ext_len, uint8_t ext_id, char *out_mid, size_t out_cap) {
+  if (!ext || !out_mid || out_cap < 2 || ext_id == 0u) {
+    return false;
+  }
+  size_t pos = 0;
+  while (pos < ext_len) {
+    uint8_t id;
+    size_t header_len;
+    size_t data_len;
+    if (extension_profile == RTP_EXT_ONE_BYTE_PROFILE) {
+      uint8_t b = ext[pos];
+      if (b == 0) {
+        pos++;
+        continue;
+      }
+      id = b >> 4;
+      if (id == 15u) {
+        return false;
+      }
+      header_len = 1;
+      data_len = (size_t)(b & 0x0fu) + 1u;
+    } else if ((extension_profile & 0xFFF0u) == RTP_EXT_TWO_BYTE_PROFILE) {
+      id = ext[pos];
+      if (id == 0) {
+        pos++;
+        continue;
+      }
+      if (pos + 2u > ext_len) {
+        return false;
+      }
+      header_len = 2;
+      data_len = ext[pos + 1u];
+    } else {
+      return false;
+    }
+    if (pos + header_len + data_len > ext_len) {
+      return false;
+    }
+    if (id == ext_id) {
+      if (data_len == 0 || data_len >= out_cap) {
+        return false;
+      }
+      memcpy(out_mid, ext + pos + header_len, data_len);
+      out_mid[data_len] = '\0';
+      return true;
+    }
+    pos += header_len + data_len;
+  }
+  return false;
+}
+
 bool sfu_rtp_ext_read_twcc(uint16_t extension_profile, const uint8_t *ext, size_t ext_len, uint8_t ext_id, uint16_t *out_seq) {
   if (!ext || !out_seq || ext_id == 0u || ext_id > 14u) {
     return false;

@@ -19,11 +19,15 @@ _Static_assert(SFU_SRTP_KEY_MATERIAL_LEN >= 88, "GCM-256 DTLS-SRTP exporter writ
 #define SFU_MAX_REMOTE_SLOTS (SFU_ROOM_MAX_PEERS - 1)
 #define SFU_MAX_REMOTE_TRANSCEIVERS (SFU_MAX_REMOTE_SLOTS * SFU_REMOTE_TRANSCEIVERS_PER_SLOT)
 #define SFU_MAX_UPLINK_TRANSCEIVERS 3      /* audio, camera, screen */
-#define SFU_REMOTE_TRANSCEIVERS_PER_SLOT 2 /* audio + video */
+#define SFU_REMOTE_TRANSCEIVERS_PER_SLOT 3 /* audio + camera + screen */
+#define SFU_LOCAL_AUDIO_MID 0u
+#define SFU_LOCAL_CAMERA_MID 1u
+#define SFU_LOCAL_SCREEN_MID 2u
+#define SFU_REMOTE_MID_BASE 3u
 
-#define SFU_SIGNALING_RECV_CAP 16384
-#define SFU_SIGNALING_SDP_CAP 16384
-#define SFU_SIGNALING_JSON_CAP 65536
+#define SFU_SIGNALING_RECV_CAP 1048576
+#define SFU_SIGNALING_SDP_CAP 1048576
+#define SFU_SIGNALING_JSON_CAP 2097152
 
 #define SFU_HASH_EMPTY UINT32_MAX
 #define SFU_HASH_DELETED (UINT32_MAX - 1)
@@ -131,18 +135,28 @@ typedef struct sfu_transceiver {
 typedef struct sfu_receiver_entry {
   sfu_peer_session_t *subscriber;
   char subscriber_ufrag[32];
+  int64_t publisher_user_id;
+  uint32_t publisher_peer_id;
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
+  uint32_t screen_ssrc;
+  uint32_t screen_rtx_ssrc;
   uint32_t mid_audio;
   uint32_t mid_video;
+  uint32_t mid_screen;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
+  uint8_t screen_pt;
+  uint8_t screen_rtx_pt;
   sfu_video_codec_t video_codec;
+  sfu_video_codec_t screen_codec;
   bool has_audio;
   bool has_video;
+  bool has_screen;
   bool audio_active;
   bool video_active;
+  bool screen_active;
 } sfu_receiver_entry_t;
 
 struct sfu_receiver_snapshot {
@@ -153,18 +167,61 @@ struct sfu_receiver_snapshot {
   sfu_receiver_entry_t entries[];
 };
 
-typedef struct sfu_media_snapshot {
-  uint32_t audio_ssrc;
+typedef struct sfu_audio_route_entry {
+  sfu_peer_session_t *subscriber;
+} sfu_audio_route_entry_t;
+
+typedef struct sfu_audio_route_snapshot {
+  _Atomic uint32_t refcount;
+  uint64_t generation;
+  uint32_t count;
+  uint32_t capacity;
+  sfu_audio_route_entry_t entries[];
+} sfu_audio_route_snapshot_t;
+
+typedef struct sfu_video_route_entry {
+  sfu_peer_session_t *subscriber;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
+  bool has_video;
+} sfu_video_route_entry_t;
+
+typedef struct sfu_video_route_snapshot {
+  _Atomic uint32_t refcount;
+  uint64_t generation;
+  uint32_t count;
+  uint32_t capacity;
+  sfu_video_route_entry_t entries[];
+} sfu_video_route_snapshot_t;
+
+typedef struct sfu_media_snapshot {
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t video_rtx_ssrc;
+  uint32_t screen_ssrc;
+  uint32_t screen_rtx_ssrc;
+  uint8_t video_pt;
+  uint8_t video_rtx_pt;
+  uint8_t screen_pt;
+  uint8_t screen_rtx_pt;
   sfu_video_codec_t video_codec;
+  sfu_video_codec_t screen_codec;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
+  uint8_t mid_recv_extmap_id;
   bool audio_active;
   bool video_active;
+  bool screen_active;
 } sfu_media_snapshot_t;
+
+typedef enum {
+  SFU_VIDEO_RUNTIME_UNINITIALIZED = 0,
+  SFU_VIDEO_RUNTIME_INITIALIZING,
+  SFU_VIDEO_RUNTIME_READY,
+  SFU_VIDEO_RUNTIME_FAILED,
+} sfu_video_runtime_state_t;
 
 typedef struct sfu_pacer {
   uint64_t sent[SFU_PACER_CLASS_COUNT];
@@ -198,11 +255,14 @@ typedef struct sfu_peer_session {
   sfu_peer_session_cold_t *cold;
   _Atomic(sfu_receiver_snapshot_t *) receivers;
   _Atomic(sfu_receiver_snapshot_t *) fanout_targets;
+  _Atomic(sfu_audio_route_snapshot_t *) audio_fanout_targets;
+  _Atomic(sfu_video_route_snapshot_t *) video_fanout_targets;
+  _Atomic(sfu_video_route_snapshot_t *) screen_fanout_targets;
   sfu_srtp_ctx_t srtp;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
-  _Atomic uint64_t media_snap_words[3];
+  _Atomic uint64_t media_snap_words[5];
   _Atomic uint32_t media_snap_seq;
   pthread_mutex_t answer_lock;
   pthread_mutex_t negotiation_lock;
@@ -212,6 +272,7 @@ typedef struct sfu_peer_session {
   uint8_t pt_map[128];
   int64_t user_id;
   int64_t last_pli_time;
+  int64_t last_screen_pli_time;
   int64_t last_fir_time;
   uint32_t peer_id;
   _Atomic uint32_t next_remote_mid;
@@ -220,19 +281,23 @@ typedef struct sfu_peer_session {
   _Atomic uint64_t worker_owner;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
+  uint8_t mid_recv_extmap_id;
   int64_t twcc_last_feedback_ref_us;
   struct sfu_twcc_recv_tracker *twcc_recv;
   _Atomic uint32_t egress_generation;
   _Atomic uint32_t refcount;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t lifecycle;
+  _Atomic uint8_t video_runtime_state;
   _Atomic bool accepts_work;
   uint8_t state;
   uint8_t fir_seq;
   _Atomic bool is_audience;
   _Atomic bool audio_send_negotiated;
   _Atomic bool video_send_negotiated;
+  _Atomic bool screen_send_negotiated;
   _Atomic bool visible;
+  _Atomic bool is_mute;
   bool active;
   bool negotiation_needed;
   bool offer_outstanding;

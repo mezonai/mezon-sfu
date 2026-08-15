@@ -43,6 +43,11 @@ static void test_basic_lifecycle(void) {
   assert(s1->active == true);
   assert(sfu_session_accepts_work(s1));
   assert(atomic_load(&s1->lifecycle) == SFU_SESSION_LIFECYCLE_OPEN);
+  assert(!sfu_session_video_runtime_ready(s1));
+  assert(s1->gcc_ctx == NULL && s1->twcc_history == NULL && s1->twcc_recv == NULL && s1->schedulers == NULL && s1->rtx_cache == NULL);
+  assert(sfu_session_ensure_video_runtime(s1));
+  assert(sfu_session_video_runtime_ready(s1));
+  assert(s1->gcc_ctx && s1->twcc_history && s1->twcc_recv && s1->schedulers && s1->rtx_cache);
 
   sfu_peer_session_t *s1_again = sfu_session_table_get_or_create(&table, &addr1, len1);
   assert(s1_again == s1);
@@ -50,6 +55,8 @@ static void test_basic_lifecycle(void) {
   sfu_peer_session_t *s2 = sfu_session_table_get_or_create(&table, &addr2, len2);
   assert(s2 != NULL);
   assert(s2 != s1);
+  assert(!sfu_session_video_runtime_ready(s2));
+  assert(s2->rtx_cache == NULL);
 
   /* Lookup by address (acquired pins). */
   sfu_peer_session_t *f;

@@ -263,6 +263,19 @@ static void test_wrong_length_element_refused(void) {
   assert(!sfu_rtp_ext_write_twcc(buf, len, sizeof(buf), TWCC_ID, 1, &out_len));
 }
 
+static void test_mid_reader(void) {
+  char mid[8];
+  uint8_t one_byte[4] = {(7u << 4) | 0u, '2', 0, 0};
+  assert(sfu_rtp_ext_read_mid(0xBEDE, one_byte, sizeof(one_byte), 7, mid, sizeof(mid)));
+  assert(strcmp(mid, "2") == 0);
+
+  uint8_t two_byte[4] = {9, 1, '1', 0};
+  assert(sfu_rtp_ext_read_mid(0x1000, two_byte, sizeof(two_byte), 9, mid, sizeof(mid)));
+  assert(strcmp(mid, "1") == 0);
+  assert(!sfu_rtp_ext_read_mid(0xBEDE, one_byte, sizeof(one_byte), 6, mid, sizeof(mid)));
+  assert(!sfu_rtp_ext_read_mid(0x1234, one_byte, sizeof(one_byte), 7, mid, sizeof(mid)));
+}
+
 int main(void) {
   test_insert_into_plain_packet();
   test_append_to_one_byte_block();
@@ -273,6 +286,7 @@ int main(void) {
   test_insert_with_csrcs();
   test_rejections();
   test_wrong_length_element_refused();
+  test_mid_reader();
   printf("test_rtp_ext: OK\n");
   return 0;
 }

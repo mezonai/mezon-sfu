@@ -6,24 +6,32 @@
 #include <stdint.h>
 #include "sfu/datadef.h"
 
-#define SFU_MAX_UFRAG_MAPPINGS 2048
+#define SFU_MAX_UFRAG_MAPPINGS SFU_SESSION_TABLE_MAX
 
 typedef struct sfu_pending_answer {
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
   uint32_t rtx_ssrc;
+  uint32_t screen_ssrc;
+  uint32_t screen_rtx_ssrc;
   uint32_t peer_id;
   int64_t user_id;
   uint32_t generation;
   uint8_t video_pt;
   uint8_t rtx_pt;
   uint8_t video_codec;
+  uint8_t screen_pt;
+  uint8_t screen_rtx_pt;
+  uint8_t screen_codec;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
+  uint8_t mid_recv_extmap_id;
   bool audio_section_present;
   bool video_section_present;
+  bool screen_section_present;
   bool audio_sends;
   bool video_sends;
+  bool screen_sends;
   bool is_audience;
   bool valid;
 } sfu_pending_answer_t;
@@ -65,6 +73,7 @@ void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd);
 sfu_routing_register_result_t sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
                                                                  const sfu_pending_answer_t *answer, uint32_t *out_generation);
 bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *client_ufrag, uint32_t worker_index, sfu_routing_snapshot_t *out);
+bool sfu_routing_table_peek_route(sfu_routing_table_t *table, const char *client_ufrag, sfu_routing_snapshot_t *out);
 bool sfu_routing_table_reconcile_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,
                                         sfu_peer_session_t *session, bool *role_changed, bool *media_changed);
 bool sfu_routing_table_invalidate_pending(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t *out_generation);

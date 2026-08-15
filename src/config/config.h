@@ -32,5 +32,6 @@ extern sfu_config_t g_sfu_config;
 const sfu_config_t *sfu_config_get(void);
 void sfu_config_set_defaults();
 int sfu_config_load_ini(const char *filepath);
+int sfu_config_validate(const sfu_config_t *config);
 
 #endif /* SFU_CONFIG_INI_H */
