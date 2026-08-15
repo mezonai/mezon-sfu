@@ -943,6 +943,7 @@
                     return;
                 }
                 isNegotiating = true;
+                while (sdp) {
                 try {
                     await pc.setRemoteDescription(
                         new RTCSessionDescription({ type: "offer", sdp })
@@ -1016,7 +1017,7 @@
                     // resyncRemoteMedia handle avatar vs video instead.
                     resyncRemoteMedia(pc);
 
-                    if (ws.readyState === WebSocket.OPEN) {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
                         ws.send(
                             JSON.stringify({
                                 type: "answer",
@@ -1028,13 +1029,11 @@
                     console.error("Failed to answer server-initiated offer:", err);
                     setConnState("negotiation failed", "err");
                 } finally {
-                    isNegotiating = false;
-                    if (pendingOfferSdp) {
-                        const next = pendingOfferSdp;
-                        pendingOfferSdp = null;
-                        await handleServerOffer(next);
-                    }
+                    sdp = pendingOfferSdp;
+                    pendingOfferSdp = null;
                 }
+                }
+                isNegotiating = false;
             }
 
             function attachAudioMeter(p, stream) {
@@ -2021,6 +2020,10 @@
                         }
 
                         if (msg.type === "offer") {
+                            if (typeof msg.sdp !== "string" || msg.sdp.length === 0) {
+                                console.error("Received offer with missing or empty SDP, ignoring.");
+                                return;
+                            }
                             await handleServerOffer(msg.sdp);
                             return;
                         }
