@@ -15,7 +15,8 @@
 #define SFU_WORKER_SEND_SQ_ENTRIES 1024
 #define SFU_WORKER_SEND_CQ_ENTRIES 2048
 #define SFU_WORKER_REAP_BATCH 128
-#define SFU_WORKER_IDLE_SLEEP_US 200
+#define SFU_WORKER_IDLE_SLEEP_MIN_US 200
+#define SFU_WORKER_IDLE_SLEEP_MAX_US 5000
 #define SFU_WORKER_TWCC_FLUSH_INTERVAL_US 15000LL
 
 bool sfu_worker_register_session(sfu_worker_t *w, sfu_peer_session_t *s) {
@@ -137,6 +138,8 @@ static void *worker_thread_main(void *arg) {
 
   SFU_LOG_INFO("worker %u started (core %d)", w->worker_index, w->core_id);
 
+  uint32_t idle_sleep_us = SFU_WORKER_IDLE_SLEEP_MIN_US;
+
   while (!sfu_shutdown_requested()) {
     bool did_work = false;
 
@@ -204,7 +207,15 @@ static void *worker_thread_main(void *arg) {
     }
 
     if (!did_work) {
-      usleep(SFU_WORKER_IDLE_SLEEP_US);
+      usleep(idle_sleep_us);
+      if (idle_sleep_us < SFU_WORKER_IDLE_SLEEP_MAX_US) {
+        idle_sleep_us = idle_sleep_us * 2;
+        if (idle_sleep_us > SFU_WORKER_IDLE_SLEEP_MAX_US) {
+          idle_sleep_us = SFU_WORKER_IDLE_SLEEP_MAX_US;
+        }
+      }
+    } else {
+      idle_sleep_us = SFU_WORKER_IDLE_SLEEP_MIN_US;
     }
 
     __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
@@ -235,7 +246,7 @@ static void *worker_thread_main(void *arg) {
       idle_passes = 0;
     } else {
       idle_passes++;
-      usleep(SFU_WORKER_IDLE_SLEEP_US);
+      usleep(SFU_WORKER_IDLE_SLEEP_MIN_US);
     }
 
     __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
