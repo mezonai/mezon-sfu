@@ -334,6 +334,35 @@ static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snap
   deferred_push(d, old, SFU_RECLAIM_RECEIVERS);
 }
 
+static sfu_receiver_snapshot_t *snapshot_build_batch(sfu_peer_session_t *owner, sfu_peer_session_t **others, uint32_t count, bool fanout) {
+  if (count == 0) {
+    return NULL;
+  }
+  sfu_receiver_snapshot_t *snap = snapshot_alloc(count);
+  if (!snap) {
+    return NULL;
+  }
+  snap->generation = 1;
+  snap->count = 0;
+
+  for (uint32_t i = 0; i < count; i++) {
+    sfu_peer_session_t *dst = others[i];
+    sfu_receiver_entry_t *e = &snap->entries[snap->count];
+    memset(e, 0, sizeof(*e));
+    if (!fanout) {
+      e->mid_audio = atomic_fetch_add_explicit(&owner->next_remote_mid, SFU_REMOTE_TRANSCEIVERS_PER_SLOT, memory_order_relaxed);
+      e->mid_video = e->mid_audio + 1;
+      e->mid_screen = e->mid_audio + 2;
+    }
+    snapshot_fill_entry(e, dst, fanout ? owner : dst);
+    e->has_audio = true;
+    e->has_video = true;
+    e->has_screen = true;
+    snap->count++;
+  }
+  return snap;
+}
+
 void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   sfu_deferred_reclaim_t deferred;
   deferred_init(&deferred);
@@ -369,6 +398,13 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     return;
   }
 
+  bool peer_is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
+
+  sfu_peer_session_t *recv_targets[SFU_ROOM_MAX_PEERS];
+  uint32_t recv_count = 0;
+  sfu_peer_session_t *fanout_targets[SFU_ROOM_MAX_PEERS];
+  uint32_t fanout_count = 0;
+
   for (uint32_t i = 0; i + 1 < room->peer_count; i++) {
     sfu_peer_session_t *other = room->peers[i];
     if (!other || other == peer) {
@@ -379,7 +415,6 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
       continue;
     }
 
-    bool peer_is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
     bool other_is_audience = atomic_load_explicit(&other->is_audience, memory_order_acquire);
 
     if (!peer_is_audience) {
@@ -389,23 +424,30 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
       }
     }
     if (!other_is_audience) {
-      sfu_receiver_snapshot_t *snap = snapshot_build_with(peer, other, false);
-      if (snap) {
-        snapshot_replace(peer, snap, &deferred);
-      }
+      recv_targets[recv_count++] = other;
     }
 
     if (!peer_is_audience) {
-      sfu_receiver_snapshot_t *snap = snapshot_build_with(peer, other, true);
-      if (snap) {
-        fanout_snapshot_replace(peer, snap, &deferred);
-      }
+      fanout_targets[fanout_count++] = other;
     }
     if (!other_is_audience) {
       sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, true);
       if (snap) {
         fanout_snapshot_replace(other, snap, &deferred);
       }
+    }
+  }
+
+  if (recv_count > 0) {
+    sfu_receiver_snapshot_t *snap = snapshot_build_batch(peer, recv_targets, recv_count, false);
+    if (snap) {
+      snapshot_replace(peer, snap, &deferred);
+    }
+  }
+  if (fanout_count > 0) {
+    sfu_receiver_snapshot_t *snap = snapshot_build_batch(peer, fanout_targets, fanout_count, true);
+    if (snap) {
+      fanout_snapshot_replace(peer, snap, &deferred);
     }
   }
 
