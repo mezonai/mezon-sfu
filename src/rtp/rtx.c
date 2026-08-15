@@ -105,7 +105,7 @@ void sfu_rtx_cache_put_stream(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_
   if (len + 2 > SFU_MAX_PAYLOAD_SIZE) {
     return;
   }
-  uint32_t idx = seq & SFU_RTX_CACHE_MASK;
+  uint32_t idx = ((uint32_t)seq ^ media_ssrc ^ (media_ssrc >> 16)) & SFU_RTX_CACHE_MASK;
   sfu_rtx_entry_t *entry = &cache->entries[idx];
   entry->seq = seq;
   entry->len = len;
@@ -119,7 +119,7 @@ void sfu_rtx_cache_put_stream(sfu_rtx_cache_t *cache, uint16_t seq, const uint8_
 
 bool sfu_rtx_cache_get_stream(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, uint32_t *out_len, uint32_t *out_rtx_ssrc,
                               uint8_t *out_rtx_pt, uint32_t media_ssrc, uint32_t generation) {
-  uint32_t idx = seq & SFU_RTX_CACHE_MASK;
+  uint32_t idx = ((uint32_t)seq ^ media_ssrc ^ (media_ssrc >> 16)) & SFU_RTX_CACHE_MASK;
   sfu_rtx_entry_t *entry = &cache->entries[idx];
   if (entry->valid && entry->seq == seq && entry->media_ssrc == media_ssrc && entry->generation == generation) {
     memcpy(out_data, entry->data, entry->len);

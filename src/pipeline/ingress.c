@@ -46,7 +46,7 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   }
 }
 
-static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subscriber, uint32_t media_ssrc) {
+static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subscriber, uint32_t media_ssrc, sfu_media_kind_t *out_source) {
   sfu_room_t *room = subscriber->room;
   if (!room) {
     return NULL;
@@ -60,7 +60,12 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
       continue;
     }
     sfu_media_snapshot_t pub_msnap = sfu_session_load_media(publisher);
+    sfu_media_kind_t source = SFU_MEDIA_VIDEO;
     bool media_matches = pub_msnap.video_ssrc == media_ssrc || pub_msnap.video_rtx_ssrc == media_ssrc;
+    if (!media_matches && (pub_msnap.screen_ssrc == media_ssrc || pub_msnap.screen_rtx_ssrc == media_ssrc)) {
+      media_matches = true;
+      source = SFU_MEDIA_SCREEN;
+    }
     if (!media_matches) {
       continue;
     }
@@ -70,8 +75,12 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
     }
     for (uint32_t j = 0; j < snap->count; j++) {
       const sfu_receiver_entry_t *e = &snap->entries[j];
-      if (e->subscriber == subscriber && e->has_video) {
+      bool subscribed = source == SFU_MEDIA_SCREEN ? e->has_screen : e->has_video;
+      if (e->subscriber == subscriber && subscribed) {
         atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+        if (out_source) {
+          *out_source = source;
+        }
         result = publisher;
         break;
       }
@@ -86,13 +95,14 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
 }
 
 static void request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
-  sfu_peer_session_t *publisher = find_publisher_by_media_ssrc(feedback_session, media_ssrc);
+  sfu_media_kind_t source = SFU_MEDIA_VIDEO;
+  sfu_peer_session_t *publisher = find_publisher_by_media_ssrc(feedback_session, media_ssrc, &source);
   if (!publisher) {
     sfu_metric_inc("rtcp_kf_unresolved");
     publisher = feedback_session;
     atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
   }
-  sfu_worker_request_keyframe_throttled(w, publisher);
+  sfu_worker_request_keyframe_throttled_for_source(w, publisher, source);
   sfu_session_release(publisher);
 }
 
@@ -331,15 +341,52 @@ typedef enum sfu_svc_parse_status {
   SFU_SVC_PARSE_MALFORMED,
 } sfu_svc_parse_status_t;
 
+static sfu_media_kind_t classify_media_source(const sfu_media_snapshot_t *snap, const sfu_rtp_packet_t *rtp) {
+  if (rtp->extension && snap->mid_recv_extmap_id != 0) {
+    char mid[8];
+    if (sfu_rtp_ext_read_mid(rtp->extension_profile, rtp->extension_data, rtp->extension_length, snap->mid_recv_extmap_id, mid, sizeof(mid))) {
+      if (strcmp(mid, "2") == 0) {
+        return SFU_MEDIA_SCREEN;
+      }
+      if (strcmp(mid, "1") == 0) {
+        return SFU_MEDIA_VIDEO;
+      }
+      if (strcmp(mid, "0") == 0) {
+        return SFU_MEDIA_AUDIO;
+      }
+    }
+  }
+  if (rtp->ssrc != 0) {
+    if (rtp->ssrc == snap->screen_ssrc || rtp->ssrc == snap->screen_rtx_ssrc) {
+      return SFU_MEDIA_SCREEN;
+    }
+    if (rtp->ssrc == snap->video_ssrc || rtp->ssrc == snap->video_rtx_ssrc) {
+      return SFU_MEDIA_VIDEO;
+    }
+    if (rtp->ssrc == snap->audio_ssrc) {
+      return SFU_MEDIA_AUDIO;
+    }
+  }
+  bool camera_pt = rtp->payload_type == snap->video_pt || rtp->payload_type == snap->video_rtx_pt;
+  bool screen_pt = rtp->payload_type == snap->screen_pt || rtp->payload_type == snap->screen_rtx_pt;
+  if (screen_pt && !camera_pt) {
+    return SFU_MEDIA_SCREEN;
+  }
+  if (camera_pt) {
+    return SFU_MEDIA_VIDEO;
+  }
+  return SFU_MEDIA_AUDIO;
+}
+
 static sfu_svc_parse_status_t extract_svc_metadata(sfu_peer_session_t *sender_session, sfu_ingress_media_t *m) {
   m->has_svc = false;
   m->is_keyframe = false;
 
   sfu_media_snapshot_t msnap = sfu_session_load_media(sender_session);
-  uint8_t video_pt = msnap.video_pt;
-  sfu_video_codec_t codec = (sfu_video_codec_t)msnap.video_codec;
+  uint8_t video_pt = m->source == SFU_MEDIA_SCREEN ? msnap.screen_pt : msnap.video_pt;
+  sfu_video_codec_t codec = (sfu_video_codec_t)(m->source == SFU_MEDIA_SCREEN ? msnap.screen_codec : msnap.video_codec);
 
-  if (m->is_audio || m->rtp.payload_type != video_pt || codec != SFU_VIDEO_CODEC_VP9) {
+  if (m->source == SFU_MEDIA_AUDIO || m->rtp.payload_type != video_pt || codec != SFU_VIDEO_CODEC_VP9) {
     return SFU_SVC_NOT_PRESENT;
   }
 
@@ -429,8 +476,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   sfu_media_snapshot_t pt_msnap = sfu_session_load_media(sender_session);
   uint8_t in_pt = m.rtp.payload_type;
-  bool is_video_pt = (in_pt == pt_msnap.video_pt) || (in_pt == pt_msnap.video_rtx_pt);
-  if (!is_video_pt && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
+  m.source = classify_media_source(&pt_msnap, &m.rtp);
+  m.is_audio = m.source == SFU_MEDIA_AUDIO;
+  if (m.is_audio && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
     sfu_metric_inc("muted_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
@@ -458,8 +506,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-  bool send_negotiated = is_video_pt ? atomic_load_explicit(&sender_session->video_send_negotiated, memory_order_acquire)
-                                     : atomic_load_explicit(&sender_session->audio_send_negotiated, memory_order_acquire);
+  bool send_negotiated = m.source == SFU_MEDIA_VIDEO   ? atomic_load_explicit(&sender_session->video_send_negotiated, memory_order_acquire)
+                         : m.source == SFU_MEDIA_SCREEN ? atomic_load_explicit(&sender_session->screen_send_negotiated, memory_order_acquire)
+                                                        : atomic_load_explicit(&sender_session->audio_send_negotiated, memory_order_acquire);
   bool learned = false;
   if (!send_negotiated) {
     sfu_metric_inc("unnegotiated_rtp_drop");
@@ -469,48 +518,29 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  bool need_learn = false;
-  if (is_video_pt) {
-    if (in_pt == pt_msnap.video_rtx_pt) {
-      need_learn = (m.rtp.ssrc != 0 && pt_msnap.video_rtx_ssrc != m.rtp.ssrc);
-    } else {
-      need_learn = (m.rtp.ssrc != 0 && pt_msnap.video_ssrc != m.rtp.ssrc);
-    }
-    if (!pt_msnap.video_active) {
-      need_learn = true;
-    }
-  } else {
-    need_learn = (m.rtp.ssrc != 0 && pt_msnap.audio_ssrc != m.rtp.ssrc);
-    if (!pt_msnap.audio_active) {
-      need_learn = true;
-    }
-  }
+  sfu_transceiver_t *source = m.source == SFU_MEDIA_SCREEN ? &sender_session->screen : m.source == SFU_MEDIA_VIDEO ? &sender_session->uplink_video
+                                                                                                                    : &sender_session->uplink_audio;
+  uint32_t known_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_ssrc : m.source == SFU_MEDIA_VIDEO ? pt_msnap.video_ssrc : pt_msnap.audio_ssrc;
+  uint32_t known_rtx_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_ssrc : pt_msnap.video_rtx_ssrc;
+  uint8_t rtx_pt = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_pt : pt_msnap.video_rtx_pt;
+  bool active = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_active : m.source == SFU_MEDIA_VIDEO ? pt_msnap.video_active : pt_msnap.audio_active;
+  bool is_rtx = !m.is_audio && in_pt == rtx_pt;
+  bool need_learn = (m.rtp.ssrc != 0 && (is_rtx ? known_rtx_ssrc : known_ssrc) != m.rtp.ssrc) || !active;
 
   if (need_learn) {
     pthread_mutex_lock(&sender_session->media_lock);
-    if (is_video_pt) {
-      if (in_pt == sender_session->uplink_video.rtx_payload_type) {
-        if (m.rtp.ssrc != 0 && sender_session->uplink_video.rtx_ssrc != m.rtp.ssrc) {
-          sender_session->uplink_video.rtx_ssrc = m.rtp.ssrc;
-          learned = true;
-        }
-      } else if (m.rtp.ssrc != 0 && sender_session->uplink_video.ssrc != m.rtp.ssrc) {
-        sender_session->uplink_video.ssrc = m.rtp.ssrc;
+    if (is_rtx) {
+      if (m.rtp.ssrc != 0 && source->rtx_ssrc != m.rtp.ssrc) {
+        source->rtx_ssrc = m.rtp.ssrc;
         learned = true;
       }
-      if (!sender_session->uplink_video.active) {
-        sender_session->uplink_video.active = true;
-        learned = true;
-      }
-    } else {
-      if (m.rtp.ssrc != 0 && sender_session->uplink_audio.ssrc != m.rtp.ssrc) {
-        sender_session->uplink_audio.ssrc = m.rtp.ssrc;
-        learned = true;
-      }
-      if (!sender_session->uplink_audio.active) {
-        sender_session->uplink_audio.active = true;
-        learned = true;
-      }
+    } else if (m.rtp.ssrc != 0 && source->ssrc != m.rtp.ssrc) {
+      source->ssrc = m.rtp.ssrc;
+      learned = true;
+    }
+    if (!source->active) {
+      source->active = true;
+      learned = true;
     }
     if (learned) {
       sfu_session_publish_media(sender_session);
@@ -520,12 +550,10 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (learned) {
     atomic_store_explicit(&sender_session->uplink_ssrc_dirty, true, memory_order_release);
   }
-
-  m.is_audio = !is_video_pt;
   sfu_svc_parse_status_t svc_status = extract_svc_metadata(sender_session, &m);
   if (svc_status == SFU_SVC_PARSE_MALFORMED) {
     sfu_metric_inc("vp9_descriptor_parse_fail");
-    sfu_worker_request_keyframe_throttled(w, sender_session);
+    sfu_worker_request_keyframe_throttled_for_source(w, sender_session, m.source);
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
@@ -538,9 +566,10 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     pthread_mutex_lock(&sender_session->media_lock);
     uint32_t learned_audio_ssrc = sender_session->uplink_audio.ssrc;
     uint32_t learned_video_ssrc = sender_session->uplink_video.ssrc;
+    uint32_t learned_screen_ssrc = sender_session->screen.ssrc;
     pthread_mutex_unlock(&sender_session->media_lock);
-    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u video=%u); refreshing + renegotiating", w->worker_index,
-                 sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc);
+    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing + renegotiating", w->worker_index,
+                 sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc, learned_screen_ssrc);
     room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
     sfu_signaling_trigger_renegotiation((sfu_room_t *)sender_session->room);
   }

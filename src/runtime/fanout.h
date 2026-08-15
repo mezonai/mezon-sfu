@@ -21,6 +21,7 @@ typedef struct sfu_fanout_target {
   uint32_t video_rtx_ssrc;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
+  uint8_t source;
   bool has_video;
 } sfu_fanout_target_t;
 
@@ -44,6 +45,7 @@ typedef struct sfu_fanout_job {
   uint32_t pool_dst;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
+  uint8_t source;
   bool has_video;
   bool is_audio;
   bool has_svc;
@@ -74,6 +76,8 @@ bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worke
 bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *source,
                                            sfu_peer_session_t *publisher, const sfu_fanout_target_t *targets, uint8_t target_count, bool is_audio,
                                            const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe);
+bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker,
+                                                         sfu_peer_session_t *publisher, sfu_media_kind_t source);
 bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher);
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data);
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job);

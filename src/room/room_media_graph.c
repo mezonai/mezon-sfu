@@ -25,8 +25,14 @@ static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *tar
   e->video_pt = media_source->uplink_video.payload_type;
   e->video_rtx_pt = media_source->uplink_video.rtx_payload_type;
   e->video_codec = media_source->uplink_video.codec;
+  e->screen_ssrc = media_source->screen.ssrc;
+  e->screen_rtx_ssrc = media_source->screen.rtx_ssrc;
+  e->screen_pt = media_source->screen.payload_type;
+  e->screen_rtx_pt = media_source->screen.rtx_payload_type;
+  e->screen_codec = media_source->screen.codec;
   e->audio_active = media_source->uplink_audio.active;
   e->video_active = media_source->uplink_video.active;
+  e->screen_active = media_source->screen.active;
   pthread_mutex_unlock(&media_source->media_lock);
 }
 
@@ -108,8 +114,11 @@ static sfu_receiver_snapshot_t *snapshot_deactivate_entry(sfu_peer_session_t *ow
   e->audio_ssrc = 0;
   e->video_ssrc = 0;
   e->video_rtx_ssrc = 0;
+  e->screen_ssrc = 0;
+  e->screen_rtx_ssrc = 0;
   e->audio_active = false;
   e->video_active = false;
+  e->screen_active = false;
 
   snap->count = old_count;
   sfu_subscriptions_snapshot_release(old);
@@ -139,12 +148,14 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
   sfu_receiver_entry_t *e = &snap->entries[old_count];
   memset(e, 0, sizeof(*e));
   if (!fanout) {
-    e->mid_audio = atomic_fetch_add_explicit(&owner->next_remote_mid, 2, memory_order_relaxed);
+    e->mid_audio = atomic_fetch_add_explicit(&owner->next_remote_mid, SFU_REMOTE_TRANSCEIVERS_PER_SLOT, memory_order_relaxed);
     e->mid_video = e->mid_audio + 1;
+    e->mid_screen = e->mid_audio + 2;
   }
   snapshot_fill_entry(e, dst, fanout ? owner : dst);
   e->has_audio = true;
   e->has_video = true;
+  e->has_screen = true;
 
   snap->count = old_count + 1;
   sfu_subscriptions_snapshot_release(old);
@@ -184,31 +195,41 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
 static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_snapshot_t *combined) {
   uint32_t audio_count = 0;
   uint32_t video_count = 0;
+  uint32_t screen_count = 0;
   if (combined) {
     for (uint32_t i = 0; i < combined->count; i++) {
       audio_count += combined->entries[i].has_audio && combined->entries[i].audio_active;
       if (combined->entries[i].has_video && combined->entries[i].video_active && sfu_session_ensure_video_runtime(combined->entries[i].subscriber)) {
         video_count++;
       }
+      if (combined->entries[i].has_screen && combined->entries[i].screen_active && sfu_session_ensure_video_runtime(combined->entries[i].subscriber)) {
+        screen_count++;
+      }
     }
   }
 
   sfu_audio_route_snapshot_t *audio = SFU_CALLOC(1, sizeof(*audio) + (size_t)audio_count * sizeof(audio->entries[0]));
   sfu_video_route_snapshot_t *video = SFU_CALLOC(1, sizeof(*video) + (size_t)video_count * sizeof(video->entries[0]));
-  if (!audio || !video) {
+  sfu_video_route_snapshot_t *screen = SFU_CALLOC(1, sizeof(*screen) + (size_t)screen_count * sizeof(screen->entries[0]));
+  if (!audio || !video || !screen) {
     SFU_FREE(audio);
     SFU_FREE(video);
+    SFU_FREE(screen);
     return false;
   }
   atomic_store_explicit(&audio->refcount, 1, memory_order_relaxed);
   atomic_store_explicit(&video->refcount, 1, memory_order_relaxed);
+  atomic_store_explicit(&screen->refcount, 1, memory_order_relaxed);
   audio->generation = combined ? combined->generation : 0;
   video->generation = combined ? combined->generation : 0;
+  screen->generation = combined ? combined->generation : 0;
   audio->count = audio->capacity = audio_count;
   video->count = video->capacity = video_count;
+  screen->count = screen->capacity = screen_count;
 
   uint32_t audio_pos = 0;
   uint32_t video_pos = 0;
+  uint32_t screen_pos = 0;
   if (combined) {
     for (uint32_t i = 0; i < combined->count; i++) {
       const sfu_receiver_entry_t *entry = &combined->entries[i];
@@ -226,11 +247,22 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
         route->has_video = entry->has_video;
         atomic_fetch_add_explicit(&entry->subscriber->refcount, 1, memory_order_relaxed);
       }
+      if (entry->has_screen && entry->screen_active && sfu_session_video_runtime_ready(entry->subscriber)) {
+        sfu_video_route_entry_t *route = &screen->entries[screen_pos++];
+        route->subscriber = entry->subscriber;
+        route->video_ssrc = entry->screen_ssrc;
+        route->video_rtx_ssrc = entry->screen_rtx_ssrc;
+        route->video_pt = entry->screen_pt;
+        route->video_rtx_pt = entry->screen_rtx_pt;
+        route->has_video = entry->has_screen;
+        atomic_fetch_add_explicit(&entry->subscriber->refcount, 1, memory_order_relaxed);
+      }
     }
   }
 
   sfu_session_publish_audio_fanout(owner, audio);
   sfu_session_publish_video_fanout(owner, video);
+  sfu_session_publish_screen_fanout(owner, screen);
   return true;
 }
 
@@ -241,6 +273,7 @@ static void fanout_snapshot_replace(sfu_peer_session_t *owner, sfu_receiver_snap
     SFU_LOG_ERROR("peer %u: failed to publish split fanout snapshots; using legacy graph", owner->peer_id);
     sfu_session_publish_audio_fanout(owner, NULL);
     sfu_session_publish_video_fanout(owner, NULL);
+    sfu_session_publish_screen_fanout(owner, NULL);
   }
   sfu_session_publish_fanout_targets(owner, new_snap);
 }
@@ -335,18 +368,28 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
   if (is_audience) {
     atomic_store_explicit(&peer->audio_send_negotiated, false, memory_order_release);
     atomic_store_explicit(&peer->video_send_negotiated, false, memory_order_release);
+    atomic_store_explicit(&peer->screen_send_negotiated, false, memory_order_release);
   }
 
   pthread_mutex_lock(&peer->media_lock);
   if (is_audience) {
+    peer->uplink_audio.ssrc = 0;
     peer->uplink_audio.active = false;
+    peer->uplink_video.ssrc = 0;
+    peer->uplink_video.rtx_ssrc = 0;
     peer->uplink_video.active = false;
+    peer->screen.ssrc = 0;
+    peer->screen.rtx_ssrc = 0;
+    peer->screen.active = false;
   } else {
     if (peer->uplink_audio.ssrc != 0) {
       peer->uplink_audio.active = true;
     }
     if (peer->uplink_video.ssrc != 0) {
       peer->uplink_video.active = true;
+    }
+    if (peer->screen.ssrc != 0) {
+      peer->screen.active = true;
     }
   }
   sfu_session_publish_media(peer);

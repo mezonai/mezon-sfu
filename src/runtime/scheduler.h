@@ -28,7 +28,7 @@ typedef struct sfu_peer_session sfu_peer_session_t;
 
 typedef struct sfu_subscriber_scheduler {
   int64_t last_target_change_us;
-  uint32_t active_publisher_id;
+  uint64_t active_publisher_id;
   uint32_t picture_timestamp;
   uint32_t transition_timestamp;
   uint32_t temporal_transition_timestamp;
@@ -72,13 +72,14 @@ typedef struct sfu_scheduler_decision {
   sfu_pacer_class_t pacer_class;
 } sfu_scheduler_decision_t;
 
-#define SFU_SESSION_SCHEDULER_CAP 8
+#define SFU_SESSION_SCHEDULER_CAP 16
 
 typedef struct sfu_session_scheduler_slot {
-  uint32_t publisher_id;
+  uint64_t publisher_id;
   sfu_subscriber_scheduler_t sched;
 } sfu_session_scheduler_slot_t;
 
+sfu_subscriber_scheduler_t *sfu_session_scheduler_for_stream(sfu_peer_session_t *session, uint32_t publisher_id, sfu_media_kind_t source);
 sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id);
 
 typedef struct sfu_scheduler {

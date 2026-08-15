@@ -334,6 +334,19 @@ void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route
   sfu_video_route_snapshot_release(old);
 }
 
+sfu_video_route_snapshot_t *sfu_session_screen_fanout_acquire(const sfu_peer_session_t *s) {
+  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->screen_fanout_targets) : NULL;
+}
+
+void sfu_session_publish_screen_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->screen_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->screen_fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  snapshot_wait_unhazarded(old);
+  sfu_video_route_snapshot_release(old);
+}
+
 static void sfu_session_free_resources(sfu_peer_session_t *s) {
   if (!s) {
     return;
@@ -375,6 +388,13 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   pthread_mutex_unlock(&s->snapshot_lock);
   snapshot_wait_unhazarded(video_routes);
   sfu_video_route_snapshot_release(video_routes);
+
+  pthread_mutex_lock(&s->snapshot_lock);
+  sfu_video_route_snapshot_t *screen_routes = atomic_load_explicit(&s->screen_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&s->screen_fanout_targets, NULL, memory_order_release);
+  pthread_mutex_unlock(&s->snapshot_lock);
+  snapshot_wait_unhazarded(screen_routes);
+  sfu_video_route_snapshot_release(screen_routes);
 
   if (s->rtx_cache) {
     sfu_rtx_cache_destroy(s->rtx_cache);
@@ -621,23 +641,35 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   }
 
   s->uplink_audio.owner = s;
+  s->uplink_audio.mid = SFU_LOCAL_AUDIO_MID;
+  s->uplink_audio.kind = SFU_MEDIA_AUDIO;
   s->uplink_video.owner = s;
+  s->uplink_video.mid = SFU_LOCAL_CAMERA_MID;
+  s->uplink_video.kind = SFU_MEDIA_VIDEO;
   s->screen.owner = s;
+  s->screen.mid = SFU_LOCAL_SCREEN_MID;
+  s->screen.kind = SFU_MEDIA_SCREEN;
 
   atomic_store_explicit(&s->receivers, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->fanout_targets, NULL, memory_order_relaxed);
+  atomic_store_explicit(&s->audio_fanout_targets, NULL, memory_order_relaxed);
+  atomic_store_explicit(&s->video_fanout_targets, NULL, memory_order_relaxed);
+  atomic_store_explicit(&s->screen_fanout_targets, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
   atomic_store_explicit(&s->audio_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->video_send_negotiated, false, memory_order_relaxed);
+  atomic_store_explicit(&s->screen_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->visible, true, memory_order_relaxed);
 
   /* Initialize the seqlock-protected media snapshot to match the zeroed transceivers. */
   atomic_store_explicit(&s->media_snap_words[0], 0, memory_order_relaxed);
   atomic_store_explicit(&s->media_snap_words[1], 0, memory_order_relaxed);
   atomic_store_explicit(&s->media_snap_words[2], 0, memory_order_relaxed);
+  atomic_store_explicit(&s->media_snap_words[3], 0, memory_order_relaxed);
+  atomic_store_explicit(&s->media_snap_words[4], 0, memory_order_relaxed);
   atomic_store_explicit(&s->media_snap_seq, 0, memory_order_relaxed);
 
-  s->next_remote_mid = 2;
+  s->next_remote_mid = SFU_REMOTE_MID_BASE;
   {
     static atomic_uint_fast32_t peer_id_counter = 0;
     uint32_t id = (uint32_t)atomic_fetch_add_explicit(&peer_id_counter, 1, memory_order_relaxed) + 1;
@@ -974,7 +1006,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
     atomic_store_explicit(&session->is_audience, answer->is_audience, memory_order_release);
   }
 
-  if (answer->video_sends && !answer->is_audience && !sfu_session_ensure_video_runtime(session)) {
+  if ((answer->video_sends || answer->screen_sends) && !answer->is_audience && !sfu_session_ensure_video_runtime(session)) {
     SFU_LOG_ERROR("session %u: failed to initialize video runtime", session->peer_id);
     pthread_mutex_unlock(&session->answer_lock);
     return false;
@@ -986,21 +1018,33 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   if (answer->video_section_present) {
     atomic_store_explicit(&session->video_send_negotiated, answer->video_sends && !answer->is_audience, memory_order_release);
   }
+  if (answer->screen_section_present) {
+    atomic_store_explicit(&session->screen_send_negotiated, answer->screen_sends && !answer->is_audience, memory_order_release);
+  }
 
   pthread_mutex_lock(&session->media_lock);
   uint32_t audio_ssrc = answer->audio_section_present ? (answer->audio_sends ? answer->audio_ssrc : 0) : session->uplink_audio.ssrc;
   uint32_t video_ssrc = answer->video_section_present ? (answer->video_sends ? answer->video_ssrc : 0) : session->uplink_video.ssrc;
   uint32_t rtx_ssrc = answer->video_section_present ? (answer->video_sends ? answer->rtx_ssrc : 0) : session->uplink_video.rtx_ssrc;
+  uint32_t screen_ssrc = answer->screen_section_present ? (answer->screen_sends ? answer->screen_ssrc : 0) : session->screen.ssrc;
+  uint32_t screen_rtx_ssrc = answer->screen_section_present ? (answer->screen_sends ? answer->screen_rtx_ssrc : 0) : session->screen.rtx_ssrc;
   uint8_t video_pt = answer->video_pt != 0 ? answer->video_pt : session->uplink_video.payload_type;
   uint8_t rtx_pt = answer->rtx_pt != 0 ? answer->rtx_pt : session->uplink_video.rtx_payload_type;
+  uint8_t screen_pt = answer->screen_pt != 0 ? answer->screen_pt : session->screen.payload_type;
+  uint8_t screen_rtx_pt = answer->screen_rtx_pt != 0 ? answer->screen_rtx_pt : session->screen.rtx_payload_type;
   sfu_video_codec_t codec = answer->video_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->video_codec : session->uplink_video.codec;
+  sfu_video_codec_t screen_codec =
+      answer->screen_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->screen_codec : session->screen.codec;
   bool current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
   bool audio_active = !current_audience && audio_ssrc != 0;
   bool video_active = !current_audience && video_ssrc != 0;
+  bool screen_active = !current_audience && screen_ssrc != 0;
 
   changed = session->uplink_audio.ssrc != audio_ssrc || session->uplink_audio.active != audio_active || session->uplink_video.ssrc != video_ssrc ||
             session->uplink_video.rtx_ssrc != rtx_ssrc || session->uplink_video.active != video_active || session->uplink_video.payload_type != video_pt ||
-            session->uplink_video.rtx_payload_type != rtx_pt || session->uplink_video.codec != codec;
+            session->uplink_video.rtx_payload_type != rtx_pt || session->uplink_video.codec != codec || session->screen.ssrc != screen_ssrc ||
+            session->screen.rtx_ssrc != screen_rtx_ssrc || session->screen.active != screen_active || session->screen.payload_type != screen_pt ||
+            session->screen.rtx_payload_type != screen_rtx_pt || session->screen.codec != screen_codec;
 
   session->uplink_audio.ssrc = audio_ssrc;
   session->uplink_audio.active = audio_active;
@@ -1010,8 +1054,15 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   session->uplink_video.payload_type = video_pt;
   session->uplink_video.rtx_payload_type = rtx_pt;
   session->uplink_video.codec = codec;
+  session->screen.ssrc = screen_ssrc;
+  session->screen.rtx_ssrc = screen_rtx_ssrc;
+  session->screen.active = screen_active;
+  session->screen.payload_type = screen_pt;
+  session->screen.rtx_payload_type = screen_rtx_pt;
+  session->screen.codec = screen_codec;
   session->twcc_recv_extmap_id = answer->twcc_recv_extmap_id;
   session->twcc_send_extmap_id = answer->twcc_send_extmap_id;
+  session->mid_recv_extmap_id = answer->mid_recv_extmap_id;
   sfu_session_publish_media(session);
   pthread_mutex_unlock(&session->media_lock);
   if (answer->peer_id != 0) {
@@ -1034,7 +1085,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   return true;
 }
 
-void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
+void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir, sfu_media_kind_t source) {
   if (!w || !publisher) {
     SFU_LOG_WARN("[KF-DBG] sfu_session_request_keyframe called with NULL worker or publisher");
     return;
@@ -1045,7 +1096,7 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
     SFU_LOG_DEBUG("[KF-DBG] Offloading KF request: current worker %u -> publisher worker %u (pub peer_id=%u)", w->worker_index, owner_worker,
                   publisher->peer_id);
     if (w->mesh) {
-      bool queued = sfu_fanout_mesh_enqueue_keyframe_request(w->mesh, w->worker_index, owner_worker, publisher);
+      bool queued = sfu_fanout_mesh_enqueue_keyframe_request_for_source(w->mesh, w->worker_index, owner_worker, publisher, source);
       if (!queued) {
         SFU_LOG_ERROR("[KF-DBG] FAILED to enqueue cross-worker KF request from %u to %u", w->worker_index, owner_worker);
       }
@@ -1056,19 +1107,21 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
   }
 
   pthread_mutex_lock(&publisher->media_lock);
-  uint32_t media_ssrc = publisher->uplink_video.ssrc;
+  uint32_t media_ssrc = source == SFU_MEDIA_SCREEN ? publisher->screen.ssrc : publisher->uplink_video.ssrc;
   pthread_mutex_unlock(&publisher->media_lock);
 
-  SFU_LOG_DEBUG("[KF-DBG] Executing KF request on owner worker %u for pub peer_id=%u (uplink SSRC=%u)", w->worker_index, publisher->peer_id, media_ssrc);
+  SFU_LOG_DEBUG("[KF-DBG] Executing KF request on owner worker %u for pub peer_id=%u source=%u (uplink SSRC=%u)", w->worker_index, publisher->peer_id,
+                (unsigned)source, media_ssrc);
 
   int64_t now = (int64_t)sfu_now_ms();
-  if (publisher->last_pli_time != 0 && now - publisher->last_pli_time < SFU_SESSION_KF_THROTTLE_MS) {
-    SFU_LOG_DEBUG("worker %u: KF request for publisher %u coalesced (last PLI %" PRId64 " ms ago)", w->worker_index, publisher->peer_id,
-                  now - publisher->last_pli_time);
+  int64_t *last_pli = source == SFU_MEDIA_SCREEN ? &publisher->last_screen_pli_time : &publisher->last_pli_time;
+  if (*last_pli != 0 && now - *last_pli < SFU_SESSION_KF_THROTTLE_MS) {
+    SFU_LOG_DEBUG("worker %u: KF request for publisher %u source %u coalesced (last PLI %" PRId64 " ms ago)", w->worker_index, publisher->peer_id,
+                  (unsigned)source, now - *last_pli);
     return;
   }
 
-  publisher->last_pli_time = now;
+  *last_pli = now;
 
   if (media_ssrc == 0) {
     SFU_LOG_WARN("[KF-DBG] Cannot send PLI/FIR: Publisher %u video SSRC is 0", publisher->peer_id);
@@ -1106,6 +1159,10 @@ void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher
   }
 
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+}
+
+void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
+  sfu_session_request_keyframe_for_source(w, publisher, use_fir, SFU_MEDIA_VIDEO);
 }
 
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher) {

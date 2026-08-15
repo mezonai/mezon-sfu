@@ -37,6 +37,7 @@ bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session);
 static inline bool sfu_session_video_runtime_ready(const sfu_peer_session_t *session) {
   return atomic_load_explicit(&session->video_runtime_state, memory_order_acquire) == SFU_VIDEO_RUNTIME_READY;
 }
+void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir, sfu_media_kind_t source);
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir);
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher);
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s);
@@ -50,13 +51,15 @@ void sfu_session_publish_audio_fanout(sfu_peer_session_t *owner, sfu_audio_route
 sfu_video_route_snapshot_t *sfu_session_video_fanout_acquire(const sfu_peer_session_t *s);
 void sfu_video_route_snapshot_release(sfu_video_route_snapshot_t *snap);
 void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
+sfu_video_route_snapshot_t *sfu_session_screen_fanout_acquire(const sfu_peer_session_t *s);
+void sfu_session_publish_screen_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
 
 static inline bool sfu_session_accepts_work(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->accepts_work, memory_order_acquire); }
 
 static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session_t *s) {
-  _Static_assert(sizeof(sfu_media_snapshot_t) <= sizeof(uint64_t) * 3, "media snapshot exceeds packed atomic storage");
+  _Static_assert(sizeof(sfu_media_snapshot_t) <= sizeof(uint64_t) * 5, "media snapshot exceeds packed atomic storage");
   sfu_media_snapshot_t snap;
-  uint64_t words[3];
+  uint64_t words[5];
   uint32_t seq0, seq1;
   do {
     seq0 = atomic_load_explicit(&s->media_snap_seq, memory_order_acquire);
@@ -66,6 +69,8 @@ static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session
     words[0] = atomic_load_explicit(&s->media_snap_words[0], memory_order_relaxed);
     words[1] = atomic_load_explicit(&s->media_snap_words[1], memory_order_relaxed);
     words[2] = atomic_load_explicit(&s->media_snap_words[2], memory_order_relaxed);
+    words[3] = atomic_load_explicit(&s->media_snap_words[3], memory_order_relaxed);
+    words[4] = atomic_load_explicit(&s->media_snap_words[4], memory_order_relaxed);
     atomic_thread_fence(memory_order_acquire);
     seq1 = atomic_load_explicit(&s->media_snap_seq, memory_order_acquire);
   } while (seq0 != seq1);
@@ -74,25 +79,34 @@ static inline sfu_media_snapshot_t sfu_session_load_media(const sfu_peer_session
 }
 
 static inline void sfu_session_publish_media(sfu_peer_session_t *s) {
-  _Static_assert(sizeof(sfu_media_snapshot_t) <= sizeof(uint64_t) * 3, "media snapshot exceeds packed atomic storage");
+  _Static_assert(sizeof(sfu_media_snapshot_t) <= sizeof(uint64_t) * 5, "media snapshot exceeds packed atomic storage");
   sfu_media_snapshot_t snap = {
       .audio_ssrc = s->uplink_audio.ssrc,
       .video_ssrc = s->uplink_video.ssrc,
       .video_rtx_ssrc = s->uplink_video.rtx_ssrc,
+      .screen_ssrc = s->screen.ssrc,
+      .screen_rtx_ssrc = s->screen.rtx_ssrc,
       .video_pt = s->uplink_video.payload_type,
       .video_rtx_pt = s->uplink_video.rtx_payload_type,
+      .screen_pt = s->screen.payload_type,
+      .screen_rtx_pt = s->screen.rtx_payload_type,
       .video_codec = (uint8_t)s->uplink_video.codec,
+      .screen_codec = (uint8_t)s->screen.codec,
       .twcc_recv_extmap_id = s->twcc_recv_extmap_id,
       .twcc_send_extmap_id = s->twcc_send_extmap_id,
+      .mid_recv_extmap_id = s->mid_recv_extmap_id,
       .audio_active = s->uplink_audio.active,
       .video_active = s->uplink_video.active,
+      .screen_active = s->screen.active,
   };
-  uint64_t words[3] = {0, 0, 0};
+  uint64_t words[5] = {0, 0, 0, 0, 0};
   memcpy(words, &snap, sizeof(snap));
   atomic_fetch_add_explicit(&s->media_snap_seq, 1, memory_order_acq_rel);
   atomic_store_explicit(&s->media_snap_words[0], words[0], memory_order_relaxed);
   atomic_store_explicit(&s->media_snap_words[1], words[1], memory_order_relaxed);
   atomic_store_explicit(&s->media_snap_words[2], words[2], memory_order_relaxed);
+  atomic_store_explicit(&s->media_snap_words[3], words[3], memory_order_relaxed);
+  atomic_store_explicit(&s->media_snap_words[4], words[4], memory_order_relaxed);
   atomic_fetch_add_explicit(&s->media_snap_seq, 1, memory_order_release);
 }
 

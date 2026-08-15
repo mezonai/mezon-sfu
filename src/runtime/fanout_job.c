@@ -27,6 +27,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
       sfu_egress_media_t media = {
           .publisher = job->publisher,
           .svc = job->svc,
+          .source = (sfu_media_kind_t)target->source,
           .video_ssrc = target->video_ssrc,
           .video_rtx_ssrc = target->video_rtx_ssrc,
           .video_pt = target->video_pt,
@@ -49,7 +50,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
 
   if (job->kind == SFU_FANOUT_JOB_KEYFRAME_REQUEST) {
     if (job->publisher) {
-      sfu_session_request_keyframe(w, job->publisher, false);
+      sfu_session_request_keyframe_for_source(w, job->publisher, false, (sfu_media_kind_t)job->source);
       sfu_session_release(job->publisher);
     }
     sfu_fanout_mesh_free_job(w->mesh, job);
@@ -58,6 +59,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
     sfu_egress_media_t media = {
         .publisher = job->publisher,
         .svc = job->svc,
+        .source = (sfu_media_kind_t)job->source,
         .video_ssrc = job->video_ssrc,
         .video_rtx_ssrc = job->video_rtx_ssrc,
         .video_pt = job->video_pt,

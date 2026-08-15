@@ -31,7 +31,7 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   s->uplink_video.owner = s;
   s->uplink_audio.active = true;
   s->uplink_video.active = true;
-  s->next_remote_mid = 2;
+  s->next_remote_mid = SFU_REMOTE_MID_BASE;
   return s;
 }
 
@@ -201,6 +201,12 @@ static void test_audience_role_asymmetry_and_transition(void) {
   speaker->uplink_video.rtx_payload_type = 97;
   speaker->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
   sfu_peer_session_t *audience = mock_session("audience");
+  audience->screen.ssrc = 4444;
+  audience->screen.rtx_ssrc = 5555;
+  audience->screen.payload_type = 96;
+  audience->screen.rtx_payload_type = 97;
+  audience->screen.codec = SFU_VIDEO_CODEC_VP8;
+  audience->screen.active = true;
   atomic_store(&audience->is_audience, true);
 
   room_add_peer(&room, speaker);
@@ -209,7 +215,7 @@ static void test_audience_role_asymmetry_and_transition(void) {
   /* Audience receives the speaker SDP source but never owns an RTP fanout
    * snapshot. The speaker forwards to the audience. */
   assert(receiver_count(audience) == 1);
-  assert(audience->next_remote_mid == 4);
+  assert(audience->next_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   assert(subscribes_to(audience, speaker));
   assert(receiver_count(speaker) == 0);
   assert(fanout_target_count(speaker) == 1);
@@ -219,8 +225,9 @@ static void test_audience_role_asymmetry_and_transition(void) {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(audience);
     assert(snap != NULL && snap->count == 1);
     assert(snap->entries[0].subscriber == speaker);
-    assert(snap->entries[0].mid_audio == 2);
-    assert(snap->entries[0].mid_video == 3);
+    assert(snap->entries[0].mid_audio == SFU_REMOTE_MID_BASE);
+    assert(snap->entries[0].mid_video == SFU_REMOTE_MID_BASE + 1);
+    assert(snap->entries[0].mid_screen == SFU_REMOTE_MID_BASE + 2);
     assert(snap->entries[0].audio_active);
     assert(snap->entries[0].video_active);
     assert(snap->entries[0].audio_ssrc == 1111);
@@ -249,17 +256,20 @@ static void test_audience_role_asymmetry_and_transition(void) {
   assert(fanout_targets(speaker, audience));
 
   /* The deactivated slot has its media state cleared... */
-  uint32_t mid_audio = 0, mid_video = 0;
+  uint32_t mid_audio = 0, mid_video = 0, mid_screen = 0;
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
     assert(snap != NULL && snap->count == 1);
     assert(snap->entries[0].subscriber == audience);
     assert(!snap->entries[0].audio_active);
     assert(!snap->entries[0].video_active);
+    assert(!snap->entries[0].screen_active);
     assert(snap->entries[0].audio_ssrc == 0);
     assert(snap->entries[0].video_ssrc == 0);
+    assert(snap->entries[0].screen_ssrc == 0);
     mid_audio = snap->entries[0].mid_audio;
     mid_video = snap->entries[0].mid_video;
+    mid_screen = snap->entries[0].mid_screen;
     sfu_subscriptions_snapshot_release(snap);
   }
   /* ...and the demoted peer's uplink state is reset so a re-promotion with
@@ -268,6 +278,8 @@ static void test_audience_role_asymmetry_and_transition(void) {
   assert(!audience->uplink_audio.active);
   assert(audience->uplink_video.ssrc == 0);
   assert(!audience->uplink_video.active);
+  assert(audience->screen.ssrc == 0);
+  assert(!audience->screen.active);
 
   /* Re-promotion with fresh uplink SSRCs reuses the same slot: mids are
    * preserved (the subscriber's transceivers stay bound) while the new
@@ -277,6 +289,12 @@ static void test_audience_role_asymmetry_and_transition(void) {
   audience->uplink_video.ssrc = 2222;
   audience->uplink_video.rtx_ssrc = 3333;
   audience->uplink_video.active = true;
+  audience->screen.ssrc = 4444;
+  audience->screen.rtx_ssrc = 5555;
+  audience->screen.payload_type = 96;
+  audience->screen.rtx_payload_type = 97;
+  audience->screen.codec = SFU_VIDEO_CODEC_VP8;
+  audience->screen.active = true;
 
   uint32_t speaker_next_mid = speaker->next_remote_mid;
   assert(room_update_peer_role(&room, audience, false));
@@ -288,11 +306,15 @@ static void test_audience_role_asymmetry_and_transition(void) {
     assert(snap->entries[0].subscriber == audience);
     assert(snap->entries[0].mid_audio == mid_audio);
     assert(snap->entries[0].mid_video == mid_video);
+    assert(snap->entries[0].mid_screen == mid_screen);
     assert(snap->entries[0].audio_active);
     assert(snap->entries[0].video_active);
+    assert(snap->entries[0].screen_active);
     assert(snap->entries[0].audio_ssrc == 1111);
     assert(snap->entries[0].video_ssrc == 2222);
     assert(snap->entries[0].video_rtx_ssrc == 3333);
+    assert(snap->entries[0].screen_ssrc == 4444);
+    assert(snap->entries[0].screen_rtx_ssrc == 5555);
     sfu_subscriptions_snapshot_release(snap);
   }
   /* No fresh mid pair was allocated for the re-promoted peer. */

@@ -6,6 +6,7 @@
 #include "sfu/datadef.h"
 
 #define SFU_TWCC_RECV_EXTMAP_ID 6
+#define SFU_MID_RECV_EXTMAP_ID 7
 
 static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
   switch (pt) {
@@ -26,15 +27,23 @@ typedef struct sfu_sdp_receiver_view {
   uint32_t audio_ssrc;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
+  uint32_t screen_ssrc;
+  uint32_t screen_rtx_ssrc;
   uint32_t mid_audio;
   uint32_t mid_video;
+  uint32_t mid_screen;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
+  uint8_t screen_pt;
+  uint8_t screen_rtx_pt;
   sfu_video_codec_t video_codec;
+  sfu_video_codec_t screen_codec;
   bool has_audio;
   bool has_video;
+  bool has_screen;
   bool audio_active;
   bool video_active;
+  bool screen_active;
   char owner_ufrag[32];
 } sfu_sdp_receiver_view_t;
 

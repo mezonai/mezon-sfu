@@ -91,7 +91,7 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
     if (!media->publisher || media->publisher->peer_id == 0) {
       has_decision = false;
     } else {
-      sched = sfu_session_scheduler_for(sub_session, media->publisher->peer_id);
+      sched = sfu_session_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
       if (!sched || !sfu_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
         if (sched) {
           sfu_scheduler_reject_packet(sched, &decision);
@@ -101,7 +101,7 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
       }
       video_class = decision.pacer_class;
       if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
-        sfu_worker_request_keyframe_throttled(w, media->publisher);
+        sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
       }
     }
   }
@@ -163,13 +163,13 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
       SFU_LOG_WARN("worker %u: [EGRESS] VP9 without publisher peer_id; forwarding without layer filter", w->worker_index);
       has_decision = false;
     } else {
-      sched = sfu_session_scheduler_for(sub_session, media->publisher->peer_id);
+      sched = sfu_session_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
       if (!sched) {
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return false;
       }
       if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
-        sfu_worker_request_keyframe_throttled(w, media->publisher);
+        sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
       }
       if (!sfu_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
         sfu_scheduler_reject_packet(sched, &decision);

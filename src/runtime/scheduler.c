@@ -193,15 +193,16 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
   sched->target_tid = 2;
 }
 
-sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id) {
-  if (!session || !sfu_session_video_runtime_ready(session) || !session->schedulers || publisher_id == 0) {
+sfu_subscriber_scheduler_t *sfu_session_scheduler_for_stream(sfu_peer_session_t *session, uint32_t publisher_id, sfu_media_kind_t source) {
+  if (!session || !sfu_session_video_runtime_ready(session) || !session->schedulers || publisher_id == 0 || source == SFU_MEDIA_AUDIO) {
     return NULL;
   }
+  uint64_t stream_key = ((uint64_t)publisher_id << 8) | (uint8_t)source;
 
   sfu_session_scheduler_slot_t *free_slot = NULL;
   for (uint32_t i = 0; i < SFU_SESSION_SCHEDULER_CAP; i++) {
     sfu_session_scheduler_slot_t *slot = &session->schedulers[i];
-    if (slot->publisher_id == publisher_id) {
+    if (slot->publisher_id == stream_key) {
       return &slot->sched;
     }
     if (!free_slot && slot->publisher_id == 0) {
@@ -210,13 +211,18 @@ sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *sessio
   }
 
   if (!free_slot) {
-    SFU_LOG_WARN("session %u: scheduler table full (%d publishers); cannot track publisher %u", session->peer_id, SFU_SESSION_SCHEDULER_CAP, publisher_id);
+    SFU_LOG_WARN("session %u: scheduler table full (%d streams); cannot track publisher %u source %u", session->peer_id, SFU_SESSION_SCHEDULER_CAP,
+                 publisher_id, (unsigned)source);
     return NULL;
   }
 
-  free_slot->publisher_id = publisher_id;
+  free_slot->publisher_id = stream_key;
   sfu_subscriber_scheduler_init(&free_slot->sched, publisher_id);
   return &free_slot->sched;
+}
+
+sfu_subscriber_scheduler_t *sfu_session_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id) {
+  return sfu_session_scheduler_for_stream(session, publisher_id, SFU_MEDIA_VIDEO);
 }
 
 static void sfu_scheduler_begin_picture(sfu_subscriber_scheduler_t *sched, uint32_t rtp_timestamp) {
