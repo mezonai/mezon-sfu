@@ -372,6 +372,18 @@
                     <input type="text" id="roomId" value="101" />
                 </div>
                 <div class="form-group">
+                    <label for="jwtToken">JWT Token</label>
+                    <input
+                        type="text"
+                        id="jwtToken"
+                        value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODY2ODUxNzgsImlkZW50aXR5IjoiMTg0MzI1MjIzNzU5MDA3MzM0NCIsImlzcyI6IkFQSWNkZDI4UHpCMmFtcCIsIm1ldGFkYXRhIjoibG9uZ21hMzUwIiwibmJmIjoxNzg2NjgxNTc4LCJzdWIiOiIxODQzMjUyMjM3NTkwMDczMzQ0IiwidmlkZW8iOnsicm9vbSI6IjIwODc3NTc3OTc0ODI1NjU2MzIiLCJyb29tSm9pbiI6dHJ1ZX19.1jxODIAZhseAj1vCT1p9-3c-65nnq9Kb7kfVysxO3tk"
+                        style="font-size: 11px;"
+                    />
+                    <small style="color: var(--muted); display:block; margin-top:4px;">
+                        Leave empty to join without authentication.
+                    </small>
+                </div>
+                <div class="form-group">
                     <label for="displayName">Your name</label>
                     <input type="text" id="displayName" value="Guest" />
                 </div>
@@ -1726,6 +1738,7 @@
             async function connectAndJoin() {
                 let wsUrl = document.getElementById("wsUrl").value.trim();
                 const roomId = document.getElementById("roomId").value.trim();
+                const jwtToken = document.getElementById("jwtToken").value.trim();
                 const displayName =
                     document.getElementById("displayName").value.trim() ||
                     "Guest";
@@ -1870,11 +1883,15 @@
                         setConnState("joining…", "warn");
 
                         // Pass the selected role (speaker or audience) to the SFU
-                        ws.send(JSON.stringify({
+                        const joinMsg = {
                             type: "join",
                             room: roomId,
                             role: currentJoinMode,
-                        }));
+                        };
+                        if (jwtToken) {
+                            joinMsg.token = jwtToken;
+                        }
+                        ws.send(JSON.stringify(joinMsg));
                     };
 
                     ws.onmessage = async (event) => {

@@ -267,6 +267,14 @@ void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snaps
   sfu_subscriptions_snapshot_release(old);
 }
 
+sfu_receiver_snapshot_t *sfu_session_publish_receivers_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->receivers, memory_order_acquire);
+  atomic_store_explicit(&owner->receivers, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  return old;
+}
+
 sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s) {
   return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->fanout_targets) : NULL;
 }
@@ -278,6 +286,14 @@ void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_
   pthread_mutex_unlock(&owner->snapshot_lock);
   snapshot_wait_unhazarded(old);
   sfu_subscriptions_snapshot_release(old);
+}
+
+sfu_receiver_snapshot_t *sfu_session_publish_fanout_targets_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  return old;
 }
 
 sfu_audio_route_snapshot_t *sfu_session_audio_fanout_acquire(const sfu_peer_session_t *s) {
@@ -307,6 +323,14 @@ void sfu_session_publish_audio_fanout(sfu_peer_session_t *owner, sfu_audio_route
   sfu_audio_route_snapshot_release(old);
 }
 
+sfu_audio_route_snapshot_t *sfu_session_publish_audio_fanout_swap(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_audio_route_snapshot_t *old = atomic_load_explicit(&owner->audio_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->audio_fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  return old;
+}
+
 sfu_video_route_snapshot_t *sfu_session_video_fanout_acquire(const sfu_peer_session_t *s) {
   return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->video_fanout_targets) : NULL;
 }
@@ -334,6 +358,14 @@ void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route
   sfu_video_route_snapshot_release(old);
 }
 
+sfu_video_route_snapshot_t *sfu_session_publish_video_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->video_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->video_fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  return old;
+}
+
 sfu_video_route_snapshot_t *sfu_session_screen_fanout_acquire(const sfu_peer_session_t *s) {
   return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->screen_fanout_targets) : NULL;
 }
@@ -343,6 +375,38 @@ void sfu_session_publish_screen_fanout(sfu_peer_session_t *owner, sfu_video_rout
   sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->screen_fanout_targets, memory_order_acquire);
   atomic_store_explicit(&owner->screen_fanout_targets, new_snap, memory_order_release);
   pthread_mutex_unlock(&owner->snapshot_lock);
+  snapshot_wait_unhazarded(old);
+  sfu_video_route_snapshot_release(old);
+}
+
+sfu_video_route_snapshot_t *sfu_session_publish_screen_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
+  pthread_mutex_lock(&owner->snapshot_lock);
+  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->screen_fanout_targets, memory_order_acquire);
+  atomic_store_explicit(&owner->screen_fanout_targets, new_snap, memory_order_release);
+  pthread_mutex_unlock(&owner->snapshot_lock);
+  return old;
+}
+
+void sfu_snapshot_reclaim_receivers(sfu_receiver_snapshot_t *old) {
+  if (!old) {
+    return;
+  }
+  snapshot_wait_unhazarded(old);
+  sfu_subscriptions_snapshot_release(old);
+}
+
+void sfu_snapshot_reclaim_audio(sfu_audio_route_snapshot_t *old) {
+  if (!old) {
+    return;
+  }
+  snapshot_wait_unhazarded(old);
+  sfu_audio_route_snapshot_release(old);
+}
+
+void sfu_snapshot_reclaim_video(sfu_video_route_snapshot_t *old) {
+  if (!old) {
+    return;
+  }
   snapshot_wait_unhazarded(old);
   sfu_video_route_snapshot_release(old);
 }

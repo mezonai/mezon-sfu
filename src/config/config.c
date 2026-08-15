@@ -72,6 +72,10 @@ int sfu_config_validate(const sfu_config_t *config) {
     SFU_LOG_ERROR("fanout_job_pool_capacity (%u) must be >= fanout_ring_capacity (%u)", config->fanout_job_pool_capacity, config->fanout_ring_capacity);
     return -1;
   }
+  if (config->packet_pool_capacity > 16777216u) {
+    SFU_LOG_ERROR("packet_pool_capacity (%u) exceeds maximum 16777216 (16M slots)", config->packet_pool_capacity);
+    return -1;
+  }
 #undef REQUIRE_POWER_OF_TWO
   return 0;
 }

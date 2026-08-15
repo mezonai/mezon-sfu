@@ -17,8 +17,8 @@ typedef struct sfu_packet {
   uint32_t cap;
   _Atomic uint32_t refcount;
   _Atomic uint32_t generation;
-  uint16_t pool_index;
-  uint16_t kbuf_index;
+  uint32_t pool_index;
+  uint32_t kbuf_index;
   uint8_t buf_source;
   struct sockaddr_storage peer_addr;
   socklen_t peer_addr_len;

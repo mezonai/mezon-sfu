@@ -43,16 +43,25 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s);
 void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap);
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
+sfu_receiver_snapshot_t *sfu_session_publish_receivers_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
 sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s);
 void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
+sfu_receiver_snapshot_t *sfu_session_publish_fanout_targets_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
 sfu_audio_route_snapshot_t *sfu_session_audio_fanout_acquire(const sfu_peer_session_t *s);
 void sfu_audio_route_snapshot_release(sfu_audio_route_snapshot_t *snap);
 void sfu_session_publish_audio_fanout(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap);
+sfu_audio_route_snapshot_t *sfu_session_publish_audio_fanout_swap(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap);
 sfu_video_route_snapshot_t *sfu_session_video_fanout_acquire(const sfu_peer_session_t *s);
 void sfu_video_route_snapshot_release(sfu_video_route_snapshot_t *snap);
 void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
+sfu_video_route_snapshot_t *sfu_session_publish_video_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
 sfu_video_route_snapshot_t *sfu_session_screen_fanout_acquire(const sfu_peer_session_t *s);
 void sfu_session_publish_screen_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
+sfu_video_route_snapshot_t *sfu_session_publish_screen_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
+
+void sfu_snapshot_reclaim_receivers(sfu_receiver_snapshot_t *old);
+void sfu_snapshot_reclaim_audio(sfu_audio_route_snapshot_t *old);
+void sfu_snapshot_reclaim_video(sfu_video_route_snapshot_t *old);
 
 static inline bool sfu_session_accepts_work(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->accepts_work, memory_order_acquire); }
 

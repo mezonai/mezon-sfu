@@ -29,6 +29,7 @@
 #include "transport/srtp/srtp.h"
 #include "util/log.h"
 #include "util/metrics.h"
+#include "util/netbytes.h"
 
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
@@ -441,6 +442,18 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
     return;
+  }
+
+  if (!is_rtcp && pkt->len >= 12 && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
+    uint32_t raw_ssrc = sfu_read_be32(pkt->data + 8);
+    sfu_media_snapshot_t mute_msnap = sfu_session_load_media(sender_session);
+    if (raw_ssrc == mute_msnap.audio_ssrc && mute_msnap.audio_ssrc != 0) {
+      sfu_metric_inc("muted_audio_drop");
+      pthread_mutex_unlock(&sender_session->ingress_lock);
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      sfu_session_release(sender_session);
+      return;
+    }
   }
 
   int plain_len = (int)pkt->len;

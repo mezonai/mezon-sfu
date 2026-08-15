@@ -42,8 +42,8 @@ sfu_packet_t *sfu_packet_pool_alloc(sfu_packet_pool_t *pp) {
   atomic_store_explicit(&pkt->generation, prior_gen, memory_order_relaxed);
   pkt->data = buf;
   pkt->cap = (uint32_t)pp->data.slot_size;
-  pkt->pool_index = (uint16_t)meta_idx;
-  pkt->kbuf_index = (uint16_t)data_idx;
+  pkt->pool_index = meta_idx;
+  pkt->kbuf_index = data_idx;
   pkt->buf_source = SFU_BUF_SOURCE_POOL;
 
   sfu_packet_reinit(pkt); /* refcount=1, generation++ */
@@ -72,7 +72,7 @@ sfu_packet_t *sfu_packet_pool_alloc_meta(sfu_packet_pool_t *pp) {
   uint32_t prior_gen = atomic_load_explicit(&pkt->generation, memory_order_relaxed);
   memset(pkt, 0, sizeof(*pkt));
   atomic_store_explicit(&pkt->generation, prior_gen, memory_order_relaxed);
-  pkt->pool_index = (uint16_t)meta_idx;
+  pkt->pool_index = meta_idx;
   pkt->buf_source = SFU_BUF_SOURCE_KERNEL;
 
   sfu_packet_reinit(pkt);
