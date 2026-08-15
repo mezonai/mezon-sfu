@@ -16,3 +16,4 @@ Thumbs.db
 build-asan/
 build-sanitize/
 build-tsan/
+build-check/
