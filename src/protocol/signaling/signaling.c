@@ -926,10 +926,6 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
     SFU_LOG_WARN("signaling: failed to send joined response (fd=%d)", c->fd);
   }
 
-  char response[128];
-  snprintf(response, sizeof(response), "{\"type\":\"joined\",\"room\":\"%" PRIu64 "\"}", room_id);
-  sfu_ws_send_text(c->fd, response, strlen(response));
-
   if (!build_and_send_initial_offer(c->fd, c->is_audience, s)) {
     SFU_LOG_WARN("signaling: failed to send initial offer (fd=%d)", c->fd);
   }
@@ -1588,6 +1584,8 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
       pthread_mutex_lock(&session->negotiation_lock);
       if (session->offer_generation == generation) {
         session->offer_outstanding = false;
+        session->renegotiation_pending = true;
+        session->negotiation_needed = true;
       }
       pthread_mutex_unlock(&session->negotiation_lock);
       SFU_LOG_WARN("signaling: failed renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u", session->cold->ufrag, fd, session->peer_id, generation);

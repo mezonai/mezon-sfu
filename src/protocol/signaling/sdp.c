@@ -441,9 +441,9 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_line_n(out, out_cap, &off, buf,
-                    (size_t)snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1,
-                                     SFU_PT_AV1_RTX, SFU_PT_VP8, SFU_PT_VP8_RTX)) != 0 ||
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
+               SFU_PT_VP8_RTX);
+  if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0 ||
       append_bundled_transport_headers(out, out_cap, &off, host, ufrag, pwd, fingerprint) != 0 ||
       append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0 || append_line(out, out_cap, &off, "a=mid:2") != 0 ||
       append_line(out, out_cap, &off, "a=rtcp-mux") != 0 || append_twcc_recv_attribute(out, out_cap, &off) != 0 ||
@@ -689,7 +689,7 @@ fail:
   return -1;
 }
 
-int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
+int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
                         char *out, size_t out_cap) {
   size_t off = 0;
   char buf[512];
@@ -728,14 +728,14 @@ int sfu_sdp_build_offer(const sfu_peer_session_t *session, const char *host, uin
   uint8_t local_screen_rtx_pt = 0;
   sfu_video_codec_t local_video_codec = SFU_VIDEO_CODEC_NONE;
   sfu_video_codec_t local_screen_codec = SFU_VIDEO_CODEC_NONE;
-  pthread_mutex_lock((pthread_mutex_t *)&session->media_lock);
+  pthread_mutex_lock(&session->media_lock);
   local_video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
   local_rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
   local_video_codec = session->uplink_video.codec;
   local_screen_pt = session->screen.payload_type ? session->screen.payload_type : local_video_pt;
   local_screen_rtx_pt = session->screen.rtx_payload_type ? session->screen.rtx_payload_type : local_rtx_pt;
   local_screen_codec = session->screen.codec != SFU_VIDEO_CODEC_NONE ? session->screen.codec : local_video_codec;
-  pthread_mutex_unlock((pthread_mutex_t *)&session->media_lock);
+  pthread_mutex_unlock(&session->media_lock);
 
   if (append_line(out, out_cap, &off, "v=0") != 0) {
     goto fail;
