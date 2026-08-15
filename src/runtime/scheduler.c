@@ -16,7 +16,8 @@
 #define SFU_DISPATCH_SQ_ENTRIES 1024
 #define SFU_DISPATCH_CQ_ENTRIES 4096
 #define SFU_DISPATCH_REAP_BATCH 256
-#define SFU_DISPATCH_IDLE_SLEEP_US 100
+#define SFU_DISPATCH_IDLE_SLEEP_MIN_US 100
+#define SFU_DISPATCH_IDLE_SLEEP_MAX_US 5000
 
 #define SFU_PENDING_FREE_SWEEP_INTERVAL_SEC 1
 #define SFU_SMALL_ROOM_AFFINITY_MAX 8
@@ -150,6 +151,8 @@ static void *scheduler_thread_main(void *arg) {
 
   SFU_LOG_INFO("scheduler (dispatcher) started on core %d", s->core_id);
 
+  uint32_t idle_sleep_us = SFU_DISPATCH_IDLE_SLEEP_MIN_US;
+
   while (!sfu_shutdown_requested()) {
     unsigned reaped = sfu_ring_reap(&s->recv_ring, SFU_DISPATCH_REAP_BATCH, s->pp, NULL, on_recv, NULL, &ctx);
 
@@ -166,7 +169,15 @@ static void *scheduler_thread_main(void *arg) {
     }
 
     if (reaped == 0 && returned == 0) {
-      usleep(SFU_DISPATCH_IDLE_SLEEP_US);
+      usleep(idle_sleep_us);
+      if (idle_sleep_us < SFU_DISPATCH_IDLE_SLEEP_MAX_US) {
+        idle_sleep_us = idle_sleep_us * 2;
+        if (idle_sleep_us > SFU_DISPATCH_IDLE_SLEEP_MAX_US) {
+          idle_sleep_us = SFU_DISPATCH_IDLE_SLEEP_MAX_US;
+        }
+      }
+    } else {
+      idle_sleep_us = SFU_DISPATCH_IDLE_SLEEP_MIN_US;
     }
   }
 
