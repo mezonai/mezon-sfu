@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include "sfu/datadef.h"
 
-#define SFU_MAX_ROOMS 128
+#define SFU_MAX_ROOMS 1024
 
 typedef struct sfu_room_registry {
   sfu_room_t rooms[SFU_MAX_ROOMS];
