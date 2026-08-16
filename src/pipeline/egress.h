@@ -17,6 +17,7 @@ typedef struct sfu_egress_media {
   sfu_media_kind_t source;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
+  uint32_t mid;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   bool has_video;

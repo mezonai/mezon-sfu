@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "peer/session.h"
-#include "protocol/signaling/sdp.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"
 #include "util/alloc.h"
@@ -234,8 +233,8 @@ static void test_audience_role_asymmetry_and_transition(void) {
     assert(snap->entries[0].audio_ssrc == 1111);
     assert(snap->entries[0].video_ssrc == 2222);
     assert(snap->entries[0].video_rtx_ssrc == 3333);
-    assert(snap->entries[0].video_pt == SFU_PT_DL_VP8);
-    assert(snap->entries[0].video_rtx_pt == SFU_PT_DL_VP8_RTX);
+    assert(snap->entries[0].video_pt == 96);
+    assert(snap->entries[0].video_rtx_pt == 97);
     assert(snap->entries[0].video_codec == SFU_VIDEO_CODEC_VP8);
     sfu_subscriptions_snapshot_release(snap);
   }
@@ -560,8 +559,8 @@ static void test_fanout_uses_publisher_stream_identity(void) {
   assert(entry->subscriber == subscriber);
   assert(entry->video_ssrc == publisher->uplink_video.ssrc);
   assert(entry->video_rtx_ssrc == publisher->uplink_video.rtx_ssrc);
-  assert(entry->video_pt == sfu_pt_to_downlink(publisher->uplink_video.payload_type));
-  assert(entry->video_rtx_pt == sfu_pt_to_downlink(publisher->uplink_video.rtx_payload_type));
+  assert(entry->video_pt == publisher->uplink_video.payload_type);
+  assert(entry->video_rtx_pt == publisher->uplink_video.rtx_payload_type);
   assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);
   assert(strcmp(entry->subscriber_ufrag, publisher->cold->ufrag) == 0);
   sfu_subscriptions_snapshot_release(snap);

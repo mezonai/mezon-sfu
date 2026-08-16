@@ -44,13 +44,6 @@ _Static_assert(SFU_SRTP_KEY_MATERIAL_LEN >= 88, "GCM-256 DTLS-SRTP exporter writ
 #define SFU_PT_VP8 96
 #define SFU_PT_VP8_RTX 97
 
-#define SFU_PT_DL_VP8 102
-#define SFU_PT_DL_VP8_RTX 103
-#define SFU_PT_DL_VP9 104
-#define SFU_PT_DL_VP9_RTX 105
-#define SFU_PT_DL_AV1 106
-#define SFU_PT_DL_AV1_RTX 107
-
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
 typedef enum { SFU_DIRECTION_INACTIVE = 0, SFU_DIRECTION_SENDONLY, SFU_DIRECTION_RECVONLY, SFU_DIRECTION_SENDRECV } sfu_direction_t;
@@ -176,6 +169,7 @@ struct sfu_receiver_snapshot {
 
 typedef struct sfu_audio_route_entry {
   sfu_peer_session_t *subscriber;
+  uint32_t mid;
 } sfu_audio_route_entry_t;
 
 typedef struct sfu_audio_route_snapshot {
@@ -190,6 +184,7 @@ typedef struct sfu_video_route_entry {
   sfu_peer_session_t *subscriber;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
+  uint32_t mid;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   bool has_video;
@@ -284,6 +279,7 @@ typedef struct sfu_peer_session {
   uint32_t peer_id;
   _Atomic uint32_t next_remote_mid;
   _Atomic uint32_t applied_answer_generation;
+  _Atomic uint32_t offer_generation;
   int fd;
   _Atomic uint64_t worker_owner;
   uint8_t twcc_recv_extmap_id;
@@ -309,7 +305,6 @@ typedef struct sfu_peer_session {
   bool negotiation_needed;
   bool offer_outstanding;
   bool renegotiation_pending;
-  uint32_t offer_generation;
   _Atomic bool uplink_ssrc_dirty;
   _Atomic bool membership_announced;
 } sfu_peer_session_t;

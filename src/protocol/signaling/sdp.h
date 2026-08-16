@@ -11,35 +11,13 @@
 static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
   switch (pt) {
     case SFU_PT_VP9:
-    case SFU_PT_DL_VP9:
       return SFU_VIDEO_CODEC_VP9;
     case SFU_PT_AV1:
-    case SFU_PT_DL_AV1:
       return SFU_VIDEO_CODEC_AV1;
     case SFU_PT_VP8:
-    case SFU_PT_DL_VP8:
       return SFU_VIDEO_CODEC_VP8;
     default:
       return SFU_VIDEO_CODEC_NONE;
-  }
-}
-
-static inline uint8_t sfu_pt_to_downlink(uint8_t pt) {
-  switch (pt) {
-    case SFU_PT_VP8:
-      return SFU_PT_DL_VP8;
-    case SFU_PT_VP8_RTX:
-      return SFU_PT_DL_VP8_RTX;
-    case SFU_PT_VP9:
-      return SFU_PT_DL_VP9;
-    case SFU_PT_VP9_RTX:
-      return SFU_PT_DL_VP9_RTX;
-    case SFU_PT_AV1:
-      return SFU_PT_DL_AV1;
-    case SFU_PT_AV1_RTX:
-      return SFU_PT_DL_AV1_RTX;
-    default:
-      return pt;
   }
 }
 

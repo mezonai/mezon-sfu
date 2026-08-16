@@ -478,6 +478,10 @@ static void answer_section_finalize(const sfu_answer_section_t *section, sfu_ans
     }
   }
 
+  if (section->mid >= (int)SFU_REMOTE_MID_BASE && receives && media->mid_recv_extmap_id == 0) {
+    media->mid_recv_extmap_id = section->mid_extmap_id;
+  }
+
   if (section->media_kind == 2 && section->mid != (int)SFU_LOCAL_CAMERA_MID && section->mid != (int)SFU_LOCAL_SCREEN_MID && receives &&
       media->twcc_send_extmap_id == 0) {
     media->twcc_send_extmap_id = section->twcc_extmap_id;

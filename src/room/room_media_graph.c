@@ -3,7 +3,6 @@
 #include <pthread.h>
 #include <string.h>
 #include "peer/session.h"
-#include "protocol/signaling/sdp.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -69,13 +68,13 @@ static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *tar
   e->audio_ssrc = media_source->uplink_audio.ssrc;
   e->video_ssrc = media_source->uplink_video.ssrc;
   e->video_rtx_ssrc = media_source->uplink_video.rtx_ssrc;
-  e->video_pt = sfu_pt_to_downlink(media_source->uplink_video.payload_type);
-  e->video_rtx_pt = sfu_pt_to_downlink(media_source->uplink_video.rtx_payload_type);
+  e->video_pt = media_source->uplink_video.payload_type;
+  e->video_rtx_pt = media_source->uplink_video.rtx_payload_type;
   e->video_codec = media_source->uplink_video.codec;
   e->screen_ssrc = media_source->screen.ssrc;
   e->screen_rtx_ssrc = media_source->screen.rtx_ssrc;
-  e->screen_pt = sfu_pt_to_downlink(media_source->screen.payload_type);
-  e->screen_rtx_pt = sfu_pt_to_downlink(media_source->screen.rtx_payload_type);
+  e->screen_pt = media_source->screen.payload_type;
+  e->screen_rtx_pt = media_source->screen.rtx_payload_type;
   e->screen_codec = media_source->screen.codec;
   e->audio_active = media_source->uplink_audio.active;
   e->video_active = media_source->uplink_video.active;
@@ -281,7 +280,9 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
     for (uint32_t i = 0; i < combined->count; i++) {
       const sfu_receiver_entry_t *entry = &combined->entries[i];
       if (entry->has_audio && entry->audio_active) {
-        audio->entries[audio_pos++].subscriber = entry->subscriber;
+        sfu_audio_route_entry_t *route = &audio->entries[audio_pos++];
+        route->subscriber = entry->subscriber;
+        route->mid = entry->mid_audio;
         atomic_fetch_add_explicit(&entry->subscriber->refcount, 1, memory_order_relaxed);
       }
       if (entry->has_video && entry->video_active && sfu_session_video_runtime_ready(entry->subscriber)) {
@@ -289,6 +290,7 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
         route->subscriber = entry->subscriber;
         route->video_ssrc = entry->video_ssrc;
         route->video_rtx_ssrc = entry->video_rtx_ssrc;
+        route->mid = entry->mid_video;
         route->video_pt = entry->video_pt;
         route->video_rtx_pt = entry->video_rtx_pt;
         route->has_video = entry->has_video;
@@ -299,6 +301,7 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
         route->subscriber = entry->subscriber;
         route->video_ssrc = entry->screen_ssrc;
         route->video_rtx_ssrc = entry->screen_rtx_ssrc;
+        route->mid = entry->mid_screen;
         route->video_pt = entry->screen_pt;
         route->video_rtx_pt = entry->screen_rtx_pt;
         route->has_video = entry->has_screen;

@@ -19,12 +19,13 @@ typedef struct {
 } sfu_route_batch_builder_t;
 
 static void forward_local(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_ingress_media_t *m, sfu_peer_session_t *sub_session, uint32_t video_ssrc,
-                          uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video) {
+                          uint32_t video_rtx_ssrc, uint32_t mid, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video) {
   sfu_egress_media_t media = {
       .publisher = sender_session,
       .source = m->source,
       .video_ssrc = video_ssrc,
       .video_rtx_ssrc = video_rtx_ssrc,
+      .mid = mid,
       .video_pt = video_pt,
       .video_rtx_pt = video_rtx_pt,
       .has_video = has_video,
@@ -77,9 +78,13 @@ static void flush_remote_batch(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 }
 
 static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_ingress_media_t *m, sfu_peer_session_t *subscriber, uint32_t video_ssrc,
-                         uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, sfu_route_batch_builder_t builders[SFU_MAX_WORKERS],
-                         sfu_packet_t **remote_source) {
+                         uint32_t video_rtx_ssrc, uint32_t mid, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video,
+                         sfu_route_batch_builder_t builders[SFU_MAX_WORKERS], sfu_packet_t **remote_source) {
   if (!subscriber || subscriber->state != SFU_SESSION_ESTABLISHED || !sfu_session_accepts_work(subscriber)) {
+    return;
+  }
+  uint32_t offered_generation = atomic_load_explicit(&subscriber->offer_generation, memory_order_acquire);
+  if (offered_generation != 0 && atomic_load_explicit(&subscriber->applied_answer_generation, memory_order_acquire) < offered_generation) {
     return;
   }
   if (!m->is_audio && !atomic_load_explicit(&subscriber->visible, memory_order_acquire)) {
@@ -89,7 +94,7 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
   uint16_t owner_worker = sfu_session_owner_worker(subscriber);
   uint32_t worker_count = w->mesh ? w->mesh->worker_count : 1;
   if (owner_worker == w->worker_index) {
-    forward_local(w, sender_session, m, subscriber, video_ssrc, video_rtx_ssrc, video_pt, video_rtx_pt, has_video);
+    forward_local(w, sender_session, m, subscriber, video_ssrc, video_rtx_ssrc, mid, video_pt, video_rtx_pt, has_video);
     return;
   }
   if (owner_worker == SFU_SESSION_OWNER_NONE || owner_worker >= worker_count) {
@@ -107,6 +112,7 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
   target->dst_len = subscriber->cold->addr_len;
   target->video_ssrc = video_ssrc;
   target->video_rtx_ssrc = video_rtx_ssrc;
+  target->mid = mid;
   target->video_pt = video_pt;
   target->video_rtx_pt = video_rtx_pt;
   target->source = (uint8_t)m->source;
@@ -123,7 +129,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     sfu_audio_route_snapshot_t *audio = sfu_session_audio_fanout_acquire(sender_session);
     if (audio) {
       for (uint32_t i = 0; i < audio->count; i++) {
-        route_target(w, sender_session, m, audio->entries[i].subscriber, 0, 0, 0, 0, false, builders, &remote_source);
+        route_target(w, sender_session, m, audio->entries[i].subscriber, 0, 0, audio->entries[i].mid, 0, 0, false, builders, &remote_source);
       }
       sfu_audio_route_snapshot_release(audio);
     } else {
@@ -131,7 +137,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       for (uint32_t i = 0; legacy && i < legacy->count; i++) {
         const sfu_receiver_entry_t *entry = &legacy->entries[i];
         if (entry->has_audio && entry->audio_active) {
-          route_target(w, sender_session, m, entry->subscriber, 0, 0, 0, 0, false, builders, &remote_source);
+          route_target(w, sender_session, m, entry->subscriber, 0, 0, entry->mid_audio, 0, 0, false, builders, &remote_source);
         }
       }
       sfu_subscriptions_snapshot_release(legacy);
@@ -142,8 +148,8 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     if (video) {
       for (uint32_t i = 0; i < video->count; i++) {
         const sfu_video_route_entry_t *entry = &video->entries[i];
-        route_target(w, sender_session, m, entry->subscriber, entry->video_ssrc, entry->video_rtx_ssrc, entry->video_pt, entry->video_rtx_pt, entry->has_video,
-                     builders, &remote_source);
+        route_target(w, sender_session, m, entry->subscriber, entry->video_ssrc, entry->video_rtx_ssrc, entry->mid, entry->video_pt, entry->video_rtx_pt,
+                     entry->has_video, builders, &remote_source);
       }
       sfu_video_route_snapshot_release(video);
     } else {
@@ -153,8 +159,9 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
         bool active = is_screen ? entry->has_screen && entry->screen_active : entry->has_video && entry->video_active;
         if (active) {
           route_target(w, sender_session, m, entry->subscriber, is_screen ? entry->screen_ssrc : entry->video_ssrc,
-                       is_screen ? entry->screen_rtx_ssrc : entry->video_rtx_ssrc, is_screen ? entry->screen_pt : entry->video_pt,
-                       is_screen ? entry->screen_rtx_pt : entry->video_rtx_pt, is_screen ? entry->has_screen : entry->has_video, builders, &remote_source);
+                       is_screen ? entry->screen_rtx_ssrc : entry->video_rtx_ssrc, is_screen ? entry->mid_screen : entry->mid_video,
+                       is_screen ? entry->screen_pt : entry->video_pt, is_screen ? entry->screen_rtx_pt : entry->video_rtx_pt,
+                       is_screen ? entry->has_screen : entry->has_video, builders, &remote_source);
         }
       }
       sfu_subscriptions_snapshot_release(legacy);
