@@ -559,6 +559,9 @@ static void test_fanout_uses_publisher_stream_identity(void) {
   assert(entry->subscriber == subscriber);
   assert(entry->video_ssrc == publisher->uplink_video.ssrc);
   assert(entry->video_rtx_ssrc == publisher->uplink_video.rtx_ssrc);
+  assert(entry->mid_audio == SFU_REMOTE_MID_BASE);
+  assert(entry->mid_video == SFU_REMOTE_MID_BASE + 1);
+  assert(entry->mid_screen == SFU_REMOTE_MID_BASE + 2);
   assert(entry->video_pt == publisher->uplink_video.payload_type);
   assert(entry->video_rtx_pt == publisher->uplink_video.rtx_payload_type);
   assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);

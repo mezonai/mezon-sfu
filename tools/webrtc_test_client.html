@@ -1164,7 +1164,7 @@
                         localStream,
                         camEnabled && localStream.getVideoTracks().length > 0,
                     );
-                sendHook(camEnabled ? "publish" : "unpublish");
+                sendHook("camera", { active: camEnabled });
             }
 
             function findUplinkVideoSender(mid = "1") {

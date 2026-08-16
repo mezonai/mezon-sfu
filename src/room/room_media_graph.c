@@ -94,6 +94,17 @@ static uint32_t snapshot_find(const sfu_receiver_snapshot_t *old, const sfu_peer
   return UINT32_MAX;
 }
 
+static void snapshot_copy_route_mids(sfu_receiver_entry_t *entry, sfu_peer_session_t *subscriber, sfu_peer_session_t *publisher) {
+  sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(subscriber);
+  uint32_t pos = snapshot_find(subscriptions, publisher);
+  if (pos != UINT32_MAX) {
+    entry->mid_audio = subscriptions->entries[pos].mid_audio;
+    entry->mid_video = subscriptions->entries[pos].mid_video;
+    entry->mid_screen = subscriptions->entries[pos].mid_screen;
+  }
+  sfu_subscriptions_snapshot_release(subscriptions);
+}
+
 static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   sfu_receiver_snapshot_t *snap = SFU_CALLOC(1, sizeof(*snap) + (size_t)capacity * sizeof(snap->entries[0]));
   if (!snap) {
@@ -129,6 +140,9 @@ static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner
   }
 
   snapshot_fill_entry(&snap->entries[pos], dst, fanout ? owner : dst);
+  if (fanout) {
+    snapshot_copy_route_mids(&snap->entries[pos], dst, owner);
+  }
 
   snap->count = old_count;
   sfu_subscriptions_snapshot_release(old);
@@ -199,6 +213,9 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
     e->mid_screen = e->mid_audio + 2;
   }
   snapshot_fill_entry(e, dst, fanout ? owner : dst);
+  if (fanout) {
+    snapshot_copy_route_mids(e, dst, owner);
+  }
   e->has_audio = true;
   e->has_video = true;
   e->has_screen = true;
@@ -434,18 +451,18 @@ void room_add_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     if (!peer_is_audience) {
       fanout_targets[fanout_count++] = other;
     }
-    if (!other_is_audience) {
-      sfu_receiver_snapshot_t *snap = snapshot_build_with(other, peer, true);
-      if (snap) {
-        fanout_snapshot_replace(other, snap, &deferred);
-      }
-    }
   }
 
   if (recv_count > 0) {
     sfu_receiver_snapshot_t *snap = snapshot_build_batch(peer, recv_targets, recv_count, false);
     if (snap) {
       snapshot_replace(peer, snap, &deferred);
+    }
+    for (uint32_t i = 0; i < recv_count; i++) {
+      snap = snapshot_build_with(recv_targets[i], peer, true);
+      if (snap) {
+        fanout_snapshot_replace(recv_targets[i], snap, &deferred);
+      }
     }
   }
   if (fanout_count > 0) {
