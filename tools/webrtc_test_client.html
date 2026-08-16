@@ -1344,6 +1344,10 @@
                 if (sender) {
                     try {
                         await sender.replaceTrack(null);
+                        const tc = pc.getTransceivers().find((t) => t.sender === sender);
+                        if (tc && tc.direction !== "recvonly" && tc.direction !== "inactive") {
+                            tc.direction = "recvonly";
+                        }
                     } catch (e) {
                         console.warn("detach screen track failed:", e);
                     }
