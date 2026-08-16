@@ -238,7 +238,7 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint1
   return 0;
 }
 
-#define SFU_TWCC_LOCAL_EXTMAP_ID 5
+#define SFU_TWCC_LOCAL_EXTMAP_ID 6
 
 static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset) {
   char line[160];
