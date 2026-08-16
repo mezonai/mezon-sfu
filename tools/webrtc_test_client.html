@@ -652,7 +652,7 @@
             function mediaTileId(baseId, mid, trackKind = null, isScreen = false) {
                 const kind = remoteKindFromMid(mid);
                 if (trackKind === "audio" || kind === "audio") return baseId;
-                return baseId + (isScreen || kind === "screen" ? "-screen" : "-camera");
+                return isScreen || kind === "screen" ? baseId + "-screen" : baseId;
             }
 
             function parsePublisherStreamId(streamId) {
@@ -770,7 +770,6 @@
                 for (const member of msg.members || []) {
                     const baseId = memberTileId(member);
                     liveIds.add(baseId);
-                    liveIds.add(baseId + "-camera");
                     liveIds.add(baseId + "-screen");
                     upsertMember(member, String(member.peer_id) === String(msg.self_peer_id));
                 }
@@ -887,10 +886,7 @@
 
                 const videoTrack = hasVideo ? stream.getVideoTracks()[0] : null;
                 const showVideo = () => {
-                    // Prefer showing the element whenever the track is live.
-                    // track.muted can lag after demote→promote even while frames
-                    // are decoding (we saw inbound decoded>0 with a black tile).
-                    const live = hasVideo && videoTrack && videoTrack.readyState === "live";
+                    const live = hasVideo && videoTrack && !videoTrack.muted && videoTrack.readyState === "live";
                     p.video.style.display = live ? "block" : "none";
                     p.avatar.style.display = live ? "none" : "flex";
                     if (live) {
