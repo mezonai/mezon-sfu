@@ -73,6 +73,7 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
 }
 
 static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset);
+static int append_mid_recv_attribute(char *out, size_t out_cap, size_t *offset);
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, sfu_video_codec_t codec, uint8_t video_pt, uint8_t rtx_pt);
 static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc, int64_t user_id, uint32_t peer_id);
 static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id,
@@ -223,6 +224,9 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint1
     return 0;
   }
   if (append_twcc_attributes(out, out_cap, offset) != 0) {
+    return -1;
+  }
+  if (append_mid_recv_attribute(out, out_cap, offset) != 0) {
     return -1;
   }
   sfu_video_codec_t codec = screen ? slot->screen_codec : slot->video_codec;
