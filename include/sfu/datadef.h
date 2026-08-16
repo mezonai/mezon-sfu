@@ -279,7 +279,6 @@ typedef struct sfu_peer_session {
   uint32_t peer_id;
   _Atomic uint32_t next_remote_mid;
   _Atomic uint32_t applied_answer_generation;
-  _Atomic uint32_t offer_generation;
   int fd;
   _Atomic uint64_t worker_owner;
   uint8_t twcc_recv_extmap_id;
@@ -305,6 +304,7 @@ typedef struct sfu_peer_session {
   bool negotiation_needed;
   bool offer_outstanding;
   bool renegotiation_pending;
+  uint32_t offer_generation;
   _Atomic bool uplink_ssrc_dirty;
   _Atomic bool membership_announced;
 } sfu_peer_session_t;

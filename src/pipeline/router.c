@@ -83,10 +83,6 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
   if (!subscriber || subscriber->state != SFU_SESSION_ESTABLISHED || !sfu_session_accepts_work(subscriber)) {
     return;
   }
-  uint32_t offered_generation = atomic_load_explicit(&subscriber->offer_generation, memory_order_acquire);
-  if (offered_generation != 0 && atomic_load_explicit(&subscriber->applied_answer_generation, memory_order_acquire) < offered_generation) {
-    return;
-  }
   if (!m->is_audio && !atomic_load_explicit(&subscriber->visible, memory_order_acquire)) {
     return;
   }
