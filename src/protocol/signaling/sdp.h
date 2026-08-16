@@ -11,13 +11,35 @@
 static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
   switch (pt) {
     case SFU_PT_VP9:
+    case SFU_PT_DL_VP9:
       return SFU_VIDEO_CODEC_VP9;
     case SFU_PT_AV1:
+    case SFU_PT_DL_AV1:
       return SFU_VIDEO_CODEC_AV1;
     case SFU_PT_VP8:
+    case SFU_PT_DL_VP8:
       return SFU_VIDEO_CODEC_VP8;
     default:
       return SFU_VIDEO_CODEC_NONE;
+  }
+}
+
+static inline uint8_t sfu_pt_to_downlink(uint8_t pt) {
+  switch (pt) {
+    case SFU_PT_VP8:
+      return SFU_PT_DL_VP8;
+    case SFU_PT_VP8_RTX:
+      return SFU_PT_DL_VP8_RTX;
+    case SFU_PT_VP9:
+      return SFU_PT_DL_VP9;
+    case SFU_PT_VP9_RTX:
+      return SFU_PT_DL_VP9_RTX;
+    case SFU_PT_AV1:
+      return SFU_PT_DL_AV1;
+    case SFU_PT_AV1_RTX:
+      return SFU_PT_DL_AV1_RTX;
+    default:
+      return pt;
   }
 }
 
@@ -50,8 +72,8 @@ typedef struct sfu_sdp_receiver_view {
 int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t offer_len, const char *host, uint16_t port, const char *ufrag, const char *pwd,
                          const char *fingerprint, char *out, size_t out_cap);
 
-int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint,
-                        char *out, size_t out_cap);
+int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, char *out,
+                        size_t out_cap);
 
 int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, bool is_audience, char *out,
                                 size_t out_cap);

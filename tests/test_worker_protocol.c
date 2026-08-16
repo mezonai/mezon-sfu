@@ -836,12 +836,12 @@ static void test_svc_filter_rewrites_sequence_and_cache_identity(void) {
   assert(sfu_read_be16(cached + 2) == 100);
   assert((cached[1] & 0x80) != 0);
   assert(rtx_ssrc == f.publisher->uplink_video.rtx_ssrc);
-  assert(rtx_pt == f.publisher->uplink_video.rtx_payload_type);
+  assert(rtx_pt == SFU_PT_DL_VP9_RTX);
 
   cached_len = sizeof(cached);
   assert(sfu_rtx_cache_get_stream(f.base.cache, 101, cached, &cached_len, &rtx_ssrc, &rtx_pt, f.pub_video_ssrc, 0));
   assert(sfu_read_be16(cached + 2) == 101); /* source 102 became subscriber 101 */
-  assert((cached[1] & 0x7f) == SFU_PT_VP9);
+  assert((cached[1] & 0x7f) == SFU_PT_DL_VP9);
   assert((cached[1] & 0x80) != 0);
 
   cached_len = sizeof(cached);

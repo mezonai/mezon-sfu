@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <string.h>
 #include "peer/session.h"
+#include "protocol/signaling/sdp.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -68,13 +69,13 @@ static void snapshot_fill_entry(sfu_receiver_entry_t *e, sfu_peer_session_t *tar
   e->audio_ssrc = media_source->uplink_audio.ssrc;
   e->video_ssrc = media_source->uplink_video.ssrc;
   e->video_rtx_ssrc = media_source->uplink_video.rtx_ssrc;
-  e->video_pt = media_source->uplink_video.payload_type;
-  e->video_rtx_pt = media_source->uplink_video.rtx_payload_type;
+  e->video_pt = sfu_pt_to_downlink(media_source->uplink_video.payload_type);
+  e->video_rtx_pt = sfu_pt_to_downlink(media_source->uplink_video.rtx_payload_type);
   e->video_codec = media_source->uplink_video.codec;
   e->screen_ssrc = media_source->screen.ssrc;
   e->screen_rtx_ssrc = media_source->screen.rtx_ssrc;
-  e->screen_pt = media_source->screen.payload_type;
-  e->screen_rtx_pt = media_source->screen.rtx_payload_type;
+  e->screen_pt = sfu_pt_to_downlink(media_source->screen.payload_type);
+  e->screen_rtx_pt = sfu_pt_to_downlink(media_source->screen.rtx_payload_type);
   e->screen_codec = media_source->screen.codec;
   e->audio_active = media_source->uplink_audio.active;
   e->video_active = media_source->uplink_video.active;

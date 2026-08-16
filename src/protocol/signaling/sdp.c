@@ -874,10 +874,10 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
     if (append_bundled_audio(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_audio, audio_live, found ? &slot : NULL) != 0) {
       goto fail;
     }
-    if (append_bundled_video(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_video, video_live, found ? &slot : NULL, local_video_pt,
-                             local_rtx_pt, false) != 0 ||
-        append_bundled_video(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_screen, screen_live, found ? &slot : NULL, local_screen_pt,
-                             local_screen_rtx_pt, true) != 0) {
+    if (append_bundled_video(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_video, video_live, found ? &slot : NULL,
+                             SFU_PT_DL_VP8, SFU_PT_DL_VP8_RTX, false) != 0 ||
+        append_bundled_video(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_screen, screen_live, found ? &slot : NULL,
+                             SFU_PT_DL_VP8, SFU_PT_DL_VP8_RTX, true) != 0) {
       goto fail;
     }
   }
