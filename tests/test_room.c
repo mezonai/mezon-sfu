@@ -583,6 +583,61 @@ static void test_fanout_uses_publisher_stream_identity(void) {
   sfu_room_destroy(&room);
 }
 
+static void assert_fanout_mids_match_subscriptions(sfu_peer_session_t *publisher, uint32_t expected_targets) {
+  sfu_receiver_snapshot_t *fanout = sfu_session_fanout_targets_acquire(publisher);
+  assert(fanout != NULL && fanout->count == expected_targets);
+  for (uint32_t i = 0; i < fanout->count; i++) {
+    const sfu_receiver_entry_t *route = &fanout->entries[i];
+    sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(route->subscriber);
+    uint32_t pos = UINT32_MAX;
+    for (uint32_t j = 0; subscriptions && j < subscriptions->count; j++) {
+      if (subscriptions->entries[j].subscriber == publisher) {
+        pos = j;
+        break;
+      }
+    }
+    assert(pos != UINT32_MAX);
+    assert(route->mid_audio == subscriptions->entries[pos].mid_audio);
+    assert(route->mid_video == subscriptions->entries[pos].mid_video);
+    assert(route->mid_screen == subscriptions->entries[pos].mid_screen);
+    assert(route->mid_audio >= SFU_REMOTE_MID_BASE);
+    assert(route->mid_video == route->mid_audio + 1);
+    assert(route->mid_screen == route->mid_audio + 2);
+    sfu_subscriptions_snapshot_release(subscriptions);
+  }
+  sfu_subscriptions_snapshot_release(fanout);
+}
+
+static void test_three_peer_route_mids(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 11) == 0);
+  sfu_peer_session_t *a = mock_session("a3");
+  sfu_peer_session_t *b = mock_session("b3");
+  sfu_peer_session_t *c = mock_session("c3");
+  a->peer_id = 1;
+  b->peer_id = 2;
+  c->peer_id = 3;
+
+  room_add_peer(&room, a);
+  room_add_peer(&room, b);
+  room_add_peer(&room, c);
+
+  assert_fanout_mids_match_subscriptions(a, 2);
+  assert_fanout_mids_match_subscriptions(b, 2);
+  assert_fanout_mids_match_subscriptions(c, 2);
+  assert(a->next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(b->next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(c->next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+
+  room_remove_peer(&room, c);
+  room_remove_peer(&room, b);
+  room_remove_peer(&room, a);
+  sfu_session_release(c);
+  sfu_session_release(b);
+  sfu_session_release(a);
+  sfu_room_destroy(&room);
+}
+
 int main(void) {
   test_add_remove();
   test_audience_role_asymmetry_and_transition();
@@ -590,6 +645,7 @@ int main(void) {
   test_concurrent_snapshot_read_write();
   test_multi_publisher_concurrent_churn();
   test_fanout_uses_publisher_stream_identity();
+  test_three_peer_route_mids();
 
   printf("test_room: OK\n");
   return 0;

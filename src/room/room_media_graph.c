@@ -376,6 +376,9 @@ static sfu_receiver_snapshot_t *snapshot_build_batch(sfu_peer_session_t *owner, 
       e->mid_screen = e->mid_audio + 2;
     }
     snapshot_fill_entry(e, dst, fanout ? owner : dst);
+    if (fanout) {
+      snapshot_copy_route_mids(e, dst, owner);
+    }
     e->has_audio = true;
     e->has_video = true;
     e->has_screen = true;
