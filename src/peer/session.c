@@ -1102,7 +1102,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   bool current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
   bool audio_active = !current_audience && audio_ssrc != 0;
   bool video_active = !current_audience && video_ssrc != 0;
-  bool screen_active = !current_audience && screen_ssrc != 0;
+  bool screen_active = !current_audience && screen_ssrc != 0 && session->screen.active;
 
   changed = session->uplink_audio.ssrc != audio_ssrc || session->uplink_audio.active != audio_active || session->uplink_video.ssrc != video_ssrc ||
             session->uplink_video.rtx_ssrc != rtx_ssrc || session->uplink_video.active != video_active || session->uplink_video.payload_type != video_pt ||
