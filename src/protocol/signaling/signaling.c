@@ -478,6 +478,10 @@ static void answer_section_finalize(const sfu_answer_section_t *section, sfu_ans
     }
   }
 
+  if (section->mid >= (int)SFU_REMOTE_MID_BASE && receives && media->mid_recv_extmap_id == 0) {
+    media->mid_recv_extmap_id = section->mid_extmap_id;
+  }
+
   if (section->media_kind == 2 && section->mid != (int)SFU_LOCAL_CAMERA_MID && section->mid != (int)SFU_LOCAL_SCREEN_MID && receives &&
       media->twcc_send_extmap_id == 0) {
     media->twcc_send_extmap_id = section->twcc_extmap_id;
@@ -1131,6 +1135,36 @@ static void handle_media_hook(sfu_client_conn_t *c, const char *event) {
   emit_hook_event(event, c->user_id, c->joined_room_id);
 }
 
+static void handle_camera(sfu_client_conn_t *c, const char *buf, size_t n) {
+  if (!c->joined_room || c->client_ufrag[0] == '\0' || c->is_audience) {
+    return;
+  }
+  bool active = true;
+  (void)sfu_json_extract_bool(buf, n, "active", &active);
+  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
+  if (!session || session->room != c->joined_room) {
+    if (session) {
+      sfu_session_release(session);
+    }
+    return;
+  }
+
+  pthread_mutex_lock(&session->media_lock);
+  bool camera_active = active && atomic_load_explicit(&session->video_send_negotiated, memory_order_acquire) && session->uplink_video.ssrc != 0;
+  bool changed = session->uplink_video.active != camera_active;
+  session->uplink_video.active = camera_active;
+  sfu_session_publish_media(session);
+  pthread_mutex_unlock(&session->media_lock);
+
+  if (changed) {
+    room_refresh_peer_streams(c->joined_room, session);
+    broadcast_peer_updated(c->joined_room, session);
+    sfu_signaling_trigger_renegotiation(c->joined_room);
+  }
+  emit_hook_event(active ? "publish" : "unpublish", c->user_id, c->joined_room_id);
+  sfu_session_release(session);
+}
+
 static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n) {
   if (!c->joined_room || c->client_ufrag[0] == '\0' || c->is_audience) {
     static const char unavailable[] = "{\"type\":\"error\",\"message\":\"screen_share_not_allowed\"}";
@@ -1254,6 +1288,8 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
     handle_visibility(c, buf, n);
   } else if (strcmp(type, "mute") == 0) {
     handle_mute(c, buf, n);
+  } else if (strcmp(type, "camera") == 0) {
+    handle_camera(c, buf, n);
   } else if (strcmp(type, "publish") == 0) {
     handle_media_hook(c, "publish");
   } else if (strcmp(type, "unpublish") == 0) {

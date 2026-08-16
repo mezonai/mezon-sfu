@@ -17,6 +17,8 @@
 #include "util/metrics.h"
 #include "util/netbytes.h"
 
+#include <stdio.h>
+
 static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                                      const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_subscriber_scheduler_t *sched,
                                      const sfu_scheduler_decision_t *decision) {
@@ -41,12 +43,25 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
       return false;
     }
   }
+  sfu_media_snapshot_t egress_msnap = sfu_session_load_media(sub_session);
+  uint8_t mid_send_extmap_id = egress_msnap.mid_recv_extmap_id;
+  if (mid_send_extmap_id != 0 && media->mid != 0) {
+    char mid[12];
+    int mid_len = snprintf(mid, sizeof(mid), "%u", media->mid);
+    size_t new_len = (size_t)enc_len;
+    if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid) ||
+        !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid, &new_len)) {
+      sfu_metric_inc("mid_write_fail");
+      return false;
+    }
+    enc_len = (int)new_len;
+  }
+
   if (media->has_video && !media->is_audio && sfu_session_video_runtime_ready(sub_session) && sub_session->rtx_cache) {
     sfu_rtx_cache_put_stream(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, media->video_rtx_ssrc, media->video_rtx_pt,
                              media->video_ssrc, atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
   }
 
-  sfu_media_snapshot_t egress_msnap = sfu_session_load_media(sub_session);
   uint8_t twcc_send_extmap_id = egress_msnap.twcc_send_extmap_id;
   if (twcc_send_extmap_id != 0) {
     uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);

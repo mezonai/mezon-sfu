@@ -169,6 +169,7 @@ struct sfu_receiver_snapshot {
 
 typedef struct sfu_audio_route_entry {
   sfu_peer_session_t *subscriber;
+  uint32_t mid;
 } sfu_audio_route_entry_t;
 
 typedef struct sfu_audio_route_snapshot {
@@ -183,6 +184,7 @@ typedef struct sfu_video_route_entry {
   sfu_peer_session_t *subscriber;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
+  uint32_t mid;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   bool has_video;

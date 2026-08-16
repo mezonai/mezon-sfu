@@ -263,6 +263,34 @@ static void test_wrong_length_element_refused(void) {
   assert(!sfu_rtp_ext_write_twcc(buf, len, sizeof(buf), TWCC_ID, 1, &out_len));
 }
 
+static bool read_mid(const uint8_t *buf, size_t len, uint8_t ext_id, char *mid, size_t mid_cap) {
+  sfu_rtp_packet_t p;
+  return sfu_rtp_packet_parse(buf, len, &p) && p.extension &&
+         sfu_rtp_ext_read_mid(p.extension_profile, p.extension_data, p.extension_length, ext_id, mid, mid_cap);
+}
+
+static void test_mid_writer(void) {
+  uint8_t buf[256];
+  size_t len = build_rtp(buf, false, 0, NULL, 0, 20);
+  size_t out_len = len;
+  char mid[8];
+  assert(sfu_rtp_ext_write_mid(buf, len, sizeof(buf), 7, "4", &out_len));
+  assert(read_mid(buf, out_len, 7, mid, sizeof(mid)));
+  assert(strcmp(mid, "4") == 0);
+
+  size_t rewritten_len = out_len;
+  assert(sfu_rtp_ext_write_mid(buf, out_len, sizeof(buf), 7, "10", &rewritten_len));
+  assert(read_mid(buf, rewritten_len, 7, mid, sizeof(mid)));
+  assert(strcmp(mid, "10") == 0);
+
+  uint16_t twcc = 0;
+  assert(sfu_rtp_ext_write_twcc(buf, rewritten_len, sizeof(buf), TWCC_ID, 4321, &out_len));
+  assert(read_mid(buf, out_len, 7, mid, sizeof(mid)));
+  assert(strcmp(mid, "10") == 0);
+  assert(read_twcc(buf, out_len, TWCC_ID, &twcc));
+  assert(twcc == 4321);
+}
+
 static void test_mid_reader(void) {
   char mid[8];
   uint8_t one_byte[4] = {(7u << 4) | 0u, '2', 0, 0};
@@ -286,6 +314,7 @@ int main(void) {
   test_insert_with_csrcs();
   test_rejections();
   test_wrong_length_element_refused();
+  test_mid_writer();
   test_mid_reader();
   printf("test_rtp_ext: OK\n");
   return 0;

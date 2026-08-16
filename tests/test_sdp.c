@@ -201,7 +201,7 @@ static void test_initial_offer_role_directions(void) {
   assert(count_occurrences(offer, "a=recvonly") == 3);
   assert(contains(offer, "a=group:BUNDLE 0 1 2"));
   assert(contains(offer, "a=mid:2"));
-  assert(count_occurrences(offer, "urn:ietf:params:rtp-hdrext:sdes:mid") == 2);
+  assert(count_occurrences(offer, "urn:ietf:params:rtp-hdrext:sdes:mid") == 3);
   assert(!contains(offer, "a=inactive"));
 
   len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", true, offer, sizeof(offer));
@@ -272,13 +272,12 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   assert(contains(offer, "a=mid:3"));
   assert(contains(offer, "a=mid:4"));
   assert(contains(offer, "a=mid:5"));
-  assert(contains(offer, "a=ssrc:1111"));
-  assert(contains(offer, "a=ssrc:1111 msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
+  assert(!contains(offer, "a=ssrc:1111"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
-  assert(contains(offer, "a=ssrc:2222"));
-  assert(contains(offer, "a=ssrc:2222 msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
+  assert(!contains(offer, "a=ssrc:2222"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
-  assert(contains(offer, "a=ssrc-group:FID 2222 3333"));
+  assert(!contains(offer, "a=ssrc-group:FID 2222 3333"));
+  assert(count_occurrences(offer, "a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid") == 6);
 
   video[0].ssrc = 0;
   sync_mock_snapshot(&session, audio, video);
@@ -328,9 +327,9 @@ static void test_screen_only_remote_offer(void) {
   assert(count_occurrences(offer, "a=sendonly") == 1);
   assert(count_occurrences(offer, "a=inactive") == 5);
   assert(contains(offer, "a=mid:5\r\n"));
-  assert(contains(offer, "a=ssrc:4444 msid:u42-p7 screen-u42-p7"));
+  assert(!contains(offer, "a=ssrc:4444"));
   assert(contains(offer, "a=msid:u42-p7 screen-u42-p7"));
-  assert(contains(offer, "a=ssrc-group:FID 4444 5555"));
+  assert(!contains(offer, "a=ssrc-group:FID 4444 5555"));
   assert(!contains(offer, "a=ssrc:1111"));
   assert(!contains(offer, "a=ssrc:2222"));
 
@@ -729,8 +728,8 @@ int main(void) {
                             sizeof(server_offer));
   assert(len > 0);
   server_offer[len] = '\0';
-  assert(contains(server_offer, "a=ssrc:987654321 cname:remote-peer"));
-  assert(contains(server_offer, "a=ssrc-group:FID 987654321 987654322"));
+  assert(!contains(server_offer, "a=ssrc:987654321"));
+  assert(!contains(server_offer, "a=ssrc-group:FID 987654321 987654322"));
   assert(contains(server_offer, "a=msid:u77-p9 video-u77-p9"));
   assert(count_occurrences(server_offer, "a=ice-ufrag:XKrsH3xm") == 6);
   assert(count_occurrences(server_offer, "a=fingerprint:sha-256") == 6);

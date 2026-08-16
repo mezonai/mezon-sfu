@@ -221,6 +221,101 @@ static void ext_block_grow(uint8_t *data, size_t len, size_t ext_off, size_t ext
   sfu_write_be16(data + ext_off + 2u, (uint16_t)(new_ext_len / 4u));
 }
 
+static bool rtp_ext_write_value(uint8_t *data, size_t len, size_t cap, uint8_t ext_id, const uint8_t *value, size_t value_len, size_t *io_len) {
+  if (!data || !value || !io_len || ext_id == 0u || value_len == 0u || len < RTP_FIXED_HEADER_LEN || len > cap) {
+    return false;
+  }
+
+  size_t ext_off = 0;
+  size_t ext_len = 0;
+  bool has_ext = rtp_ext_block(data, len, &ext_off, &ext_len);
+  uint16_t profile = has_ext ? sfu_read_be16(data + ext_off) : 0;
+  size_t header_len = 0;
+
+  if (has_ext && profile == RTP_EXT_ONE_BYTE_PROFILE) {
+    if (ext_id > 14u || value_len > 16u) {
+      return false;
+    }
+    header_len = 1u;
+    size_t elem_off = 0;
+    size_t elem_size = 0;
+    if (one_byte_find(data + ext_off + 4u, ext_len, ext_id, &elem_off, &elem_size)) {
+      if (elem_size == header_len + value_len) {
+        data[ext_off + 4u + elem_off] = (uint8_t)((ext_id << 4) | (value_len - 1u));
+        memcpy(data + ext_off + 4u + elem_off + header_len, value, value_len);
+        *io_len = len;
+        return true;
+      }
+      memset(data + ext_off + 4u + elem_off, 0, elem_size);
+    }
+  } else if (has_ext && (profile & 0xFFF0u) == RTP_EXT_TWO_BYTE_PROFILE) {
+    if (value_len > UINT8_MAX) {
+      return false;
+    }
+    header_len = 2u;
+    size_t elem_off = 0;
+    size_t elem_size = 0;
+    if (two_byte_find(data + ext_off + 4u, ext_len, ext_id, &elem_off, &elem_size)) {
+      if (elem_size == header_len + value_len) {
+        data[ext_off + 4u + elem_off] = ext_id;
+        data[ext_off + 4u + elem_off + 1u] = (uint8_t)value_len;
+        memcpy(data + ext_off + 4u + elem_off + header_len, value, value_len);
+        *io_len = len;
+        return true;
+      }
+      memset(data + ext_off + 4u + elem_off, 0, elem_size);
+    }
+  } else if (has_ext) {
+    return false;
+  } else {
+    if (ext_id > 14u || value_len > 16u || (data[0] & 0x10u)) {
+      return false;
+    }
+    size_t csrc_end = rtp_csrc_end(data, len);
+    size_t elem_len = 1u + value_len;
+    size_t block_len = (elem_len + 3u) & ~(size_t)3u;
+    size_t grow = 4u + block_len;
+    if (csrc_end == 0 || len + grow > cap) {
+      return false;
+    }
+    memmove(data + csrc_end + grow, data + csrc_end, len - csrc_end);
+    data[0] |= 0x10u;
+    sfu_write_be16(data + csrc_end, RTP_EXT_ONE_BYTE_PROFILE);
+    sfu_write_be16(data + csrc_end + 2u, (uint16_t)(block_len / 4u));
+    memset(data + csrc_end + 4u, 0, block_len);
+    data[csrc_end + 4u] = (uint8_t)((ext_id << 4) | (value_len - 1u));
+    memcpy(data + csrc_end + 5u, value, value_len);
+    *io_len = len + grow;
+    return true;
+  }
+
+  size_t elem_len = header_len + value_len;
+  size_t new_ext_len = (ext_len + elem_len + 3u) & ~(size_t)3u;
+  size_t grow = new_ext_len - ext_len;
+  if (new_ext_len / 4u > UINT16_MAX || len + grow > cap) {
+    return false;
+  }
+  size_t insert_at = ext_off + 4u + ext_len;
+  ext_block_grow(data, len, ext_off, ext_len, new_ext_len);
+  if (header_len == 1u) {
+    data[insert_at] = (uint8_t)((ext_id << 4) | (value_len - 1u));
+  } else {
+    data[insert_at] = ext_id;
+    data[insert_at + 1u] = (uint8_t)value_len;
+  }
+  memcpy(data + insert_at + header_len, value, value_len);
+  *io_len = len + grow;
+  return true;
+}
+
+bool sfu_rtp_ext_write_mid(uint8_t *data, size_t len, size_t cap, uint8_t ext_id, const char *mid, size_t *io_len) {
+  if (!mid) {
+    return false;
+  }
+  size_t mid_len = strlen(mid);
+  return rtp_ext_write_value(data, len, cap, ext_id, (const uint8_t *)mid, mid_len, io_len);
+}
+
 bool sfu_rtp_ext_write_twcc(uint8_t *data, size_t len, size_t cap, uint8_t ext_id, uint16_t twcc_seq, size_t *io_len) {
   if (!data || !io_len || ext_id == 0u || ext_id > 14u || len < RTP_FIXED_HEADER_LEN || len > cap) {
     return false;

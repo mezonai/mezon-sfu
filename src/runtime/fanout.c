@@ -130,7 +130,7 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
 
 bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, sfu_peer_session_t *subscriber,
                                      sfu_peer_session_t *publisher, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
-                                     uint32_t video_rtx_ssrc, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, bool is_audio,
+                                     uint32_t video_rtx_ssrc, uint32_t mid, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, bool is_audio,
                                      const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe) {
   sfu_fanout_job_t *job = mesh_job_alloc(mesh, src_worker, dst_worker);
   if (!job) {
@@ -148,6 +148,7 @@ bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worke
   }
   job->video_ssrc = video_ssrc;
   job->video_rtx_ssrc = video_rtx_ssrc;
+  job->mid = mid;
   job->video_pt = video_pt;
   job->video_rtx_pt = video_rtx_pt;
   job->source = (uint8_t)(is_audio ? SFU_MEDIA_AUDIO : SFU_MEDIA_VIDEO);
