@@ -50,8 +50,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     char mid[12];
     int mid_len = snprintf(mid, sizeof(mid), "%u", media->mid);
     size_t new_len = (size_t)enc_len;
-    if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid) ||
-        !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid, &new_len)) {
+    if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid) || !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid, &new_len)) {
       sfu_metric_inc("mid_write_fail");
       return false;
     }
@@ -77,10 +76,6 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     }
   }
 
-  uint16_t protect_seq = sfu_read_be16(pkt->data + 2);
-  uint32_t protect_ssrc = sfu_read_be32(pkt->data + 8);
-  uint8_t protect_pt = pkt->data[1] & 0x7F;
-  uint32_t egress_generation = atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire);
   srtp_err_status_t protect_status = sfu_srtp_protect_rtp_status(&sub_session->srtp, pkt->data, &enc_len, pkt->cap);
   if (protect_status != srtp_err_status_ok) {
     if (protect_status == srtp_err_status_replay_old) {
@@ -89,12 +84,6 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
       sfu_metric_inc("egress_protect_replay_fail");
     }
     sfu_metric_inc(media->is_audio ? "egress_protect_fail_audio" : "egress_protect_fail_video");
-    SFU_LOG_WARN(
-        "worker %u: [EGRESS DROP] SRTP protect failed status=%d(%s) subscriber_peer=%u subscriber_user=%" PRId64
-        " ufrag=%s owner_worker=%u egress_generation=%u publisher_peer=%u source=%u mid=%u ssrc=%u seq=%u pt=%u len=%d",
-        w->worker_index, (int)protect_status, sfu_srtp_status_name(protect_status), sub_session->peer_id, sub_session->user_id,
-        sub_session->cold ? sub_session->cold->ufrag : "", sfu_session_owner_worker(sub_session), egress_generation,
-        media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source, media->mid, protect_ssrc, protect_seq, protect_pt, enc_len);
     sfu_metric_inc("egress_protect_fail");
     return false;
   }
