@@ -198,6 +198,13 @@ static int send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t len
 int sfu_ws_send_text(int fd, const char *data, size_t len) { return send_frame(fd, 0x1, (const uint8_t *)data, len); }
 
 ssize_t sfu_ws_recv_text(int fd, char *buf, size_t cap) {
+  if (!buf || cap == 0) {
+    return -1;
+  }
+
+  size_t message_len = 0;
+  int fragmented_text = 0;
+
   for (;;) {
     uint8_t header[2];
     if (read_exact(fd, header, 2) < 0) {
@@ -208,9 +215,10 @@ ssize_t sfu_ws_recv_text(int fd, char *buf, size_t cap) {
     int opcode = header[0] & 0x0F;
     int masked = (header[1] & 0x80) != 0;
     uint64_t payload_len = header[1] & 0x7F;
+    int control = (opcode & 0x08) != 0;
 
-    if (!fin) {
-      SFU_LOG_WARN("WS: fragmented frames not supported, dropping connection");
+    if ((header[0] & 0x70) != 0) {
+      SFU_LOG_WARN("WS: unsupported RSV bits, dropping connection");
       return -1;
     }
 
@@ -229,43 +237,84 @@ ssize_t sfu_ws_recv_text(int fd, char *buf, size_t cap) {
       for (int i = 0; i < 8; i++) {
         payload_len = (payload_len << 8) | ext[i];
       }
+      if ((ext[0] & 0x80) != 0) {
+        SFU_LOG_WARN("WS: invalid 64-bit payload length, dropping connection");
+        return -1;
+      }
+    }
+
+    if (control && (!fin || payload_len > 125)) {
+      SFU_LOG_WARN("WS: invalid control frame, dropping connection");
+      return -1;
     }
 
     uint8_t mask_key[4] = {0};
-    if (masked) {
-      if (read_exact(fd, mask_key, 4) < 0) {
-        return -1;
-      }
-    }
-
-    if (payload_len >= cap) {
-      SFU_LOG_WARN("WS: frame payload (%llu) exceeds buffer capacity (%zu)", (unsigned long long)payload_len, cap);
+    if (masked && read_exact(fd, mask_key, 4) < 0) {
       return -1;
     }
 
-    if (payload_len > 0 && read_exact(fd, (uint8_t *)buf, payload_len) < 0) {
+    if (control) {
+      uint8_t control_payload[125];
+      if (payload_len > 0 && read_exact(fd, control_payload, (size_t)payload_len) < 0) {
+        return -1;
+      }
+      if (masked) {
+        for (size_t i = 0; i < (size_t)payload_len; i++) {
+          control_payload[i] ^= mask_key[i % 4];
+        }
+      }
+
+      switch (opcode) {
+        case 0x8: /* close */
+          return 0;
+        case 0x9: /* ping -> answer with pong, preserve any partial text message */
+          if (send_frame(fd, 0xA, control_payload, (size_t)payload_len) < 0) {
+            return -1;
+          }
+          continue;
+        case 0xA: /* pong */
+          continue;
+        default:
+          SFU_LOG_WARN("WS: unsupported control opcode %d, dropping connection", opcode);
+          return -1;
+      }
+    }
+
+    if (opcode == 0x0) {
+      if (!fragmented_text) {
+        SFU_LOG_WARN("WS: continuation frame without fragmented text, dropping connection");
+        return -1;
+      }
+    } else if (opcode == 0x1) {
+      if (fragmented_text) {
+        SFU_LOG_WARN("WS: new text frame during fragmented message, dropping connection");
+        return -1;
+      }
+    } else {
+      SFU_LOG_WARN("WS: unsupported data opcode %d, dropping connection", opcode);
+      return -1;
+    }
+
+    if (payload_len > (uint64_t)(cap - 1 - message_len)) {
+      SFU_LOG_WARN("WS: message payload exceeds buffer capacity (%zu)", cap);
+      return -1;
+    }
+
+    size_t fragment_len = (size_t)payload_len;
+    if (fragment_len > 0 && read_exact(fd, (uint8_t *)buf + message_len, fragment_len) < 0) {
       return -1;
     }
     if (masked) {
-      for (uint64_t i = 0; i < payload_len; i++) {
-        ((uint8_t *)buf)[i] ^= mask_key[i % 4];
+      for (size_t i = 0; i < fragment_len; i++) {
+        ((uint8_t *)buf)[message_len + i] ^= mask_key[i % 4];
       }
     }
-    buf[payload_len] = '\0';
+    message_len += fragment_len;
+    buf[message_len] = '\0';
 
-    switch (opcode) {
-      case 0x1: /* text */
-        return (ssize_t)payload_len;
-      case 0x8: /* close */
-        return 0;
-      case 0x9: /* ping -> answer with pong, keep looping for the real message */
-        send_frame(fd, 0xA, (const uint8_t *)buf, payload_len);
-        continue;
-      case 0xA: /* pong: nothing to do */
-        continue;
-      default:
-        SFU_LOG_WARN("WS: unsupported opcode %d, dropping connection", opcode);
-        return -1;
+    if (fin) {
+      return (ssize_t)message_len;
     }
+    fragmented_text = 1;
   }
 }
