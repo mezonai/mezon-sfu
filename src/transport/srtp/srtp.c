@@ -116,14 +116,78 @@ bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
   return true;
 }
 
+const char *sfu_srtp_status_name(srtp_err_status_t status) {
+  switch (status) {
+    case srtp_err_status_ok:
+      return "ok";
+    case srtp_err_status_fail:
+      return "fail";
+    case srtp_err_status_bad_param:
+      return "bad_param";
+    case srtp_err_status_alloc_fail:
+      return "alloc_fail";
+    case srtp_err_status_dealloc_fail:
+      return "dealloc_fail";
+    case srtp_err_status_init_fail:
+      return "init_fail";
+    case srtp_err_status_terminus:
+      return "terminus";
+    case srtp_err_status_auth_fail:
+      return "auth_fail";
+    case srtp_err_status_cipher_fail:
+      return "cipher_fail";
+    case srtp_err_status_replay_fail:
+      return "replay_fail";
+    case srtp_err_status_replay_old:
+      return "replay_old";
+    case srtp_err_status_algo_fail:
+      return "algo_fail";
+    case srtp_err_status_no_such_op:
+      return "no_such_op";
+    case srtp_err_status_no_ctx:
+      return "no_ctx";
+    case srtp_err_status_cant_check:
+      return "cant_check";
+    case srtp_err_status_key_expired:
+      return "key_expired";
+    case srtp_err_status_socket_err:
+      return "socket_err";
+    case srtp_err_status_signal_err:
+      return "signal_err";
+    case srtp_err_status_nonce_bad:
+      return "nonce_bad";
+    case srtp_err_status_read_fail:
+      return "read_fail";
+    case srtp_err_status_write_fail:
+      return "write_fail";
+    case srtp_err_status_parse_err:
+      return "parse_err";
+    case srtp_err_status_encode_err:
+      return "encode_err";
+    case srtp_err_status_semaphore_err:
+      return "semaphore_err";
+    case srtp_err_status_pfkey_err:
+      return "pfkey_err";
+    default:
+      return "unknown";
+  }
+}
+
+srtp_err_status_t sfu_srtp_protect_rtp_status(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
+  if ((size_t)*len + SRTP_MAX_TRAILER_LEN > cap) {
+    return srtp_err_status_bad_param;
+  }
+  return srtp_protect(ctx->outbound, buf, len);
+}
+
 bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
   if ((size_t)*len + SRTP_MAX_TRAILER_LEN > cap) {
     SFU_LOG_WARN("SRTP protect (RTP): insufficient buffer headroom (%d + trailer > %zu)", *len, cap);
     return false;
   }
-  srtp_err_status_t rc = srtp_protect(ctx->outbound, buf, len);
+  srtp_err_status_t rc = sfu_srtp_protect_rtp_status(ctx, buf, len, cap);
   if (rc != srtp_err_status_ok) {
-    SFU_LOG_WARN("SRTP protect (RTP) failed: %d", (int)rc);
+    SFU_LOG_WARN("SRTP protect (RTP) failed: %d (%s)", (int)rc, sfu_srtp_status_name(rc));
     return false;
   }
   return true;
