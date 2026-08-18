@@ -285,8 +285,8 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
-  assert(count_occurrences(offer, "a=sendonly") == 1);
-  assert(count_occurrences(offer, "a=inactive") == 5);
+  assert(count_occurrences(offer, "a=sendonly") == 2);
+  assert(count_occurrences(offer, "a=inactive") == 4);
   assert(!contains(offer, "a=ssrc:2222"));
 
   cleanup_mock_session(&session, remotes);
@@ -334,6 +334,17 @@ static void test_screen_only_remote_offer(void) {
   assert(!contains(offer, "a=ssrc-group:FID 4444 5555"));
   assert(!contains(offer, "a=ssrc:1111"));
   assert(!contains(offer, "a=ssrc:2222"));
+
+  entry->screen_active = false;
+  entry->screen_ssrc = 0;
+  entry->screen_rtx_ssrc = 0;
+  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=sendonly") == 1);
+  assert(contains(offer, "a=mid:5\r\n"));
+  assert(contains(offer, "a=msid:u42-p7 screen-u42-p7"));
+  assert(!contains(offer, "a=ssrc:"));
 
   cleanup_mock_session(&session, remotes);
 }
@@ -611,8 +622,8 @@ static void test_299_audio_only_remote_offer(void) {
   assert(count_occurrences(offer, "a=setup:passive") == SFU_ROOM_MAX_PEERS * 3);
   assert(count_occurrences(offer, "a=candidate:") == 1);
   assert(count_occurrences(offer, "a=end-of-candidates") == 1);
-  assert(count_occurrences(offer, "a=sendonly") == SFU_MAX_REMOTE_SLOTS);
-  assert(count_occurrences(offer, "a=inactive") == SFU_MAX_REMOTE_SLOTS * 2);
+  assert(count_occurrences(offer, "a=sendonly") == SFU_MAX_REMOTE_SLOTS * 2);
+  assert(count_occurrences(offer, "a=inactive") == SFU_MAX_REMOTE_SLOTS);
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
   assert(contains(offer, " 897 898 899\r\n"));
   assert(contains(offer, "a=msid:u1000000-p1 audio-u1000000-p1"));

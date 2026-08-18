@@ -167,6 +167,52 @@ static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signal
   return true;
 }
 
+static bool session_has_receivers(sfu_peer_session_t *session) {
+  bool found = false;
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
+  if (snap) {
+    found = snap->count > 0;
+    sfu_subscriptions_snapshot_release(snap);
+  }
+  return found;
+}
+
+static bool session_receives_from(sfu_peer_session_t *receiver, sfu_peer_session_t *source) {
+  bool found = false;
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(receiver);
+  if (snap) {
+    for (uint32_t i = 0; i < snap->count; i++) {
+      if (snap->entries[i].subscriber == source) {
+        found = true;
+        break;
+      }
+    }
+    sfu_subscriptions_snapshot_release(snap);
+  }
+  return found;
+}
+
+static void schedule_admission_targets(sfu_room_t *room, sfu_peer_session_t *admitted) {
+  sfu_peer_session_t *targets[SFU_ROOM_MAX_PEERS];
+  uint32_t count = 0;
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->peer_count && count < SFU_ROOM_MAX_PEERS; i++) {
+    sfu_peer_session_t *peer = room->peers[i];
+    if (!peer || !sfu_session_accepts_work(peer)) {
+      continue;
+    }
+    if ((peer == admitted && session_has_receivers(peer)) || (peer != admitted && session_receives_from(peer, admitted))) {
+      atomic_fetch_add_explicit(&peer->refcount, 1, memory_order_relaxed);
+      targets[count++] = peer;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+  for (uint32_t i = 0; i < count; i++) {
+    sfu_signaling_trigger_peer_renegotiation(targets[i]);
+    sfu_session_release(targets[i]);
+  }
+}
+
 void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *peer) {
   if (!room || !peer || !g_signaling_server || peer->room != room) {
     return;
@@ -176,6 +222,7 @@ void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *pe
     return;
   }
 
+  schedule_admission_targets(room, peer);
   atomic_fetch_add_explicit(&peer->refcount, 1, memory_order_relaxed);
   sfu_membership_queue_t *queue = &g_signaling_server->membership_queue;
   pthread_mutex_lock(&queue->lock);
@@ -193,60 +240,61 @@ void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *pe
   uv_async_send(&g_signaling_server->renegotiation_waker);
 }
 
-void sfu_signaling_trigger_renegotiation(sfu_room_t *room) {
-  if (!room || !g_signaling_server) {
+static void schedule_peer_renegotiation(sfu_peer_session_t *session, bool bump_revision) {
+  if (!session || !g_signaling_server || !sfu_session_accepts_work(session)) {
     return;
   }
 
-  sfu_peer_session_t *sessions[SFU_ROOM_MAX_PEERS];
-  uint32_t count = 0;
-  pthread_mutex_lock(&room->lock);
-  for (uint32_t i = 0; i < room->peer_count && count < SFU_ROOM_MAX_PEERS; i++) {
-    sfu_peer_session_t *session = room->peers[i];
-    if (!session || !sfu_session_accepts_work(session)) {
-      continue;
+  atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
+  bool enqueue = false;
+  uint64_t now_ms = sfu_now_ms();
+  pthread_mutex_lock(&session->negotiation_lock);
+  if (bump_revision) {
+    session->desired_offer_revision++;
+    if (session->desired_offer_revision == 0) {
+      session->desired_offer_revision = 1;
     }
-    atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
-    sessions[count++] = session;
   }
-  pthread_mutex_unlock(&room->lock);
-
-  for (uint32_t i = 0; i < count; i++) {
-    sfu_peer_session_t *session = sessions[i];
-    bool enqueue = false;
-    pthread_mutex_lock(&session->negotiation_lock);
-    session->renegotiation_pending = true;
-    if (session->state != SFU_SESSION_ESTABLISHED) {
-      pthread_mutex_unlock(&session->negotiation_lock);
-      sfu_session_release(session);
-      continue;
-    }
+  session->renegotiation_pending = session->desired_offer_revision > session->answered_revision;
+  if (session->state == SFU_SESSION_ESTABLISHED && !session->offer_outstanding && session->renegotiation_pending) {
     if (!session->negotiation_needed) {
       session->negotiation_needed = true;
+      session->negotiation_first_dirty_ms = now_ms;
+      session->negotiation_due_ms = now_ms + SFU_RENEGOTIATION_DEBOUNCE_MS;
       enqueue = true;
+    } else {
+      uint64_t due_ms = now_ms + SFU_RENEGOTIATION_DEBOUNCE_MS;
+      uint64_t deadline_ms = session->negotiation_first_dirty_ms + SFU_RENEGOTIATION_MAX_DELAY_MS;
+      session->negotiation_due_ms = due_ms < deadline_ms ? due_ms : deadline_ms;
     }
-    pthread_mutex_unlock(&session->negotiation_lock);
+  }
+  pthread_mutex_unlock(&session->negotiation_lock);
 
-    if (enqueue) {
-      sfu_renegotiation_queue_t *queue = &g_signaling_server->renegotiation_queue;
-      pthread_mutex_lock(&queue->lock);
-      if (queue->count < SFU_RENEGOTIATION_QUEUE_CAP) {
-        queue->items[queue->tail] = session;
-        queue->tail = (queue->tail + 1) % SFU_RENEGOTIATION_QUEUE_CAP;
-        queue->count++;
-        session = NULL;
-      }
-      pthread_mutex_unlock(&queue->lock);
+  if (enqueue) {
+    sfu_renegotiation_queue_t *queue = &g_signaling_server->renegotiation_queue;
+    pthread_mutex_lock(&queue->lock);
+    if (queue->count < SFU_RENEGOTIATION_QUEUE_CAP) {
+      queue->items[queue->tail] = session;
+      queue->tail = (queue->tail + 1) % SFU_RENEGOTIATION_QUEUE_CAP;
+      queue->count++;
+      session = NULL;
     }
-    if (session) {
+    pthread_mutex_unlock(&queue->lock);
+  }
+  if (session) {
+    if (enqueue) {
       pthread_mutex_lock(&session->negotiation_lock);
       session->negotiation_needed = false;
       pthread_mutex_unlock(&session->negotiation_lock);
-      sfu_session_release(session);
+      SFU_LOG_WARN("signaling: renegotiation queue full for peer %u", session->peer_id);
     }
+    sfu_session_release(session);
   }
   uv_async_send(&g_signaling_server->renegotiation_waker);
 }
+
+void sfu_signaling_trigger_peer_renegotiation(sfu_peer_session_t *session) { schedule_peer_renegotiation(session, true); }
+void sfu_signaling_schedule_pending_peer(sfu_peer_session_t *session) { schedule_peer_renegotiation(session, false); }
 
 static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
   if (!room || !leaving) {
@@ -257,6 +305,8 @@ static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
   const int64_t user_id = leaving->user_id;
   const uint32_t peer_id = leaving->peer_id;
 
+  sfu_peer_session_t *targets[SFU_ROOM_MAX_PEERS];
+  uint32_t target_count = 0;
   pthread_mutex_lock(&room->lock);
   uint32_t participant_count = room->peer_count > 0 ? room->peer_count - 1 : 0;
   for (uint32_t i = 0; i < room->peer_count; i++) {
@@ -280,6 +330,10 @@ static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
       }
       sfu_subscriptions_snapshot_release(snap);
     }
+    if (mid_audio != 0 && target_count < SFU_ROOM_MAX_PEERS) {
+      atomic_fetch_add_explicit(&other->refcount, 1, memory_order_relaxed);
+      targets[target_count++] = other;
+    }
 
     char msg[384];
     int n = snprintf(msg, sizeof(msg),
@@ -296,6 +350,10 @@ static void notify_peer_left(sfu_room_t *room, sfu_peer_session_t *leaving) {
     }
   }
   pthread_mutex_unlock(&room->lock);
+  for (uint32_t i = 0; i < target_count; i++) {
+    sfu_signaling_trigger_peer_renegotiation(targets[i]);
+    sfu_session_release(targets[i]);
+  }
 }
 
 static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
@@ -761,10 +819,6 @@ static void finish_client_close(sfu_client_conn_t *c) {
     }
     (void)sfu_session_begin_close(c->server->sessions, session);
     sfu_session_release(session);
-
-    if (room) {
-      sfu_signaling_trigger_renegotiation(room);
-    }
   }
 
   if (was_in_room) {
@@ -1019,21 +1073,35 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
 
   bool follow_up_pending = false;
   uint32_t answered_offer_generation = 0;
+  uint64_t answered_offer_revision = 0;
   pthread_mutex_lock(&session->negotiation_lock);
   if (session->offer_outstanding) {
     session->offer_outstanding = false;
     answered_offer_generation = session->offer_generation;
+    answered_offer_revision = session->offered_revision;
+    session->answered_revision = answered_offer_revision;
   }
-  follow_up_pending = session->renegotiation_pending;
+  follow_up_pending = session->desired_offer_revision > session->answered_revision;
+  session->renegotiation_pending = follow_up_pending;
   pthread_mutex_unlock(&session->negotiation_lock);
   if (answered_offer_generation != 0) {
-    SFU_LOG_INFO("signaling: completed renegotiation answer ufrag=%s peer_id=%u generation=%u pending=%d", c->client_ufrag, session->peer_id,
-                 answered_offer_generation, follow_up_pending);
+    SFU_LOG_INFO("signaling: completed renegotiation answer ufrag=%s peer_id=%u generation=%u revision=%" PRIu64 " pending=%d", c->client_ufrag,
+                 session->peer_id, answered_offer_generation, answered_offer_revision, follow_up_pending);
   }
 
   bool role_changed = false;
   bool media_changed = false;
   bool newly_bound = false;
+  bool sdp_contract_changed = false;
+  pthread_mutex_lock(&session->media_lock);
+  sdp_contract_changed =
+      (pending.video_pt != 0 && pending.video_pt != session->uplink_video.payload_type) ||
+      (pending.rtx_pt != 0 && pending.rtx_pt != session->uplink_video.rtx_payload_type) ||
+      (pending.video_codec != SFU_VIDEO_CODEC_NONE && pending.video_codec != (uint8_t)session->uplink_video.codec) ||
+      (pending.screen_pt != 0 && pending.screen_pt != session->screen.payload_type) ||
+      (pending.screen_rtx_pt != 0 && pending.screen_rtx_pt != session->screen.rtx_payload_type) ||
+      (pending.screen_codec != SFU_VIDEO_CODEC_NONE && pending.screen_codec != (uint8_t)session->screen.codec);
+  pthread_mutex_unlock(&session->media_lock);
   if (sfu_routing_table_reconcile_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, session, &role_changed, &media_changed)) {
     if (!session->room) {
       room_add_peer(c->joined_room, session);
@@ -1043,16 +1111,16 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
       }
     }
     if (session->room && (media_changed || role_changed || newly_bound)) {
-      SFU_LOG_INFO("answer: media/role changed for ufrag=%s generation=%u (media=%d role=%d bound=%d), refreshing%s", c->client_ufrag, answer_generation,
-                   media_changed, role_changed, newly_bound, answered_offer_generation == 0 ? " + renegotiating" : "");
+      SFU_LOG_INFO("answer: media/role changed for ufrag=%s generation=%u (media=%d role=%d bound=%d), refreshing forwarding", c->client_ufrag,
+                   answer_generation, media_changed, role_changed, newly_bound);
       room_refresh_peer_streams((sfu_room_t *)session->room, session);
-      if (answered_offer_generation == 0 || role_changed || newly_bound) {
-        sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
-      }
     }
   }
-  if (follow_up_pending && session->room) {
-    sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+  if (sdp_contract_changed && session->room) {
+    schedule_admission_targets((sfu_room_t *)session->room, session);
+  }
+  if (follow_up_pending) {
+    schedule_peer_renegotiation(session, false);
   }
   sfu_session_release(session);
 }
@@ -1120,7 +1188,12 @@ static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s,
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
     broadcast_peer_updated(c->joined_room, session);
-    sfu_signaling_trigger_renegotiation(c->joined_room);
+    if (is_audience) {
+      sfu_signaling_trigger_peer_renegotiation(session);
+    } else {
+      sfu_signaling_trigger_peer_renegotiation(session);
+      schedule_admission_targets(c->joined_room, session);
+    }
     emit_hook_event(is_audience ? "unpublish" : "publish", c->user_id, c->joined_room_id);
   }
   if (session) {
@@ -1152,7 +1225,6 @@ static void handle_camera(sfu_client_conn_t *c, const char *buf, size_t n) {
   if (changed) {
     room_refresh_peer_streams(c->joined_room, session);
     broadcast_peer_updated(c->joined_room, session);
-    sfu_signaling_trigger_renegotiation(c->joined_room);
   }
   emit_hook_event(active ? "publish" : "unpublish", c->user_id, c->joined_room_id);
   sfu_session_release(session);
@@ -1176,11 +1248,16 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
     return;
   }
   pthread_mutex_lock(&session->media_lock);
-  session->screen.active = active && atomic_load_explicit(&session->screen_send_negotiated, memory_order_acquire);
-  sfu_session_publish_media(session);
+  bool screen_active = active && atomic_load_explicit(&session->screen_send_negotiated, memory_order_acquire);
+  bool changed = session->screen.active != screen_active;
+  session->screen.active = screen_active;
+  if (changed) {
+    sfu_session_publish_media(session);
+  }
   pthread_mutex_unlock(&session->media_lock);
-  room_refresh_peer_streams(c->joined_room, session);
-  sfu_signaling_trigger_renegotiation(c->joined_room);
+  if (changed) {
+    room_refresh_peer_streams(c->joined_room, session);
+  }
   sfu_session_release(session);
   emit_hook_event(active ? "share_screen" : "unshare_screen", c->user_id, c->joined_room_id);
   char response[80];
@@ -1572,43 +1649,133 @@ static sfu_peer_session_t *renegotiation_queue_pop(sfu_renegotiation_queue_t *qu
   return session;
 }
 
+static bool renegotiation_queue_push_owned(sfu_renegotiation_queue_t *queue, sfu_peer_session_t *session) {
+  bool queued = false;
+  pthread_mutex_lock(&queue->lock);
+  if (queue->count < SFU_RENEGOTIATION_QUEUE_CAP) {
+    queue->items[queue->tail] = session;
+    queue->tail = (queue->tail + 1) % SFU_RENEGOTIATION_QUEUE_CAP;
+    queue->count++;
+    queued = true;
+  }
+  pthread_mutex_unlock(&queue->lock);
+  return queued;
+}
+
+static uint32_t renegotiation_queue_count(sfu_renegotiation_queue_t *queue) {
+  pthread_mutex_lock(&queue->lock);
+  uint32_t count = queue->count;
+  pthread_mutex_unlock(&queue->lock);
+  return count;
+}
+
+static void on_renegotiation_timer(uv_timer_t *timer);
+
+static void arm_renegotiation_timer(sfu_signaling_server_t *s, uint64_t due_ms) {
+  if (!s->renegotiation_timer_inited || due_ms == 0) {
+    return;
+  }
+  uint64_t now_ms = sfu_now_ms();
+  uint64_t delay_ms = due_ms > now_ms ? due_ms - now_ms : 1;
+  uv_timer_start(&s->renegotiation_timer, on_renegotiation_timer, delay_ms, 0);
+}
+
 static void flush_pending_offers(sfu_signaling_server_t *s) {
-  sfu_peer_session_t *session;
-  while ((session = renegotiation_queue_pop(&s->renegotiation_queue)) != NULL) {
+  uint32_t pending = renegotiation_queue_count(&s->renegotiation_queue);
+  uint64_t earliest_due_ms = 0;
+  for (uint32_t i = 0; i < pending; i++) {
+    sfu_peer_session_t *session = renegotiation_queue_pop(&s->renegotiation_queue);
+    if (!session) {
+      break;
+    }
+
     int fd = -1;
     uint32_t generation = 0;
+    uint64_t attempt_revision = 0;
     bool send = false;
+    bool requeue = false;
+    uint64_t now_ms = sfu_now_ms();
     pthread_mutex_lock(&session->negotiation_lock);
-    session->negotiation_needed = false;
-    if (session->state != SFU_SESSION_ESTABLISHED) {
-      session->renegotiation_pending = true;
-      pthread_mutex_unlock(&session->negotiation_lock);
-      sfu_session_release(session);
-      continue;
+    if (s->renegotiation_timer_inited && session->negotiation_due_ms > now_ms) {
+      requeue = true;
+    } else {
+      session->negotiation_needed = false;
+      if (session->state == SFU_SESSION_ESTABLISHED && !session->offer_outstanding && sfu_session_accepts_work(session) && session->fd >= 0 &&
+          session->desired_offer_revision > session->offered_revision) {
+        session->offer_outstanding = true;
+        session->renegotiation_pending = false;
+        session->offer_generation++;
+        generation = session->offer_generation;
+        attempt_revision = session->desired_offer_revision;
+        fd = session->fd;
+        send = true;
+      }
     }
-    if (session->renegotiation_pending && !session->offer_outstanding && sfu_session_accepts_work(session) && session->fd >= 0) {
-      session->renegotiation_pending = false;
-      session->offer_outstanding = true;
-      session->offer_generation++;
-      generation = session->offer_generation;
-      fd = session->fd;
-      send = true;
-    }
+    uint64_t due_ms = session->negotiation_due_ms;
     pthread_mutex_unlock(&session->negotiation_lock);
 
-    if (send && build_and_send_offer(fd, session, s)) {
-      SFU_LOG_INFO("signaling: sent renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u", session->cold->ufrag, fd, session->peer_id, generation);
+    if (requeue) {
+      if (renegotiation_queue_push_owned(&s->renegotiation_queue, session)) {
+        if (earliest_due_ms == 0 || due_ms < earliest_due_ms) {
+          earliest_due_ms = due_ms;
+        }
+        continue;
+      }
+      pthread_mutex_lock(&session->negotiation_lock);
+      session->negotiation_needed = false;
+      pthread_mutex_unlock(&session->negotiation_lock);
+      SFU_LOG_WARN("signaling: failed to requeue debounced offer for peer %u", session->peer_id);
+    } else if (send && build_and_send_offer(fd, session, s)) {
+      pthread_mutex_lock(&session->negotiation_lock);
+      session->offered_revision = attempt_revision;
+      session->negotiation_retry_count = 0;
+      pthread_mutex_unlock(&session->negotiation_lock);
+      SFU_LOG_INFO("signaling: sent renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u revision=%" PRIu64, session->cold->ufrag, fd,
+                   session->peer_id, generation, attempt_revision);
     } else if (send) {
       pthread_mutex_lock(&session->negotiation_lock);
       if (session->offer_generation == generation) {
         session->offer_outstanding = false;
         session->renegotiation_pending = true;
+        session->negotiation_retry_count++;
+        uint32_t shift = session->negotiation_retry_count > 5 ? 5 : session->negotiation_retry_count;
+        uint64_t retry_ms = 15u << shift;
+        if (retry_ms > SFU_RENEGOTIATION_RETRY_MAX_MS) {
+          retry_ms = SFU_RENEGOTIATION_RETRY_MAX_MS;
+        }
+        session->negotiation_due_ms = sfu_now_ms() + retry_ms;
+        session->negotiation_first_dirty_ms = sfu_now_ms();
         session->negotiation_needed = true;
+        due_ms = session->negotiation_due_ms;
+        requeue = true;
       }
       pthread_mutex_unlock(&session->negotiation_lock);
-      SFU_LOG_WARN("signaling: failed renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u", session->cold->ufrag, fd, session->peer_id, generation);
+      SFU_LOG_WARN("signaling: failed renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u", session->cold->ufrag, fd, session->peer_id,
+                   generation);
+      if (requeue && renegotiation_queue_push_owned(&s->renegotiation_queue, session)) {
+        if (earliest_due_ms == 0 || due_ms < earliest_due_ms) {
+          earliest_due_ms = due_ms;
+        }
+        continue;
+      }
+      if (requeue) {
+        pthread_mutex_lock(&session->negotiation_lock);
+        session->negotiation_needed = false;
+        pthread_mutex_unlock(&session->negotiation_lock);
+      }
     }
     sfu_session_release(session);
+  }
+
+  if (earliest_due_ms != 0) {
+    arm_renegotiation_timer(s, earliest_due_ms);
+  }
+}
+
+static void on_renegotiation_timer(uv_timer_t *timer) {
+  sfu_signaling_server_t *s = timer->data;
+  if (s && atomic_load(&s->running)) {
+    flush_pending_offers(s);
   }
 }
 
@@ -1629,16 +1796,18 @@ static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
 
   sfu_signaling_server_t *s = (sfu_signaling_server_t *)arg;
 
+  if (s->renegotiation_timer_inited && handle == (uv_handle_t *)&s->renegotiation_timer) {
+    uv_timer_stop(&s->renegotiation_timer);
+    uv_close(handle, NULL);
+    return;
+  }
   if (handle->type == UV_POLL && handle->data != NULL && handle->data != s) {
     disconnect_client((sfu_client_conn_t *)handle->data);
     return;
   }
-  if (handle->type == UV_TIMER && handle->data != NULL) {
-    sfu_client_conn_t *c = (sfu_client_conn_t *)handle->data;
-    if (c->server == s || c->server != NULL) {
-      disconnect_client(c);
-      return;
-    }
+  if (handle->type == UV_TIMER && handle->data != NULL && handle->data != s) {
+    disconnect_client((sfu_client_conn_t *)handle->data);
+    return;
   }
   uv_close(handle, NULL);
 }
@@ -1653,6 +1822,13 @@ static void *signaling_loop_main(void *arg) {
   s->async_waker.data = s;
   uv_async_init(&loop, &s->renegotiation_waker, on_renegotiation_wake);
   s->renegotiation_waker.data = s;
+  if (uv_timer_init(&loop, &s->renegotiation_timer) == 0) {
+    s->renegotiation_timer.data = s;
+    s->renegotiation_timer_inited = true;
+  } else {
+    s->renegotiation_timer_inited = false;
+    SFU_LOG_ERROR("signaling: failed to initialize renegotiation timer");
+  }
 
   uv_poll_t listen_poll;
   uv_poll_init_socket(&loop, &listen_poll, s->listen_fd);

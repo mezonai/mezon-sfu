@@ -581,10 +581,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint32_t learned_video_ssrc = sender_session->uplink_video.ssrc;
     uint32_t learned_screen_ssrc = sender_session->screen.ssrc;
     pthread_mutex_unlock(&sender_session->media_lock);
-    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing + renegotiating", w->worker_index,
+    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing forwarding", w->worker_index,
                  sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc, learned_screen_ssrc);
     room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
-    sfu_signaling_trigger_renegotiation((sfu_room_t *)sender_session->room);
   }
   pthread_mutex_unlock(&sender_session->ingress_lock);
   sfu_session_release(sender_session);

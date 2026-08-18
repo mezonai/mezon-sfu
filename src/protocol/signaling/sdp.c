@@ -823,9 +823,9 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
     int16_t entry_index = map_slot < SFU_MAX_REMOTE_SLOTS ? mid_index[map_slot] : -1;
     bool found = entry_index >= 0 && sfu_sdp_receiver_view(snap, (uint32_t)entry_index, &slot);
 
-    bool audio_live = found && slot.has_audio && slot.audio_active && slot.audio_ssrc != 0;
-    bool video_live = found && slot.has_video && slot.video_active && slot.video_ssrc != 0;
-    bool screen_live = found && slot.has_screen && slot.screen_active && slot.screen_ssrc != 0;
+    bool audio_live = found && slot.has_audio;
+    bool video_live = found && slot.has_video;
+    bool screen_live = found && slot.has_screen;
     if (append_bundled_audio(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_audio, audio_live, found ? &slot : NULL) != 0) {
       goto fail;
     }

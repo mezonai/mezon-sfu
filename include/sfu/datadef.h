@@ -305,6 +305,12 @@ typedef struct sfu_peer_session {
   bool offer_outstanding;
   bool renegotiation_pending;
   uint32_t offer_generation;
+  uint32_t negotiation_retry_count;
+  uint64_t desired_offer_revision;
+  uint64_t offered_revision;
+  uint64_t answered_revision;
+  uint64_t negotiation_first_dirty_ms;
+  uint64_t negotiation_due_ms;
   _Atomic bool uplink_ssrc_dirty;
   _Atomic bool membership_announced;
 } sfu_peer_session_t;

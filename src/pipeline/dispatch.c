@@ -201,7 +201,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   if (session->room && (newly_bound || role_changed || media_changed)) {
     room_refresh_peer_streams((sfu_room_t *)session->room, session);
-    sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
   }
 
   sfu_session_release(session);
@@ -256,8 +255,8 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
                      session->room ? "BOUND" : "STILL UNBOUND -- media will be dropped until it binds");
 
         if (session->room) {
-          SFU_LOG_INFO("worker %u: SRTP secure pipeline verified. Dispatching room renegotiation for room context.", w->worker_index);
-          sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+          SFU_LOG_INFO("worker %u: SRTP secure pipeline verified. Scheduling pending peer negotiation.", w->worker_index);
+          sfu_signaling_schedule_pending_peer(session);
         }
       }
       break;

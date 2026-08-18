@@ -12,6 +12,9 @@
 #define SFU_SIGNALING_PING_INTERVAL_MS 10000u
 #define SFU_SIGNALING_IDLE_TIMEOUT_MS 20000u
 #define SFU_RENEGOTIATION_QUEUE_CAP 2048u
+#define SFU_RENEGOTIATION_DEBOUNCE_MS 15u
+#define SFU_RENEGOTIATION_MAX_DELAY_MS 50u
+#define SFU_RENEGOTIATION_RETRY_MAX_MS 500u
 #define SFU_MEMBERSHIP_QUEUE_CAP 2048u
 
 typedef struct sfu_renegotiation_queue {
@@ -42,6 +45,8 @@ typedef struct sfu_signaling_server {
   pthread_t thread;
   uv_async_t async_waker;
   uv_async_t renegotiation_waker;
+  uv_timer_t renegotiation_timer;
+  bool renegotiation_timer_inited;
   sfu_renegotiation_queue_t renegotiation_queue;
   sfu_membership_queue_t membership_queue;
   const sfu_ice_credentials_t *ice_creds;
@@ -78,7 +83,8 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
                                const sfu_ice_credentials_t *ice_creds, const sfu_dtls_ctx_t *dtls_ctx, sfu_session_table_t *sessions,
                                sfu_room_registry_t *room_registry, sfu_routing_table_t *routing_table);
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
-void sfu_signaling_trigger_renegotiation(sfu_room_t *room);
+void sfu_signaling_trigger_peer_renegotiation(sfu_peer_session_t *session);
+void sfu_signaling_schedule_pending_peer(sfu_peer_session_t *session);
 void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);

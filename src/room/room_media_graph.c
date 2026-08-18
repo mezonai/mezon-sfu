@@ -558,7 +558,6 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     }
   }
 
-  peer->negotiation_needed = true;
   pthread_mutex_unlock(&room->lock);
   deferred_flush(&deferred);
   return true;
@@ -625,7 +624,6 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   fanout_snapshot_replace(peer, empty, &deferred);
 
   peer->room = NULL;
-  peer->negotiation_needed = false;
 
   pthread_mutex_unlock(&room->lock);
   deferred_flush(&deferred);

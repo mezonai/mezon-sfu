@@ -233,7 +233,7 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
 }
 
 int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, int64_t *out_user_id, uint64_t *out_room_id) {
-  if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out_user_id) {
+  if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out_user_id || !out_room_id) {
     return -1;
   }
 
