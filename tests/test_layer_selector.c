@@ -65,8 +65,8 @@ static void test_switch_source_transaction(void) {
   memset(&session, 0, sizeof(session));
   static sfu_session_scheduler_slot_t slots[SFU_SESSION_SCHEDULER_CAP];
   memset(slots, 0, sizeof(slots));
-  session.schedulers = slots;
-  atomic_store(&session.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
   /* Pre-existing per-publisher state for source 1 (the source being left). */
   sfu_subscriber_scheduler_t *old = sfu_session_scheduler_for(&session, 1);
   assert(old != NULL);
@@ -84,10 +84,10 @@ static void test_switch_source_transaction(void) {
   gcc.aimd.ack_window_bytes = 4096;
   gcc.trendline.history_count = 3;
   gcc.current_group.packet_count = 2;
-  session.gcc_ctx = &gcc;
+  session.egress.gcc_ctx = &gcc;
   gcc_bwe_context_t gcc_before = gcc;
 
-  atomic_store(&session.egress_generation, 7);
+  atomic_store(&session.egress.generation, 7);
 
   sfu_layer_selector_switch_source(&session, 42);
 
@@ -98,7 +98,7 @@ static void test_switch_source_transaction(void) {
   assert(sw->active_publisher_id == 42);
   assert(sw->needs_keyframe == true); /* gate armed */
   assert(sw->current_sid == 0 && sw->current_tid == 0);
-  assert(atomic_load(&session.egress_generation) == 8); /* stale RTX invalidated */
+  assert(atomic_load(&session.egress.generation) == 8); /* stale RTX invalidated */
   assert(memcmp(&gcc, &gcc_before, sizeof(gcc)) == 0);
 }
 

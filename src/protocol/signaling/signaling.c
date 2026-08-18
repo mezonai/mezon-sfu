@@ -218,7 +218,7 @@ void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *pe
     return;
   }
   bool expected = false;
-  if (!atomic_compare_exchange_strong_explicit(&peer->membership_announced, &expected, true, memory_order_acq_rel, memory_order_acquire)) {
+  if (!atomic_compare_exchange_strong_explicit(&peer->graph.membership_announced, &expected, true, memory_order_acq_rel, memory_order_acquire)) {
     return;
   }
 
@@ -228,7 +228,7 @@ void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *pe
   pthread_mutex_lock(&queue->lock);
   if (queue->count >= SFU_MEMBERSHIP_QUEUE_CAP) {
     pthread_mutex_unlock(&queue->lock);
-    atomic_store_explicit(&peer->membership_announced, false, memory_order_release);
+    atomic_store_explicit(&peer->graph.membership_announced, false, memory_order_release);
     sfu_session_release(peer);
     SFU_LOG_WARN("signaling: membership queue full for peer %u", peer->peer_id);
     return;
@@ -1098,15 +1098,15 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   bool media_changed = false;
   bool newly_bound = false;
   bool sdp_contract_changed = false;
-  pthread_mutex_lock(&session->media_lock);
+  pthread_mutex_lock(&session->media.lock);
   sdp_contract_changed =
-      (pending.video_pt != 0 && pending.video_pt != session->uplink_video.payload_type) ||
-      (pending.rtx_pt != 0 && pending.rtx_pt != session->uplink_video.rtx_payload_type) ||
-      (pending.video_codec != SFU_VIDEO_CODEC_NONE && pending.video_codec != (uint8_t)session->uplink_video.codec) ||
-      (pending.screen_pt != 0 && pending.screen_pt != session->screen.payload_type) ||
-      (pending.screen_rtx_pt != 0 && pending.screen_rtx_pt != session->screen.rtx_payload_type) ||
-      (pending.screen_codec != SFU_VIDEO_CODEC_NONE && pending.screen_codec != (uint8_t)session->screen.codec);
-  pthread_mutex_unlock(&session->media_lock);
+      (pending.video_pt != 0 && pending.video_pt != session->media.uplink_video.payload_type) ||
+      (pending.rtx_pt != 0 && pending.rtx_pt != session->media.uplink_video.rtx_payload_type) ||
+      (pending.video_codec != SFU_VIDEO_CODEC_NONE && pending.video_codec != (uint8_t)session->media.uplink_video.codec) ||
+      (pending.screen_pt != 0 && pending.screen_pt != session->media.screen.payload_type) ||
+      (pending.screen_rtx_pt != 0 && pending.screen_rtx_pt != session->media.screen.rtx_payload_type) ||
+      (pending.screen_codec != SFU_VIDEO_CODEC_NONE && pending.screen_codec != (uint8_t)session->media.screen.codec);
+  pthread_mutex_unlock(&session->media.lock);
   if (sfu_routing_table_reconcile_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, session, &role_changed, &media_changed)) {
     if (!session->room) {
       room_add_peer(c->joined_room, session);
@@ -1124,9 +1124,9 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   if (answered_offer_generation != 0) {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
     uint32_t receiver_count = snap ? snap->count : 0;
-    pthread_mutex_lock(&session->media_lock);
-    uint8_t mid_recv_extmap_id = session->mid_recv_extmap_id;
-    pthread_mutex_unlock(&session->media_lock);
+    pthread_mutex_lock(&session->media.lock);
+    uint8_t mid_recv_extmap_id = session->media.mid_recv_extmap_id;
+    pthread_mutex_unlock(&session->media.lock);
     SFU_LOG_INFO("signaling: downlink ready ufrag=%s peer_id=%u audience=%d receivers=%u mid_extmap=%u", c->client_ufrag, session->peer_id,
                  atomic_load_explicit(&session->is_audience, memory_order_acquire), receiver_count, mid_recv_extmap_id);
     if (snap) {
@@ -1158,7 +1158,7 @@ static void broadcast_peer_updated(sfu_room_t *room, sfu_peer_session_t *session
   pthread_mutex_unlock(&room->lock);
 
   bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
-  bool is_mute = atomic_load_explicit(&session->is_mute, memory_order_acquire);
+  bool is_mute = atomic_load_explicit(&session->media.is_mute, memory_order_acquire);
   char event[288];
   int n = snprintf(event, sizeof(event), "{\"type\":\"peer_updated\",\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64 "\",\"role\":\"%s\",\"is_mute\":%s}}",
                    session->peer_id, session->user_id, is_audience ? "audience" : "speaker", is_mute ? "true" : "false");
@@ -1179,7 +1179,7 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
 
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
   bool accepted = session && session->room == c->joined_room && atomic_load_explicit(&session->is_audience, memory_order_acquire) &&
-                  (!active || atomic_load_explicit(&session->audio_send_negotiated, memory_order_acquire)) &&
+                  (!active || atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire)) &&
                   room_set_peer_ptt_active(c->joined_room, session, active);
   if (!accepted) {
     static const char rejected[] = "{\"type\":\"error\",\"message\":\"push_to_talk_rejected\"}";
@@ -1258,12 +1258,12 @@ static void handle_camera(sfu_client_conn_t *c, const char *buf, size_t n) {
     return;
   }
 
-  pthread_mutex_lock(&session->media_lock);
-  bool camera_active = active && atomic_load_explicit(&session->video_send_negotiated, memory_order_acquire) && session->uplink_video.ssrc != 0;
-  bool changed = session->uplink_video.active != camera_active;
-  session->uplink_video.active = camera_active;
+  pthread_mutex_lock(&session->media.lock);
+  bool camera_active = active && atomic_load_explicit(&session->media.video_send_negotiated, memory_order_acquire) && session->media.uplink_video.ssrc != 0;
+  bool changed = session->media.uplink_video.active != camera_active;
+  session->media.uplink_video.active = camera_active;
   sfu_session_publish_media(session);
-  pthread_mutex_unlock(&session->media_lock);
+  pthread_mutex_unlock(&session->media.lock);
 
   if (changed) {
     room_refresh_peer_streams(c->joined_room, session);
@@ -1290,15 +1290,15 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
     }
     return;
   }
-  bool screen_negotiated = atomic_load_explicit(&session->screen_send_negotiated, memory_order_acquire);
-  pthread_mutex_lock(&session->media_lock);
+  bool screen_negotiated = atomic_load_explicit(&session->media.screen_send_negotiated, memory_order_acquire);
+  pthread_mutex_lock(&session->media.lock);
   bool screen_active = active && screen_negotiated;
-  bool changed = session->screen.active != screen_active;
-  session->screen.active = screen_active;
+  bool changed = session->media.screen.active != screen_active;
+  session->media.screen.active = screen_active;
   if (changed) {
     sfu_session_publish_media(session);
   }
-  pthread_mutex_unlock(&session->media_lock);
+  pthread_mutex_unlock(&session->media.lock);
   if (changed) {
     room_refresh_peer_streams(c->joined_room, session);
   }
@@ -1339,7 +1339,7 @@ static void handle_visibility(sfu_client_conn_t *c, const char *buf, size_t n) {
     return;
   }
 
-  atomic_store_explicit(&session->visible, visible, memory_order_release);
+  atomic_store_explicit(&session->media.visible, visible, memory_order_release);
   sfu_session_release(session);
 
   char response[96];
@@ -1374,7 +1374,7 @@ static void handle_mute(sfu_client_conn_t *c, const char *buf, size_t n) {
     return;
   }
 
-  atomic_store_explicit(&session->is_mute, is_mute, memory_order_release);
+  atomic_store_explicit(&session->media.is_mute, is_mute, memory_order_release);
   broadcast_peer_updated(c->joined_room, session);
   sfu_session_release(session);
 
@@ -1615,7 +1615,7 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
             .user_id = peer->user_id,
             .fd = peer->fd,
             .is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire),
-            .is_mute = atomic_load_explicit(&peer->is_mute, memory_order_acquire),
+            .is_mute = atomic_load_explicit(&peer->media.is_mute, memory_order_acquire),
         };
         if (peer->cold) {
           snprintf(members[count].ufrag, sizeof(members[count].ufrag), "%s", peer->cold->ufrag);
@@ -1667,7 +1667,7 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         uint32_t mid_video = 0;
         uint32_t mid_screen = 0;
         membership_find_mids(members[i].session, joined, &mid_audio, &mid_video, &mid_screen);
-        bool joined_mute = atomic_load_explicit(&joined->is_mute, memory_order_acquire);
+        bool joined_mute = atomic_load_explicit(&joined->media.is_mute, memory_order_acquire);
         char event[416];
         int event_len = snprintf(event, sizeof(event),
                                  "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64

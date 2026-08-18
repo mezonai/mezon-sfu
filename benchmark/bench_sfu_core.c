@@ -443,18 +443,18 @@ static sfu_peer_session_t *mock_media_session(const char *ufrag, uint16_t owner_
   s->state = SFU_SESSION_ESTABLISHED;
   pthread_mutex_init(&s->answer_lock, NULL);
   pthread_mutex_init(&s->negotiation.lock, NULL);
-  pthread_mutex_init(&s->media_lock, NULL);
-  pthread_mutex_init(&s->snapshot_lock, NULL);
+  pthread_mutex_init(&s->media.lock, NULL);
+  pthread_mutex_init(&s->graph.lock, NULL);
   pthread_mutex_init(&s->ingress_lock, NULL);
   atomic_store(&s->refcount, 1);
   atomic_store(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
   atomic_store(&s->accepts_work, true);
-  atomic_store(&s->visible, true);
+  atomic_store(&s->media.visible, true);
   sfu_session_set_owner_worker(s, owner_worker);
-  s->uplink_audio.owner = s;
-  s->uplink_video.owner = s;
-  s->uplink_video.active = true;
-  atomic_store(&s->next_remote_mid, SFU_REMOTE_MID_BASE);
+  s->media.uplink_audio.owner = s;
+  s->media.uplink_video.owner = s;
+  s->media.uplink_video.active = true;
+  atomic_store(&s->graph.next_remote_mid, SFU_REMOTE_MID_BASE);
   return s;
 }
 
@@ -463,8 +463,8 @@ static void free_mock_media_session(sfu_peer_session_t *s) {
     return;
   }
   pthread_mutex_destroy(&s->ingress_lock);
-  pthread_mutex_destroy(&s->snapshot_lock);
-  pthread_mutex_destroy(&s->media_lock);
+  pthread_mutex_destroy(&s->graph.lock);
+  pthread_mutex_destroy(&s->media.lock);
   pthread_mutex_destroy(&s->negotiation.lock);
   pthread_mutex_destroy(&s->answer_lock);
   SFU_FREE(s->cold);

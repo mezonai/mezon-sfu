@@ -491,8 +491,8 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
 
-  uint8_t video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
-  uint8_t rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
+  uint8_t video_pt = session->media.uplink_video.payload_type ? session->media.uplink_video.payload_type : SFU_PT_VP8;
+  uint8_t rtx_pt = session->media.uplink_video.rtx_payload_type ? session->media.uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
 
   size_t pos = 0;
   while (pos < offer_len) {
@@ -617,7 +617,7 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
         goto fail;
       }
       if (current_media == 2 && video_pt != 0) {
-        if (append_video_codec_attributes(out, out_cap, &off, session->uplink_video.codec, video_pt, rtx_pt) != 0) {
+        if (append_video_codec_attributes(out, out_cap, &off, session->media.uplink_video.codec, video_pt, rtx_pt) != 0) {
           goto fail;
         }
       }
@@ -635,10 +635,10 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
       if (starts_with(line, len, "a=ssrc:")) {
         uint32_t parsed_ssrc = 0;
         if (sscanf(line, "a=ssrc:%u", &parsed_ssrc) == 1) {
-          if (current_media == 1 && session->uplink_audio.ssrc == 0) {
-            session->uplink_audio.ssrc = parsed_ssrc;
-          } else if (current_media == 2 && session->uplink_video.ssrc == 0) {
-            session->uplink_video.ssrc = parsed_ssrc;
+          if (current_media == 1 && session->media.uplink_audio.ssrc == 0) {
+            session->media.uplink_audio.ssrc = parsed_ssrc;
+          } else if (current_media == 2 && session->media.uplink_video.ssrc == 0) {
+            session->media.uplink_video.ssrc = parsed_ssrc;
           }
         }
       }
@@ -716,14 +716,14 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
   uint8_t local_screen_rtx_pt = 0;
   sfu_video_codec_t local_video_codec = SFU_VIDEO_CODEC_NONE;
   sfu_video_codec_t local_screen_codec = SFU_VIDEO_CODEC_NONE;
-  pthread_mutex_lock(&session->media_lock);
-  local_video_pt = session->uplink_video.payload_type ? session->uplink_video.payload_type : SFU_PT_VP8;
-  local_rtx_pt = session->uplink_video.rtx_payload_type ? session->uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
-  local_video_codec = session->uplink_video.codec;
-  local_screen_pt = session->screen.payload_type ? session->screen.payload_type : local_video_pt;
-  local_screen_rtx_pt = session->screen.rtx_payload_type ? session->screen.rtx_payload_type : local_rtx_pt;
-  local_screen_codec = session->screen.codec != SFU_VIDEO_CODEC_NONE ? session->screen.codec : local_video_codec;
-  pthread_mutex_unlock(&session->media_lock);
+  pthread_mutex_lock(&session->media.lock);
+  local_video_pt = session->media.uplink_video.payload_type ? session->media.uplink_video.payload_type : SFU_PT_VP8;
+  local_rtx_pt = session->media.uplink_video.rtx_payload_type ? session->media.uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
+  local_video_codec = session->media.uplink_video.codec;
+  local_screen_pt = session->media.screen.payload_type ? session->media.screen.payload_type : local_video_pt;
+  local_screen_rtx_pt = session->media.screen.rtx_payload_type ? session->media.screen.rtx_payload_type : local_rtx_pt;
+  local_screen_codec = session->media.screen.codec != SFU_VIDEO_CODEC_NONE ? session->media.screen.codec : local_video_codec;
+  pthread_mutex_unlock(&session->media.lock);
 
   if (append_line(out, out_cap, &off, "v=0") != 0) {
     goto fail;
@@ -741,7 +741,7 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
 
   SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_count=%u", ufrag ? ufrag : "unknown", receiver_count);
 
-  uint32_t next_remote_mid = atomic_load_explicit(&session->next_remote_mid, memory_order_acquire);
+  uint32_t next_remote_mid = atomic_load_explicit(&session->graph.next_remote_mid, memory_order_acquire);
   if (append_bundle_group(out, out_cap, &off, next_remote_mid) != 0) {
     goto fail;
   }
