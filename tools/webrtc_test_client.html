@@ -1952,19 +1952,29 @@
 
                         if (track.kind === "video") {
                             const label = "Peer " + id.substring(0, 8);
-                            const p = ensureParticipant(id, {
-                                isLocal: false,
-                                label: label,
-                            });
+                            const showVideoTile = () => {
+                                const p = ensureParticipant(id, {
+                                    isLocal: false,
+                                    label: label,
+                                });
+                                setTileStream(p, new MediaStream([track]), true);
+                                setConnState("connected", "ok");
+                            };
 
-                            const singleVideoStream = new MediaStream([track]);
-                            setTileStream(p, singleVideoStream, true);
+                            if (isScreenTrack) {
+                                // Screen transceivers are pre-negotiated. Only show the
+                                // tile while RTP is actually flowing from the sharer.
+                                if (!track.muted) showVideoTile();
+                                track.addEventListener("unmute", showVideoTile);
+                                track.addEventListener("mute", () => removeTile(id));
+                                track.addEventListener("ended", () => removeTile(id));
+                                return;
+                            }
 
+                            showVideoTile();
                             track.addEventListener("ended", () => {
                                 removeTile(id);
                             });
-
-                            setConnState("connected", "ok");
                         } else if (track.kind === "audio") {
                             const audioEl = document.createElement("audio");
                             audioEl.autoplay = true;
