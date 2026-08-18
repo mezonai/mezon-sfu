@@ -195,6 +195,36 @@
             .tile.local video {
                 transform: scaleX(-1);
             }
+            .tile.screen-share {
+                cursor: zoom-in;
+            }
+            .tile.screen-share video {
+                object-fit: contain;
+            }
+            .tile.local.screen-share video {
+                transform: none;
+            }
+            .tile.screen-share.expanded {
+                position: fixed;
+                left: 50%;
+                top: 50%;
+                width: min(1920px, calc(100vw - 32px));
+                height: min(1080px, calc(100dvh - 32px));
+                max-width: calc(100vw - 32px);
+                max-height: calc(100dvh - 32px);
+                aspect-ratio: auto;
+                transform: translate(-50%, -50%);
+                z-index: 1000;
+                cursor: zoom-out;
+                border-color: var(--accent);
+                box-shadow:
+                    0 0 0 100vmax rgba(0, 0, 0, 0.75),
+                    0 16px 48px rgba(0, 0, 0, 0.6);
+            }
+            .tile.screen-share:focus-visible {
+                outline: 3px solid var(--accent);
+                outline-offset: 2px;
+            }
             .tile .avatar-fallback {
                 position: absolute;
                 inset: 0;
@@ -668,10 +698,44 @@
                     `· ${n} participant${n === 1 ? "" : "s"}`;
             }
 
+            function collapseExpandedScreenTile(except = null) {
+                document.querySelectorAll(".tile.screen-share.expanded").forEach((tile) => {
+                    if (tile !== except) {
+                        tile.classList.remove("expanded");
+                        tile.setAttribute("aria-expanded", "false");
+                    }
+                });
+            }
+
+            function toggleScreenTile(tile) {
+                const expand = !tile.classList.contains("expanded");
+                collapseExpandedScreenTile(tile);
+                tile.classList.toggle("expanded", expand);
+                tile.setAttribute("aria-expanded", expand ? "true" : "false");
+            }
+
+            document.addEventListener("keydown", (event) => {
+                if (event.key === "Escape") collapseExpandedScreenTile();
+            });
+
             function createTile(id, { isLocal, label }) {
                 const tile = document.createElement("div");
                 tile.className = "tile" + (isLocal ? " local" : "");
                 tile.id = "tile-" + id;
+                if (id.endsWith("-screen")) {
+                    tile.classList.add("screen-share");
+                    tile.tabIndex = 0;
+                    tile.setAttribute("role", "button");
+                    tile.setAttribute("aria-label", `Expand ${label || "screen share"}`);
+                    tile.setAttribute("aria-expanded", "false");
+                    tile.addEventListener("click", () => toggleScreenTile(tile));
+                    tile.addEventListener("keydown", (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            toggleScreenTile(tile);
+                        }
+                    });
+                }
 
                 const video = document.createElement("video");
                 video.autoplay = true;
@@ -984,10 +1048,11 @@
                         new RTCSessionDescription({ type: "offer", sdp })
                     );
 
-                    if (!localTracksAdded && currentJoinMode === "speaker" && localStream) {
+                    if (!localTracksAdded && localStream) {
                         const audioTrack = localStream.getAudioTracks()[0];
                         const videoTrack = localStream.getVideoTracks()[0];
                         if (audioTrack) {
+                            if (currentJoinMode === "audience") audioTrack.enabled = false;
                             const audioTc = pc.getTransceivers().find(
                                 (t) => t.mid === "0" || (t.receiver && t.receiver.track && t.receiver.track.kind === "audio")
                             );
@@ -998,7 +1063,7 @@
                                 pc.addTrack(audioTrack, localStream);
                             }
                         }
-                        if (videoTrack) {
+                        if (currentJoinMode === "speaker" && videoTrack) {
                             await enableSvcForVideoSender(pc, videoTrack);
                             if (screenSharing && screenStream) {
                                 const screenTrack = screenStream.getVideoTracks()[0];
@@ -1037,7 +1102,7 @@
                         answer.sdp,
                         wantSvc ? 1000 : 600,
                         wantSvc ? 1500 : 1000,
-                        wantSvc ? 2500 : 1500
+                        8000
                     );
                     await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
 
@@ -1212,13 +1277,14 @@
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    // Screen content: prefer clarity over motion/SVC.
+                    // Screen content: preserve native resolution and spend bitrate on text clarity.
                     const enc = params.encodings[0];
                     if ("scalabilityMode" in enc) {
                         delete enc.scalabilityMode;
                     }
-                    enc.maxFramerate = 15;
-                    enc.maxBitrate = 2_500_000;
+                    params.degradationPreference = "maintain-resolution";
+                    enc.maxFramerate = 10;
+                    enc.maxBitrate = 8_000_000;
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
                     enc.networkPriority = "high";
@@ -1243,9 +1309,9 @@
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             cursor: "always",
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 },
-                            frameRate: { ideal: 15, max: 30 },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                            frameRate: { ideal: 10, max: 15 },
                         },
                         audio: false,
                     });
@@ -1265,7 +1331,7 @@
 
                 if ("contentHint" in screenTrack) {
                     try {
-                        screenTrack.contentHint = "detail";
+                        screenTrack.contentHint = "text";
                     } catch (_) {
                         /* older browsers */
                     }
@@ -1738,12 +1804,12 @@
                 if (!ws || ws.readyState !== WebSocket.OPEN || pttActive) return;
 
                 pttActive = true;
-                // Keep join-mode in sync so later offers re-attach encodings/tracks.
-                currentJoinMode = "speaker";
+                const audioTrack = localStream && localStream.getAudioTracks()[0];
+                if (audioTrack) audioTrack.enabled = true;
                 setPttButtonPressed(true);
                 ws.send(JSON.stringify({
                     type: "push_to_talk",
-                    role: "speaker",
+                    active: true,
                 }));
             }
 
@@ -1763,11 +1829,12 @@
                 if (!ws || ws.readyState !== WebSocket.OPEN || !pttActive) return;
 
                 pttActive = false;
-                currentJoinMode = "audience";
+                const audioTrack = localStream && localStream.getAudioTracks()[0];
+                if (audioTrack) audioTrack.enabled = false;
                 setPttButtonPressed(false);
                 ws.send(JSON.stringify({
-                    type: "role_change",
-                    role: "audience",
+                    type: "push_to_talk",
+                    active: false,
                 }));
             }
 
@@ -1885,19 +1952,29 @@
 
                         if (track.kind === "video") {
                             const label = "Peer " + id.substring(0, 8);
-                            const p = ensureParticipant(id, {
-                                isLocal: false,
-                                label: label,
-                            });
+                            const showVideoTile = () => {
+                                const p = ensureParticipant(id, {
+                                    isLocal: false,
+                                    label: label,
+                                });
+                                setTileStream(p, new MediaStream([track]), true);
+                                setConnState("connected", "ok");
+                            };
 
-                            const singleVideoStream = new MediaStream([track]);
-                            setTileStream(p, singleVideoStream, true);
+                            if (isScreenTrack) {
+                                // Screen transceivers are pre-negotiated. Only show the
+                                // tile while RTP is actually flowing from the sharer.
+                                if (!track.muted) showVideoTile();
+                                track.addEventListener("unmute", showVideoTile);
+                                track.addEventListener("mute", () => removeTile(id));
+                                track.addEventListener("ended", () => removeTile(id));
+                                return;
+                            }
 
+                            showVideoTile();
                             track.addEventListener("ended", () => {
                                 removeTile(id);
                             });
-
-                            setConnState("connected", "ok");
                         } else if (track.kind === "audio") {
                             const audioEl = document.createElement("audio");
                             audioEl.autoplay = true;
@@ -1939,7 +2016,7 @@
                             camBtn.disabled = true;
                         }
                     } else {
-                        // Hide mic/cam/screen controls for audience; show hold-to-talk.
+                        // Audience is receive-only until the PTT button requests an explicit temporary promotion.
                         document.getElementById("micBtn").style.display = "none";
                         document.getElementById("camBtn").style.display = "none";
                         document.getElementById("screenBtn").style.display = "none";
@@ -1970,6 +2047,14 @@
 
                         if (msg.type === "error") {
                             const detail = msg.message || "unknown_error";
+                            if (detail === "invalid_push_to_talk" || detail === "push_to_talk_rejected") {
+                                pttActive = false;
+                                const audioTrack = localStream && localStream.getAudioTracks()[0];
+                                if (audioTrack) audioTrack.enabled = false;
+                                setPttButtonPressed(false);
+                                console.warn("PTT rejected:", detail);
+                                return;
+                            }
                             const friendly = detail === "missing_token"
                                 ? "Join failed: missing token"
                                 : detail === "invalid_token"
@@ -2018,6 +2103,14 @@
 
                         if (msg.type === "peer_left") {
                             handlePeerLeft(msg);
+                            return;
+                        }
+
+                        if (msg.type === "push_to_talk_changed") {
+                            pttActive = !!msg.active;
+                            const audioTrack = localStream && localStream.getAudioTracks()[0];
+                            if (audioTrack) audioTrack.enabled = pttActive;
+                            setPttButtonPressed(pttActive);
                             return;
                         }
 

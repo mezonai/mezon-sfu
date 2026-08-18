@@ -436,13 +436,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
-  if (!is_rtcp && atomic_load_explicit(&sender_session->is_audience, memory_order_acquire)) {
-    sfu_metric_inc("audience_rtp_drop");
-    pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-    sfu_session_release(sender_session);
-    return;
-  }
 
   if (!is_rtcp && pkt->len >= 12 && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
     uint32_t raw_ssrc = sfu_read_be32(pkt->data + 8);
@@ -491,6 +484,15 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint8_t in_pt = m.rtp.payload_type;
   m.source = classify_media_source(&pt_msnap, &m.rtp);
   m.is_audio = m.source == SFU_MEDIA_AUDIO;
+  bool is_audience = atomic_load_explicit(&sender_session->is_audience, memory_order_acquire);
+  bool ptt_active = atomic_load_explicit(&sender_session->ptt_active, memory_order_acquire);
+  if (is_audience && (!m.is_audio || !ptt_active)) {
+    sfu_metric_inc(m.is_audio ? "ptt_inactive_audio_drop" : "audience_rtp_drop");
+    pthread_mutex_unlock(&sender_session->ingress_lock);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
   if (m.is_audio && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
     sfu_metric_inc("muted_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
@@ -525,6 +527,13 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool learned = false;
   if (!send_negotiated) {
     sfu_metric_inc("unnegotiated_rtp_drop");
+    pthread_mutex_unlock(&sender_session->ingress_lock);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
+  if (is_audience && !atomic_load_explicit(&sender_session->ptt_active, memory_order_acquire)) {
+    sfu_metric_inc("ptt_inactive_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
@@ -581,10 +590,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint32_t learned_video_ssrc = sender_session->uplink_video.ssrc;
     uint32_t learned_screen_ssrc = sender_session->screen.ssrc;
     pthread_mutex_unlock(&sender_session->media_lock);
-    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing + renegotiating", w->worker_index,
+    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing forwarding", w->worker_index,
                  sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc, learned_screen_ssrc);
     room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
-    sfu_signaling_trigger_renegotiation((sfu_room_t *)sender_session->room);
   }
   pthread_mutex_unlock(&sender_session->ingress_lock);
   sfu_session_release(sender_session);

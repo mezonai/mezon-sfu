@@ -232,9 +232,8 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
   return 0;
 }
 
-int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, uint64_t requested_room_id, int64_t *out_user_id,
-                                    uint64_t *out_room_id) {
-  if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out_user_id) {
+int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, int64_t *out_user_id, uint64_t *out_room_id) {
+  if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out_user_id || !out_room_id) {
     return -1;
   }
 
@@ -253,10 +252,6 @@ int sfu_handshake_verify_join_token(const char *token, size_t token_len, const c
   }
   if (!claims.has_room || claims.room_id == 0) {
     SFU_LOG_WARN("handshake: JWT missing video.room claim");
-    return -1;
-  }
-  if (requested_room_id != 0 && requested_room_id != claims.room_id) {
-    SFU_LOG_WARN("handshake: JWT room %" PRIu64 " does not match join room %" PRIu64, claims.room_id, requested_room_id);
     return -1;
   }
 
