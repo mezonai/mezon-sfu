@@ -27,9 +27,13 @@ typedef struct sfu_renegotiation_queue {
 
 typedef struct sfu_membership_queue {
   sfu_peer_session_t *items[SFU_MEMBERSHIP_QUEUE_CAP];
+  sfu_peer_session_t *media_items[SFU_MEMBERSHIP_QUEUE_CAP];
   uint32_t head;
   uint32_t tail;
   uint32_t count;
+  uint32_t media_head;
+  uint32_t media_tail;
+  uint32_t media_count;
   pthread_mutex_t lock;
 } sfu_membership_queue_t;
 
@@ -86,6 +90,7 @@ void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 void sfu_signaling_trigger_peer_renegotiation(sfu_peer_session_t *session);
 void sfu_signaling_schedule_pending_peer(sfu_peer_session_t *session);
 void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *peer);
+void sfu_signaling_notify_media_state(sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);
 uint32_t generate_unique_id(void);

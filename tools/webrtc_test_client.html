@@ -805,6 +805,10 @@
                 const badges = [];
                 if (role === "audience") badges.push("Audience");
                 if (p.isMute) badges.push("Muted");
+                if (mergedMember.camera_active) badges.push("Camera on");
+                else if (mergedMember.camera_requested) badges.push("Camera pending");
+                if (mergedMember.screen_active) badges.push("Sharing screen");
+                else if (mergedMember.screen_requested) badges.push("Screen pending");
                 p.badges.textContent = badges.join(" · ");
 
                 for (const midValue of memberMids(member)) {

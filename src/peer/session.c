@@ -19,6 +19,12 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
+#define SFU_SESSION_KF_THROTTLE_MS 1000
+#define SFU_SNAPSHOT_HAZARD_SLOTS 256
+#define SFU_BWE_START_BPS 1500000u
+#define SFU_BWE_MIN_BPS 100000u
+#define SFU_BWE_MAX_BPS 5000000u
+
 typedef struct {
   sfu_session_table_t *t;
   const struct sockaddr_storage *addr;
@@ -29,12 +35,6 @@ typedef struct {
   sfu_session_table_t *t;
   const char *ufrag;
 } ufrag_match_ctx_t;
-
-#define SFU_SESSION_KF_THROTTLE_MS 1000
-#define SFU_SNAPSHOT_HAZARD_SLOTS 256
-#define SFU_BWE_START_BPS 1500000u
-#define SFU_BWE_MIN_BPS 100000u
-#define SFU_BWE_MAX_BPS 5000000u
 
 typedef struct {
   _Atomic uint32_t refcount;
@@ -119,6 +119,20 @@ static void snapshot_wait_unhazarded(void *snap) {
     }
     sched_yield();
   }
+}
+
+bool sfu_session_recompute_video_activity_locked(sfu_peer_session_t *session) {
+  bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  bool camera_active = !is_audience && atomic_load_explicit(&session->media.camera_enabled, memory_order_acquire) &&
+                       atomic_load_explicit(&session->media.video_send_negotiated, memory_order_acquire) &&
+                       atomic_load_explicit(&session->media.camera_rtp_observed, memory_order_acquire) && session->media.uplink_video.ssrc != 0;
+  bool screen_active = !is_audience && atomic_load_explicit(&session->media.screen_enabled, memory_order_acquire) &&
+                       atomic_load_explicit(&session->media.screen_send_negotiated, memory_order_acquire) &&
+                       atomic_load_explicit(&session->media.screen_rtp_observed, memory_order_acquire) && session->media.screen.ssrc != 0;
+  bool changed = session->media.uplink_video.active != camera_active || session->media.screen.active != screen_active;
+  session->media.uplink_video.active = camera_active;
+  session->media.screen.active = screen_active;
+  return changed;
 }
 
 bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session) {
@@ -721,6 +735,13 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->graph.screen_fanout_targets, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.ptt_active, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.camera_enabled, true, memory_order_relaxed);
+  atomic_store_explicit(&s->media.screen_enabled, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.camera_rtp_observed, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.screen_rtp_observed, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.media_update_queued, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.camera_announced_active, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.screen_announced_active, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.audio_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.video_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.screen_send_negotiated, false, memory_order_relaxed);
@@ -1098,37 +1119,47 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   uint8_t screen_pt = answer->screen_pt != 0 ? answer->screen_pt : session->media.screen.payload_type;
   uint8_t screen_rtx_pt = answer->screen_rtx_pt != 0 ? answer->screen_rtx_pt : session->media.screen.rtx_payload_type;
   sfu_video_codec_t codec = answer->video_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->video_codec : session->media.uplink_video.codec;
-  sfu_video_codec_t screen_codec =
-      answer->screen_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->screen_codec : session->media.screen.codec;
+  sfu_video_codec_t screen_codec = answer->screen_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->screen_codec : session->media.screen.codec;
   bool current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
   bool ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
+  if (current_audience || (answer->video_section_present && (!answer->video_sends || video_ssrc == 0))) {
+    atomic_store_explicit(&session->media.camera_rtp_observed, false, memory_order_release);
+  } else if (answer->video_section_present && answer->video_sends && video_ssrc != 0) {
+    atomic_store_explicit(&session->media.camera_rtp_observed, true, memory_order_release);
+  }
+  if (current_audience || (answer->screen_section_present && (!answer->screen_sends || screen_ssrc == 0))) {
+    atomic_store_explicit(&session->media.screen_rtp_observed, false, memory_order_release);
+  } else if (answer->screen_section_present && answer->screen_sends && screen_ssrc != 0) {
+    atomic_store_explicit(&session->media.screen_rtp_observed, true, memory_order_release);
+  }
   bool audio_active = audio_ssrc != 0 && (!current_audience || ptt_active);
-  bool video_active = !current_audience && video_ssrc != 0;
-  bool screen_active = !current_audience && screen_ssrc != 0 && session->media.screen.active;
+  bool old_video_active = session->media.uplink_video.active;
+  bool old_screen_active = session->media.screen.active;
 
-  changed = session->media.uplink_audio.ssrc != audio_ssrc || session->media.uplink_audio.active != audio_active || session->media.uplink_video.ssrc != video_ssrc ||
-            session->media.uplink_video.rtx_ssrc != rtx_ssrc || session->media.uplink_video.active != video_active || session->media.uplink_video.payload_type != video_pt ||
-            session->media.uplink_video.rtx_payload_type != rtx_pt || session->media.uplink_video.codec != codec || session->media.screen.ssrc != screen_ssrc ||
-            session->media.screen.rtx_ssrc != screen_rtx_ssrc || session->media.screen.active != screen_active || session->media.screen.payload_type != screen_pt ||
+  changed = session->media.uplink_audio.ssrc != audio_ssrc || session->media.uplink_audio.active != audio_active ||
+            session->media.uplink_video.ssrc != video_ssrc || session->media.uplink_video.rtx_ssrc != rtx_ssrc ||
+            session->media.uplink_video.payload_type != video_pt || session->media.uplink_video.rtx_payload_type != rtx_pt ||
+            session->media.uplink_video.codec != codec || session->media.screen.ssrc != screen_ssrc ||
+            session->media.screen.rtx_ssrc != screen_rtx_ssrc || session->media.screen.payload_type != screen_pt ||
             session->media.screen.rtx_payload_type != screen_rtx_pt || session->media.screen.codec != screen_codec;
 
   session->media.uplink_audio.ssrc = audio_ssrc;
   session->media.uplink_audio.active = audio_active;
   session->media.uplink_video.ssrc = video_ssrc;
   session->media.uplink_video.rtx_ssrc = rtx_ssrc;
-  session->media.uplink_video.active = video_active;
   session->media.uplink_video.payload_type = video_pt;
   session->media.uplink_video.rtx_payload_type = rtx_pt;
   session->media.uplink_video.codec = codec;
   session->media.screen.ssrc = screen_ssrc;
   session->media.screen.rtx_ssrc = screen_rtx_ssrc;
-  session->media.screen.active = screen_active;
   session->media.screen.payload_type = screen_pt;
   session->media.screen.rtx_payload_type = screen_rtx_pt;
   session->media.screen.codec = screen_codec;
   session->media.twcc_recv_extmap_id = answer->twcc_recv_extmap_id;
   session->media.twcc_send_extmap_id = answer->twcc_send_extmap_id;
   session->media.mid_recv_extmap_id = answer->mid_recv_extmap_id;
+  bool activity_changed = sfu_session_recompute_video_activity_locked(session);
+  changed = changed || activity_changed || old_video_active != session->media.uplink_video.active || old_screen_active != session->media.screen.active;
   sfu_session_publish_media(session);
   pthread_mutex_unlock(&session->media.lock);
   if (answer->peer_id != 0) {
