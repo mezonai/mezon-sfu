@@ -20,7 +20,7 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
   s->active = true;
   assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
-  assert(pthread_mutex_init(&s->negotiation_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->negotiation.lock, NULL) == 0);
   assert(pthread_mutex_init(&s->media_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->snapshot_lock, NULL) == 0);
   atomic_store(&s->refcount, 1);
@@ -206,7 +206,11 @@ static void test_audience_role_asymmetry_and_transition(void) {
   audience->screen.payload_type = 96;
   audience->screen.rtx_payload_type = 97;
   audience->screen.codec = SFU_VIDEO_CODEC_VP8;
-  audience->screen.active = true;
+  audience->screen.active = false;
+  audience->uplink_audio.ssrc = 7777;
+  audience->uplink_audio.active = false;
+  audience->uplink_video.active = false;
+  atomic_store(&audience->audio_send_negotiated, true);
   atomic_store(&audience->is_audience, true);
 
   room_add_peer(&room, speaker);
@@ -217,10 +221,40 @@ static void test_audience_role_asymmetry_and_transition(void) {
   assert(receiver_count(audience) == 1);
   assert(audience->next_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   assert(subscribes_to(audience, speaker));
-  assert(receiver_count(speaker) == 0);
+  assert(receiver_count(speaker) == 1);
+  assert(subscribes_to(speaker, audience));
   assert(fanout_target_count(speaker) == 1);
   assert(fanout_targets(speaker, audience));
-  assert(fanout_target_count(audience) == 0);
+  assert(fanout_target_count(audience) == 1);
+  assert(fanout_targets(audience, speaker));
+  uint32_t audience_mid_before_ptt = 0;
+  {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
+    assert(snap != NULL && snap->count == 1);
+    audience_mid_before_ptt = snap->entries[0].mid_audio;
+    assert(snap->entries[0].has_audio);
+    assert(!snap->entries[0].has_video);
+    assert(!snap->entries[0].has_screen);
+    assert(!snap->entries[0].audio_active);
+    sfu_subscriptions_snapshot_release(snap);
+  }
+  uint32_t speaker_next_mid_before_ptt = speaker->next_remote_mid;
+  assert(audio_route_count(audience) == 0);
+  assert(room_set_peer_ptt_active(&room, audience, true));
+  assert(atomic_load(&audience->is_audience));
+  assert(atomic_load(&audience->ptt_active));
+  assert(audio_route_count(audience) == 1);
+  assert(speaker->next_remote_mid == speaker_next_mid_before_ptt);
+  assert(room_set_peer_ptt_active(&room, audience, false));
+  assert(!atomic_load(&audience->ptt_active));
+  assert(audio_route_count(audience) == 0);
+  {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
+    assert(snap != NULL && snap->count == 1);
+    assert(snap->entries[0].mid_audio == audience_mid_before_ptt);
+    assert(!snap->entries[0].audio_active);
+    sfu_subscriptions_snapshot_release(snap);
+  }
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(audience);
     assert(snap != NULL && snap->count == 1);
@@ -252,7 +286,7 @@ static void test_audience_role_asymmetry_and_transition(void) {
    * stable for a later re-promotion; the audience no longer owns fanout
    * targets but the speaker still receives from it. */
   assert(receiver_count(speaker) == 1);
-  assert(fanout_target_count(audience) == 0);
+  assert(fanout_target_count(audience) == 1);
   assert(fanout_targets(speaker, audience));
 
   /* The deactivated slot has its media state cleared... */

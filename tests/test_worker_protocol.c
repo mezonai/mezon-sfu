@@ -548,12 +548,16 @@ static void test_audience_pli_routes_to_source_publisher(void) {
   kf_fixture_init(&f);
 
   /* Rebuild the graph exactly like production: audience is marked before add,
-   * so it subscribes to the speaker but is not a publish source. */
+   * so it subscribes to the speaker and owns a dormant audio-only PTT source slot. */
   room_remove_peer(&f.room, f.base.session);
   atomic_store_explicit(&f.base.session->is_audience, true, memory_order_release);
   room_add_peer(&f.room, f.base.session);
   sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(f.publisher);
-  assert(subscriptions != NULL && subscriptions->count == 0);
+  assert(subscriptions != NULL && subscriptions->count == 1);
+  assert(subscriptions->entries[0].subscriber == f.base.session);
+  assert(subscriptions->entries[0].has_audio);
+  assert(!subscriptions->entries[0].has_video);
+  assert(!subscriptions->entries[0].has_screen);
   sfu_subscriptions_snapshot_release(subscriptions);
   sfu_receiver_snapshot_t *fanout = sfu_session_fanout_targets_acquire(f.publisher);
   assert(fanout != NULL && fanout->count == 1 && fanout->entries[0].subscriber == f.base.session);

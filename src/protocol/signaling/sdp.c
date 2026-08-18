@@ -75,9 +75,8 @@ static int append_media_transport_headers(char *out, size_t out_cap, size_t *off
 static int append_twcc_attributes(char *out, size_t out_cap, size_t *offset);
 static int append_mid_recv_attribute(char *out, size_t out_cap, size_t *offset);
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, sfu_video_codec_t codec, uint8_t video_pt, uint8_t rtx_pt);
-static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc, int64_t user_id, uint32_t peer_id);
-static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id,
-                                     const char *track_prefix);
+static int append_remote_audio_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id);
+static int append_remote_video_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id, const char *track_prefix);
 
 static int append_bundled_transport_headers(char *out, size_t out_cap, size_t *offset, const char *host, const char *ufrag, const char *pwd,
                                             const char *fingerprint) {
@@ -160,7 +159,7 @@ static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, uint1
   if (append_line(out, out_cap, offset, "a=rtpmap:111 opus/48000/2") != 0) {
     return -1;
   }
-  if (live && (!slot || append_remote_audio_ssrcs(out, out_cap, offset, slot->audio_ssrc, slot->publisher_user_id, slot->publisher_peer_id) != 0)) {
+  if (live && (!slot || append_remote_audio_msid(out, out_cap, offset, slot->publisher_user_id, slot->publisher_peer_id) != 0)) {
     return -1;
   }
   return 0;
@@ -230,13 +229,10 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint1
     return -1;
   }
   sfu_video_codec_t codec = screen ? slot->screen_codec : slot->video_codec;
-  uint32_t media_ssrc = screen ? slot->screen_ssrc : slot->video_ssrc;
-  uint32_t rtx_ssrc = screen ? slot->screen_rtx_ssrc : slot->video_rtx_ssrc;
   if (append_video_codec_attributes(out, out_cap, offset, codec, video_pt, rtx_pt) != 0) {
     return -1;
   }
-  if (append_remote_video_ssrcs(out, out_cap, offset, media_ssrc, rtx_ssrc, slot->publisher_user_id, slot->publisher_peer_id, screen ? "screen" : "video") !=
-      0) {
+  if (append_remote_video_msid(out, out_cap, offset, slot->publisher_user_id, slot->publisher_peer_id, screen ? "screen" : "video") != 0) {
     return -1;
   }
   return 0;
@@ -311,7 +307,7 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
   return 0;
 }
 
-static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t audio_ssrc, int64_t user_id, uint32_t peer_id) {
+static int append_remote_audio_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id) {
   char line[160];
   char stream_id[64];
   int n = snprintf(stream_id, sizeof(stream_id), "u%" PRId64 "-p%u", user_id, peer_id);
@@ -319,24 +315,10 @@ static int append_remote_audio_ssrcs(char *out, size_t out_cap, size_t *offset, 
     return -1;
   }
   n = snprintf(line, sizeof(line), "a=msid:%s audio-%s", stream_id, stream_id);
-  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-    return -1;
-  }
-  if (audio_ssrc != 0) {
-    n = snprintf(line, sizeof(line), "a=ssrc:%u cname:%s", audio_ssrc, stream_id);
-    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-      return -1;
-    }
-    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s audio-%s", audio_ssrc, stream_id, stream_id);
-    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-      return -1;
-    }
-  }
-  return 0;
+  return n < 0 || (size_t)n >= sizeof(line) ? -1 : append_line_n(out, out_cap, offset, line, (size_t)n);
 }
 
-static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, uint32_t video_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id,
-                                     const char *track_prefix) {
+static int append_remote_video_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id, const char *track_prefix) {
   char line[160];
   char stream_id[64];
   int n = snprintf(stream_id, sizeof(stream_id), "u%" PRId64 "-p%u", user_id, peer_id);
@@ -347,34 +329,7 @@ static int append_remote_video_ssrcs(char *out, size_t out_cap, size_t *offset, 
     track_prefix = "video";
   }
   n = snprintf(line, sizeof(line), "a=msid:%s %s-%s", stream_id, track_prefix, stream_id);
-  if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-    return -1;
-  }
-  if (video_ssrc != 0) {
-    n = snprintf(line, sizeof(line), "a=ssrc:%u cname:%s", video_ssrc, stream_id);
-    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-      return -1;
-    }
-    n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s %s-%s", video_ssrc, stream_id, track_prefix, stream_id);
-    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-      return -1;
-    }
-    if (rtx_ssrc != 0) {
-      n = snprintf(line, sizeof(line), "a=ssrc:%u cname:%s", rtx_ssrc, stream_id);
-      if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-        return -1;
-      }
-      n = snprintf(line, sizeof(line), "a=ssrc:%u msid:%s %s-%s", rtx_ssrc, stream_id, track_prefix, stream_id);
-      if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-        return -1;
-      }
-      n = snprintf(line, sizeof(line), "a=ssrc-group:FID %u %u", video_ssrc, rtx_ssrc);
-      if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
-        return -1;
-      }
-    }
-  }
-  return 0;
+  return n < 0 || (size_t)n >= sizeof(line) ? -1 : append_line_n(out, out_cap, offset, line, (size_t)n);
 }
 
 int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, bool is_audience, char *out,
@@ -417,7 +372,7 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
     return -1;
   }
 
@@ -801,7 +756,7 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
   if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
     goto fail;
   }
-  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=mid:0") != 0) {
@@ -868,9 +823,9 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
     int16_t entry_index = map_slot < SFU_MAX_REMOTE_SLOTS ? mid_index[map_slot] : -1;
     bool found = entry_index >= 0 && sfu_sdp_receiver_view(snap, (uint32_t)entry_index, &slot);
 
-    bool audio_live = found && slot.has_audio && slot.audio_active && slot.audio_ssrc != 0;
-    bool video_live = found && slot.has_video && slot.video_active && slot.video_ssrc != 0;
-    bool screen_live = found && slot.has_screen && slot.screen_active && slot.screen_ssrc != 0;
+    bool audio_live = found && slot.has_audio;
+    bool video_live = found && slot.has_video;
+    bool screen_live = found && slot.has_screen;
     if (append_bundled_audio(out, out_cap, &off, port, bundled_transport, bundled_transport_len, mid_audio, audio_live, found ? &slot : NULL) != 0) {
       goto fail;
     }

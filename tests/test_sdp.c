@@ -207,8 +207,8 @@ static void test_initial_offer_role_directions(void) {
   len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", true, offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
-  assert(count_occurrences(offer, "a=inactive") == 3);
-  assert(!contains(offer, "a=recvonly"));
+  assert(count_occurrences(offer, "a=inactive") == 2);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
 }
 
 static void test_renegotiation_offer_role_directions(void) {
@@ -230,7 +230,8 @@ static void test_renegotiation_offer_role_directions(void) {
   len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
-  assert(count_occurrences(offer, "a=inactive") == 3);
+  assert(count_occurrences(offer, "a=inactive") == 2);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
 
   pthread_mutex_destroy(&session.snapshot_lock);
   pthread_mutex_destroy(&session.media_lock);
@@ -267,19 +268,18 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
   assert(contains(offer, "a=mid:4"));
   assert(contains(offer, "a=mid:5"));
-  assert(count_occurrences(offer, "a=inactive") == 4);
+  assert(count_occurrences(offer, "a=inactive") == 3);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
   assert(count_occurrences(offer, "a=sendonly") == 2);
   assert(contains(offer, "a=mid:3"));
   assert(contains(offer, "a=mid:4"));
   assert(contains(offer, "a=mid:5"));
-  assert(contains(offer, "a=ssrc:1111 cname:u1843252237590073344-p9"));
-  assert(contains(offer, "a=ssrc:1111 msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
+  assert(!contains(offer, "a=ssrc:1111"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
-  assert(contains(offer, "a=ssrc:2222 cname:u1843252237590073344-p9"));
-  assert(contains(offer, "a=ssrc:2222 msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
+  assert(!contains(offer, "a=ssrc:2222"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
-  assert(contains(offer, "a=ssrc:3333 cname:u1843252237590073344-p9"));
-  assert(contains(offer, "a=ssrc-group:FID 2222 3333"));
+  assert(!contains(offer, "a=ssrc:3333"));
+  assert(!contains(offer, "a=ssrc-group:FID 2222 3333"));
   assert(count_occurrences(offer, "a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid") == 6);
 
   video[0].ssrc = 0;
@@ -287,8 +287,9 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
-  assert(count_occurrences(offer, "a=sendonly") == 1);
-  assert(count_occurrences(offer, "a=inactive") == 5);
+  assert(count_occurrences(offer, "a=sendonly") == 2);
+  assert(count_occurrences(offer, "a=inactive") == 3);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
   assert(!contains(offer, "a=ssrc:2222"));
 
   cleanup_mock_session(&session, remotes);
@@ -328,15 +329,26 @@ static void test_screen_only_remote_offer(void) {
   offer[len] = '\0';
 
   assert(count_occurrences(offer, "a=sendonly") == 1);
-  assert(count_occurrences(offer, "a=inactive") == 5);
+  assert(count_occurrences(offer, "a=inactive") == 4);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
   assert(contains(offer, "a=mid:5\r\n"));
-  assert(contains(offer, "a=ssrc:4444 cname:u42-p7"));
-  assert(contains(offer, "a=ssrc:4444 msid:u42-p7 screen-u42-p7"));
+  assert(!contains(offer, "a=ssrc:4444"));
   assert(contains(offer, "a=msid:u42-p7 screen-u42-p7"));
-  assert(contains(offer, "a=ssrc:5555 cname:u42-p7"));
-  assert(contains(offer, "a=ssrc-group:FID 4444 5555"));
+  assert(!contains(offer, "a=ssrc:5555"));
+  assert(!contains(offer, "a=ssrc-group:FID 4444 5555"));
   assert(!contains(offer, "a=ssrc:1111"));
   assert(!contains(offer, "a=ssrc:2222"));
+
+  entry->screen_active = false;
+  entry->screen_ssrc = 0;
+  entry->screen_rtx_ssrc = 0;
+  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=sendonly") == 1);
+  assert(contains(offer, "a=mid:5\r\n"));
+  assert(contains(offer, "a=msid:u42-p7 screen-u42-p7"));
+  assert(!contains(offer, "a=ssrc:"));
 
   cleanup_mock_session(&session, remotes);
 }
@@ -468,7 +480,7 @@ static sfu_peer_session_t *race_mock_session(const char *ufrag) {
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
   s->active = true;
   assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
-  assert(pthread_mutex_init(&s->negotiation_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->negotiation.lock, NULL) == 0);
   assert(pthread_mutex_init(&s->media_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->snapshot_lock, NULL) == 0);
   atomic_store(&s->refcount, 1);
@@ -614,13 +626,12 @@ static void test_299_audio_only_remote_offer(void) {
   assert(count_occurrences(offer, "a=setup:passive") == SFU_ROOM_MAX_PEERS * 3);
   assert(count_occurrences(offer, "a=candidate:") == 1);
   assert(count_occurrences(offer, "a=end-of-candidates") == 1);
-  assert(count_occurrences(offer, "a=sendonly") == SFU_MAX_REMOTE_SLOTS);
-  assert(count_occurrences(offer, "a=inactive") == SFU_MAX_REMOTE_SLOTS * 2);
+  assert(count_occurrences(offer, "a=sendonly") == SFU_MAX_REMOTE_SLOTS * 2);
+  assert(count_occurrences(offer, "a=inactive") == SFU_MAX_REMOTE_SLOTS);
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
   assert(contains(offer, " 897 898 899\r\n"));
   assert(contains(offer, "a=msid:u1000000-p1 audio-u1000000-p1"));
-  assert(contains(offer, "a=ssrc:10000 cname:u1000000-p1"));
-  assert(contains(offer, "a=ssrc:10000 msid:u1000000-p1 audio-u1000000-p1"));
+  assert(count_occurrences(offer, "a=ssrc:") == 0);
 
   free(offer);
   cleanup_mock_session(&session, remotes);
@@ -735,10 +746,9 @@ int main(void) {
                             sizeof(server_offer));
   assert(len > 0);
   server_offer[len] = '\0';
-  assert(contains(server_offer, "a=ssrc:987654321 cname:u77-p9"));
-  assert(contains(server_offer, "a=ssrc:987654321 msid:u77-p9 video-u77-p9"));
-  assert(contains(server_offer, "a=ssrc:987654322 cname:u77-p9"));
-  assert(contains(server_offer, "a=ssrc-group:FID 987654321 987654322"));
+  assert(!contains(server_offer, "a=ssrc:987654321"));
+  assert(!contains(server_offer, "a=ssrc:987654322"));
+  assert(!contains(server_offer, "a=ssrc-group:FID 987654321 987654322"));
   assert(contains(server_offer, "a=msid:u77-p9 video-u77-p9"));
   assert(count_occurrences(server_offer, "a=ice-ufrag:XKrsH3xm") == 6);
   assert(count_occurrences(server_offer, "a=fingerprint:sha-256") == 6);

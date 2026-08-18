@@ -82,14 +82,15 @@ int main(void) {
     int64_t exp = (int64_t)time(NULL) + 3600;
     int64_t nbf = (int64_t)time(NULL) - 60;
     snprintf(payload, sizeof(payload),
-             "{\"exp\":%" PRId64 ",\"identity\":\"1843252237590073344\",\"iss\":\"APIcdd28PzB2amp\",\"metadata\":\"longma350\","
+             "{\"exp\":%" PRId64
+             ",\"identity\":\"1843252237590073344\",\"iss\":\"APIcdd28PzB2amp\",\"metadata\":\"longma350\","
              "\"nbf\":%" PRId64 ",\"sub\":\"1843252237590073344\",\"video\":{\"room\":\"2087757797482565632\",\"roomJoin\":true}}",
              exp, nbf);
     assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
 
     int64_t user_id = 0;
     uint64_t room_id = 0;
-    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 2087757797482565632ULL, &user_id, &room_id) == 0);
+    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, &user_id, &room_id) == 0);
     assert(user_id == 1843252237590073344LL);
     assert(room_id == 2087757797482565632ULL);
 
@@ -112,7 +113,7 @@ int main(void) {
     assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
     int64_t user_id = 0;
     uint64_t room_id = 0;
-    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 0, &user_id, &room_id) == 0);
+    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, &user_id, &room_id) == 0);
     assert(user_id == 99);
     assert(room_id == 101);
   }
@@ -124,7 +125,7 @@ int main(void) {
     snprintf(payload, sizeof(payload), "{\"identity\":\"1\",\"exp\":%" PRId64 ",\"video\":{\"room\":\"101\",\"roomJoin\":true}}", exp);
     assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
     int64_t user_id = 0;
-    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 202ULL, &user_id, NULL) != 0);
+    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, &user_id, NULL) != 0);
   }
 
   /* roomJoin false. */
@@ -134,7 +135,7 @@ int main(void) {
     snprintf(payload, sizeof(payload), "{\"identity\":\"1\",\"exp\":%" PRId64 ",\"video\":{\"room\":\"101\",\"roomJoin\":false}}", exp);
     assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
     int64_t user_id = 0;
-    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 101ULL, &user_id, NULL) != 0);
+    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, &user_id, NULL) != 0);
   }
 
   /* Bad signature. */
@@ -146,7 +147,7 @@ int main(void) {
     size_t len = strlen(token);
     token[len - 2] = (token[len - 2] == 'A') ? 'B' : 'A';
     int64_t user_id = 0;
-    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 101ULL, &user_id, NULL) != 0);
+    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, &user_id, NULL) != 0);
   }
 
   /* Expired. */
@@ -155,7 +156,7 @@ int main(void) {
     snprintf(payload, sizeof(payload), "{\"identity\":\"7\",\"exp\":1,\"video\":{\"room\":\"101\",\"roomJoin\":true}}");
     assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
     int64_t user_id = 0;
-    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 101ULL, &user_id, NULL) != 0);
+    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, &user_id, NULL) != 0);
   }
 
   /* Wrong alg. */
@@ -163,7 +164,7 @@ int main(void) {
     assert(mint_hs256("{\"alg\":\"none\",\"typ\":\"JWT\"}", "{\"identity\":\"1\",\"video\":{\"room\":\"101\",\"roomJoin\":true}}", secret, token,
                       sizeof(token)) == 0);
     int64_t user_id = 0;
-    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, 101ULL, &user_id, NULL) != 0);
+    assert(sfu_handshake_verify_join_token(token, strlen(token), secret, &user_id, NULL) != 0);
   }
 
   printf("test_handshake: all passed\n");
