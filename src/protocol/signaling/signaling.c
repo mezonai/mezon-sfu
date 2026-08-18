@@ -952,6 +952,8 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
       c->is_audience = true;
     }
   }
+  SFU_LOG_INFO("signaling: join role user_id=%" PRId64 " room=%" PRIu64 " role=%s audience=%d fd=%d", c->user_id, room_id,
+               role_str[0] != '\0' ? role_str : "<missing>", c->is_audience, c->fd);
 
   if (room_id == 0) {
     sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_room\"}", 41);
@@ -1071,6 +1073,9 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     return;
   }
 
+  SFU_LOG_INFO("signaling: answer role ufrag=%s peer_id=%u pending_audience=%d session_audience=%d", c->client_ufrag, session->peer_id,
+               pending.is_audience, atomic_load_explicit(&session->is_audience, memory_order_acquire));
+
   bool follow_up_pending = false;
   uint32_t answered_offer_generation = 0;
   uint64_t answered_offer_revision = 0;
@@ -1114,6 +1119,18 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
       SFU_LOG_INFO("answer: media/role changed for ufrag=%s generation=%u (media=%d role=%d bound=%d), refreshing forwarding", c->client_ufrag,
                    answer_generation, media_changed, role_changed, newly_bound);
       room_refresh_peer_streams((sfu_room_t *)session->room, session);
+    }
+  }
+  if (answered_offer_generation != 0) {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
+    uint32_t receiver_count = snap ? snap->count : 0;
+    pthread_mutex_lock(&session->media_lock);
+    uint8_t mid_recv_extmap_id = session->mid_recv_extmap_id;
+    pthread_mutex_unlock(&session->media_lock);
+    SFU_LOG_INFO("signaling: downlink ready ufrag=%s peer_id=%u audience=%d receivers=%u mid_extmap=%u", c->client_ufrag, session->peer_id,
+                 atomic_load_explicit(&session->is_audience, memory_order_acquire), receiver_count, mid_recv_extmap_id);
+    if (snap) {
+      sfu_subscriptions_snapshot_release(snap);
     }
   }
   if (sdp_contract_changed && session->room) {
