@@ -882,7 +882,7 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
     return;
   }
   uint64_t token_room = 0;
-  if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, 0, &user_id, &token_room) != 0) {
+  if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &user_id, &token_room) != 0) {
     SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
     sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
     disconnect_client(c);
