@@ -2111,6 +2111,26 @@
                         }
 
                         if (msg.type === "peer_updated") {
+                            const peerId = msg.peer && msg.peer.peer_id != null ? String(msg.peer.peer_id) : null;
+                            const existing = peerId ? membersByPeerId.get(peerId) : null;
+                            if (existing && existing.isSelf) {
+                                applyCameraState(!!msg.peer.camera_requested);
+                                if (!msg.peer.screen_requested && (screenSharing || screenStream)) {
+                                    await stopScreenShare({ skipSignal: true });
+                                }
+                                if (!msg.peer.camera_requested) {
+                                    setConnState("camera stopped", "ok");
+                                } else if (msg.peer.camera_active) {
+                                    setConnState("camera active", "ok");
+                                }
+                                if (!msg.peer.screen_requested) {
+                                    setConnState("screen share stopped", "ok");
+                                } else if (msg.peer.screen_active) {
+                                    setConnState("sharing screen", "ok");
+                                } else {
+                                    setConnState("screen share pending", "warn");
+                                }
+                            }
                             upsertMember(msg.peer, false);
                             updateParticipantCount();
                             return;
@@ -2118,34 +2138,6 @@
 
                         if (msg.type === "peer_left") {
                             handlePeerLeft(msg);
-                            return;
-                        }
-
-                        if (msg.type === "camera_changed") {
-                            applyCameraState(!!msg.requested);
-                            if (!msg.requested) {
-                                setConnState("camera stopped", "ok");
-                            } else if (msg.active) {
-                                setConnState("camera active", "ok");
-                            } else {
-                                setConnState("camera waiting for RTP", "warn");
-                            }
-                            return;
-                        }
-
-                        if (msg.type === "screen_share_changed") {
-                            if (!msg.requested && (screenSharing || screenStream)) {
-                                await stopScreenShare({ skipSignal: true });
-                            }
-                            if (!msg.requested) {
-                                setConnState("screen share stopped", "ok");
-                            } else if (msg.active) {
-                                setConnState("sharing screen", "ok");
-                            } else if (msg.negotiation_pending) {
-                                setConnState("screen negotiation pending", "warn");
-                            } else {
-                                setConnState("screen waiting for RTP", "warn");
-                            }
                             return;
                         }
 
