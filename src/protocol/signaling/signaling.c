@@ -1290,8 +1290,9 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
     }
     return;
   }
+  bool screen_negotiated = atomic_load_explicit(&session->screen_send_negotiated, memory_order_acquire);
   pthread_mutex_lock(&session->media_lock);
-  bool screen_active = active && atomic_load_explicit(&session->screen_send_negotiated, memory_order_acquire);
+  bool screen_active = active && screen_negotiated;
   bool changed = session->screen.active != screen_active;
   session->screen.active = screen_active;
   if (changed) {
@@ -1300,6 +1301,10 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
   pthread_mutex_unlock(&session->media_lock);
   if (changed) {
     room_refresh_peer_streams(c->joined_room, session);
+  }
+  if (active && !screen_negotiated) {
+    SFU_LOG_INFO("signaling: screen share requires sender negotiation ufrag=%s peer_id=%u", c->client_ufrag, session->peer_id);
+    sfu_signaling_trigger_peer_renegotiation(session);
   }
   sfu_session_release(session);
   emit_hook_event(active ? "share_screen" : "unshare_screen", c->user_id, c->joined_room_id);
