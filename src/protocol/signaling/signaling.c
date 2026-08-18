@@ -1169,6 +1169,8 @@ static void broadcast_peer_updated(sfu_room_t *room, sfu_peer_session_t *session
   }
 }
 
+bool sfu_signaling_push_to_talk_allowed(bool is_audience) { return !is_audience; }
+
 static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n, bool push_to_talk) {
   (void)s;
   char role_str[16] = {0};
@@ -1184,6 +1186,16 @@ static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s,
 
   bool is_audience = strcmp(role_str, "audience") == 0;
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
+  if (push_to_talk && !sfu_signaling_push_to_talk_allowed(c->is_audience)) {
+    static const char role_change_rejected[] = "{\"type\":\"error\",\"message\":\"role_change_rejected\"}";
+    SFU_LOG_INFO("signaling: rejected audience push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u role=audience", c->user_id, c->client_ufrag,
+                 session ? session->peer_id : 0);
+    sfu_ws_send_text(c->fd, role_change_rejected, sizeof(role_change_rejected) - 1);
+    if (session) {
+      sfu_session_release(session);
+    }
+    return;
+  }
   bool changed = false;
   if (session && session->room == c->joined_room) {
     pthread_mutex_lock(&session->answer_lock);

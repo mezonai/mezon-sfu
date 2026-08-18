@@ -25,6 +25,9 @@ static void make_addr(struct sockaddr_storage *addr, socklen_t *len, const char 
  * Single-threaded lifecycle tests
  * ------------------------------------------------------------------------- */
 static void test_basic_lifecycle(void) {
+  assert(!sfu_signaling_push_to_talk_allowed(true));
+  assert(sfu_signaling_push_to_talk_allowed(false));
+
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
 

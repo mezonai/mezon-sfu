@@ -85,6 +85,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 void sfu_signaling_trigger_peer_renegotiation(sfu_peer_session_t *session);
 void sfu_signaling_schedule_pending_peer(sfu_peer_session_t *session);
+bool sfu_signaling_push_to_talk_allowed(bool is_audience);
 void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);
