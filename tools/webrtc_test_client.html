@@ -1735,12 +1735,12 @@
                         }
                     }
                 }
-                if (!ws || ws.readyState !== WebSocket.OPEN || pttActive || currentJoinMode !== "speaker") return;
+                if (!ws || ws.readyState !== WebSocket.OPEN || pttActive) return;
 
                 pttActive = true;
                 setPttButtonPressed(true);
                 ws.send(JSON.stringify({
-                    type: "push_to_talk",
+                    type: "role_change",
                     role: "speaker",
                 }));
             }
@@ -1762,6 +1762,10 @@
 
                 pttActive = false;
                 setPttButtonPressed(false);
+                ws.send(JSON.stringify({
+                    type: "role_change",
+                    role: "audience",
+                }));
             }
 
             function abortJoin(reason) {
@@ -1932,11 +1936,11 @@
                             camBtn.disabled = true;
                         }
                     } else {
-                        // Audience role is receive-only; promotion requires an explicit role_change.
+                        // Audience is receive-only until the PTT button requests an explicit temporary promotion.
                         document.getElementById("micBtn").style.display = "none";
                         document.getElementById("camBtn").style.display = "none";
                         document.getElementById("screenBtn").style.display = "none";
-                        document.getElementById("pttBtn").style.display = "none";
+                        document.getElementById("pttBtn").style.display = "flex";
                     }
 
                     setJoinStatus("Connecting to signaling server…");
