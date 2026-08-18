@@ -43,7 +43,7 @@ static void test_basic_lifecycle(void) {
   assert(s1->active == true);
   assert(sfu_session_accepts_work(s1));
   assert(atomic_load(&s1->lifecycle) == SFU_SESSION_LIFECYCLE_OPEN);
-  assert(!atomic_load(&s1->ptt_active));
+  assert(!atomic_load(&s1->media.ptt_active));
   assert(!s1->negotiation.negotiation_needed);
   assert(!s1->negotiation.offer_outstanding);
   assert(!s1->negotiation.renegotiation_pending);
@@ -52,10 +52,10 @@ static void test_basic_lifecycle(void) {
   assert(s1->negotiation.answered_revision == 0);
   assert(s1->negotiation.negotiation_retry_count == 0);
   assert(!sfu_session_video_runtime_ready(s1));
-  assert(s1->gcc_ctx == NULL && s1->twcc_history == NULL && s1->twcc_recv == NULL && s1->schedulers == NULL && s1->rtx_cache == NULL);
+  assert(s1->egress.gcc_ctx == NULL && s1->egress.twcc_history == NULL && s1->egress.twcc_recv == NULL && s1->egress.schedulers == NULL && s1->egress.rtx_cache == NULL);
   assert(sfu_session_ensure_video_runtime(s1));
   assert(sfu_session_video_runtime_ready(s1));
-  assert(s1->gcc_ctx && s1->twcc_history && s1->twcc_recv && s1->schedulers && s1->rtx_cache);
+  assert(s1->egress.gcc_ctx && s1->egress.twcc_history && s1->egress.twcc_recv && s1->egress.schedulers && s1->egress.rtx_cache);
 
   sfu_peer_session_t *s1_again = sfu_session_table_get_or_create(&table, &addr1, len1);
   assert(s1_again == s1);
@@ -64,7 +64,7 @@ static void test_basic_lifecycle(void) {
   assert(s2 != NULL);
   assert(s2 != s1);
   assert(!sfu_session_video_runtime_ready(s2));
-  assert(s2->rtx_cache == NULL);
+  assert(s2->egress.rtx_cache == NULL);
 
   /* Lookup by address (acquired pins). */
   sfu_peer_session_t *f;
@@ -424,8 +424,8 @@ static void test_pending_answer_application(void) {
   assert(atomic_load(&s->is_audience));
   assert(s->peer_id == 77);
   assert(s->fd == 20);
-  assert(s->uplink_audio.ssrc == 0 && !s->uplink_audio.active);
-  assert(s->uplink_video.ssrc == 0 && !s->uplink_video.active);
+  assert(s->media.uplink_audio.ssrc == 0 && !s->media.uplink_audio.active);
+  assert(s->media.uplink_video.ssrc == 0 && !s->media.uplink_video.active);
   assert(media_changed);
 
   /* A stale generation cannot revert a newer applied answer. */
@@ -438,7 +438,7 @@ static void test_pending_answer_application(void) {
   stale.video_ssrc = 888;
   assert(!sfu_session_apply_pending_answer(s, &stale, 21, &role_changed, &media_changed));
   assert(atomic_load(&s->is_audience));
-  assert(s->uplink_video.ssrc == 0);
+  assert(s->media.uplink_video.ssrc == 0);
   assert(s->fd == 20);
 
   sfu_routing_table_destroy(&rtable);

@@ -261,63 +261,75 @@ typedef struct {
   uint64_t negotiation_due_ms;
 } sfu_session_negotiation_t;
 
-typedef struct sfu_peer_session {
-  sfu_room_t *room;
-  gcc_bwe_context_t *gcc_ctx;
-  sfu_twcc_history_t *twcc_history;
-  sfu_session_scheduler_slot_t *schedulers;
-  sfu_pacer_t pacer;
-  sfu_rtx_cache_t *rtx_cache;
-  sfu_peer_session_cold_t *cold;
+typedef struct {
+  pthread_mutex_t lock;
   _Atomic(sfu_receiver_snapshot_t *) receivers;
   _Atomic(sfu_receiver_snapshot_t *) fanout_targets;
   _Atomic(sfu_audio_route_snapshot_t *) audio_fanout_targets;
   _Atomic(sfu_video_route_snapshot_t *) video_fanout_targets;
   _Atomic(sfu_video_route_snapshot_t *) screen_fanout_targets;
-  sfu_srtp_ctx_t srtp;
+  _Atomic uint32_t next_remote_mid;
+  _Atomic bool membership_announced;
+} sfu_session_graph_t;
+
+typedef struct {
+  pthread_mutex_t lock;
   sfu_transceiver_t uplink_audio;
   sfu_transceiver_t uplink_video;
   sfu_transceiver_t screen;
-  _Atomic uint64_t media_snap_words[5];
-  _Atomic uint32_t media_snap_seq;
-  pthread_mutex_t answer_lock;
-  sfu_session_negotiation_t negotiation;
-  pthread_mutex_t media_lock;
-  pthread_mutex_t snapshot_lock;
-  pthread_mutex_t ingress_lock;
+  _Atomic uint64_t snapshot_words[5];
+  _Atomic uint32_t snapshot_seq;
   uint8_t pt_map[128];
-  int64_t user_id;
-  int64_t last_pli_time;
-  int64_t last_screen_pli_time;
-  int64_t last_fir_time;
-  uint32_t peer_id;
-  _Atomic uint32_t next_remote_mid;
-  _Atomic uint32_t applied_answer_generation;
-  int fd;
-  _Atomic uint64_t worker_owner;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
   uint8_t mid_recv_extmap_id;
-  int64_t twcc_last_feedback_ref_us;
-  struct sfu_twcc_recv_tracker *twcc_recv;
-  _Atomic uint32_t egress_generation;
-  _Atomic uint32_t refcount;
-  _Atomic uint16_t next_twcc_seq;
-  _Atomic uint8_t lifecycle;
-  _Atomic uint8_t video_runtime_state;
-  _Atomic bool accepts_work;
-  uint8_t state;
-  uint8_t fir_seq;
-  _Atomic bool is_audience;
   _Atomic bool ptt_active;
   _Atomic bool audio_send_negotiated;
   _Atomic bool video_send_negotiated;
   _Atomic bool screen_send_negotiated;
   _Atomic bool visible;
   _Atomic bool is_mute;
-  bool active;
   _Atomic bool uplink_ssrc_dirty;
-  _Atomic bool membership_announced;
+} sfu_session_media_t;
+
+typedef struct {
+  gcc_bwe_context_t *gcc_ctx;
+  sfu_twcc_history_t *twcc_history;
+  sfu_twcc_recv_tracker_t *twcc_recv;
+  sfu_session_scheduler_slot_t *schedulers;
+  sfu_pacer_t pacer;
+  sfu_rtx_cache_t *rtx_cache;
+  int64_t last_pli_time;
+  int64_t last_screen_pli_time;
+  int64_t last_fir_time;
+  int64_t twcc_last_feedback_ref_us;
+  _Atomic uint32_t generation;
+  _Atomic uint16_t next_twcc_seq;
+  _Atomic uint8_t video_runtime_state;
+  uint8_t fir_seq;
+} sfu_session_egress_t;
+
+typedef struct sfu_peer_session {
+  sfu_room_t *room;
+  sfu_peer_session_cold_t *cold;
+  sfu_session_negotiation_t negotiation;
+  sfu_session_graph_t graph;
+  sfu_session_media_t media;
+  sfu_session_egress_t egress;
+  sfu_srtp_ctx_t srtp;
+  pthread_mutex_t answer_lock;
+  pthread_mutex_t ingress_lock;
+  int64_t user_id;
+  uint32_t peer_id;
+  _Atomic uint32_t applied_answer_generation;
+  int fd;
+  _Atomic uint64_t worker_owner;
+  _Atomic uint32_t refcount;
+  _Atomic uint8_t lifecycle;
+  _Atomic bool accepts_work;
+  uint8_t state;
+  _Atomic bool is_audience;
+  bool active;
 } sfu_peer_session_t;
 
 typedef struct sfu_hash_slot {
