@@ -1043,10 +1043,12 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
       }
     }
     if (session->room && (media_changed || role_changed || newly_bound)) {
-      SFU_LOG_INFO("answer: media/role changed for ufrag=%s generation=%u (media=%d role=%d bound=%d), refreshing + renegotiating", c->client_ufrag,
-                   answer_generation, media_changed, role_changed, newly_bound);
+      SFU_LOG_INFO("answer: media/role changed for ufrag=%s generation=%u (media=%d role=%d bound=%d), refreshing%s", c->client_ufrag, answer_generation,
+                   media_changed, role_changed, newly_bound, answered_offer_generation == 0 ? " + renegotiating" : "");
       room_refresh_peer_streams((sfu_room_t *)session->room, session);
-      sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+      if (answered_offer_generation == 0 || role_changed || newly_bound) {
+        sfu_signaling_trigger_renegotiation((sfu_room_t *)session->room);
+      }
     }
   }
   if (follow_up_pending && session->room) {
