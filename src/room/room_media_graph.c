@@ -271,6 +271,9 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
     }
   }
 
+  SFU_LOG_INFO("fanout publish publisher_peer=%u combined=%u audio=%u video=%u screen=%u", owner->peer_id, combined ? combined->count : 0, audio_count,
+               video_count, screen_count);
+
   sfu_audio_route_snapshot_t *audio = SFU_CALLOC(1, sizeof(*audio) + (size_t)audio_count * sizeof(audio->entries[0]));
   sfu_video_route_snapshot_t *video = SFU_CALLOC(1, sizeof(*video) + (size_t)video_count * sizeof(video->entries[0]));
   sfu_video_route_snapshot_t *screen = SFU_CALLOC(1, sizeof(*screen) + (size_t)screen_count * sizeof(screen->entries[0]));
@@ -301,6 +304,9 @@ static bool publish_split_fanout(sfu_peer_session_t *owner, const sfu_receiver_s
         route->subscriber = entry->subscriber;
         route->mid = entry->mid_audio;
         atomic_fetch_add_explicit(&entry->subscriber->refcount, 1, memory_order_relaxed);
+        SFU_LOG_INFO("fanout audio route publisher_peer=%u subscriber_peer=%u subscriber_ufrag=%s active=%d mid=%u ssrc=%u", owner->peer_id,
+                     entry->subscriber->peer_id, entry->subscriber->cold ? entry->subscriber->cold->ufrag : "", entry->audio_active, entry->mid_audio,
+                     entry->audio_ssrc);
       }
       if (entry->has_video && entry->video_active && sfu_session_video_runtime_ready(entry->subscriber)) {
         sfu_video_route_entry_t *route = &video->entries[video_pos++];
