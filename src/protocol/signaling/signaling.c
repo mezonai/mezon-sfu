@@ -1126,15 +1126,6 @@ static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s,
   }
 }
 
-static void handle_media_hook(sfu_client_conn_t *c, const char *event) {
-  if (!c->joined_room || c->joined_room_id == 0) {
-    static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
-    sfu_ws_send_text(c->fd, must_join, sizeof(must_join) - 1);
-    return;
-  }
-  emit_hook_event(event, c->user_id, c->joined_room_id);
-}
-
 static void handle_camera(sfu_client_conn_t *c, const char *buf, size_t n) {
   if (!c->joined_room || c->client_ufrag[0] == '\0' || c->is_audience) {
     return;
@@ -1189,7 +1180,7 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
   room_refresh_peer_streams(c->joined_room, session);
   sfu_signaling_trigger_renegotiation(c->joined_room);
   sfu_session_release(session);
-  emit_hook_event("share_screen", c->user_id, c->joined_room_id);
+  emit_hook_event(active ? "share_screen" : "unshare_screen", c->user_id, c->joined_room_id);
   char response[80];
   int response_len = snprintf(response, sizeof(response), "{\"type\":\"screen_share_changed\",\"active\":%s}", active ? "true" : "false");
   if (response_len > 0 && (size_t)response_len < sizeof(response)) {
@@ -1290,10 +1281,6 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
     handle_mute(c, buf, n);
   } else if (strcmp(type, "camera") == 0) {
     handle_camera(c, buf, n);
-  } else if (strcmp(type, "publish") == 0) {
-    handle_media_hook(c, "publish");
-  } else if (strcmp(type, "unpublish") == 0) {
-    handle_media_hook(c, "unpublish");
   } else if (strcmp(type, "share_screen") == 0) {
     handle_screen_share(c, buf, n);
   } else {
