@@ -531,6 +531,7 @@
             let micEnabled = true;
             let camEnabled = false;
             let screenSharing = false;
+            let screenStopping = false;
             let screenStream = null;
             let cameraTrackBackup = null;
             let audioCtx = null;
@@ -1218,22 +1219,28 @@
                 }
             }
 
-            function toggleCam() {
-                camEnabled = !camEnabled;
-                localStream
-                    .getVideoTracks()
-                    .forEach((t) => (t.enabled = camEnabled));
+            function applyCameraState(enabled) {
+                camEnabled = !!enabled;
+                if (localStream) {
+                    localStream.getVideoTracks().forEach((t) => (t.enabled = camEnabled));
+                }
                 const btn = document.getElementById("camBtn");
                 btn.textContent = camEnabled ? "📷" : "📵";
                 btn.classList.toggle("off", !camEnabled);
                 const local = participants.get("local");
-                if (local)
+                if (local) {
                     setTileStream(
                         local,
-                        localStream,
-                        camEnabled && localStream.getVideoTracks().length > 0,
+                        localStream || new MediaStream(),
+                        camEnabled && !!localStream && localStream.getVideoTracks().length > 0,
                     );
-                sendHook("camera", { active: camEnabled });
+                }
+            }
+
+            function toggleCam() {
+                const requested = !camEnabled;
+                applyCameraState(requested);
+                sendHook("camera", { active: requested });
             }
 
             function findUplinkVideoSender(mid = "1") {
@@ -1386,7 +1393,8 @@
             }
 
             async function stopScreenShare(opts = {}) {
-                if (!screenSharing && !screenStream) return;
+                if (screenStopping || (!screenSharing && !screenStream)) return;
+                screenStopping = true;
 
                 const screenTrack =
                     screenStream && screenStream.getVideoTracks
@@ -1438,12 +1446,15 @@
                     }
                 }
 
-                sendHook("share_screen", { active: false });
+                if (!opts.skipSignal) {
+                    sendHook("share_screen", { active: false });
+                }
                 if (!opts.fromTrackEnded) {
                     setConnState("screen share stopped", "ok");
                 } else {
                     setConnState("screen share ended", "warn");
                 }
+                screenStopping = false;
             }
 
             async function toggleScreenShare() {
@@ -2107,6 +2118,34 @@
 
                         if (msg.type === "peer_left") {
                             handlePeerLeft(msg);
+                            return;
+                        }
+
+                        if (msg.type === "camera_changed") {
+                            applyCameraState(!!msg.requested);
+                            if (!msg.requested) {
+                                setConnState("camera stopped", "ok");
+                            } else if (msg.active) {
+                                setConnState("camera active", "ok");
+                            } else {
+                                setConnState("camera waiting for RTP", "warn");
+                            }
+                            return;
+                        }
+
+                        if (msg.type === "screen_share_changed") {
+                            if (!msg.requested && (screenSharing || screenStream)) {
+                                await stopScreenShare({ skipSignal: true });
+                            }
+                            if (!msg.requested) {
+                                setConnState("screen share stopped", "ok");
+                            } else if (msg.active) {
+                                setConnState("sharing screen", "ok");
+                            } else if (msg.negotiation_pending) {
+                                setConnState("screen negotiation pending", "warn");
+                            } else {
+                                setConnState("screen waiting for RTP", "warn");
+                            }
                             return;
                         }
 
