@@ -1,7 +1,9 @@
 #include "protocol/signaling/json_lite.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 int sfu_json_extract_string(const char *json, size_t json_len, const char *field, char *out, size_t out_cap) {
@@ -124,6 +126,37 @@ int sfu_json_extract_bool(const char *json, size_t json_len, const char *field, 
     return 0;
   }
   return -1;
+}
+
+int sfu_json_extract_int64_string(const char *json, size_t json_len, const char *field, int64_t *out) {
+  if (!out) {
+    return -1;
+  }
+
+  char value[32];
+  int value_len = sfu_json_extract_string(json, json_len, field, value, sizeof(value));
+  if (value_len <= 0) {
+    return -1;
+  }
+
+  size_t start = value[0] == '-' ? 1U : 0U;
+  if (start == (size_t)value_len) {
+    return -1;
+  }
+  for (size_t i = start; i < (size_t)value_len; i++) {
+    if (value[i] < '0' || value[i] > '9') {
+      return -1;
+    }
+  }
+
+  errno = 0;
+  char *end = NULL;
+  long long parsed = strtoll(value, &end, 10);
+  if (errno == ERANGE || end != value + value_len) {
+    return -1;
+  }
+  *out = (int64_t)parsed;
+  return 0;
 }
 
 int sfu_json_escape(const char *value, size_t value_len, char *out, size_t out_cap) {

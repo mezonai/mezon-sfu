@@ -1464,6 +1464,98 @@ static void handle_visibility(sfu_client_conn_t *c, const char *buf, size_t n) {
   SFU_LOG_INFO("signaling: visibility user_id=%" PRId64 " visible=%s (fd=%d)", c->user_id, visible ? "true" : "false", c->fd);
 }
 
+static bool can_mute_participant(int64_t requester_user_id, int64_t target_user_id, uint64_t room_id) {
+  (void)requester_user_id;
+  (void)target_user_id;
+  (void)room_id;
+  return true;
+}
+
+static void handle_mute_participant(sfu_client_conn_t *c, const char *buf, size_t n) {
+  if (!c->joined_room || c->joined_room_id == 0) {
+    static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
+    sfu_ws_send_text(c->fd, must_join, sizeof(must_join) - 1);
+    return;
+  }
+
+  char token[4096];
+  int64_t target_user_id = 0;
+  int token_len = sfu_json_extract_string(buf, n, "token", token, sizeof(token));
+  if (token_len < 0 || sfu_json_extract_int64_string(buf, n, "target_user_id", &target_user_id) != 0 || target_user_id <= 0) {
+    static const char invalid[] = "{\"type\":\"error\",\"message\":\"invalid_mute_participant\"}";
+    sfu_ws_send_text(c->fd, invalid, sizeof(invalid) - 1);
+    return;
+  }
+
+  const char *jwt_secret = g_sfu_config.jwt_secret;
+  if (jwt_secret[0] == '\0') {
+    static const char auth_missing[] = "{\"type\":\"error\",\"message\":\"auth_not_configured\"}";
+    sfu_ws_send_text(c->fd, auth_missing, sizeof(auth_missing) - 1);
+    return;
+  }
+
+  int64_t requester_user_id = 0;
+  uint64_t token_room_id = 0;
+  if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &requester_user_id, &token_room_id) != 0) {
+    static const char invalid_token[] = "{\"type\":\"error\",\"message\":\"invalid_token\"}";
+    sfu_ws_send_text(c->fd, invalid_token, sizeof(invalid_token) - 1);
+    return;
+  }
+  if (requester_user_id != c->user_id) {
+    static const char identity_mismatch[] = "{\"type\":\"error\",\"message\":\"token_identity_mismatch\"}";
+    sfu_ws_send_text(c->fd, identity_mismatch, sizeof(identity_mismatch) - 1);
+    return;
+  }
+  if (token_room_id != c->joined_room_id || c->joined_room->room_id != c->joined_room_id) {
+    static const char room_mismatch[] = "{\"type\":\"error\",\"message\":\"token_room_mismatch\"}";
+    sfu_ws_send_text(c->fd, room_mismatch, sizeof(room_mismatch) - 1);
+    return;
+  }
+  if (target_user_id == requester_user_id) {
+    static const char cannot_mute_self[] = "{\"type\":\"error\",\"message\":\"cannot_mute_self\"}";
+    sfu_ws_send_text(c->fd, cannot_mute_self, sizeof(cannot_mute_self) - 1);
+    return;
+  }
+  if (!can_mute_participant(requester_user_id, target_user_id, token_room_id)) {
+    static const char forbidden[] = "{\"type\":\"error\",\"message\":\"mute_participant_forbidden\"}";
+    sfu_ws_send_text(c->fd, forbidden, sizeof(forbidden) - 1);
+    return;
+  }
+
+  sfu_peer_session_t *targets[SFU_ROOM_MAX_PEERS];
+  uint32_t target_count = 0;
+  pthread_mutex_lock(&c->joined_room->lock);
+  for (uint32_t i = 0; i < c->joined_room->peer_count && target_count < SFU_ROOM_MAX_PEERS; i++) {
+    sfu_peer_session_t *peer = c->joined_room->peers[i];
+    if (peer && peer->room == c->joined_room && peer->user_id == target_user_id && sfu_session_accepts_work(peer)) {
+      atomic_fetch_add_explicit(&peer->refcount, 1, memory_order_relaxed);
+      targets[target_count++] = peer;
+    }
+  }
+  pthread_mutex_unlock(&c->joined_room->lock);
+
+  if (target_count == 0) {
+    static const char target_not_found[] = "{\"type\":\"error\",\"message\":\"target_not_found\"}";
+    sfu_ws_send_text(c->fd, target_not_found, sizeof(target_not_found) - 1);
+    return;
+  }
+
+  for (uint32_t i = 0; i < target_count; i++) {
+    atomic_store_explicit(&targets[i]->media.is_mute, true, memory_order_release);
+    broadcast_peer_updated(c->joined_room, targets[i]);
+    sfu_session_release(targets[i]);
+  }
+
+  char response[128];
+  int response_len = snprintf(response, sizeof(response),
+                              "{\"type\":\"participant_muted\",\"user_id\":\"%" PRId64 "\",\"is_mute\":true}", target_user_id);
+  if (response_len > 0 && (size_t)response_len < sizeof(response)) {
+    sfu_ws_send_text(c->fd, response, (size_t)response_len);
+  }
+  SFU_LOG_INFO("signaling: mute participant requester_user_id=%" PRId64 " target_user_id=%" PRId64 " room=%" PRIu64 " sessions=%u (fd=%d)",
+               requester_user_id, target_user_id, token_room_id, target_count, c->fd);
+}
+
 static void handle_mute(sfu_client_conn_t *c, const char *buf, size_t n) {
   if (!c->joined_room || c->client_ufrag[0] == '\0') {
     static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
@@ -1522,6 +1614,8 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
     handle_visibility(c, buf, n);
   } else if (strcmp(type, "mute") == 0) {
     handle_mute(c, buf, n);
+  } else if (strcmp(type, "mute_participant") == 0) {
+    handle_mute_participant(c, buf, n);
   } else if (strcmp(type, "camera") == 0) {
     handle_camera(c, buf, n);
   } else if (strcmp(type, "share_screen") == 0) {
