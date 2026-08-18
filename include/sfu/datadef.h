@@ -247,6 +247,20 @@ typedef struct {
   sfu_dtls_conn_t dtls;
 } sfu_peer_session_cold_t;
 
+typedef struct {
+  pthread_mutex_t lock;
+  bool negotiation_needed;
+  bool offer_outstanding;
+  bool renegotiation_pending;
+  uint32_t offer_generation;
+  uint32_t negotiation_retry_count;
+  uint64_t desired_offer_revision;
+  uint64_t offered_revision;
+  uint64_t answered_revision;
+  uint64_t negotiation_first_dirty_ms;
+  uint64_t negotiation_due_ms;
+} sfu_session_negotiation_t;
+
 typedef struct sfu_peer_session {
   sfu_room_t *room;
   gcc_bwe_context_t *gcc_ctx;
@@ -267,7 +281,7 @@ typedef struct sfu_peer_session {
   _Atomic uint64_t media_snap_words[5];
   _Atomic uint32_t media_snap_seq;
   pthread_mutex_t answer_lock;
-  pthread_mutex_t negotiation_lock;
+  sfu_session_negotiation_t negotiation;
   pthread_mutex_t media_lock;
   pthread_mutex_t snapshot_lock;
   pthread_mutex_t ingress_lock;
@@ -302,16 +316,6 @@ typedef struct sfu_peer_session {
   _Atomic bool visible;
   _Atomic bool is_mute;
   bool active;
-  bool negotiation_needed;
-  bool offer_outstanding;
-  bool renegotiation_pending;
-  uint32_t offer_generation;
-  uint32_t negotiation_retry_count;
-  uint64_t desired_offer_revision;
-  uint64_t offered_revision;
-  uint64_t answered_revision;
-  uint64_t negotiation_first_dirty_ms;
-  uint64_t negotiation_due_ms;
   _Atomic bool uplink_ssrc_dirty;
   _Atomic bool membership_announced;
 } sfu_peer_session_t;
