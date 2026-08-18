@@ -1169,15 +1169,39 @@ static void broadcast_peer_updated(sfu_room_t *room, sfu_peer_session_t *session
   }
 }
 
-bool sfu_signaling_push_to_talk_allowed(bool is_audience) { return !is_audience; }
+static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n) {
+  bool active = false;
+  if (!c->joined_room || c->client_ufrag[0] == '\0' || sfu_json_extract_bool(buf, n, "active", &active) != 0) {
+    static const char invalid_ptt[] = "{\"type\":\"error\",\"message\":\"invalid_push_to_talk\"}";
+    sfu_ws_send_text(c->fd, invalid_ptt, sizeof(invalid_ptt) - 1);
+    return;
+  }
 
-static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n, bool push_to_talk) {
+  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
+  bool accepted = session && session->room == c->joined_room && atomic_load_explicit(&session->is_audience, memory_order_acquire) &&
+                  (!active || atomic_load_explicit(&session->audio_send_negotiated, memory_order_acquire)) &&
+                  room_set_peer_ptt_active(c->joined_room, session, active);
+  if (!accepted) {
+    static const char rejected[] = "{\"type\":\"error\",\"message\":\"push_to_talk_rejected\"}";
+    sfu_ws_send_text(c->fd, rejected, sizeof(rejected) - 1);
+  } else {
+    char response[80];
+    int response_len = snprintf(response, sizeof(response), "{\"type\":\"push_to_talk_changed\",\"active\":%s}", active ? "true" : "false");
+    if (response_len > 0 && (size_t)response_len < sizeof(response)) {
+      sfu_ws_send_text(c->fd, response, (size_t)response_len);
+    }
+    SFU_LOG_INFO("signaling: push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u active=%d role=audience", c->user_id, c->client_ufrag,
+                 session->peer_id, active);
+  }
+  if (session) {
+    sfu_session_release(session);
+  }
+}
+
+static void handle_role_change(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
   (void)s;
   char role_str[16] = {0};
-  if (push_to_talk) {
-    snprintf(role_str, sizeof(role_str), "speaker");
-  }
-  if (!c->joined_room || c->client_ufrag[0] == '\0' || (!push_to_talk && sfu_json_extract_string(buf, n, "role", role_str, sizeof(role_str)) < 0) ||
+  if (!c->joined_room || c->client_ufrag[0] == '\0' || sfu_json_extract_string(buf, n, "role", role_str, sizeof(role_str)) < 0 ||
       (strcmp(role_str, "speaker") != 0 && strcmp(role_str, "audience") != 0)) {
     static const char invalid_role_change[] = "{\"type\":\"error\",\"message\":\"invalid_role_change\"}";
     sfu_ws_send_text(c->fd, invalid_role_change, sizeof(invalid_role_change) - 1);
@@ -1186,16 +1210,6 @@ static void handle_push_to_talk(sfu_client_conn_t *c, sfu_signaling_server_t *s,
 
   bool is_audience = strcmp(role_str, "audience") == 0;
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
-  if (push_to_talk && !sfu_signaling_push_to_talk_allowed(c->is_audience)) {
-    static const char role_change_rejected[] = "{\"type\":\"error\",\"message\":\"role_change_rejected\"}";
-    SFU_LOG_INFO("signaling: rejected audience push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u role=audience", c->user_id, c->client_ufrag,
-                 session ? session->peer_id : 0);
-    sfu_ws_send_text(c->fd, role_change_rejected, sizeof(role_change_rejected) - 1);
-    if (session) {
-      sfu_session_release(session);
-    }
-    return;
-  }
   bool changed = false;
   if (session && session->room == c->joined_room) {
     pthread_mutex_lock(&session->answer_lock);
@@ -1381,8 +1395,10 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
     handle_join(c, s, buf, n);
   } else if (strcmp(type, "answer") == 0) {
     handle_answer(c, s, buf, n);
-  } else if (strcmp(type, "push_to_talk") == 0 || strcmp(type, "role_change") == 0) {
-    handle_push_to_talk(c, s, buf, n, strcmp(type, "push_to_talk") == 0);
+  } else if (strcmp(type, "push_to_talk") == 0) {
+    handle_push_to_talk(c, buf, n);
+  } else if (strcmp(type, "role_change") == 0) {
+    handle_role_change(c, s, buf, n);
   } else if (strcmp(type, "visibility") == 0) {
     handle_visibility(c, buf, n);
   } else if (strcmp(type, "mute") == 0) {

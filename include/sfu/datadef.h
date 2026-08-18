@@ -295,6 +295,7 @@ typedef struct sfu_peer_session {
   uint8_t state;
   uint8_t fir_seq;
   _Atomic bool is_audience;
+  _Atomic bool ptt_active;
   _Atomic bool audio_send_negotiated;
   _Atomic bool video_send_negotiated;
   _Atomic bool screen_send_negotiated;

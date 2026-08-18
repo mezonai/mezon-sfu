@@ -720,6 +720,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->video_fanout_targets, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->screen_fanout_targets, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
+  atomic_store_explicit(&s->ptt_active, false, memory_order_relaxed);
   atomic_store_explicit(&s->audio_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->video_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->screen_send_negotiated, false, memory_order_relaxed);
@@ -1077,7 +1078,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   }
 
   if (answer->audio_section_present) {
-    atomic_store_explicit(&session->audio_send_negotiated, answer->audio_sends && !answer->is_audience, memory_order_release);
+    atomic_store_explicit(&session->audio_send_negotiated, answer->audio_sends, memory_order_release);
   }
   if (answer->video_section_present) {
     atomic_store_explicit(&session->video_send_negotiated, answer->video_sends && !answer->is_audience, memory_order_release);
@@ -1100,7 +1101,8 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   sfu_video_codec_t screen_codec =
       answer->screen_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->screen_codec : session->screen.codec;
   bool current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
-  bool audio_active = !current_audience && audio_ssrc != 0;
+  bool ptt_active = atomic_load_explicit(&session->ptt_active, memory_order_acquire);
+  bool audio_active = audio_ssrc != 0 && (!current_audience || ptt_active);
   bool video_active = !current_audience && video_ssrc != 0;
   bool screen_active = !current_audience && screen_ssrc != 0 && session->screen.active;
 

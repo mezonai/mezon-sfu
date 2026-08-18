@@ -372,7 +372,7 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
     return -1;
   }
 
@@ -756,7 +756,7 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
   if (append_media_transport_headers(out, out_cap, &off, host, port, ufrag, pwd, fingerprint) != 0) {
     goto fail;
   }
-  if (append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0) {
+  if (append_line(out, out_cap, &off, "a=recvonly") != 0) {
     goto fail;
   }
   if (append_line(out, out_cap, &off, "a=mid:0") != 0) {

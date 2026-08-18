@@ -984,10 +984,11 @@
                         new RTCSessionDescription({ type: "offer", sdp })
                     );
 
-                    if (!localTracksAdded && currentJoinMode === "speaker" && localStream) {
+                    if (!localTracksAdded && localStream) {
                         const audioTrack = localStream.getAudioTracks()[0];
                         const videoTrack = localStream.getVideoTracks()[0];
                         if (audioTrack) {
+                            if (currentJoinMode === "audience") audioTrack.enabled = false;
                             const audioTc = pc.getTransceivers().find(
                                 (t) => t.mid === "0" || (t.receiver && t.receiver.track && t.receiver.track.kind === "audio")
                             );
@@ -998,7 +999,7 @@
                                 pc.addTrack(audioTrack, localStream);
                             }
                         }
-                        if (videoTrack) {
+                        if (currentJoinMode === "speaker" && videoTrack) {
                             await enableSvcForVideoSender(pc, videoTrack);
                             if (screenSharing && screenStream) {
                                 const screenTrack = screenStream.getVideoTracks()[0];
@@ -1738,10 +1739,12 @@
                 if (!ws || ws.readyState !== WebSocket.OPEN || pttActive) return;
 
                 pttActive = true;
+                const audioTrack = localStream && localStream.getAudioTracks()[0];
+                if (audioTrack) audioTrack.enabled = true;
                 setPttButtonPressed(true);
                 ws.send(JSON.stringify({
-                    type: "role_change",
-                    role: "speaker",
+                    type: "push_to_talk",
+                    active: true,
                 }));
             }
 
@@ -1761,10 +1764,12 @@
                 if (!ws || ws.readyState !== WebSocket.OPEN || !pttActive) return;
 
                 pttActive = false;
+                const audioTrack = localStream && localStream.getAudioTracks()[0];
+                if (audioTrack) audioTrack.enabled = false;
                 setPttButtonPressed(false);
                 ws.send(JSON.stringify({
-                    type: "role_change",
-                    role: "audience",
+                    type: "push_to_talk",
+                    active: false,
                 }));
             }
 
@@ -1967,6 +1972,14 @@
 
                         if (msg.type === "error") {
                             const detail = msg.message || "unknown_error";
+                            if (detail === "invalid_push_to_talk" || detail === "push_to_talk_rejected") {
+                                pttActive = false;
+                                const audioTrack = localStream && localStream.getAudioTracks()[0];
+                                if (audioTrack) audioTrack.enabled = false;
+                                setPttButtonPressed(false);
+                                console.warn("PTT rejected:", detail);
+                                return;
+                            }
                             const friendly = detail === "missing_token"
                                 ? "Join failed: missing token"
                                 : detail === "invalid_token"
@@ -2015,6 +2028,14 @@
 
                         if (msg.type === "peer_left") {
                             handlePeerLeft(msg);
+                            return;
+                        }
+
+                        if (msg.type === "push_to_talk_changed") {
+                            pttActive = !!msg.active;
+                            const audioTrack = localStream && localStream.getAudioTracks()[0];
+                            if (audioTrack) audioTrack.enabled = pttActive;
+                            setPttButtonPressed(pttActive);
                             return;
                         }
 

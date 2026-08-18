@@ -436,13 +436,6 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
-  if (!is_rtcp && atomic_load_explicit(&sender_session->is_audience, memory_order_acquire)) {
-    sfu_metric_inc("audience_rtp_drop");
-    pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
-    sfu_session_release(sender_session);
-    return;
-  }
 
   if (!is_rtcp && pkt->len >= 12 && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
     uint32_t raw_ssrc = sfu_read_be32(pkt->data + 8);
@@ -491,6 +484,15 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint8_t in_pt = m.rtp.payload_type;
   m.source = classify_media_source(&pt_msnap, &m.rtp);
   m.is_audio = m.source == SFU_MEDIA_AUDIO;
+  bool is_audience = atomic_load_explicit(&sender_session->is_audience, memory_order_acquire);
+  bool ptt_active = atomic_load_explicit(&sender_session->ptt_active, memory_order_acquire);
+  if (is_audience && (!m.is_audio || !ptt_active)) {
+    sfu_metric_inc(m.is_audio ? "ptt_inactive_audio_drop" : "audience_rtp_drop");
+    pthread_mutex_unlock(&sender_session->ingress_lock);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
   if (m.is_audio && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
     sfu_metric_inc("muted_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
@@ -525,6 +527,13 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool learned = false;
   if (!send_negotiated) {
     sfu_metric_inc("unnegotiated_rtp_drop");
+    pthread_mutex_unlock(&sender_session->ingress_lock);
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_session_release(sender_session);
+    return;
+  }
+  if (is_audience && !atomic_load_explicit(&sender_session->ptt_active, memory_order_acquire)) {
+    sfu_metric_inc("ptt_inactive_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);

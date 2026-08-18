@@ -207,8 +207,8 @@ static void test_initial_offer_role_directions(void) {
   len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", true, offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
-  assert(count_occurrences(offer, "a=inactive") == 3);
-  assert(!contains(offer, "a=recvonly"));
+  assert(count_occurrences(offer, "a=inactive") == 2);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
 }
 
 static void test_renegotiation_offer_role_directions(void) {
@@ -230,7 +230,8 @@ static void test_renegotiation_offer_role_directions(void) {
   len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
-  assert(count_occurrences(offer, "a=inactive") == 3);
+  assert(count_occurrences(offer, "a=inactive") == 2);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
 
   pthread_mutex_destroy(&session.snapshot_lock);
   pthread_mutex_destroy(&session.media_lock);
@@ -267,7 +268,8 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
   assert(contains(offer, "a=mid:4"));
   assert(contains(offer, "a=mid:5"));
-  assert(count_occurrences(offer, "a=inactive") == 4);
+  assert(count_occurrences(offer, "a=inactive") == 3);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
   assert(count_occurrences(offer, "a=sendonly") == 2);
   assert(contains(offer, "a=mid:3"));
   assert(contains(offer, "a=mid:4"));
@@ -286,7 +288,8 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=sendonly") == 2);
-  assert(count_occurrences(offer, "a=inactive") == 4);
+  assert(count_occurrences(offer, "a=inactive") == 3);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
   assert(!contains(offer, "a=ssrc:2222"));
 
   cleanup_mock_session(&session, remotes);
@@ -326,7 +329,8 @@ static void test_screen_only_remote_offer(void) {
   offer[len] = '\0';
 
   assert(count_occurrences(offer, "a=sendonly") == 1);
-  assert(count_occurrences(offer, "a=inactive") == 5);
+  assert(count_occurrences(offer, "a=inactive") == 4);
+  assert(count_occurrences(offer, "a=recvonly") == 1);
   assert(contains(offer, "a=mid:5\r\n"));
   assert(!contains(offer, "a=ssrc:4444"));
   assert(contains(offer, "a=msid:u42-p7 screen-u42-p7"));
