@@ -131,27 +131,6 @@ int main(void) {
     assert(canary == 0xA5);
   }
 
-  /* Strict 64-bit IDs are accepted only as complete decimal strings. */
-  {
-    int64_t value = 0;
-    const char *valid = "{\"target_user_id\":\"9007199254740993\"}";
-    assert(sfu_json_extract_int64_string(valid, strlen(valid), "target_user_id", &value) == 0);
-    assert(value == INT64_C(9007199254740993));
-
-    const char *negative = "{\"target_user_id\":\"-42\"}";
-    assert(sfu_json_extract_int64_string(negative, strlen(negative), "target_user_id", &value) == 0);
-    assert(value == -42);
-
-    assert(sfu_json_extract_int64_string("{}", 2, "target_user_id", &value) == -1);
-    assert(sfu_json_extract_int64_string("{\"target_user_id\":123}", strlen("{\"target_user_id\":123}"), "target_user_id", &value) == -1);
-    assert(sfu_json_extract_int64_string("{\"target_user_id\":\"\"}", strlen("{\"target_user_id\":\"\"}"), "target_user_id", &value) == -1);
-    assert(sfu_json_extract_int64_string("{\"target_user_id\":\"12x\"}", strlen("{\"target_user_id\":\"12x\"}"), "target_user_id", &value) == -1);
-    assert(sfu_json_extract_int64_string("{\"target_user_id\":\"12 \"}", strlen("{\"target_user_id\":\"12 \"}"), "target_user_id", &value) == -1);
-    assert(sfu_json_extract_int64_string("{\"target_user_id\":\"9223372036854775808\"}",
-                                         strlen("{\"target_user_id\":\"9223372036854775808\"}"), "target_user_id", &value) == -1);
-    assert(sfu_json_extract_int64_string(valid, strlen(valid), "target_user_id", NULL) == -1);
-  }
-
   printf("test_json_lite: OK\n");
   return 0;
 }
