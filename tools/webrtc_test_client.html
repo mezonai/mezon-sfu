@@ -195,6 +195,36 @@
             .tile.local video {
                 transform: scaleX(-1);
             }
+            .tile.screen-share {
+                cursor: zoom-in;
+            }
+            .tile.screen-share video {
+                object-fit: contain;
+            }
+            .tile.local.screen-share video {
+                transform: none;
+            }
+            .tile.screen-share.expanded {
+                position: fixed;
+                left: 50%;
+                top: 50%;
+                width: min(720px, calc(100vw - 32px));
+                height: min(1280px, calc(100dvh - 32px));
+                max-width: calc(100vw - 32px);
+                max-height: calc(100dvh - 32px);
+                aspect-ratio: auto;
+                transform: translate(-50%, -50%);
+                z-index: 1000;
+                cursor: zoom-out;
+                border-color: var(--accent);
+                box-shadow:
+                    0 0 0 100vmax rgba(0, 0, 0, 0.75),
+                    0 16px 48px rgba(0, 0, 0, 0.6);
+            }
+            .tile.screen-share:focus-visible {
+                outline: 3px solid var(--accent);
+                outline-offset: 2px;
+            }
             .tile .avatar-fallback {
                 position: absolute;
                 inset: 0;
@@ -668,10 +698,44 @@
                     `· ${n} participant${n === 1 ? "" : "s"}`;
             }
 
+            function collapseExpandedScreenTile(except = null) {
+                document.querySelectorAll(".tile.screen-share.expanded").forEach((tile) => {
+                    if (tile !== except) {
+                        tile.classList.remove("expanded");
+                        tile.setAttribute("aria-expanded", "false");
+                    }
+                });
+            }
+
+            function toggleScreenTile(tile) {
+                const expand = !tile.classList.contains("expanded");
+                collapseExpandedScreenTile(tile);
+                tile.classList.toggle("expanded", expand);
+                tile.setAttribute("aria-expanded", expand ? "true" : "false");
+            }
+
+            document.addEventListener("keydown", (event) => {
+                if (event.key === "Escape") collapseExpandedScreenTile();
+            });
+
             function createTile(id, { isLocal, label }) {
                 const tile = document.createElement("div");
                 tile.className = "tile" + (isLocal ? " local" : "");
                 tile.id = "tile-" + id;
+                if (id.endsWith("-screen")) {
+                    tile.classList.add("screen-share");
+                    tile.tabIndex = 0;
+                    tile.setAttribute("role", "button");
+                    tile.setAttribute("aria-label", `Expand ${label || "screen share"}`);
+                    tile.setAttribute("aria-expanded", "false");
+                    tile.addEventListener("click", () => toggleScreenTile(tile));
+                    tile.addEventListener("keydown", (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            toggleScreenTile(tile);
+                        }
+                    });
+                }
 
                 const video = document.createElement("video");
                 video.autoplay = true;
