@@ -1102,7 +1102,7 @@
                         answer.sdp,
                         wantSvc ? 1000 : 600,
                         wantSvc ? 1500 : 1000,
-                        wantSvc ? 2500 : 1500
+                        8000
                     );
                     await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
 
@@ -1277,13 +1277,14 @@
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    // Screen content: prefer clarity over motion/SVC.
+                    // Screen content: preserve native resolution and spend bitrate on text clarity.
                     const enc = params.encodings[0];
                     if ("scalabilityMode" in enc) {
                         delete enc.scalabilityMode;
                     }
-                    enc.maxFramerate = 15;
-                    enc.maxBitrate = 2_500_000;
+                    params.degradationPreference = "maintain-resolution";
+                    enc.maxFramerate = 10;
+                    enc.maxBitrate = 8_000_000;
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
                     enc.networkPriority = "high";
@@ -1308,9 +1309,9 @@
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             cursor: "always",
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 },
-                            frameRate: { ideal: 15, max: 30 },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                            frameRate: { ideal: 10, max: 15 },
                         },
                         audio: false,
                     });
@@ -1330,7 +1331,7 @@
 
                 if ("contentHint" in screenTrack) {
                     try {
-                        screenTrack.contentHint = "detail";
+                        screenTrack.contentHint = "text";
                     } catch (_) {
                         /* older browsers */
                     }
