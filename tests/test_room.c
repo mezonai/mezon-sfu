@@ -21,17 +21,17 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   s->active = true;
   assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->negotiation.lock, NULL) == 0);
-  assert(pthread_mutex_init(&s->media_lock, NULL) == 0);
-  assert(pthread_mutex_init(&s->snapshot_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->media.lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->graph.lock, NULL) == 0);
   atomic_store(&s->refcount, 1);
   atomic_store(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
   atomic_store(&s->accepts_work, true);
-  atomic_store(&s->visible, true);
-  s->uplink_audio.owner = s;
-  s->uplink_video.owner = s;
-  s->uplink_audio.active = true;
-  s->uplink_video.active = true;
-  s->next_remote_mid = SFU_REMOTE_MID_BASE;
+  atomic_store(&s->media.visible, true);
+  s->media.uplink_audio.owner = s;
+  s->media.uplink_video.owner = s;
+  s->media.uplink_audio.active = true;
+  s->media.uplink_video.active = true;
+  s->graph.next_remote_mid = SFU_REMOTE_MID_BASE;
   return s;
 }
 
@@ -113,12 +113,12 @@ static void test_add_remove(void) {
   assert(audio_route_count(a) == 1 && audio_route_count(b) == 1);
   assert(video_route_count(a) == 1 && video_route_count(b) == 1);
 
-  b->uplink_video.active = false;
+  b->media.uplink_video.active = false;
   room_refresh_peer_streams(&room, b);
   assert(receiver_count(a) == 1); /* stable SDP slot remains */
   assert(video_route_count(b) == 0); /* inactive source omitted from hot path */
   assert(audio_route_count(b) == 1);
-  b->uplink_video.active = true;
+  b->media.uplink_video.active = true;
   room_refresh_peer_streams(&room, b);
   assert(video_route_count(b) == 1);
 
@@ -194,23 +194,23 @@ static void test_audience_role_asymmetry_and_transition(void) {
   assert(sfu_room_init(&room, 4) == 0);
 
   sfu_peer_session_t *speaker = mock_session("speaker");
-  speaker->uplink_audio.ssrc = 1111;
-  speaker->uplink_video.ssrc = 2222;
-  speaker->uplink_video.rtx_ssrc = 3333;
-  speaker->uplink_video.payload_type = 96;
-  speaker->uplink_video.rtx_payload_type = 97;
-  speaker->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+  speaker->media.uplink_audio.ssrc = 1111;
+  speaker->media.uplink_video.ssrc = 2222;
+  speaker->media.uplink_video.rtx_ssrc = 3333;
+  speaker->media.uplink_video.payload_type = 96;
+  speaker->media.uplink_video.rtx_payload_type = 97;
+  speaker->media.uplink_video.codec = SFU_VIDEO_CODEC_VP8;
   sfu_peer_session_t *audience = mock_session("audience");
-  audience->screen.ssrc = 4444;
-  audience->screen.rtx_ssrc = 5555;
-  audience->screen.payload_type = 96;
-  audience->screen.rtx_payload_type = 97;
-  audience->screen.codec = SFU_VIDEO_CODEC_VP8;
-  audience->screen.active = false;
-  audience->uplink_audio.ssrc = 7777;
-  audience->uplink_audio.active = false;
-  audience->uplink_video.active = false;
-  atomic_store(&audience->audio_send_negotiated, true);
+  audience->media.screen.ssrc = 4444;
+  audience->media.screen.rtx_ssrc = 5555;
+  audience->media.screen.payload_type = 96;
+  audience->media.screen.rtx_payload_type = 97;
+  audience->media.screen.codec = SFU_VIDEO_CODEC_VP8;
+  audience->media.screen.active = false;
+  audience->media.uplink_audio.ssrc = 7777;
+  audience->media.uplink_audio.active = false;
+  audience->media.uplink_video.active = false;
+  atomic_store(&audience->media.audio_send_negotiated, true);
   atomic_store(&audience->is_audience, true);
 
   room_add_peer(&room, speaker);
@@ -219,7 +219,7 @@ static void test_audience_role_asymmetry_and_transition(void) {
   /* Audience receives the speaker SDP source but never owns an RTP fanout
    * snapshot. The speaker forwards to the audience. */
   assert(receiver_count(audience) == 1);
-  assert(audience->next_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(audience->graph.next_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   assert(subscribes_to(audience, speaker));
   assert(receiver_count(speaker) == 1);
   assert(subscribes_to(speaker, audience));
@@ -238,15 +238,15 @@ static void test_audience_role_asymmetry_and_transition(void) {
     assert(!snap->entries[0].audio_active);
     sfu_subscriptions_snapshot_release(snap);
   }
-  uint32_t speaker_next_mid_before_ptt = speaker->next_remote_mid;
+  uint32_t speaker_next_mid_before_ptt = speaker->graph.next_remote_mid;
   assert(audio_route_count(audience) == 0);
   assert(room_set_peer_ptt_active(&room, audience, true));
   assert(atomic_load(&audience->is_audience));
-  assert(atomic_load(&audience->ptt_active));
+  assert(atomic_load(&audience->media.ptt_active));
   assert(audio_route_count(audience) == 1);
-  assert(speaker->next_remote_mid == speaker_next_mid_before_ptt);
+  assert(speaker->graph.next_remote_mid == speaker_next_mid_before_ptt);
   assert(room_set_peer_ptt_active(&room, audience, false));
-  assert(!atomic_load(&audience->ptt_active));
+  assert(!atomic_load(&audience->media.ptt_active));
   assert(audio_route_count(audience) == 0);
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
@@ -308,29 +308,29 @@ static void test_audience_role_asymmetry_and_transition(void) {
   }
   /* ...and the demoted peer's uplink state is reset so a re-promotion with
    * fresh browser SSRCs is learned from RTP again. */
-  assert(audience->uplink_audio.ssrc == 0);
-  assert(!audience->uplink_audio.active);
-  assert(audience->uplink_video.ssrc == 0);
-  assert(!audience->uplink_video.active);
-  assert(audience->screen.ssrc == 0);
-  assert(!audience->screen.active);
+  assert(audience->media.uplink_audio.ssrc == 0);
+  assert(!audience->media.uplink_audio.active);
+  assert(audience->media.uplink_video.ssrc == 0);
+  assert(!audience->media.uplink_video.active);
+  assert(audience->media.screen.ssrc == 0);
+  assert(!audience->media.screen.active);
 
   /* Re-promotion with fresh uplink SSRCs reuses the same slot: mids are
    * preserved (the subscriber's transceivers stay bound) while the new
    * media state is picked up. */
-  audience->uplink_audio.ssrc = 1111;
-  audience->uplink_audio.active = true;
-  audience->uplink_video.ssrc = 2222;
-  audience->uplink_video.rtx_ssrc = 3333;
-  audience->uplink_video.active = true;
-  audience->screen.ssrc = 4444;
-  audience->screen.rtx_ssrc = 5555;
-  audience->screen.payload_type = 96;
-  audience->screen.rtx_payload_type = 97;
-  audience->screen.codec = SFU_VIDEO_CODEC_VP8;
-  audience->screen.active = true;
+  audience->media.uplink_audio.ssrc = 1111;
+  audience->media.uplink_audio.active = true;
+  audience->media.uplink_video.ssrc = 2222;
+  audience->media.uplink_video.rtx_ssrc = 3333;
+  audience->media.uplink_video.active = true;
+  audience->media.screen.ssrc = 4444;
+  audience->media.screen.rtx_ssrc = 5555;
+  audience->media.screen.payload_type = 96;
+  audience->media.screen.rtx_payload_type = 97;
+  audience->media.screen.codec = SFU_VIDEO_CODEC_VP8;
+  audience->media.screen.active = true;
 
-  uint32_t speaker_next_mid = speaker->next_remote_mid;
+  uint32_t speaker_next_mid = speaker->graph.next_remote_mid;
   assert(room_update_peer_role(&room, audience, false));
   assert(receiver_count(speaker) == 1);
   assert(fanout_targets(audience, speaker));
@@ -352,7 +352,7 @@ static void test_audience_role_asymmetry_and_transition(void) {
     sfu_subscriptions_snapshot_release(snap);
   }
   /* No fresh mid pair was allocated for the re-promoted peer. */
-  assert(speaker->next_remote_mid == speaker_next_mid);
+  assert(speaker->graph.next_remote_mid == speaker_next_mid);
 
   room_remove_peer(&room, audience);
   room_remove_peer(&room, speaker);
@@ -573,16 +573,16 @@ static void test_fanout_uses_publisher_stream_identity(void) {
 
   sfu_peer_session_t *publisher = mock_session("publisher");
   sfu_peer_session_t *subscriber = mock_session("subscriber");
-  publisher->uplink_video.ssrc = 1111;
-  publisher->uplink_video.rtx_ssrc = 2222;
-  publisher->uplink_video.payload_type = 98;
-  publisher->uplink_video.rtx_payload_type = 97;
-  publisher->uplink_video.codec = SFU_VIDEO_CODEC_VP9;
-  subscriber->uplink_video.ssrc = 3333;
-  subscriber->uplink_video.rtx_ssrc = 4444;
-  subscriber->uplink_video.payload_type = 96;
-  subscriber->uplink_video.rtx_payload_type = 99;
-  subscriber->uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+  publisher->media.uplink_video.ssrc = 1111;
+  publisher->media.uplink_video.rtx_ssrc = 2222;
+  publisher->media.uplink_video.payload_type = 98;
+  publisher->media.uplink_video.rtx_payload_type = 97;
+  publisher->media.uplink_video.codec = SFU_VIDEO_CODEC_VP9;
+  subscriber->media.uplink_video.ssrc = 3333;
+  subscriber->media.uplink_video.rtx_ssrc = 4444;
+  subscriber->media.uplink_video.payload_type = 96;
+  subscriber->media.uplink_video.rtx_payload_type = 99;
+  subscriber->media.uplink_video.codec = SFU_VIDEO_CODEC_VP8;
 
   room_add_peer(&room, publisher);
   room_add_peer(&room, subscriber);
@@ -591,13 +591,13 @@ static void test_fanout_uses_publisher_stream_identity(void) {
   assert(snap != NULL && snap->count == 1);
   const sfu_receiver_entry_t *entry = &snap->entries[0];
   assert(entry->subscriber == subscriber);
-  assert(entry->video_ssrc == publisher->uplink_video.ssrc);
-  assert(entry->video_rtx_ssrc == publisher->uplink_video.rtx_ssrc);
+  assert(entry->video_ssrc == publisher->media.uplink_video.ssrc);
+  assert(entry->video_rtx_ssrc == publisher->media.uplink_video.rtx_ssrc);
   assert(entry->mid_audio == SFU_REMOTE_MID_BASE);
   assert(entry->mid_video == SFU_REMOTE_MID_BASE + 1);
   assert(entry->mid_screen == SFU_REMOTE_MID_BASE + 2);
-  assert(entry->video_pt == publisher->uplink_video.payload_type);
-  assert(entry->video_rtx_pt == publisher->uplink_video.rtx_payload_type);
+  assert(entry->video_pt == publisher->media.uplink_video.payload_type);
+  assert(entry->video_rtx_pt == publisher->media.uplink_video.rtx_payload_type);
   assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);
   assert(strcmp(entry->subscriber_ufrag, publisher->cold->ufrag) == 0);
   sfu_subscriptions_snapshot_release(snap);
@@ -606,7 +606,7 @@ static void test_fanout_uses_publisher_stream_identity(void) {
   assert(snap != NULL && snap->count == 1);
   entry = &snap->entries[0];
   assert(entry->subscriber == publisher);
-  assert(entry->video_ssrc == publisher->uplink_video.ssrc);
+  assert(entry->video_ssrc == publisher->media.uplink_video.ssrc);
   assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);
   sfu_subscriptions_snapshot_release(snap);
 
@@ -659,9 +659,9 @@ static void test_three_peer_route_mids(void) {
   assert_fanout_mids_match_subscriptions(a, 2);
   assert_fanout_mids_match_subscriptions(b, 2);
   assert_fanout_mids_match_subscriptions(c, 2);
-  assert(a->next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
-  assert(b->next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
-  assert(c->next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(a->graph.next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(b->graph.next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(c->graph.next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
 
   room_remove_peer(&room, c);
   room_remove_peer(&room, b);

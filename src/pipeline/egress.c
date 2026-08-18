@@ -32,7 +32,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   int64_t send_time_us = (int64_t)sfu_now_us();
   sfu_pacer_class_t cls = media->is_audio ? SFU_PACER_CLASS_AUDIO : (media->has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
-  if (!sfu_pacer_should_send(&sub_session->pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
+  if (!sfu_pacer_should_send(&sub_session->egress.pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
     sfu_metric_inc("pacer_dropped_enh");
     return false;
   }
@@ -57,19 +57,19 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     enc_len = (int)new_len;
   }
 
-  if (media->has_video && !media->is_audio && sfu_session_video_runtime_ready(sub_session) && sub_session->rtx_cache) {
-    sfu_rtx_cache_put_stream(sub_session->rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, media->video_rtx_ssrc, media->video_rtx_pt,
-                             media->video_ssrc, atomic_load_explicit(&sub_session->egress_generation, memory_order_acquire));
+  if (media->has_video && !media->is_audio && sfu_session_video_runtime_ready(sub_session) && sub_session->egress.rtx_cache) {
+    sfu_rtx_cache_put_stream(sub_session->egress.rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, media->video_rtx_ssrc, media->video_rtx_pt,
+                             media->video_ssrc, atomic_load_explicit(&sub_session->egress.generation, memory_order_acquire));
   }
 
   uint8_t twcc_send_extmap_id = egress_msnap.twcc_send_extmap_id;
   if (twcc_send_extmap_id != 0) {
-    uint16_t twcc_seq = __atomic_fetch_add(&sub_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+    uint16_t twcc_seq = __atomic_fetch_add(&sub_session->egress.next_twcc_seq, 1, __ATOMIC_RELAXED);
     size_t new_len = (size_t)enc_len;
     if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, twcc_send_extmap_id, twcc_seq, &new_len)) {
       enc_len = (int)new_len;
-      if (sfu_session_video_runtime_ready(sub_session) && sub_session->twcc_history) {
-        sfu_twcc_history_record(sub_session->twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
+      if (sfu_session_video_runtime_ready(sub_session) && sub_session->egress.twcc_history) {
+        sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
       }
     } else {
       sfu_metric_inc("twcc_write_fail");
@@ -129,7 +129,7 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
 
   if (video_class == SFU_PACER_CLASS_VIDEO_ENH) {
     int64_t now_us = (int64_t)sfu_now_us();
-    if (sfu_pacer_debt_after(&sub_session->pacer, plain->len + 10, now_us) > sub_session->pacer.bucket_cap_bytes) {
+    if (sfu_pacer_debt_after(&sub_session->egress.pacer, plain->len + 10, now_us) > sub_session->egress.pacer.bucket_cap_bytes) {
       if (has_decision) {
         sfu_scheduler_reject_packet(sched, &decision);
       }

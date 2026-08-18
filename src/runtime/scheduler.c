@@ -205,14 +205,14 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
 }
 
 sfu_subscriber_scheduler_t *sfu_session_scheduler_for_stream(sfu_peer_session_t *session, uint32_t publisher_id, sfu_media_kind_t source) {
-  if (!session || !sfu_session_video_runtime_ready(session) || !session->schedulers || publisher_id == 0 || source == SFU_MEDIA_AUDIO) {
+  if (!session || !sfu_session_video_runtime_ready(session) || !session->egress.schedulers || publisher_id == 0 || source == SFU_MEDIA_AUDIO) {
     return NULL;
   }
   uint64_t stream_key = ((uint64_t)publisher_id << 8) | (uint8_t)source;
 
   sfu_session_scheduler_slot_t *free_slot = NULL;
   for (uint32_t i = 0; i < SFU_SESSION_SCHEDULER_CAP; i++) {
-    sfu_session_scheduler_slot_t *slot = &session->schedulers[i];
+    sfu_session_scheduler_slot_t *slot = &session->egress.schedulers[i];
     if (slot->publisher_id == stream_key) {
       return &slot->sched;
     }
@@ -553,5 +553,5 @@ void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_
   sched->keyframe_failed = false;
   sched->output_seq_initialized = false;
 
-  atomic_fetch_add_explicit(&session->egress_generation, 1, memory_order_acq_rel);
+  atomic_fetch_add_explicit(&session->egress.generation, 1, memory_order_acq_rel);
 }

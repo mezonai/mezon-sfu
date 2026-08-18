@@ -35,12 +35,12 @@
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
 
 void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
-  sfu_pacer_set_rate(&session->pacer, bitrate_bps, (int64_t)sfu_now_us());
-  if (!session->schedulers) {
+  sfu_pacer_set_rate(&session->egress.pacer, bitrate_bps, (int64_t)sfu_now_us());
+  if (!session->egress.schedulers) {
     return;
   }
   for (uint32_t i = 0; i < SFU_SESSION_SCHEDULER_CAP; i++) {
-    sfu_session_scheduler_slot_t *slot = &session->schedulers[i];
+    sfu_session_scheduler_slot_t *slot = &session->egress.schedulers[i];
     if (slot->publisher_id != 0) {
       sfu_subscriber_scheduler_set_bitrate(&slot->sched, bitrate_bps);
     }
@@ -112,7 +112,7 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     return;
   }
   sfu_twcc_parser_t parser;
-  if (sfu_twcc_parser_init(&parser, view->member, view->member_len, sender_session->twcc_last_feedback_ref_us) != 0) {
+  if (sfu_twcc_parser_init(&parser, view->member, view->member_len, sender_session->egress.twcc_last_feedback_ref_us) != 0) {
     sfu_metric_inc("rtcp_twcc_bad");
     return;
   }
@@ -132,16 +132,16 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     return;
   }
 
-  uint32_t estimated_bps = sender_session->gcc_ctx ? sender_session->gcc_ctx->aimd.current_bitrate_bps : 0;
+  uint32_t estimated_bps = sender_session->egress.gcc_ctx ? sender_session->egress.gcc_ctx->aimd.current_bitrate_bps : 0;
   uint32_t fresh_lost = 0;
   uint32_t fresh_total = 0;
 
   for (size_t i = 0; i < batch_count; i++) {
-    if (!sender_session->twcc_history) {
+    if (!sender_session->egress.twcc_history) {
       break;
     }
     if (batch[i].status == TWCC_STATUS_NOT_RECEIVED) {
-      if (sfu_twcc_history_report_loss_once(sender_session->twcc_history, batch[i].sequence_number)) {
+      if (sfu_twcc_history_report_loss_once(sender_session->egress.twcc_history, batch[i].sequence_number)) {
         fresh_lost++;
         fresh_total++;
       }
@@ -150,9 +150,9 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 
     gcc_packet_info_t item = {.sequence_number = batch[i].sequence_number, .receive_time_us = batch[i].receive_time_us};
     bool was_loss_reported = false;
-    if (sfu_twcc_history_consume_received(sender_session->twcc_history, item.sequence_number, &item, &was_loss_reported)) {
-      if (sender_session->gcc_ctx) {
-        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->gcc_ctx, &item);
+    if (sfu_twcc_history_consume_received(sender_session->egress.twcc_history, item.sequence_number, &item, &was_loss_reported)) {
+      if (sender_session->egress.gcc_ctx) {
+        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->egress.gcc_ctx, &item);
       }
       if (!was_loss_reported) {
         fresh_total++;
@@ -160,13 +160,13 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     }
   }
 
-  if (parser.current_time_us > sender_session->twcc_last_feedback_ref_us) {
-    sender_session->twcc_last_feedback_ref_us = parser.current_time_us;
+  if (parser.current_time_us > sender_session->egress.twcc_last_feedback_ref_us) {
+    sender_session->egress.twcc_last_feedback_ref_us = parser.current_time_us;
   }
 
-  if (sender_session->gcc_ctx && fresh_lost > 0) {
-    gcc_bwe_report_loss(sender_session->gcc_ctx, fresh_lost, fresh_total);
-    estimated_bps = sender_session->gcc_ctx->aimd.current_bitrate_bps;
+  if (sender_session->egress.gcc_ctx && fresh_lost > 0) {
+    gcc_bwe_report_loss(sender_session->egress.gcc_ctx, fresh_lost, fresh_total);
+    estimated_bps = sender_session->egress.gcc_ctx->aimd.current_bitrate_bps;
   }
 
   if (estimated_bps > 0) {
@@ -182,12 +182,12 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     return;
   }
 
-  if (!sender_session->rtx_cache) {
+  if (!sender_session->egress.rtx_cache) {
     return;
   }
 
   uint32_t nack_media_ssrc = sfu_nack_parser_media_ssrc(&nack_parser);
-  uint32_t nack_generation = atomic_load_explicit(&sender_session->egress_generation, memory_order_acquire);
+  uint32_t nack_generation = atomic_load_explicit(&sender_session->egress.generation, memory_order_acquire);
 
   uint16_t requested[SFU_INGRESS_NACK_REQUEST_CAP];
   uint32_t requested_count = 0;
@@ -217,12 +217,12 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     uint32_t rtx_ssrc = 0;
     uint8_t rtx_pt = 0;
 
-    if (!sfu_rtx_cache_get_stream(sender_session->rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
+    if (!sfu_rtx_cache_get_stream(sender_session->egress.rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
       unrecoverable_loss = true;
       continue;
     }
 
-    if (!sfu_pacer_rtx_allow(&sender_session->pacer, orig_len + 2, (int64_t)sfu_now_us())) {
+    if (!sfu_pacer_rtx_allow(&sender_session->egress.pacer, orig_len + 2, (int64_t)sfu_now_us())) {
       sfu_metric_inc("rtx_dropped_budget");
       continue;
     }
@@ -232,7 +232,7 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       continue;
     }
 
-    uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
+    uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->egress.rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
     size_t rtx_built_len = 0;
     if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, next_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
       sfu_metric_inc("rtx_build_fail");
@@ -241,13 +241,13 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     }
 
     int64_t send_time_us = (int64_t)sfu_now_us();
-    if (sender_session->twcc_send_extmap_id != 0) {
-      uint16_t twcc_seq = __atomic_fetch_add(&sender_session->next_twcc_seq, 1, __ATOMIC_RELAXED);
+    if (sender_session->media.twcc_send_extmap_id != 0) {
+      uint16_t twcc_seq = __atomic_fetch_add(&sender_session->egress.next_twcc_seq, 1, __ATOMIC_RELAXED);
       size_t rewritten_len = rtx_built_len;
-      if (sfu_rtp_ext_write_twcc(rtx_enc->data, rtx_built_len, rtx_enc->cap, sender_session->twcc_send_extmap_id, twcc_seq, &rewritten_len)) {
+      if (sfu_rtp_ext_write_twcc(rtx_enc->data, rtx_built_len, rtx_enc->cap, sender_session->media.twcc_send_extmap_id, twcc_seq, &rewritten_len)) {
         rtx_built_len = rewritten_len;
-        if (sender_session->twcc_history) {
-          sfu_twcc_history_record(sender_session->twcc_history, twcc_seq, send_time_us, (uint32_t)rtx_built_len);
+        if (sender_session->egress.twcc_history) {
+          sfu_twcc_history_record(sender_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)rtx_built_len);
         }
       } else {
         sfu_metric_inc("twcc_write_fail");
@@ -437,7 +437,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
 
-  if (!is_rtcp && pkt->len >= 12 && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
+  if (!is_rtcp && pkt->len >= 12 && atomic_load_explicit(&sender_session->media.is_mute, memory_order_acquire)) {
     uint32_t raw_ssrc = sfu_read_be32(pkt->data + 8);
     sfu_media_snapshot_t mute_msnap = sfu_session_load_media(sender_session);
     if (raw_ssrc == mute_msnap.audio_ssrc && mute_msnap.audio_ssrc != 0) {
@@ -485,7 +485,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   m.source = classify_media_source(&pt_msnap, &m.rtp);
   m.is_audio = m.source == SFU_MEDIA_AUDIO;
   bool is_audience = atomic_load_explicit(&sender_session->is_audience, memory_order_acquire);
-  bool ptt_active = atomic_load_explicit(&sender_session->ptt_active, memory_order_acquire);
+  bool ptt_active = atomic_load_explicit(&sender_session->media.ptt_active, memory_order_acquire);
   if (is_audience && (!m.is_audio || !ptt_active)) {
     sfu_metric_inc(m.is_audio ? "ptt_inactive_audio_drop" : "audience_rtp_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
@@ -493,7 +493,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_session_release(sender_session);
     return;
   }
-  if (m.is_audio && atomic_load_explicit(&sender_session->is_mute, memory_order_acquire)) {
+  if (m.is_audio && atomic_load_explicit(&sender_session->media.is_mute, memory_order_acquire)) {
     sfu_metric_inc("muted_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
@@ -502,28 +502,28 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   uint8_t twcc_recv_extmap_id = pt_msnap.twcc_recv_extmap_id;
-  if (sfu_session_video_runtime_ready(sender_session) && sender_session->twcc_recv && twcc_recv_extmap_id != 0 && m.rtp.extension) {
+  if (sfu_session_video_runtime_ready(sender_session) && sender_session->egress.twcc_recv && twcc_recv_extmap_id != 0 && m.rtp.extension) {
     uint16_t twcc_seq = 0;
     if (sfu_rtp_ext_read_twcc(m.rtp.extension_profile, m.rtp.extension_data, m.rtp.extension_length, twcc_recv_extmap_id, &twcc_seq)) {
       int64_t arrival_us;
       if (pkt->recv_ts_ns != 0) {
         arrival_us = (int64_t)(pkt->recv_ts_ns / 1000ULL);
-        sender_session->twcc_recv->have_kernel_clock = true;
-        sender_session->twcc_recv->last_arrival_us = arrival_us;
-      } else if (sender_session->twcc_recv->have_kernel_clock && sender_session->twcc_recv->last_arrival_us != 0) {
-        arrival_us = sender_session->twcc_recv->last_arrival_us + 1;
-        sender_session->twcc_recv->last_arrival_us = arrival_us;
+        sender_session->egress.twcc_recv->have_kernel_clock = true;
+        sender_session->egress.twcc_recv->last_arrival_us = arrival_us;
+      } else if (sender_session->egress.twcc_recv->have_kernel_clock && sender_session->egress.twcc_recv->last_arrival_us != 0) {
+        arrival_us = sender_session->egress.twcc_recv->last_arrival_us + 1;
+        sender_session->egress.twcc_recv->last_arrival_us = arrival_us;
       } else {
         arrival_us = (int64_t)sfu_now_us();
-        sender_session->twcc_recv->last_arrival_us = arrival_us;
+        sender_session->egress.twcc_recv->last_arrival_us = arrival_us;
       }
-      sfu_twcc_recv_tracker_record(sender_session->twcc_recv, twcc_seq, arrival_us);
+      sfu_twcc_recv_tracker_record(sender_session->egress.twcc_recv, twcc_seq, arrival_us);
     }
   }
 
-  bool send_negotiated = m.source == SFU_MEDIA_VIDEO   ? atomic_load_explicit(&sender_session->video_send_negotiated, memory_order_acquire)
-                         : m.source == SFU_MEDIA_SCREEN ? atomic_load_explicit(&sender_session->screen_send_negotiated, memory_order_acquire)
-                                                        : atomic_load_explicit(&sender_session->audio_send_negotiated, memory_order_acquire);
+  bool send_negotiated = m.source == SFU_MEDIA_VIDEO   ? atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire)
+                         : m.source == SFU_MEDIA_SCREEN ? atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire)
+                                                        : atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire);
   bool learned = false;
   if (!send_negotiated) {
     sfu_metric_inc("unnegotiated_rtp_drop");
@@ -532,7 +532,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_session_release(sender_session);
     return;
   }
-  if (is_audience && !atomic_load_explicit(&sender_session->ptt_active, memory_order_acquire)) {
+  if (is_audience && !atomic_load_explicit(&sender_session->media.ptt_active, memory_order_acquire)) {
     sfu_metric_inc("ptt_inactive_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
@@ -540,8 +540,8 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  sfu_transceiver_t *source = m.source == SFU_MEDIA_SCREEN ? &sender_session->screen : m.source == SFU_MEDIA_VIDEO ? &sender_session->uplink_video
-                                                                                                                    : &sender_session->uplink_audio;
+  sfu_transceiver_t *source = m.source == SFU_MEDIA_SCREEN ? &sender_session->media.screen : m.source == SFU_MEDIA_VIDEO ? &sender_session->media.uplink_video
+                                                                                                                    : &sender_session->media.uplink_audio;
   uint32_t known_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_ssrc : m.source == SFU_MEDIA_VIDEO ? pt_msnap.video_ssrc : pt_msnap.audio_ssrc;
   uint32_t known_rtx_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_ssrc : pt_msnap.video_rtx_ssrc;
   uint8_t rtx_pt = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_pt : pt_msnap.video_rtx_pt;
@@ -550,7 +550,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool need_learn = (m.rtp.ssrc != 0 && (is_rtx ? known_rtx_ssrc : known_ssrc) != m.rtp.ssrc) || !active;
 
   if (need_learn) {
-    pthread_mutex_lock(&sender_session->media_lock);
+    pthread_mutex_lock(&sender_session->media.lock);
     if (is_rtx) {
       if (m.rtp.ssrc != 0 && source->rtx_ssrc != m.rtp.ssrc) {
         source->rtx_ssrc = m.rtp.ssrc;
@@ -567,10 +567,10 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     if (learned) {
       sfu_session_publish_media(sender_session);
     }
-    pthread_mutex_unlock(&sender_session->media_lock);
+    pthread_mutex_unlock(&sender_session->media.lock);
   }
   if (learned) {
-    atomic_store_explicit(&sender_session->uplink_ssrc_dirty, true, memory_order_release);
+    atomic_store_explicit(&sender_session->media.uplink_ssrc_dirty, true, memory_order_release);
   }
   sfu_svc_parse_status_t svc_status = extract_svc_metadata(sender_session, &m);
   if (svc_status == SFU_SVC_PARSE_MALFORMED) {
@@ -584,12 +584,12 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
 
   sfu_router_forward(w, sender_session, &m);
 
-  if (atomic_exchange_explicit(&sender_session->uplink_ssrc_dirty, false, memory_order_acq_rel) && sender_session->room) {
-    pthread_mutex_lock(&sender_session->media_lock);
-    uint32_t learned_audio_ssrc = sender_session->uplink_audio.ssrc;
-    uint32_t learned_video_ssrc = sender_session->uplink_video.ssrc;
-    uint32_t learned_screen_ssrc = sender_session->screen.ssrc;
-    pthread_mutex_unlock(&sender_session->media_lock);
+  if (atomic_exchange_explicit(&sender_session->media.uplink_ssrc_dirty, false, memory_order_acq_rel) && sender_session->room) {
+    pthread_mutex_lock(&sender_session->media.lock);
+    uint32_t learned_audio_ssrc = sender_session->media.uplink_audio.ssrc;
+    uint32_t learned_video_ssrc = sender_session->media.uplink_video.ssrc;
+    uint32_t learned_screen_ssrc = sender_session->media.screen.ssrc;
+    pthread_mutex_unlock(&sender_session->media.lock);
     SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing forwarding", w->worker_index,
                  sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc, learned_screen_ssrc);
     room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
