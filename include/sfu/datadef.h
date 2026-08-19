@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
+#include "rtp/rtp_seq_translate.h"
 
 // Max DTLS-SRTP exporter length: GCM-256 is 2 x (32-byte key + 12-byte salt) = 88
 #define SFU_SRTP_KEY_MATERIAL_LEN 88
@@ -245,6 +246,17 @@ typedef struct {
   socklen_t addr_len;
   char ufrag[32];
   sfu_dtls_conn_t dtls;
+  sfu_dtls_conn_t pending_dtls;
+  uint8_t active_client_random[32];
+  uint8_t pending_client_random[32];
+  uint64_t pending_dtls_started_ms;
+  uint64_t last_srtp_failure_log_ms;
+  _Atomic uint32_t transport_generation;
+  uint32_t suppressed_srtp_failures;
+  int last_srtp_failure_status;
+  bool active_client_random_valid;
+  bool pending_dtls_active;
+  sfu_rtp_seq_translator_t rtp_seq_translator;
 } sfu_peer_session_cold_t;
 
 typedef struct {
@@ -324,6 +336,9 @@ typedef struct sfu_peer_session {
   sfu_session_media_t media;
   sfu_session_egress_t egress;
   sfu_srtp_ctx_t srtp;
+  sfu_srtp_ctx_t previous_srtp;
+  uint64_t previous_srtp_expires_ms;
+  pthread_mutex_t crypto_lock;
   pthread_mutex_t answer_lock;
   pthread_mutex_t ingress_lock;
   int64_t user_id;

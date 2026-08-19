@@ -33,7 +33,6 @@ typedef struct sfu_subscriber_scheduler {
   uint32_t transition_timestamp;
   uint32_t temporal_transition_timestamp;
   uint32_t keyframe_timestamp;
-  uint16_t next_output_seq;
   uint8_t target_sid;
   uint8_t target_tid;
   uint8_t current_sid;
@@ -52,7 +51,6 @@ typedef struct sfu_subscriber_scheduler {
   bool temporal_transition_failed;
   bool keyframe_active;
   bool keyframe_failed;
-  bool output_seq_initialized;
 } sfu_subscriber_scheduler_t;
 
 typedef struct sfu_scheduler_decision {
@@ -107,7 +105,6 @@ void sfu_subscriber_scheduler_init(sfu_subscriber_scheduler_t *sched, uint32_t i
 bool sfu_scheduler_prepare_packet(sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe, sfu_scheduler_decision_t *decision);
 void sfu_scheduler_commit_packet(sfu_subscriber_scheduler_t *sched, const sfu_scheduler_decision_t *decision);
 void sfu_scheduler_reject_packet(sfu_subscriber_scheduler_t *sched, const sfu_scheduler_decision_t *decision);
-uint16_t sfu_scheduler_assign_output_seq(sfu_subscriber_scheduler_t *sched, uint16_t source_seq);
 
 sfu_pacer_class_t sfu_scheduler_classify_frame(const sfu_subscriber_scheduler_t *sched, const sfu_svc_descriptor_t *desc);
 void sfu_subscriber_scheduler_set_bitrate(sfu_subscriber_scheduler_t *sched, uint32_t bitrate_bps);

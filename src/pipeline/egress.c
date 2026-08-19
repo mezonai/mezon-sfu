@@ -37,12 +37,24 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return false;
   }
 
-  uint16_t subscriber_seq = sfu_read_be16(pkt->data + 2);
-  if (sched && decision) {
-    subscriber_seq = sfu_scheduler_assign_output_seq(sched, subscriber_seq);
-    if (!sfu_rtp_packet_set_seq(pkt->data, pkt->len, subscriber_seq) || !sfu_rtp_packet_set_marker(pkt->data, pkt->len, decision->set_marker)) {
-      return false;
-    }
+  if (pkt->len < 12) {
+    sfu_metric_inc("egress_seq_translate_fail");
+    return false;
+  }
+  uint16_t source_seq = sfu_read_be16(pkt->data + 2);
+  uint32_t outbound_ssrc = sfu_read_be32(pkt->data + 8);
+  uint16_t subscriber_seq = 0;
+  if (!sfu_rtp_seq_translate(&sub_session->cold->rtp_seq_translator, outbound_ssrc, source_seq, &subscriber_seq)) {
+    sfu_metric_inc("egress_seq_translate_fail");
+    sfu_metric_inc("egress_seq_translate_table_full");
+    return false;
+  }
+  if (!sfu_rtp_packet_set_seq(pkt->data, pkt->len, subscriber_seq)) {
+    sfu_metric_inc("egress_seq_translate_fail");
+    return false;
+  }
+  if (sched && decision && !sfu_rtp_packet_set_marker(pkt->data, pkt->len, decision->set_marker)) {
+    return false;
   }
   sfu_media_snapshot_t egress_msnap = sfu_session_load_media(sub_session);
   uint8_t mid_send_extmap_id = egress_msnap.mid_recv_extmap_id;
@@ -76,7 +88,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     }
   }
 
+  pthread_mutex_lock(&sub_session->crypto_lock);
   srtp_err_status_t protect_status = sfu_srtp_protect_rtp_status(&sub_session->srtp, pkt->data, &enc_len, pkt->cap);
+  pthread_mutex_unlock(&sub_session->crypto_lock);
   if (protect_status != srtp_err_status_ok) {
     if (protect_status == srtp_err_status_replay_old) {
       sfu_metric_inc("egress_protect_replay_old");

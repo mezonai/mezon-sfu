@@ -100,6 +100,7 @@ add_library(sfu_core STATIC
   src/congestion/twcc_feedback.c
   src/congestion/twcc_parser.c
   src/rtp/rtp_packet.c
+  src/rtp/rtp_seq_translate.c
   src/rtp/rtp_ext.c
   src/rtp/rtx.c
   src/rtp/rtx_build.c

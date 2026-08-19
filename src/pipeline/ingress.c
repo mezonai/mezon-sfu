@@ -255,7 +255,10 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     }
 
     int rtx_enc_len = (int)rtx_built_len;
-    if (sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap)) {
+    pthread_mutex_lock(&sender_session->crypto_lock);
+    bool protected = sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap);
+    pthread_mutex_unlock(&sender_session->crypto_lock);
+    if (protected) {
       rtx_enc->len = (uint32_t)rtx_enc_len;
       sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
     }
@@ -450,11 +453,68 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   int plain_len = (int)pkt->len;
-  bool unprotected =
-      is_rtcp ? sfu_srtp_unprotect_rtcp(&sender_session->srtp, pkt->data, &plain_len) : sfu_srtp_unprotect_rtp(&sender_session->srtp, pkt->data, &plain_len);
+  srtp_err_status_t unprotect_status;
+  bool used_previous_generation = false;
 
-  if (!unprotected) {
-    SFU_LOG_WARN("worker %u: [INGRESS DROP] SRTP unprotect FAILED (is_rtcp=%d, len=%u). Key mismatch or corrupted packet!", w->worker_index, is_rtcp, pkt->len);
+  pthread_mutex_lock(&sender_session->crypto_lock);
+  uint64_t now_ms = sfu_now_ms();
+  if (sender_session->previous_srtp.inbound && now_ms >= sender_session->previous_srtp_expires_ms) {
+    sfu_srtp_ctx_destroy(&sender_session->previous_srtp);
+    sender_session->previous_srtp_expires_ms = 0;
+  }
+
+  uint8_t ciphertext[SFU_MAX_PAYLOAD_SIZE];
+  bool can_retry_previous = sender_session->previous_srtp.inbound && pkt->len <= sizeof(ciphertext);
+  if (can_retry_previous) {
+    memcpy(ciphertext, pkt->data, pkt->len);
+  }
+
+  unprotect_status = is_rtcp ? sfu_srtp_unprotect_rtcp_status(&sender_session->srtp, pkt->data, &plain_len)
+                             : sfu_srtp_unprotect_rtp_status(&sender_session->srtp, pkt->data, &plain_len);
+  if (unprotect_status == srtp_err_status_auth_fail && can_retry_previous) {
+    memcpy(pkt->data, ciphertext, pkt->len);
+    plain_len = (int)pkt->len;
+    srtp_err_status_t previous_status =
+        is_rtcp ? sfu_srtp_unprotect_rtcp_status(&sender_session->previous_srtp, pkt->data, &plain_len)
+                : sfu_srtp_unprotect_rtp_status(&sender_session->previous_srtp, pkt->data, &plain_len);
+    if (previous_status == srtp_err_status_ok) {
+      unprotect_status = srtp_err_status_ok;
+      used_previous_generation = true;
+    }
+  }
+  pthread_mutex_unlock(&sender_session->crypto_lock);
+
+  if (used_previous_generation) {
+    sfu_metric_inc("ingress_unprotect_previous_generation");
+  }
+
+  if (unprotect_status != srtp_err_status_ok) {
+    sfu_metric_inc(is_rtcp ? "ingress_unprotect_fail_rtcp" : "ingress_unprotect_fail_rtp");
+    if (unprotect_status == srtp_err_status_auth_fail) {
+      sfu_metric_inc("ingress_unprotect_auth_fail");
+    } else if (unprotect_status == srtp_err_status_replay_fail) {
+      sfu_metric_inc("ingress_unprotect_replay_fail");
+    } else if (unprotect_status == srtp_err_status_replay_old) {
+      sfu_metric_inc("ingress_unprotect_replay_old");
+    } else if (unprotect_status == srtp_err_status_no_ctx) {
+      sfu_metric_inc("ingress_unprotect_no_ctx");
+    } else {
+      sfu_metric_inc("ingress_unprotect_other");
+    }
+    uint64_t log_now_ms = sfu_now_ms();
+    bool should_log = sender_session->cold->last_srtp_failure_log_ms == 0 ||
+                      sender_session->cold->last_srtp_failure_status != (int)unprotect_status ||
+                      log_now_ms - sender_session->cold->last_srtp_failure_log_ms >= 5000u;
+    if (should_log) {
+      SFU_LOG_WARN("worker %u: [INGRESS DROP] SRTP unprotect failed peer=%u ufrag=%s status=%d (%s) rtcp=%d len=%u generation=%u owner=%u suppressed=%u",
+                   w->worker_index, sender_session->peer_id, sender_session->cold->ufrag, (int)unprotect_status, sfu_srtp_status_name(unprotect_status), is_rtcp,
+                   pkt->len, sender_session->cold->transport_generation, sfu_session_owner_worker(sender_session), sender_session->cold->suppressed_srtp_failures);
+      sender_session->cold->last_srtp_failure_log_ms = log_now_ms;
+      sender_session->cold->last_srtp_failure_status = (int)unprotect_status;
+      sender_session->cold->suppressed_srtp_failures = 0;
+    } else {
+      sender_session->cold->suppressed_srtp_failures++;
+    }
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);

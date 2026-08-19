@@ -431,11 +431,13 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   }
 
   if (s->active) {
-    if (s->state == SFU_SESSION_ESTABLISHED) {
-      sfu_srtp_ctx_destroy(&s->srtp);
-    }
+    pthread_mutex_lock(&s->crypto_lock);
+    sfu_srtp_ctx_destroy(&s->srtp);
+    sfu_srtp_ctx_destroy(&s->previous_srtp);
+    pthread_mutex_unlock(&s->crypto_lock);
     if (s->cold) {
       sfu_dtls_conn_destroy(&s->cold->dtls);
+      sfu_dtls_conn_destroy(&s->cold->pending_dtls);
     }
   }
 
@@ -500,6 +502,7 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     s->cold = NULL;
   }
   pthread_mutex_destroy(&s->ingress_lock);
+  pthread_mutex_destroy(&s->crypto_lock);
   pthread_mutex_destroy(&s->graph.lock);
   pthread_mutex_destroy(&s->media.lock);
   pthread_mutex_destroy(&s->negotiation.lock);
@@ -700,7 +703,21 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
+  if (pthread_mutex_init(&s->crypto_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->graph.lock);
+    pthread_mutex_destroy(&s->media.lock);
+    pthread_mutex_destroy(&s->negotiation.lock);
+    pthread_mutex_destroy(&s->answer_lock);
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    if (index + 1 == t->count) {
+      t->count--;
+    }
+    pthread_rwlock_unlock(&t->lock);
+    return NULL;
+  }
   if (pthread_mutex_init(&s->ingress_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->crypto_lock);
     pthread_mutex_destroy(&s->graph.lock);
     pthread_mutex_destroy(&s->media.lock);
     pthread_mutex_destroy(&s->negotiation.lock);
@@ -766,6 +783,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   }
 
   atomic_store_explicit(&s->egress.video_runtime_state, SFU_VIDEO_RUNTIME_UNINITIALIZED, memory_order_relaxed);
+  sfu_rtp_seq_translator_init(&s->cold->rtp_seq_translator);
   sfu_pacer_init(&s->egress.pacer);
   sfu_pacer_set_rate(&s->egress.pacer, SFU_BWE_START_BPS, (int64_t)sfu_now_us());
 
@@ -1243,7 +1261,10 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
   }
 
   if (rtcp_len > 0) {
-    if (sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap)) {
+    pthread_mutex_lock(&publisher->crypto_lock);
+    bool protected = sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap);
+    pthread_mutex_unlock(&publisher->crypto_lock);
+    if (protected) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
 
       int sent = sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
@@ -1302,7 +1323,10 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
       continue;
     }
 
-    if (sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap)) {
+    pthread_mutex_lock(&publisher->crypto_lock);
+    bool protected = sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap);
+    pthread_mutex_unlock(&publisher->crypto_lock);
+    if (protected) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
       int sent = sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
       if (sent != 0) {

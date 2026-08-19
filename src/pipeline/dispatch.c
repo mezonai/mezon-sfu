@@ -9,10 +9,12 @@
 #include "protocol/signaling/signaling.h"
 #include "room/room_media_graph.h"
 #include "runtime/routing_context.h"
+#include "runtime/timer.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"
 #include "transport/stun/stun.h"
 #include "util/log.h"
+#include "util/metrics.h"
 
 extern bool sfu_lookup_ufrag_room(const char *client_ufrag, sfu_room_t **out_room);
 
@@ -206,6 +208,17 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   sfu_session_release(session);
 }
 
+#define SFU_DTLS_RESTART_TIMEOUT_MS 15000u
+#define SFU_SRTP_PREVIOUS_GRACE_MS 3000u
+
+static void clear_pending_dtls(sfu_peer_session_t *session) {
+  sfu_dtls_conn_destroy(&session->cold->pending_dtls);
+  memset(&session->cold->pending_dtls, 0, sizeof(session->cold->pending_dtls));
+  memset(session->cold->pending_client_random, 0, sizeof(session->cold->pending_client_random));
+  session->cold->pending_dtls_started_ms = 0;
+  session->cold->pending_dtls_active = false;
+}
+
 static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   char ip[64];
   uint16_t port;
@@ -230,43 +243,109 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  SFU_LOG_INFO("worker %u: Feeding %u bytes of DTLS data from %s:%u (current state: %d, room %s)", w->worker_index, pkt->len, ip, port, session->state,
-               session->room ? "BOUND" : "unbound");
+  uint64_t now_ms = sfu_now_ms();
+  if (session->cold->pending_dtls_active && now_ms - session->cold->pending_dtls_started_ms > SFU_DTLS_RESTART_TIMEOUT_MS) {
+    clear_pending_dtls(session);
+    sfu_metric_inc("dtls_restart_timeout");
+  }
 
-  sfu_dtls_feed_status_t status = sfu_dtls_conn_feed(&session->cold->dtls, pkt->data, pkt->len, NULL, NULL);
+  uint8_t client_random[32];
+  bool is_client_hello = sfu_dtls_extract_client_hello_random(pkt->data, pkt->len, client_random);
+  if (session->state == SFU_SESSION_ESTABLISHED && is_client_hello && !session->cold->pending_dtls_active) {
+    if (session->cold->active_client_random_valid && memcmp(client_random, session->cold->active_client_random, sizeof(client_random)) == 0) {
+      sfu_metric_inc("dtls_restart_duplicate");
+      pthread_mutex_unlock(&session->answer_lock);
+      sfu_session_release(session);
+      return;
+    }
+    if (sfu_dtls_conn_init(&session->cold->pending_dtls, w->sessions->dtls_ctx) != 0) {
+      sfu_metric_inc("dtls_restart_failed");
+      pthread_mutex_unlock(&session->answer_lock);
+      sfu_session_release(session);
+      return;
+    }
+    memcpy(session->cold->pending_client_random, client_random, sizeof(client_random));
+    session->cold->pending_dtls_started_ms = now_ms;
+    session->cold->pending_dtls_active = true;
+    sfu_metric_inc("dtls_restart_detected");
+  } else if (session->state != SFU_SESSION_ESTABLISHED && is_client_hello && !session->cold->active_client_random_valid) {
+    memcpy(session->cold->active_client_random, client_random, sizeof(client_random));
+    session->cold->active_client_random_valid = true;
+  }
+
+  bool restarting = session->cold->pending_dtls_active;
+  sfu_dtls_conn_t *dtls = restarting ? &session->cold->pending_dtls : &session->cold->dtls;
+  sfu_dtls_feed_status_t status = sfu_dtls_conn_feed(dtls, pkt->data, pkt->len, NULL, NULL);
 
   uint8_t out[4096];
-  size_t out_len = sfu_dtls_conn_drain_output(&session->cold->dtls, out, sizeof(out));
+  size_t out_len = sfu_dtls_conn_drain_output(dtls, out, sizeof(out));
   if (out_len > 0) {
     send_raw(w, out, out_len, &pkt->peer_addr, pkt->peer_addr_len);
   }
 
   switch (status) {
     case SFU_DTLS_FEED_ESTABLISHED:
-      if (session->state != SFU_SESSION_ESTABLISHED) {
-        if (sfu_srtp_ctx_init_from_dtls(&session->srtp, session->cold->dtls.srtp_keying_material, session->cold->dtls.srtp_profile_id, true) != 0) {
+      if (restarting) {
+        sfu_srtp_ctx_t next_srtp;
+        memset(&next_srtp, 0, sizeof(next_srtp));
+        if (sfu_srtp_ctx_init_from_dtls(&next_srtp, dtls->srtp_keying_material, dtls->srtp_profile_id, true) != 0) {
+          clear_pending_dtls(session);
+          sfu_metric_inc("dtls_restart_failed");
+          break;
+        }
+
+        pthread_mutex_lock(&session->crypto_lock);
+        sfu_srtp_ctx_destroy(&session->previous_srtp);
+        session->previous_srtp = session->srtp;
+        session->srtp = next_srtp;
+        memset(&next_srtp, 0, sizeof(next_srtp));
+        session->previous_srtp_expires_ms = now_ms + SFU_SRTP_PREVIOUS_GRACE_MS;
+        pthread_mutex_unlock(&session->crypto_lock);
+
+        sfu_dtls_conn_destroy(&session->cold->dtls);
+        session->cold->dtls = session->cold->pending_dtls;
+        memset(&session->cold->pending_dtls, 0, sizeof(session->cold->pending_dtls));
+        memcpy(session->cold->active_client_random, session->cold->pending_client_random, sizeof(session->cold->active_client_random));
+        session->cold->active_client_random_valid = true;
+        session->cold->pending_dtls_active = false;
+        session->cold->pending_dtls_started_ms = 0;
+        session->cold->transport_generation++;
+        sfu_metric_inc("dtls_restart_established");
+        SFU_LOG_INFO("worker %u: DTLS transport restarted for peer %u generation %u at %s:%u", w->worker_index, session->peer_id,
+                     session->cold->transport_generation, ip, port);
+      } else if (session->state != SFU_SESSION_ESTABLISHED) {
+        pthread_mutex_lock(&session->crypto_lock);
+        int srtp_rc = sfu_srtp_ctx_init_from_dtls(&session->srtp, dtls->srtp_keying_material, dtls->srtp_profile_id, true);
+        pthread_mutex_unlock(&session->crypto_lock);
+        if (srtp_rc != 0) {
           SFU_LOG_ERROR("worker %u: failed to derive SRTP keys after DTLS handshake for %s:%u", w->worker_index, ip, port);
           session->state = SFU_SESSION_FAILED;
           break;
         }
 
+        session->cold->transport_generation = 1;
         session->state = SFU_SESSION_ESTABLISHED;
         SFU_LOG_INFO("worker %u: DTLS established, SRTP sessions ready for %s:%u (room %s)", w->worker_index, ip, port,
                      session->room ? "BOUND" : "STILL UNBOUND -- media will be dropped until it binds");
 
         if (session->room) {
-          SFU_LOG_INFO("worker %u: SRTP secure pipeline verified. Scheduling pending peer negotiation.", w->worker_index);
           sfu_signaling_schedule_pending_peer(session);
         }
       }
       break;
     case SFU_DTLS_FEED_IN_PROGRESS:
-      session->state = SFU_SESSION_DTLS_HANDSHAKING;
-      SFU_LOG_INFO("worker %u: DTLS handshake in progress for %s:%u", w->worker_index, ip, port);
+      if (!restarting) {
+        session->state = SFU_SESSION_DTLS_HANDSHAKING;
+      }
       break;
     case SFU_DTLS_FEED_ERROR:
-      session->state = SFU_SESSION_FAILED;
-      SFU_LOG_WARN("worker %u: DTLS handshake failed for peer %s:%u", w->worker_index, ip, port);
+      if (restarting) {
+        clear_pending_dtls(session);
+        sfu_metric_inc("dtls_restart_failed");
+      } else {
+        session->state = SFU_SESSION_FAILED;
+        SFU_LOG_WARN("worker %u: DTLS handshake failed for peer %s:%u", w->worker_index, ip, port);
+      }
       break;
   }
 

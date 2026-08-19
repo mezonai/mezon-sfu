@@ -1690,7 +1690,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
       }
     }
 
-    if (sfu_ws_handshake(c->fd) != 0) {
+    if (sfu_ws_handshake(c->fd, &c->ws_read) != 0) {
       SFU_LOG_WARN("signaling: WebSocket handshake failed");
       disconnect_client(c);
       return;
@@ -1712,25 +1712,32 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
     c->handshake_done = true;
     SFU_LOG_INFO("signaling: peer joined from IP: %s (Detected from header: %s)", c->peer_ip, c->ip_detected_from_header ? "YES" : "NO");
     start_client_keepalive(c);
-    return;
-  }
-
-  char *buf = s->scratch.recv;
-  ssize_t n = sfu_ws_recv_text(c->fd, buf, SFU_SIGNALING_RECV_CAP);
-  if (n < 0) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    if (!sfu_ws_read_state_has_pending(&c->ws_read)) {
       return;
     }
-    disconnect_client(c);
-    return;
-  }
-  if (n == 0) {
-    disconnect_client(c);
-    return;
   }
 
-  mark_client_activity(c);
-  dispatch_client_message(c, s, buf, (size_t)n);
+  do {
+    char *buf = s->scratch.recv;
+    ssize_t n = sfu_ws_recv_text(c->fd, &c->ws_read, buf, SFU_SIGNALING_RECV_CAP);
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return;
+      }
+      disconnect_client(c);
+      return;
+    }
+    if (n == 0) {
+      disconnect_client(c);
+      return;
+    }
+
+    mark_client_activity(c);
+    dispatch_client_message(c, s, buf, (size_t)n);
+    if (c->disconnecting) {
+      return;
+    }
+  } while (sfu_ws_read_state_has_pending(&c->ws_read));
 }
 
 static void on_server_readable(uv_poll_t *handle, int status, int events) {

@@ -230,6 +230,32 @@ size_t sfu_dtls_conn_drain_output(sfu_dtls_conn_t *conn, uint8_t *out, size_t ca
   return total;
 }
 
+bool sfu_dtls_extract_client_hello_random(const uint8_t *data, size_t len, uint8_t random_out[32]) {
+  if (!data || !random_out || len < 13 + 12 + 2 + 32 || data[0] != 22) {
+    return false;
+  }
+
+  size_t record_len = ((size_t)data[11] << 8) | data[12];
+  if (record_len > len - 13 || record_len < 12 + 2 + 32) {
+    return false;
+  }
+
+  const uint8_t *handshake = data + 13;
+  if (handshake[0] != 1) {
+    return false;
+  }
+
+  size_t message_len = ((size_t)handshake[1] << 16) | ((size_t)handshake[2] << 8) | handshake[3];
+  size_t fragment_offset = ((size_t)handshake[6] << 16) | ((size_t)handshake[7] << 8) | handshake[8];
+  size_t fragment_len = ((size_t)handshake[9] << 16) | ((size_t)handshake[10] << 8) | handshake[11];
+  if (fragment_offset != 0 || message_len < 2 + 32 || fragment_len < 2 + 32 || fragment_len > record_len - 12) {
+    return false;
+  }
+
+  memcpy(random_out, handshake + 14, 32);
+  return true;
+}
+
 bool sfu_dtls_is_dtls_packet(const uint8_t *data, size_t len) {
   if (len < 1) {
     return false;
