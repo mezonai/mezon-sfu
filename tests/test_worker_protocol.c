@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include "congestion/pacer.h"
 #include "congestion/twcc_history.h"
+#include "media/svc/layer_scheduler.h"
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
@@ -166,7 +167,7 @@ static void fixture_init(fixture_t *f) {
   assert(f->cache != NULL);
   assert(sfu_rtx_cache_init(f->cache) == 0);
   f->session->egress.rtx_cache = f->cache;
-  f->session->egress.schedulers = SFU_CALLOC(SFU_SESSION_SCHEDULER_CAP, sizeof(*f->session->egress.schedulers));
+  f->session->egress.schedulers = SFU_CALLOC(SFU_LAYER_SCHEDULER_CAP, sizeof(*f->session->egress.schedulers));
   assert(f->session->egress.schedulers != NULL);
   atomic_store_explicit(&f->session->egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY, memory_order_release);
 
@@ -333,6 +334,7 @@ static void test_bad_nack_fci(void) {
   uint8_t nack[64];
   uint16_t fci[] = {42, 0x0000};
   size_t nack_len = build_nack(nack, fci, 2);
+  (void)nack_len;
   nack_len -= 2; /* lie: member ends mid-FCI */
   /* Fix the length word to match the odd logical size. */
   sfu_write_be16(nack + 2, 3); /* 16 bytes total -> 14 logical here; parser rejects */
@@ -618,7 +620,7 @@ static void test_gcc_estimate_reaches_scheduler(void) {
 
   /* A scheduler slot is created lazily for the publisher this subscriber is
    * receiving. Exercise the exact TWCC-result path in the worker. */
-  sfu_subscriber_scheduler_t *sched = sfu_session_scheduler_for(f.session, 1);
+  sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for(f.session, 1);
   assert(sched != NULL);
   /* Optimistic full-stack default until BWE constrains. */
   assert(sched->target_sid == 2);
@@ -1201,7 +1203,7 @@ static void test_source_switch_colliding_seq_delayed_nack(void) {
   pkt_buf[12] = 0xaa; /* A's payload marker */
   sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
 
-  /* Source switch: generation 0 -> 1 (sfu_layer_selector_switch_source
+  /* Source switch: generation 0 -> 1 (sfu_layer_scheduler_switch_source
    * bumps this; the new source's stream here reuses the same media SSRC,
    * so ONLY the generation distinguishes stale from fresh). */
   atomic_store(&f.session->egress.generation, 1);

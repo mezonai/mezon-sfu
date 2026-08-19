@@ -8,8 +8,7 @@
 #include "rtp/rtp_ext.h"
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
-#include "runtime/fanout.h"
-#include "runtime/scheduler.h"
+#include "media/svc/layer_scheduler.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/srtp/srtp.h"
@@ -21,8 +20,8 @@
 #include <stdio.h>
 
 static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
-                                     const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_subscriber_scheduler_t *sched,
-                                     const sfu_scheduler_decision_t *decision) {
+                                     const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_layer_scheduler_t *sched,
+                                     const sfu_layer_scheduler_decision_t *decision) {
   int enc_len = (int)pkt->len;
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
@@ -122,17 +121,17 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
   }
 
   sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
-  sfu_subscriber_scheduler_t *sched = NULL;
-  sfu_scheduler_decision_t decision;
+  sfu_layer_scheduler_t *sched = NULL;
+  sfu_layer_scheduler_decision_t decision;
   bool has_decision = media->has_svc && media->has_video && !media->is_audio;
   if (has_decision) {
     if (!media->publisher || media->publisher->peer_id == 0) {
       has_decision = false;
     } else {
-      sched = sfu_session_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
-      if (!sched || !sfu_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+      sched = sfu_layer_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
+      if (!sched || !sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
         if (sched) {
-          sfu_scheduler_reject_packet(sched, &decision);
+          sfu_layer_scheduler_reject_packet(sched, &decision);
         }
         sfu_metric_inc("egress_admission_drop");
         return false;
@@ -148,7 +147,7 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
     int64_t now_us = (int64_t)sfu_now_us();
     if (sfu_pacer_debt_after(&sub_session->egress.pacer, plain->len + 10, now_us) > sub_session->egress.pacer.bucket_cap_bytes) {
       if (has_decision) {
-        sfu_scheduler_reject_packet(sched, &decision);
+        sfu_layer_scheduler_reject_packet(sched, &decision);
       }
       sfu_metric_inc("egress_admission_drop");
       return false;
@@ -161,7 +160,7 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
     }
     if (has_decision) {
-      sfu_scheduler_reject_packet(sched, &decision);
+      sfu_layer_scheduler_reject_packet(sched, &decision);
     }
     return false;
   }
@@ -173,9 +172,9 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
   bool admitted = sfu_egress_process_local(w, sub_session, output, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL);
   if (has_decision) {
     if (admitted) {
-      sfu_scheduler_commit_packet(sched, &decision);
+      sfu_layer_scheduler_commit_packet(sched, &decision);
     } else {
-      sfu_scheduler_reject_packet(sched, &decision);
+      sfu_layer_scheduler_reject_packet(sched, &decision);
     }
   }
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
@@ -192,8 +191,8 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
   }
 
   sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
-  sfu_subscriber_scheduler_t *sched = NULL;
-  sfu_scheduler_decision_t decision;
+  sfu_layer_scheduler_t *sched = NULL;
+  sfu_layer_scheduler_decision_t decision;
   bool has_decision = media->has_svc && media->has_video && !media->is_audio;
 
   if (has_decision) {
@@ -201,7 +200,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
       SFU_LOG_WARN("worker %u: [EGRESS] VP9 without publisher peer_id; forwarding without layer filter", w->worker_index);
       has_decision = false;
     } else {
-      sched = sfu_session_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
+      sched = sfu_layer_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
       if (!sched) {
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return false;
@@ -209,8 +208,8 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
       if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
         sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
       }
-      if (!sfu_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
-        sfu_scheduler_reject_packet(sched, &decision);
+      if (!sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+        sfu_layer_scheduler_reject_packet(sched, &decision);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return false;
       }
@@ -221,9 +220,9 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
   bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL);
   if (has_decision) {
     if (admitted) {
-      sfu_scheduler_commit_packet(sched, &decision);
+      sfu_layer_scheduler_commit_packet(sched, &decision);
     } else {
-      sfu_scheduler_reject_packet(sched, &decision);
+      sfu_layer_scheduler_reject_packet(sched, &decision);
     }
   }
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);

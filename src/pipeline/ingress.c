@@ -23,7 +23,7 @@
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
 #include "rtp/rtx_build.h"
-#include "runtime/scheduler.h"
+#include "media/svc/layer_scheduler.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/srtp/srtp.h"
@@ -39,10 +39,10 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   if (!session->egress.schedulers) {
     return;
   }
-  for (uint32_t i = 0; i < SFU_SESSION_SCHEDULER_CAP; i++) {
-    sfu_session_scheduler_slot_t *slot = &session->egress.schedulers[i];
+  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+    sfu_layer_scheduler_slot_t *slot = &session->egress.schedulers[i];
     if (slot->publisher_id != 0) {
-      sfu_subscriber_scheduler_set_bitrate(&slot->sched, bitrate_bps);
+      sfu_layer_scheduler_set_bitrate(&slot->sched, bitrate_bps);
     }
   }
 }

@@ -11,7 +11,7 @@
 #include "rtcp/rtcp_kf.h"
 #include "rtp/rtx.h"
 #include "runtime/routing_context.h"
-#include "runtime/scheduler.h"
+#include "media/svc/layer_scheduler.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/dtls/dtls.h"
@@ -153,7 +153,7 @@ bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session) {
   gcc_bwe_context_t *gcc = SFU_CALLOC(1, sizeof(*gcc));
   sfu_twcc_history_t *history = SFU_CALLOC(1, sizeof(*history));
   sfu_twcc_recv_tracker_t *recv = SFU_CALLOC(1, sizeof(*recv));
-  sfu_session_scheduler_slot_t *schedulers = SFU_CALLOC(SFU_SESSION_SCHEDULER_CAP, sizeof(*schedulers));
+  sfu_layer_scheduler_slot_t *schedulers = SFU_CALLOC(SFU_LAYER_SCHEDULER_CAP, sizeof(*schedulers));
   sfu_rtx_cache_t *rtx = SFU_CALLOC(1, sizeof(*rtx));
   bool ok = gcc && history && recv && schedulers && rtx && sfu_rtx_cache_init(rtx) == 0;
   if (!ok) {

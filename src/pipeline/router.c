@@ -8,9 +8,7 @@
 #include "peer/session.h"
 #include "pipeline/egress.h"
 #include "runtime/fanout.h"
-#include "runtime/scheduler.h"
 #include "runtime/worker.h"
-#include "util/log.h"
 #include "util/metrics.h"
 
 typedef struct {
