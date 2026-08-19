@@ -5,6 +5,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <uv.h>
+#include "protocol/websocket/ws.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
 #include "transport/stun/stun.h"
@@ -80,6 +81,7 @@ typedef struct sfu_client_conn {
   uint8_t handles_open;
   char peer_ip[64];
   char client_ufrag[32];
+  sfu_ws_read_state_t ws_read;
   bool handshake_done;
   bool is_audience;
   bool disconnecting;

@@ -113,7 +113,7 @@ static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len, 
     buf[15] ^= 0xFF; /* flip a payload byte */
 
     int plain_len = len;
-    assert(sfu_srtp_unprotect_rtp(&sfu_ctx, buf, &plain_len) == false);
+    assert(sfu_srtp_unprotect_rtp_status(&sfu_ctx, buf, &plain_len) == srtp_err_status_auth_fail);
   }
 
   srtp_dealloc(client_outbound);

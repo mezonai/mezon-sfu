@@ -46,7 +46,7 @@ sfu_packet_t *sfu_packet_pool_alloc(sfu_packet_pool_t *pp) {
   pkt->kbuf_index = data_idx;
   pkt->buf_source = SFU_BUF_SOURCE_POOL;
 
-  sfu_packet_reinit(pkt); /* refcount=1, generation++ */
+  sfu_packet_reinit(pkt);
 
   return pkt;
 }
@@ -55,7 +55,7 @@ void sfu_packet_pool_free(sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
   uint32_t data_idx = pkt->kbuf_index;
   uint32_t meta_idx = pkt->pool_index;
 
-  pkt->data = NULL; /* guard against use-after-free within this process */
+  pkt->data = NULL;
 
   sfu_pool_free(&pp->data, data_idx);
   sfu_pool_free(&pp->meta, meta_idx);

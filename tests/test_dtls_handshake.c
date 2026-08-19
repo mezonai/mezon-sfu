@@ -6,7 +6,37 @@
 #include <stdio.h>
 #include <string.h>
 
+static void test_client_hello_random_parser(void) {
+  uint8_t packet[59] = {0};
+  packet[0] = 22;
+  packet[1] = 0xfe;
+  packet[2] = 0xfd;
+  packet[11] = 0;
+  packet[12] = 46;
+  packet[13] = 1;
+  packet[16] = 34;
+  packet[24] = 34;
+  packet[25] = 0xfe;
+  packet[26] = 0xfd;
+  for (uint8_t i = 0; i < 32; i++) {
+    packet[27 + i] = i;
+  }
+
+  uint8_t random[32];
+  assert(sfu_dtls_extract_client_hello_random(packet, sizeof(packet), random));
+  for (uint8_t i = 0; i < 32; i++) {
+    assert(random[i] == i);
+  }
+  assert(!sfu_dtls_extract_client_hello_random(packet, sizeof(packet) - 1, random));
+  packet[13] = 2;
+  assert(!sfu_dtls_extract_client_hello_random(packet, sizeof(packet), random));
+  packet[13] = 1;
+  packet[21] = 1;
+  assert(!sfu_dtls_extract_client_hello_random(packet, sizeof(packet), random));
+}
+
 int main(void) {
+  test_client_hello_random_parser();
   sfu_dtls_ctx_t server_ctx;
   assert(sfu_dtls_ctx_init(&server_ctx) == 0);
   assert(strlen(server_ctx.fingerprint) > 0);

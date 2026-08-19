@@ -1,14 +1,9 @@
 #include "runtime/fanout_job.h"
-
-#include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "pipeline/egress.h"
 #include "runtime/worker.h"
 #include "util/log.h"
-#include "util/metrics.h"
-
-#include <string.h>
 
 void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;

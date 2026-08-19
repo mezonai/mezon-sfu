@@ -74,6 +74,10 @@ add_executable(test_rtp_packet test_rtp_packet.c)
 target_link_libraries(test_rtp_packet PRIVATE sfu_core)
 add_test(NAME rtp_packet COMMAND test_rtp_packet)
 
+add_executable(test_rtp_seq_translate test_rtp_seq_translate.c)
+target_link_libraries(test_rtp_seq_translate PRIVATE sfu_core)
+add_test(NAME rtp_seq_translate COMMAND test_rtp_seq_translate)
+
 add_executable(test_rtcp_fb test_rtcp_fb.c)
 target_link_libraries(test_rtcp_fb PRIVATE sfu_core)
 add_test(NAME rtcp_fb COMMAND test_rtcp_fb)

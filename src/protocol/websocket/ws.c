@@ -25,10 +25,10 @@ static void init_ws_send_locks(void) {
   }
 }
 
-static ssize_t read_full_available(int fd, char *buf, size_t cap, const char *terminator) {
+static int read_http_headers(int fd, uint8_t *buf, size_t cap, size_t *total_len, size_t *header_len) {
   size_t total = 0;
-  while (total < cap - 1) {
-    ssize_t n = read(fd, buf + total, cap - 1 - total);
+  while (total < cap) {
+    ssize_t n = read(fd, buf + total, cap - total);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
         if (total > 0) {
@@ -44,9 +44,12 @@ static ssize_t read_full_available(int fd, char *buf, size_t cap, const char *te
       return -1;
     }
     total += (size_t)n;
-    buf[total] = '\0';
-    if (strstr(buf, terminator)) {
-      return (ssize_t)total;
+    for (size_t i = 3; i < total; i++) {
+      if (buf[i - 3] == '\r' && buf[i - 2] == '\n' && buf[i - 1] == '\r' && buf[i] == '\n') {
+        *total_len = total;
+        *header_len = i + 1;
+        return 0;
+      }
     }
   }
   return -1;
@@ -101,15 +104,36 @@ static int write_exact(int fd, const uint8_t *buf, size_t len) {
   return 0;
 }
 
-int sfu_ws_handshake(int fd) {
-  char req[WS_HANDSHAKE_BUF_CAP];
-  if (read_full_available(fd, req, sizeof(req), "\r\n\r\n") < 0) {
+int sfu_ws_handshake(int fd, sfu_ws_read_state_t *state) {
+  if (!state) {
+    return -1;
+  }
+  state->prefetched_offset = 0;
+  state->prefetched_len = 0;
+
+  uint8_t req_bytes[WS_HANDSHAKE_BUF_CAP + 1];
+  size_t total_len = 0;
+  size_t header_len = 0;
+  if (read_http_headers(fd, req_bytes, WS_HANDSHAKE_BUF_CAP, &total_len, &header_len) != 0) {
     SFU_LOG_WARN("WS handshake: failed to read a complete HTTP request");
     return -1;
   }
 
+  size_t trailing_len = total_len - header_len;
+  if (trailing_len > sizeof(state->prefetched)) {
+    SFU_LOG_WARN("WS handshake: prefetched frame data exceeds buffer capacity");
+    return -1;
+  }
+  if (trailing_len > 0) {
+    memcpy(state->prefetched, req_bytes + header_len, trailing_len);
+    state->prefetched_len = trailing_len;
+  }
+  req_bytes[header_len] = '\0';
+  const char *req = (const char *)req_bytes;
+
   char key[256];
   if (extract_header(req, "Sec-WebSocket-Key:", key, sizeof(key)) != 0 && extract_header(req, "sec-websocket-key:", key, sizeof(key)) != 0) {
+    state->prefetched_len = 0;
     SFU_LOG_WARN("WS handshake: no Sec-WebSocket-Key header found");
     return -1;
   }
@@ -134,6 +158,7 @@ int sfu_ws_handshake(int fd) {
                           accept);
 
   if (write_exact(fd, (const uint8_t *)response, (size_t)resp_len) < 0) {
+    state->prefetched_len = 0;
     SFU_LOG_WARN("WS handshake: failed to write 101 response");
     return -1;
   }
@@ -141,8 +166,24 @@ int sfu_ws_handshake(int fd) {
   return 0;
 }
 
-static ssize_t read_exact(int fd, uint8_t *buf, size_t len) {
+int sfu_ws_read_state_has_pending(const sfu_ws_read_state_t *state) {
+  return state && state->prefetched_offset < state->prefetched_len;
+}
+
+static ssize_t read_exact(int fd, sfu_ws_read_state_t *state, uint8_t *buf, size_t len) {
   size_t total = 0;
+  if (sfu_ws_read_state_has_pending(state)) {
+    size_t available = state->prefetched_len - state->prefetched_offset;
+    size_t take = available < len ? available : len;
+    memcpy(buf, state->prefetched + state->prefetched_offset, take);
+    state->prefetched_offset += take;
+    total += take;
+    if (state->prefetched_offset == state->prefetched_len) {
+      state->prefetched_offset = 0;
+      state->prefetched_len = 0;
+    }
+  }
+
   while (total < len) {
     ssize_t n = read(fd, buf + total, len - total);
     if (n < 0) {
@@ -150,6 +191,9 @@ static ssize_t read_exact(int fd, uint8_t *buf, size_t len) {
         struct pollfd pfd = {.fd = fd, .events = POLLIN};
         int res = poll(&pfd, 1, 100);
         if (res <= 0) {
+          if (total > 0) {
+            errno = EPROTO;
+          }
           return -1;
         }
         continue;
@@ -160,6 +204,7 @@ static ssize_t read_exact(int fd, uint8_t *buf, size_t len) {
     }
     total += (size_t)n;
   }
+  errno = 0;
   return (ssize_t)total;
 }
 
@@ -197,17 +242,19 @@ static int send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t len
 
 int sfu_ws_send_text(int fd, const char *data, size_t len) { return send_frame(fd, 0x1, (const uint8_t *)data, len); }
 
-ssize_t sfu_ws_recv_text(int fd, char *buf, size_t cap) {
-  if (!buf || cap == 0) {
+ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t cap) {
+  if (!state || !buf || cap == 0) {
+    errno = EINVAL;
     return -1;
   }
+  errno = 0;
 
   size_t message_len = 0;
   int fragmented_text = 0;
 
   for (;;) {
     uint8_t header[2];
-    if (read_exact(fd, header, 2) < 0) {
+    if (read_exact(fd, state, header, 2) < 0) {
       return -1;
     }
 
@@ -224,13 +271,13 @@ ssize_t sfu_ws_recv_text(int fd, char *buf, size_t cap) {
 
     if (payload_len == 126) {
       uint8_t ext[2];
-      if (read_exact(fd, ext, 2) < 0) {
+      if (read_exact(fd, state, ext, 2) < 0) {
         return -1;
       }
       payload_len = ((uint64_t)ext[0] << 8) | ext[1];
     } else if (payload_len == 127) {
       uint8_t ext[8];
-      if (read_exact(fd, ext, 8) < 0) {
+      if (read_exact(fd, state, ext, 8) < 0) {
         return -1;
       }
       payload_len = 0;
@@ -249,13 +296,13 @@ ssize_t sfu_ws_recv_text(int fd, char *buf, size_t cap) {
     }
 
     uint8_t mask_key[4] = {0};
-    if (masked && read_exact(fd, mask_key, 4) < 0) {
+    if (masked && read_exact(fd, state, mask_key, 4) < 0) {
       return -1;
     }
 
     if (control) {
       uint8_t control_payload[125];
-      if (payload_len > 0 && read_exact(fd, control_payload, (size_t)payload_len) < 0) {
+      if (payload_len > 0 && read_exact(fd, state, control_payload, (size_t)payload_len) < 0) {
         return -1;
       }
       if (masked) {
@@ -301,7 +348,7 @@ ssize_t sfu_ws_recv_text(int fd, char *buf, size_t cap) {
     }
 
     size_t fragment_len = (size_t)payload_len;
-    if (fragment_len > 0 && read_exact(fd, (uint8_t *)buf + message_len, fragment_len) < 0) {
+    if (fragment_len > 0 && read_exact(fd, state, (uint8_t *)buf + message_len, fragment_len) < 0) {
       return -1;
     }
     if (masked) {

@@ -3,7 +3,6 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include "peer/session.h"
 #include "room/room.h"
@@ -115,7 +114,7 @@ static void test_add_remove(void) {
 
   b->media.uplink_video.active = false;
   room_refresh_peer_streams(&room, b);
-  assert(receiver_count(a) == 1); /* stable SDP slot remains */
+  assert(receiver_count(a) == 1);    /* stable SDP slot remains */
   assert(video_route_count(b) == 0); /* inactive source omitted from hot path */
   assert(audio_route_count(b) == 1);
   b->media.uplink_video.active = true;
