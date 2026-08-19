@@ -232,9 +232,18 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       continue;
     }
 
-    uint16_t next_rtx_seq = __atomic_fetch_add(&sender_session->egress.rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
+    uint16_t source_rtx_seq = __atomic_fetch_add(&sender_session->egress.rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
+    uint16_t subscriber_rtx_seq = 0;
+    pthread_mutex_lock(&sender_session->crypto_lock);
+    bool translated = sfu_rtp_seq_translate(&sender_session->cold->rtp_seq_translator, rtx_ssrc, source_rtx_seq, &subscriber_rtx_seq);
+    pthread_mutex_unlock(&sender_session->crypto_lock);
+    if (!translated) {
+      sfu_metric_inc("rtx_seq_translate_fail");
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+      continue;
+    }
     size_t rtx_built_len = 0;
-    if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, next_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
+    if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, subscriber_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
       sfu_metric_inc("rtx_build_fail");
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
       continue;
@@ -256,11 +265,18 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 
     int rtx_enc_len = (int)rtx_built_len;
     pthread_mutex_lock(&sender_session->crypto_lock);
-    bool protected = sfu_srtp_protect_rtp(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap);
+    srtp_err_status_t protect_status = sfu_srtp_protect_rtp_status(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap);
     pthread_mutex_unlock(&sender_session->crypto_lock);
-    if (protected) {
+    if (protect_status == srtp_err_status_ok) {
       rtx_enc->len = (uint32_t)rtx_enc_len;
       sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
+    } else {
+      if (protect_status == srtp_err_status_replay_old) {
+        sfu_metric_inc("rtx_protect_replay_old");
+      } else if (protect_status == srtp_err_status_replay_fail) {
+        sfu_metric_inc("rtx_protect_replay_fail");
+      }
+      sfu_metric_inc("rtx_protect_fail");
     }
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
   }

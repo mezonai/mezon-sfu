@@ -44,7 +44,10 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   uint16_t source_seq = sfu_read_be16(pkt->data + 2);
   uint32_t outbound_ssrc = sfu_read_be32(pkt->data + 8);
   uint16_t subscriber_seq = 0;
-  if (!sfu_rtp_seq_translate(&sub_session->cold->rtp_seq_translator, outbound_ssrc, source_seq, &subscriber_seq)) {
+  pthread_mutex_lock(&sub_session->crypto_lock);
+  bool translated = sfu_rtp_seq_translate(&sub_session->cold->rtp_seq_translator, outbound_ssrc, source_seq, &subscriber_seq);
+  pthread_mutex_unlock(&sub_session->crypto_lock);
+  if (!translated) {
     sfu_metric_inc("egress_seq_translate_fail");
     sfu_metric_inc("egress_seq_translate_table_full");
     return false;
