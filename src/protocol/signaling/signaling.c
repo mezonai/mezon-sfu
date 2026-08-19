@@ -816,8 +816,38 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
 
 static void disconnect_client(sfu_client_conn_t *c);
 
+static void register_client(sfu_client_conn_t *c) {
+  if (!c || !c->server || c->in_registry) {
+    return;
+  }
+  c->registry_next = c->server->connections_head;
+  if (c->registry_next) {
+    c->registry_next->registry_prev = c;
+  }
+  c->server->connections_head = c;
+  c->in_registry = true;
+}
+
+static void unregister_client(sfu_client_conn_t *c) {
+  if (!c || !c->server || !c->in_registry) {
+    return;
+  }
+  if (c->registry_prev) {
+    c->registry_prev->registry_next = c->registry_next;
+  } else {
+    c->server->connections_head = c->registry_next;
+  }
+  if (c->registry_next) {
+    c->registry_next->registry_prev = c->registry_prev;
+  }
+  c->registry_prev = NULL;
+  c->registry_next = NULL;
+  c->in_registry = false;
+}
+
 static void finish_client_close(sfu_client_conn_t *c) {
   SFU_LOG_INFO("signaling: client closed fd=%d ufrag=%s", c->fd, c->client_ufrag);
+  unregister_client(c);
 
   const uint64_t room_id = c->joined_room_id;
   const int64_t user_id = c->user_id;
@@ -1099,8 +1129,8 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     return;
   }
 
-  SFU_LOG_INFO("signaling: answer role ufrag=%s peer_id=%u pending_audience=%d session_audience=%d", c->client_ufrag, session->peer_id,
-               pending.is_audience, atomic_load_explicit(&session->is_audience, memory_order_acquire));
+  SFU_LOG_INFO("signaling: answer role ufrag=%s peer_id=%u pending_audience=%d session_audience=%d", c->client_ufrag, session->peer_id, pending.is_audience,
+               atomic_load_explicit(&session->is_audience, memory_order_acquire));
 
   bool follow_up_pending = false;
   uint32_t answered_offer_generation = 0;
@@ -1126,13 +1156,12 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   bool sdp_contract_changed = false;
   sfu_media_snapshot_t media_before_answer = sfu_session_load_media(session);
   pthread_mutex_lock(&session->media.lock);
-  sdp_contract_changed =
-      (pending.video_pt != 0 && pending.video_pt != session->media.uplink_video.payload_type) ||
-      (pending.rtx_pt != 0 && pending.rtx_pt != session->media.uplink_video.rtx_payload_type) ||
-      (pending.video_codec != SFU_VIDEO_CODEC_NONE && pending.video_codec != (uint8_t)session->media.uplink_video.codec) ||
-      (pending.screen_pt != 0 && pending.screen_pt != session->media.screen.payload_type) ||
-      (pending.screen_rtx_pt != 0 && pending.screen_rtx_pt != session->media.screen.rtx_payload_type) ||
-      (pending.screen_codec != SFU_VIDEO_CODEC_NONE && pending.screen_codec != (uint8_t)session->media.screen.codec);
+  sdp_contract_changed = (pending.video_pt != 0 && pending.video_pt != session->media.uplink_video.payload_type) ||
+                         (pending.rtx_pt != 0 && pending.rtx_pt != session->media.uplink_video.rtx_payload_type) ||
+                         (pending.video_codec != SFU_VIDEO_CODEC_NONE && pending.video_codec != (uint8_t)session->media.uplink_video.codec) ||
+                         (pending.screen_pt != 0 && pending.screen_pt != session->media.screen.payload_type) ||
+                         (pending.screen_rtx_pt != 0 && pending.screen_rtx_pt != session->media.screen.rtx_payload_type) ||
+                         (pending.screen_codec != SFU_VIDEO_CODEC_NONE && pending.screen_codec != (uint8_t)session->media.screen.codec);
   pthread_mutex_unlock(&session->media.lock);
   if (sfu_routing_table_reconcile_answer(s->routing_table, c->client_ufrag, c->joined_room, c->fd, answer_generation, session, &role_changed, &media_changed)) {
     if (!session->room) {
@@ -1197,9 +1226,8 @@ static void send_peer_updated(int fd, sfu_peer_session_t *session) {
                    "{\"type\":\"peer_updated\",\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
                    "\",\"role\":\"%s\",\"is_mute\":%s,\"camera_requested\":%s,\"camera_active\":%s,"
                    "\"screen_requested\":%s,\"screen_active\":%s}}",
-                   session->peer_id, session->user_id, is_audience ? "audience" : "speaker", is_mute ? "true" : "false",
-                   camera_requested ? "true" : "false", media.video_active ? "true" : "false", screen_requested ? "true" : "false",
-                   media.screen_active ? "true" : "false");
+                   session->peer_id, session->user_id, is_audience ? "audience" : "speaker", is_mute ? "true" : "false", camera_requested ? "true" : "false",
+                   media.video_active ? "true" : "false", screen_requested ? "true" : "false", media.screen_active ? "true" : "false");
   if (n > 0 && (size_t)n < sizeof(event)) {
     (void)sfu_ws_send_text(fd, event, (size_t)n);
   }
@@ -1269,8 +1297,8 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
     if (response_len > 0 && (size_t)response_len < sizeof(response)) {
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
-    SFU_LOG_INFO("signaling: push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u active=%d role=audience", c->user_id, c->client_ufrag,
-                 session->peer_id, active);
+    SFU_LOG_INFO("signaling: push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u active=%d role=audience", c->user_id, c->client_ufrag, session->peer_id,
+                 active);
   }
   if (session) {
     sfu_session_release(session);
@@ -1464,8 +1492,18 @@ static void handle_visibility(sfu_client_conn_t *c, const char *buf, size_t n) {
   SFU_LOG_INFO("signaling: visibility user_id=%" PRId64 " visible=%s (fd=%d)", c->user_id, visible ? "true" : "false", c->fd);
 }
 
-static void handle_mute_participant(sfu_client_conn_t *c, const char *buf, size_t n) {
-  if (!c->joined_room || c->joined_room_id == 0) {
+static void send_participant_action_completed(sfu_client_conn_t *c, const char *action, int64_t user_id, uint32_t affected) {
+  char response[160];
+  int response_len =
+      snprintf(response, sizeof(response), "{\"type\":\"participant_action_completed\",\"action\":\"%s\",\"user_id\":\"%" PRId64 "\",\"affected\":%u}", action,
+               user_id, affected);
+  if (response_len > 0 && (size_t)response_len < sizeof(response)) {
+    (void)sfu_ws_send_text(c->fd, response, (size_t)response_len);
+  }
+}
+
+static void handle_participant_action(sfu_client_conn_t *c, const char *buf, size_t n) {
+  if (!c->joined_room || c->joined_room_id == 0 || c->joined_room->room_id != c->joined_room_id) {
     static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
     sfu_ws_send_text(c->fd, must_join, sizeof(must_join) - 1);
     return;
@@ -1474,7 +1512,7 @@ static void handle_mute_participant(sfu_client_conn_t *c, const char *buf, size_
   char token[4096];
   int token_len = sfu_json_extract_string(buf, n, "token", token, sizeof(token));
   if (token_len < 0) {
-    static const char invalid[] = "{\"type\":\"error\",\"message\":\"invalid_mute_participant\"}";
+    static const char invalid[] = "{\"type\":\"error\",\"message\":\"invalid_participant_action\"}";
     sfu_ws_send_text(c->fd, invalid, sizeof(invalid) - 1);
     return;
   }
@@ -1486,54 +1524,79 @@ static void handle_mute_participant(sfu_client_conn_t *c, const char *buf, size_
     return;
   }
 
-  int64_t target_user_id = 0;
-  uint64_t token_room_id = 0;
-  if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &target_user_id, &token_room_id) != 0) {
+  sfu_jwt_claims_t claims;
+  if (sfu_handshake_verify_token_claims(token, (size_t)token_len, jwt_secret, &claims) != 0) {
     static const char invalid_token[] = "{\"type\":\"error\",\"message\":\"invalid_token\"}";
     sfu_ws_send_text(c->fd, invalid_token, sizeof(invalid_token) - 1);
     return;
   }
-  if (token_room_id != c->joined_room_id || c->joined_room->room_id != c->joined_room_id) {
+  if (claims.room_id != c->joined_room_id) {
     static const char room_mismatch[] = "{\"type\":\"error\",\"message\":\"token_room_mismatch\"}";
     sfu_ws_send_text(c->fd, room_mismatch, sizeof(room_mismatch) - 1);
     return;
   }
 
-  sfu_peer_session_t *targets[SFU_ROOM_MAX_PEERS];
-  uint32_t target_count = 0;
-  pthread_mutex_lock(&c->joined_room->lock);
-  for (uint32_t i = 0; i < c->joined_room->peer_count && target_count < SFU_ROOM_MAX_PEERS; i++) {
-    sfu_peer_session_t *peer = c->joined_room->peers[i];
-    if (peer && peer->room == c->joined_room && peer->user_id == target_user_id && sfu_session_accepts_work(peer)) {
-      atomic_fetch_add_explicit(&peer->refcount, 1, memory_order_relaxed);
-      targets[target_count++] = peer;
+  if (strcmp(claims.metadata, "mute") == 0) {
+    sfu_peer_session_t *targets[SFU_ROOM_MAX_PEERS];
+    uint32_t target_count = 0;
+    pthread_mutex_lock(&c->joined_room->lock);
+    for (uint32_t i = 0; i < c->joined_room->peer_count && target_count < SFU_ROOM_MAX_PEERS; i++) {
+      sfu_peer_session_t *peer = c->joined_room->peers[i];
+      if (peer && peer->room == c->joined_room && peer->user_id == claims.user_id && sfu_session_accepts_work(peer)) {
+        atomic_fetch_add_explicit(&peer->refcount, 1, memory_order_relaxed);
+        targets[target_count++] = peer;
+      }
     }
-  }
-  pthread_mutex_unlock(&c->joined_room->lock);
+    pthread_mutex_unlock(&c->joined_room->lock);
 
-  if (target_count == 0) {
-    static const char target_not_found[] = "{\"type\":\"error\",\"message\":\"target_not_found\"}";
-    sfu_ws_send_text(c->fd, target_not_found, sizeof(target_not_found) - 1);
+    if (target_count == 0) {
+      static const char target_not_found[] = "{\"type\":\"error\",\"message\":\"target_not_found\"}";
+      sfu_ws_send_text(c->fd, target_not_found, sizeof(target_not_found) - 1);
+      return;
+    }
+
+    for (uint32_t i = 0; i < target_count; i++) {
+      atomic_store_explicit(&targets[i]->media.is_mute, true, memory_order_release);
+      broadcast_peer_updated(c->joined_room, targets[i]);
+      sfu_session_release(targets[i]);
+    }
+    send_participant_action_completed(c, "mute", claims.user_id, target_count);
+    SFU_LOG_INFO("signaling: participant action=mute target_user_id=%" PRId64 " room=%" PRIu64 " affected=%u (fd=%d)", claims.user_id, claims.room_id,
+                 target_count, c->fd);
     return;
   }
 
-  for (uint32_t i = 0; i < target_count; i++) {
-    atomic_store_explicit(&targets[i]->media.is_mute, true, memory_order_release);
-    broadcast_peer_updated(c->joined_room, targets[i]);
-    sfu_session_release(targets[i]);
+  if (strcmp(claims.metadata, "kick") == 0) {
+    uint32_t target_count = 0;
+    for (sfu_client_conn_t *target = c->server->connections_head; target; target = target->registry_next) {
+      if (!target->disconnecting && target->joined_room == c->joined_room && target->joined_room_id == claims.room_id && target->user_id == claims.user_id) {
+        target_count++;
+      }
+    }
+    if (target_count == 0) {
+      static const char target_not_found[] = "{\"type\":\"error\",\"message\":\"target_not_found\"}";
+      sfu_ws_send_text(c->fd, target_not_found, sizeof(target_not_found) - 1);
+      return;
+    }
+
+    send_participant_action_completed(c, "kick", claims.user_id, target_count);
+    SFU_LOG_INFO("signaling: participant action=kick target_user_id=%" PRId64 " room=%" PRIu64 " affected=%u (fd=%d)", claims.user_id, claims.room_id,
+                 target_count, c->fd);
+    for (sfu_client_conn_t *target = c->server->connections_head; target;) {
+      sfu_client_conn_t *next = target->registry_next;
+      if (!target->disconnecting && target->joined_room == c->joined_room && target->joined_room_id == claims.room_id && target->user_id == claims.user_id) {
+        disconnect_client(target);
+      }
+      target = next;
+    }
+    return;
   }
 
-  char response[128];
-  int response_len = snprintf(response, sizeof(response),
-                              "{\"type\":\"participant_muted\",\"user_id\":\"%" PRId64 "\",\"is_mute\":true}", target_user_id);
-  if (response_len > 0 && (size_t)response_len < sizeof(response)) {
-    sfu_ws_send_text(c->fd, response, (size_t)response_len);
-  }
-  SFU_LOG_INFO("signaling: mute participant target_user_id=%" PRId64 " room=%" PRIu64 " sessions=%u (fd=%d)", target_user_id,
-               token_room_id, target_count, c->fd);
+  static const char unsupported[] = "{\"type\":\"error\",\"message\":\"unsupported_participant_action\"}";
+  sfu_ws_send_text(c->fd, unsupported, sizeof(unsupported) - 1);
 }
 
-static void handle_mute(sfu_client_conn_t *c, const char *buf, size_t n) {
+static void handle_self_mute(sfu_client_conn_t *c, const char *buf, size_t n) {
   if (!c->joined_room || c->client_ufrag[0] == '\0') {
     static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
     sfu_ws_send_text(c->fd, must_join, sizeof(must_join) - 1);
@@ -1590,9 +1653,9 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
   } else if (strcmp(type, "visibility") == 0) {
     handle_visibility(c, buf, n);
   } else if (strcmp(type, "mute") == 0) {
-    handle_mute(c, buf, n);
-  } else if (strcmp(type, "mute_participant") == 0) {
-    handle_mute_participant(c, buf, n);
+    handle_self_mute(c, buf, n);
+  } else if (strcmp(type, "participant_action") == 0) {
+    handle_participant_action(c, buf, n);
   } else if (strcmp(type, "camera") == 0) {
     handle_camera(c, buf, n);
   } else if (strcmp(type, "share_screen") == 0) {
@@ -1720,6 +1783,7 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
       c->keepalive_timer.data = c;
       c->keepalive_inited = true;
       c->handles_open = 2;
+      register_client(c);
 
       rc = uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
       if (rc != 0) {
@@ -1851,10 +1915,9 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
                        "\",\"role\":\"%s\",\"is_mute\":%s,\"camera_requested\":%s,\"camera_active\":%s,"
                        "\"screen_requested\":%s,\"screen_active\":%s,\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u,\"mid_screen\":%u}",
                        i ? "," : "", members[i].peer_id, members[i].user_id, members[i].is_audience ? "audience" : "speaker",
-                       members[i].is_mute ? "true" : "false", members[i].camera_requested ? "true" : "false",
-                       members[i].camera_active ? "true" : "false", members[i].screen_requested ? "true" : "false",
-                       members[i].screen_active ? "true" : "false", members[i].ufrag, members[i].mid_audio, members[i].mid_video,
-                       members[i].mid_screen);
+                       members[i].is_mute ? "true" : "false", members[i].camera_requested ? "true" : "false", members[i].camera_active ? "true" : "false",
+                       members[i].screen_requested ? "true" : "false", members[i].screen_active ? "true" : "false", members[i].ufrag, members[i].mid_audio,
+                       members[i].mid_video, members[i].mid_screen);
           if (n < 0 || (size_t)n >= SFU_SIGNALING_JSON_CAP - off) {
             off = 0;
             break;
@@ -1883,14 +1946,14 @@ static void flush_membership_events(sfu_signaling_server_t *s) {
         bool joined_screen_requested = atomic_load_explicit(&joined->media.screen_enabled, memory_order_acquire);
         sfu_media_snapshot_t joined_media = sfu_session_load_media(joined);
         char event[560];
-        int event_len = snprintf(event, sizeof(event),
-                                 "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
-                                 "\",\"role\":\"%s\",\"is_mute\":%s,\"camera_requested\":%s,\"camera_active\":%s,"
-                                 "\"screen_requested\":%s,\"screen_active\":%s,\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u,\"mid_screen\":%u}}",
-                                 count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined_mute ? "true" : "false",
-                                 joined_camera_requested ? "true" : "false", joined_media.video_active ? "true" : "false",
-                                 joined_screen_requested ? "true" : "false", joined_media.screen_active ? "true" : "false",
-                                 joined->cold ? joined->cold->ufrag : "", mid_audio, mid_video, mid_screen);
+        int event_len =
+            snprintf(event, sizeof(event),
+                     "{\"type\":\"peer_joined\",\"participant_count\":%u,\"peer\":{\"peer_id\":%u,\"user_id\":\"%" PRId64
+                     "\",\"role\":\"%s\",\"is_mute\":%s,\"camera_requested\":%s,\"camera_active\":%s,"
+                     "\"screen_requested\":%s,\"screen_active\":%s,\"ufrag\":\"%s\",\"mid_audio\":%u,\"mid_video\":%u,\"mid_screen\":%u}}",
+                     count, joined->peer_id, joined->user_id, joined_audience ? "audience" : "speaker", joined_mute ? "true" : "false",
+                     joined_camera_requested ? "true" : "false", joined_media.video_active ? "true" : "false", joined_screen_requested ? "true" : "false",
+                     joined_media.screen_active ? "true" : "false", joined->cold ? joined->cold->ufrag : "", mid_audio, mid_video, mid_screen);
         if (event_len > 0 && (size_t)event_len < sizeof(event)) {
           (void)sfu_ws_send_text(members[i].fd, event, (size_t)event_len);
         }
@@ -1997,8 +2060,8 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
       session->negotiation.offered_revision = attempt_revision;
       session->negotiation.negotiation_retry_count = 0;
       pthread_mutex_unlock(&session->negotiation.lock);
-      SFU_LOG_INFO("signaling: sent renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u revision=%" PRIu64, session->cold->ufrag, fd,
-                   session->peer_id, generation, attempt_revision);
+      SFU_LOG_INFO("signaling: sent renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u revision=%" PRIu64, session->cold->ufrag, fd, session->peer_id,
+                   generation, attempt_revision);
     } else if (send) {
       pthread_mutex_lock(&session->negotiation.lock);
       if (session->negotiation.offer_generation == generation) {
@@ -2017,8 +2080,7 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
         requeue = true;
       }
       pthread_mutex_unlock(&session->negotiation.lock);
-      SFU_LOG_WARN("signaling: failed renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u", session->cold->ufrag, fd, session->peer_id,
-                   generation);
+      SFU_LOG_WARN("signaling: failed renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%u", session->cold->ufrag, fd, session->peer_id, generation);
       if (requeue && renegotiation_queue_push_owned(&s->renegotiation_queue, session)) {
         if (earliest_due_ms == 0 || due_ms < earliest_due_ms) {
           earliest_due_ms = due_ms;

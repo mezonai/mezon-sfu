@@ -232,8 +232,8 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
   return 0;
 }
 
-int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, int64_t *out_user_id, uint64_t *out_room_id) {
-  if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out_user_id || !out_room_id) {
+int sfu_handshake_verify_token_claims(const char *token, size_t token_len, const char *secret, sfu_jwt_claims_t *out) {
+  if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out) {
     return -1;
   }
 
@@ -265,9 +265,21 @@ int sfu_handshake_verify_join_token(const char *token, size_t token_len, const c
     return -1;
   }
 
-  *out_user_id = claims.user_id;
-  if (out_room_id) {
-    *out_room_id = claims.room_id;
+  *out = claims;
+  return 0;
+}
+
+int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, int64_t *out_user_id, uint64_t *out_room_id) {
+  if (!out_user_id || !out_room_id) {
+    return -1;
   }
+
+  sfu_jwt_claims_t claims;
+  if (sfu_handshake_verify_token_claims(token, token_len, secret, &claims) != 0) {
+    return -1;
+  }
+
+  *out_user_id = claims.user_id;
+  *out_room_id = claims.room_id;
   return 0;
 }
