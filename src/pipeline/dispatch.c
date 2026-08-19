@@ -9,6 +9,7 @@
 #include "protocol/signaling/signaling.h"
 #include "room/room_media_graph.h"
 #include "runtime/routing_context.h"
+#include "runtime/scheduler.h"
 #include "runtime/timer.h"
 #include "transport/dtls/dtls.h"
 #include "transport/srtp/srtp.h"

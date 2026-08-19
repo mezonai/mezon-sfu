@@ -94,7 +94,7 @@ sudo ldconfig
 ## build mezon sfu
 ```
 mkdir build && cd build
-cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Debug
+cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ctest --output-on-failure
 ```

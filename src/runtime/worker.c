@@ -218,7 +218,7 @@ static void *worker_thread_main(void *arg) {
       idle_sleep_us = SFU_WORKER_IDLE_SLEEP_MIN_US;
     }
 
-    __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
+    atomic_fetch_add_explicit(&w->generation, 1, memory_order_release);
   }
 
   for (unsigned idle_passes = 0; idle_passes < 32;) {
@@ -249,7 +249,7 @@ static void *worker_thread_main(void *arg) {
       usleep(SFU_WORKER_IDLE_SLEEP_MIN_US);
     }
 
-    __atomic_fetch_add(&w->generation, 1, __ATOMIC_RELEASE);
+    atomic_fetch_add_explicit(&w->generation, 1, memory_order_release);
   }
 
   SFU_LOG_INFO("worker %u shutting down", w->worker_index);

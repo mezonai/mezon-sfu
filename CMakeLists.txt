@@ -17,6 +17,8 @@ add_compile_options(
   -Wno-unused-parameter
   -D_GNU_SOURCE
   -march=native
+  $<$<AND:$<CONFIG:Release>,$<COMPILE_LANG_AND_ID:C,GNU,Clang>>:-O3>
+  $<$<AND:$<CONFIG:Release>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>:-O3>
 )
 
 if(SFU_ENABLE_ASAN)
@@ -58,6 +60,7 @@ find_library(NATS_LIBRARY NAMES nats)
 add_library(sfu_core STATIC
   src/media/svc/svc_parser.c
   src/media/svc/svc_descriptor.c
+  src/media/svc/layer_scheduler.c
   src/memory/pool.c
   src/memory/packet_pool.c
   src/memory/refcount.c
@@ -141,7 +144,6 @@ set_target_properties(mezon-sfu PROPERTIES LINKER_LANGUAGE CXX)
 
 target_compile_options(mezon-sfu PRIVATE
     $<$<CONFIG:Debug>:-g3>
-    $<$<CONFIG:Release>:-O2>
 )
 
 enable_testing()

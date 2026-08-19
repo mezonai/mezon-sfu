@@ -200,19 +200,16 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
   if (extract_json_int64((const char *)payload_json, payload_json_len, "identity", &user_id) == 0 ||
       extract_json_int64((const char *)payload_json, payload_json_len, "sub", &user_id) == 0) {
     out->user_id = user_id;
-    out->has_user_id = true;
   }
 
   int64_t exp = 0;
   if (extract_json_int64((const char *)payload_json, payload_json_len, "exp", &exp) == 0) {
     out->exp = exp;
-    out->has_exp = true;
   }
 
   int64_t nbf = 0;
   if (extract_json_int64((const char *)payload_json, payload_json_len, "nbf", &nbf) == 0) {
     out->nbf = nbf;
-    out->has_nbf = true;
   }
 
   (void)sfu_json_extract_string((const char *)payload_json, payload_json_len, "iss", out->iss, sizeof(out->iss));
@@ -221,12 +218,6 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
   int64_t room_id = 0;
   if (extract_json_int64((const char *)payload_json, payload_json_len, "room", &room_id) == 0 && room_id > 0) {
     out->room_id = (uint64_t)room_id;
-    out->has_room = true;
-  }
-
-  bool room_join = false;
-  if (sfu_json_extract_bool((const char *)payload_json, payload_json_len, "roomJoin", &room_join) == 0) {
-    out->room_join = room_join;
   }
 
   return 0;
@@ -242,25 +233,21 @@ int sfu_handshake_verify_token_claims(const char *token, size_t token_len, const
     SFU_LOG_WARN("handshake: JWT parse/verify failed");
     return -1;
   }
-  if (!claims.has_user_id || claims.user_id == 0) {
+  if (claims.user_id == 0) {
     SFU_LOG_WARN("handshake: JWT missing identity/sub claim");
     return -1;
   }
-  if (!claims.room_join) {
-    SFU_LOG_WARN("handshake: JWT video.roomJoin is not true");
-    return -1;
-  }
-  if (!claims.has_room || claims.room_id == 0) {
+  if (claims.room_id == 0) {
     SFU_LOG_WARN("handshake: JWT missing video.room claim");
     return -1;
   }
 
   int64_t now = (int64_t)time(NULL);
-  if (claims.has_nbf && now < claims.nbf) {
+  if (now < claims.nbf) {
     SFU_LOG_WARN("handshake: JWT not yet valid (nbf=%" PRId64 " now=%" PRId64 ")", claims.nbf, now);
     return -1;
   }
-  if (claims.has_exp && claims.exp < now) {
+  if (claims.exp < now) {
     SFU_LOG_WARN("handshake: JWT expired (exp=%" PRId64 " now=%" PRId64 ")", claims.exp, now);
     return -1;
   }
