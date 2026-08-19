@@ -12,11 +12,6 @@ typedef struct sfu_jwt_claims {
   uint64_t room_id;
   char iss[64];
   char metadata[64];
-  bool room_join;
-  bool has_user_id;
-  bool has_exp;
-  bool has_nbf;
-  bool has_room;
 } sfu_jwt_claims_t;
 
 int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret, size_t secret_len, sfu_jwt_claims_t *out);
