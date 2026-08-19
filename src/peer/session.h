@@ -34,6 +34,7 @@ bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s
 bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *session);
 bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pending_answer_t *answer, int fd, bool *role_changed, bool *media_changed);
 bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session);
+bool sfu_session_recompute_video_activity_locked(sfu_peer_session_t *session);
 static inline bool sfu_session_video_runtime_ready(const sfu_peer_session_t *session) {
   return atomic_load_explicit(&session->egress.video_runtime_state, memory_order_acquire) == SFU_VIDEO_RUNTIME_READY;
 }

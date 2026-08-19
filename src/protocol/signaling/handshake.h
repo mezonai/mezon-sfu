@@ -20,6 +20,7 @@ typedef struct sfu_jwt_claims {
 } sfu_jwt_claims_t;
 
 int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret, size_t secret_len, sfu_jwt_claims_t *out);
+int sfu_handshake_verify_token_claims(const char *token, size_t token_len, const char *secret, sfu_jwt_claims_t *out);
 int sfu_handshake_verify_join_token(const char *token, size_t token_len, const char *secret, int64_t *out_user_id, uint64_t *out_room_id);
 
 #endif /* SFU_PROTOCOL_HANDSHAKE_H */

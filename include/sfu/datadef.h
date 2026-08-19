@@ -284,6 +284,13 @@ typedef struct {
   uint8_t twcc_send_extmap_id;
   uint8_t mid_recv_extmap_id;
   _Atomic bool ptt_active;
+  _Atomic bool camera_enabled;
+  _Atomic bool screen_enabled;
+  _Atomic bool camera_rtp_observed;
+  _Atomic bool screen_rtp_observed;
+  _Atomic bool media_update_queued;
+  _Atomic bool camera_announced_active;
+  _Atomic bool screen_announced_active;
   _Atomic bool audio_send_negotiated;
   _Atomic bool video_send_negotiated;
   _Atomic bool screen_send_negotiated;

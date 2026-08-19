@@ -95,7 +95,7 @@ int main(void) {
     assert(room_id == 2087757797482565632ULL);
 
     sfu_jwt_claims_t claims;
-    assert(sfu_jwt_parse_hs256(token, strlen(token), secret, strlen(secret), &claims) == 0);
+    assert(sfu_handshake_verify_token_claims(token, strlen(token), secret, &claims) == 0);
     assert(claims.has_user_id && claims.user_id == 1843252237590073344LL);
     assert(claims.has_exp && claims.exp == exp);
     assert(claims.has_nbf && claims.nbf == nbf);
@@ -103,6 +103,24 @@ int main(void) {
     assert(claims.room_join);
     assert(strcmp(claims.iss, "APIcdd28PzB2amp") == 0);
     assert(strcmp(claims.metadata, "longma350") == 0);
+  }
+
+  /* Valid participant action metadata is preserved by verified claims. */
+  {
+    const char *actions[] = {"mute", "kick"};
+    for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++) {
+      char payload[256];
+      int64_t exp = (int64_t)time(NULL) + 3600;
+      snprintf(payload, sizeof(payload),
+               "{\"identity\":\"99\",\"metadata\":\"%s\",\"exp\":%" PRId64 ",\"video\":{\"room\":\"101\",\"roomJoin\":true}}",
+               actions[i], exp);
+      assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
+      sfu_jwt_claims_t claims;
+      assert(sfu_handshake_verify_token_claims(token, strlen(token), secret, &claims) == 0);
+      assert(claims.user_id == 99);
+      assert(claims.room_id == 101);
+      assert(strcmp(claims.metadata, actions[i]) == 0);
+    }
   }
 
   /* sub fallback when identity is absent. */
