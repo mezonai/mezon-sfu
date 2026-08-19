@@ -8,9 +8,14 @@
 
 static natsConnection *global_nats_nc;
 
-static void onDisconnect(natsConnection *, void *) { SFU_LOG_INFO("[Producer] Disconnected from NATS server!\n"); }
+static void onDisconnect(natsConnection *nc, void *data) {
+  (void)nc;
+  (void)data;
+  SFU_LOG_INFO("[Producer] Disconnected from NATS server!\n");
+}
 
-static void onReconnect(natsConnection *nc, void *) {
+static void onReconnect(natsConnection *nc, void *data) {
+  (void)data;
   char url_buffer[256];
   natsStatus st = natsConnection_GetConnectedUrl(nc, url_buffer, sizeof(url_buffer));
   if (st == NATS_OK) {

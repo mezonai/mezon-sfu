@@ -28,7 +28,6 @@ int sfu_pool_init(sfu_pool_t *pool, uint32_t capacity, uint32_t slot_size) {
   atomic_init(&pool->high_water, 0);
   atomic_init(&pool->alloc_failures, 0);
 
-  /* Chain every slot into the free list: 0 -> 1 -> 2 -> ... -> EMPTY */
   for (uint32_t i = 0; i < capacity; i++) {
     pool->next[i] = (i + 1 < capacity) ? (i + 1) : SFU_POOL_EMPTY_INDEX;
   }
@@ -68,7 +67,6 @@ void *sfu_pool_alloc(sfu_pool_t *pool, uint32_t *out_index) {
       }
       return sfu_pool_slot(pool, idx);
     }
-    /* CAS failed: old_head was refreshed by the intrinsic, retry. */
   }
 }
 
@@ -86,7 +84,6 @@ void sfu_pool_free(sfu_pool_t *pool, uint32_t index) {
       atomic_fetch_sub_explicit(&pool->in_use, 1, memory_order_relaxed);
       return;
     }
-    /* retry with refreshed old_head */
   }
 }
 

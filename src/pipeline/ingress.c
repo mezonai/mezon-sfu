@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "congestion/gcc.h"
+#include "congestion/pacer.h"
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "congestion/twcc_parser.h"
@@ -14,7 +15,6 @@
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
-#include "protocol/signaling/sdp.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_compound.h"
@@ -490,9 +490,8 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (unprotect_status == srtp_err_status_auth_fail && can_retry_previous) {
     memcpy(pkt->data, ciphertext, pkt->len);
     plain_len = (int)pkt->len;
-    srtp_err_status_t previous_status =
-        is_rtcp ? sfu_srtp_unprotect_rtcp_status(&sender_session->previous_srtp, pkt->data, &plain_len)
-                : sfu_srtp_unprotect_rtp_status(&sender_session->previous_srtp, pkt->data, &plain_len);
+    srtp_err_status_t previous_status = is_rtcp ? sfu_srtp_unprotect_rtcp_status(&sender_session->previous_srtp, pkt->data, &plain_len)
+                                                : sfu_srtp_unprotect_rtp_status(&sender_session->previous_srtp, pkt->data, &plain_len);
     if (previous_status == srtp_err_status_ok) {
       unprotect_status = srtp_err_status_ok;
       used_previous_generation = true;
@@ -518,13 +517,13 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       sfu_metric_inc("ingress_unprotect_other");
     }
     uint64_t log_now_ms = sfu_now_ms();
-    bool should_log = sender_session->cold->last_srtp_failure_log_ms == 0 ||
-                      sender_session->cold->last_srtp_failure_status != (int)unprotect_status ||
+    bool should_log = sender_session->cold->last_srtp_failure_log_ms == 0 || sender_session->cold->last_srtp_failure_status != (int)unprotect_status ||
                       log_now_ms - sender_session->cold->last_srtp_failure_log_ms >= 5000u;
     if (should_log) {
       SFU_LOG_WARN("worker %u: [INGRESS DROP] SRTP unprotect failed peer=%u ufrag=%s status=%d (%s) rtcp=%d len=%u generation=%u owner=%u suppressed=%u",
-                   w->worker_index, sender_session->peer_id, sender_session->cold->ufrag, (int)unprotect_status, sfu_srtp_status_name(unprotect_status), is_rtcp,
-                   pkt->len, sender_session->cold->transport_generation, sfu_session_owner_worker(sender_session), sender_session->cold->suppressed_srtp_failures);
+                   w->worker_index, sender_session->peer_id, sender_session->cold->ufrag, (int)unprotect_status, sfu_srtp_status_name(unprotect_status),
+                   is_rtcp, pkt->len, sender_session->cold->transport_generation, sfu_session_owner_worker(sender_session),
+                   sender_session->cold->suppressed_srtp_failures);
       sender_session->cold->last_srtp_failure_log_ms = log_now_ms;
       sender_session->cold->last_srtp_failure_status = (int)unprotect_status;
       sender_session->cold->suppressed_srtp_failures = 0;
@@ -597,7 +596,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-  bool send_negotiated = m.source == SFU_MEDIA_VIDEO   ? atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire)
+  bool send_negotiated = m.source == SFU_MEDIA_VIDEO    ? atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire)
                          : m.source == SFU_MEDIA_SCREEN ? atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire)
                                                         : atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire);
   bool learned = false;
@@ -630,8 +629,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-  sfu_transceiver_t *source = m.source == SFU_MEDIA_SCREEN ? &sender_session->media.screen : m.source == SFU_MEDIA_VIDEO ? &sender_session->media.uplink_video
-                                                                                                                    : &sender_session->media.uplink_audio;
+  sfu_transceiver_t *source = m.source == SFU_MEDIA_SCREEN  ? &sender_session->media.screen
+                              : m.source == SFU_MEDIA_VIDEO ? &sender_session->media.uplink_video
+                                                            : &sender_session->media.uplink_audio;
   uint32_t known_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_ssrc : m.source == SFU_MEDIA_VIDEO ? pt_msnap.video_ssrc : pt_msnap.audio_ssrc;
   uint32_t known_rtx_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_ssrc : pt_msnap.video_rtx_ssrc;
   uint8_t rtx_pt = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_pt : pt_msnap.video_rtx_pt;
@@ -650,12 +650,10 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       source->ssrc = m.rtp.ssrc;
       learned = true;
     }
-    if (!is_rtx && m.source == SFU_MEDIA_VIDEO &&
-        !atomic_load_explicit(&sender_session->media.camera_rtp_observed, memory_order_acquire)) {
+    if (!is_rtx && m.source == SFU_MEDIA_VIDEO && !atomic_load_explicit(&sender_session->media.camera_rtp_observed, memory_order_acquire)) {
       atomic_store_explicit(&sender_session->media.camera_rtp_observed, true, memory_order_release);
       learned = true;
-    } else if (!is_rtx && m.source == SFU_MEDIA_SCREEN &&
-               !atomic_load_explicit(&sender_session->media.screen_rtp_observed, memory_order_acquire)) {
+    } else if (!is_rtx && m.source == SFU_MEDIA_SCREEN && !atomic_load_explicit(&sender_session->media.screen_rtp_observed, memory_order_acquire)) {
       atomic_store_explicit(&sender_session->media.screen_rtp_observed, true, memory_order_release);
       learned = true;
     }
