@@ -7,9 +7,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-static void write_masked_frame(int fd, int fin, uint8_t opcode, const char *payload, size_t len, const uint8_t mask_key[4]) {
+static size_t build_masked_frame(uint8_t *frame, int fin, uint8_t opcode, const char *payload, size_t len, const uint8_t mask_key[4]) {
   assert(len < 126);
-  uint8_t frame[256];
   size_t off = 0;
   frame[off++] = (fin ? 0x80 : 0) | opcode;
   frame[off++] = 0x80 | (uint8_t)len;
@@ -18,12 +17,19 @@ static void write_masked_frame(int fd, int fin, uint8_t opcode, const char *payl
   for (size_t i = 0; i < len; i++) {
     frame[off++] = (uint8_t)payload[i] ^ mask_key[i % 4];
   }
-  assert(write(fd, frame, off) == (ssize_t)off);
+  return off;
+}
+
+static void write_masked_frame(int fd, int fin, uint8_t opcode, const char *payload, size_t len, const uint8_t mask_key[4]) {
+  uint8_t frame[256];
+  size_t frame_len = build_masked_frame(frame, fin, opcode, payload, len, mask_key);
+  assert(write(fd, frame, frame_len) == (ssize_t)frame_len);
 }
 
 static void open_pair(int fds[2]) { assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0); }
 
 int main(void) {
+  sfu_ws_read_state_t state = {0};
   /* RFC 6455 section 1.3's own worked example: this exact key must
    * produce this exact accept value. If our SHA1+base64 handshake
    * logic is wrong, this is where it shows up. */
@@ -40,7 +46,7 @@ int main(void) {
         "Sec-WebSocket-Version: 13\r\n\r\n";
     assert(write(fds[1], request, strlen(request)) == (ssize_t)strlen(request));
 
-    assert(sfu_ws_handshake(fds[0]) == 0);
+    assert(sfu_ws_handshake(fds[0], &state) == 0);
 
     char response[512];
     ssize_t n = read(fds[1], response, sizeof(response) - 1);
@@ -50,6 +56,103 @@ int main(void) {
     assert(strstr(response, "101") != NULL);
     assert(strstr(response, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != NULL);
 
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  /* Upgrade headers and the first frame may be coalesced into one TCP read.
+   * Handshake must preserve every byte after the HTTP terminator. */
+  {
+    int fds[2];
+    open_pair(fds);
+    const char *request =
+        "GET /chat HTTP/1.1\r\n"
+        "Host: server.example.com\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n\r\n";
+    const char *payload = "first message";
+    const uint8_t mask[4] = {0x10, 0x20, 0x30, 0x40};
+    uint8_t frame[64];
+    size_t frame_len = build_masked_frame(frame, 1, 0x1, payload, strlen(payload), mask);
+    uint8_t combined[512];
+    size_t request_len = strlen(request);
+    memcpy(combined, request, request_len);
+    memcpy(combined + request_len, frame, frame_len);
+    assert(write(fds[1], combined, request_len + frame_len) == (ssize_t)(request_len + frame_len));
+
+    assert(sfu_ws_handshake(fds[0], &state) == 0);
+    assert(sfu_ws_read_state_has_pending(&state));
+    char buf[64];
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == (ssize_t)strlen(payload));
+    assert(strcmp(buf, payload) == 0);
+    assert(!sfu_ws_read_state_has_pending(&state));
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  /* Prefetched frame bytes combine with later socket bytes, even when the
+   * handshake read ends in the middle of the mask key. */
+  {
+    int fds[2];
+    open_pair(fds);
+    const char *request =
+        "GET /chat HTTP/1.1\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+    const char *payload = "split frame";
+    const uint8_t mask[4] = {1, 3, 5, 7};
+    uint8_t frame[64];
+    size_t frame_len = build_masked_frame(frame, 1, 0x1, payload, strlen(payload), mask);
+    size_t request_len = strlen(request);
+    uint8_t combined[512];
+    memcpy(combined, request, request_len);
+    memcpy(combined + request_len, frame, 4);
+    assert(write(fds[1], combined, request_len + 4) == (ssize_t)(request_len + 4));
+    assert(sfu_ws_handshake(fds[0], &state) == 0);
+    assert(write(fds[1], frame + 4, frame_len - 4) == (ssize_t)(frame_len - 4));
+
+    char buf[64];
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == (ssize_t)strlen(payload));
+    assert(strcmp(buf, payload) == 0);
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  /* Multiple frames coalesced with the upgrade remain ordered and pending
+   * until each complete message is consumed. */
+  {
+    int fds[2];
+    open_pair(fds);
+    const char *request =
+        "GET /chat HTTP/1.1\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+    const uint8_t mask1[4] = {2, 4, 6, 8};
+    const uint8_t mask2[4] = {8, 6, 4, 2};
+    uint8_t frame1[32];
+    uint8_t frame2[32];
+    size_t frame1_len = build_masked_frame(frame1, 1, 0x1, "one", 3, mask1);
+    size_t frame2_len = build_masked_frame(frame2, 1, 0x1, "two", 3, mask2);
+    size_t request_len = strlen(request);
+    uint8_t combined[512];
+    memcpy(combined, request, request_len);
+    memcpy(combined + request_len, frame1, frame1_len);
+    memcpy(combined + request_len + frame1_len, frame2, frame2_len);
+    size_t combined_len = request_len + frame1_len + frame2_len;
+    assert(write(fds[1], combined, combined_len) == (ssize_t)combined_len);
+    assert(sfu_ws_handshake(fds[0], &state) == 0);
+
+    char buf[16];
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == 3);
+    assert(strcmp(buf, "one") == 0);
+    assert(sfu_ws_read_state_has_pending(&state));
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == 3);
+    assert(strcmp(buf, "two") == 0);
+    assert(!sfu_ws_read_state_has_pending(&state));
     close(fds[0]);
     close(fds[1]);
   }
@@ -91,7 +194,7 @@ int main(void) {
     assert(write(fds[1], frame, off) == (ssize_t)off);
 
     char buf[128];
-    ssize_t rn = sfu_ws_recv_text(fds[0], buf, sizeof(buf));
+    ssize_t rn = sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf));
     assert(rn == (ssize_t)plen);
     assert(memcmp(buf, payload, plen) == 0);
 
@@ -112,7 +215,7 @@ int main(void) {
     write_masked_frame(fds[1], 1, 0x0, "message", 7, mask3);
 
     char buf[64];
-    ssize_t n = sfu_ws_recv_text(fds[0], buf, sizeof(buf));
+    ssize_t n = sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf));
     assert(n == 24);
     assert(strcmp(buf, "large fragmented message") == 0);
     close(fds[0]);
@@ -130,7 +233,7 @@ int main(void) {
     write_masked_frame(fds[1], 1, 0x0, "world", 5, mask);
 
     char buf[32];
-    ssize_t n = sfu_ws_recv_text(fds[0], buf, sizeof(buf));
+    ssize_t n = sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf));
     assert(n == 11);
     assert(strcmp(buf, "hello world") == 0);
 
@@ -150,7 +253,7 @@ int main(void) {
     const uint8_t mask[4] = {1, 1, 1, 1};
     write_masked_frame(fds[1], 1, 0x0, "orphan", 6, mask);
     char buf[32];
-    assert(sfu_ws_recv_text(fds[0], buf, sizeof(buf)) == -1);
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == -1);
     close(fds[0]);
     close(fds[1]);
   }
@@ -161,7 +264,7 @@ int main(void) {
     write_masked_frame(fds[1], 0, 0x1, "first", 5, mask);
     write_masked_frame(fds[1], 1, 0x1, "second", 6, mask);
     char buf[32];
-    assert(sfu_ws_recv_text(fds[0], buf, sizeof(buf)) == -1);
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == -1);
     close(fds[0]);
     close(fds[1]);
   }
@@ -172,7 +275,7 @@ int main(void) {
     write_masked_frame(fds[1], 0, 0x1, "12345", 5, mask);
     write_masked_frame(fds[1], 1, 0x0, "67890", 5, mask);
     char buf[10];
-    assert(sfu_ws_recv_text(fds[0], buf, sizeof(buf)) == -1);
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == -1);
     close(fds[0]);
     close(fds[1]);
   }
@@ -185,7 +288,7 @@ int main(void) {
     write_masked_frame(fds[1], 0, 0x1, "partial", 7, mask);
     write_masked_frame(fds[1], 1, 0x8, "", 0, mask);
     char buf[32];
-    assert(sfu_ws_recv_text(fds[0], buf, sizeof(buf)) == 0);
+    assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == 0);
     close(fds[0]);
     close(fds[1]);
   }

@@ -83,6 +83,11 @@ static void test_snapshot_format(void) {
   /* New counters render too. */
   EXPECT(strstr(buf, "rtcp_compound_malformed 0\n") != NULL);
   EXPECT(strstr(buf, "rtx_build_fail 0\n") != NULL);
+  EXPECT(strstr(buf, "rtx_seq_translate_fail 0\n") != NULL);
+  EXPECT(strstr(buf, "rtx_protect_replay_old 0\n") != NULL);
+  EXPECT(strstr(buf, "dtls_restart_detected 0\n") != NULL);
+  EXPECT(strstr(buf, "ingress_unprotect_auth_fail 0\n") != NULL);
+  EXPECT(strstr(buf, "ingress_unprotect_previous_generation 0\n") != NULL);
 
   /* Truncation: tiny buffer still NUL-terminated; return is full length. */
   char tiny[8];

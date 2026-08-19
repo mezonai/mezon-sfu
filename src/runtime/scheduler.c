@@ -461,16 +461,6 @@ void sfu_scheduler_reject_packet(sfu_subscriber_scheduler_t *sched, const sfu_sc
   }
 }
 
-uint16_t sfu_scheduler_assign_output_seq(sfu_subscriber_scheduler_t *sched, uint16_t source_seq) {
-  if (!sched->output_seq_initialized) {
-    sched->next_output_seq = source_seq;
-    sched->output_seq_initialized = true;
-  }
-  uint16_t output_seq = sched->next_output_seq;
-  sched->next_output_seq = (uint16_t)(sched->next_output_seq + 1);
-  return output_seq;
-}
-
 typedef struct sfu_layer_rung {
   uint32_t rate_bps;
   uint8_t sid;
@@ -551,7 +541,6 @@ void sfu_layer_selector_switch_source(sfu_peer_session_t *session, uint32_t new_
   sched->temporal_transition_failed = false;
   sched->keyframe_active = false;
   sched->keyframe_failed = false;
-  sched->output_seq_initialized = false;
 
   atomic_fetch_add_explicit(&session->egress.generation, 1, memory_order_acq_rel);
 }

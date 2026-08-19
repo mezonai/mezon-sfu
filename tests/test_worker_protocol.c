@@ -5,18 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
+#include "congestion/pacer.h"
 #include "congestion/twcc_history.h"
 #include "memory/packet_pool.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "pipeline/router.h"
-#include "runtime/fanout_job.h"
-#include "rtp/rtp_packet.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"
+#include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
+#include "runtime/fanout_job.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "sfu/datadef.h"
@@ -185,7 +185,7 @@ static void fixture_destroy(fixture_t *f) {
   close(f->send_fds[1]);
   sfu_rtx_cache_destroy(f->cache);
   SFU_FREE(f->cache);
-  f->session->egress.rtx_cache = NULL;            /* table teardown must not double-free */
+  f->session->egress.rtx_cache = NULL;     /* table teardown must not double-free */
   sfu_session_release(f->session);         /* drop the caller pin from get_or_create */
   sfu_session_table_destroy(&f->sessions); /* destroys copied SRTP handles */
   f->srtp.inbound = NULL;
@@ -296,7 +296,7 @@ static void test_compound_pli_then_nack(void) {
   feed_rtcp(&f, compound, pli_len + nack_len);
 
   assert(f.session->egress.last_pli_time != 0); /* PLI dispatched */
-  assert(f.cache->next_rtx_seq == 1);    /* NACK dispatched and serviced */
+  assert(f.cache->next_rtx_seq == 1);           /* NACK dispatched and serviced */
   fixture_destroy(&f);
 }
 
@@ -394,7 +394,7 @@ static void test_packet_release_ownership(void) {
   uint8_t pli[64];
   size_t pli_len = build_pli(pli);
   feed_rtcp(&f, pli, pli_len);
-  assert(f.session->egress.last_pli_time != 0); /* request throttled/coalesced... */
+  assert(f.session->egress.last_pli_time != 0);    /* request throttled/coalesced... */
   assert(pool_free_count(&f.pp) == POOL_CAPACITY); /* ...but no packet held */
 
   /* With a video SSRC the PLI is actually built: one packet is allocated,
@@ -701,7 +701,7 @@ static void test_egress_writes_twcc_extension(void) {
    * growth over the plaintext RTP length. */
   gcc_packet_info_t info = {0};
   assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info)); /* first seq = 0 */
-  assert(info.size_bytes > plain_len);                          /* grew by the ext block */
+  assert(info.size_bytes > plain_len);                                 /* grew by the ext block */
   assert(sfu_metric_get("twcc_write_fail") == 0);
 
   kf_fixture_destroy(&f);
@@ -825,9 +825,9 @@ static void test_svc_filter_rewrites_sequence_and_cache_identity(void) {
   kf_fixture_t f;
   kf_fixture_init(&f);
 
-  const uint8_t keyframe[] = {0x0c};                    /* P=0 B=1 E=1, SID=0 TID=0 */
-  const uint8_t upper[] = {0x6c, 0x02, 0x00};          /* P=1 L=1 B=1 E=1, SID=1 */
-  const uint8_t base_delta[] = {0x4c};                 /* P=1 B=1 E=1, SID=0 TID=0 */
+  const uint8_t keyframe[] = {0x0c};          /* P=0 B=1 E=1, SID=0 TID=0 */
+  const uint8_t upper[] = {0x6c, 0x02, 0x00}; /* P=1 L=1 B=1 E=1, SID=1 */
+  const uint8_t base_delta[] = {0x4c};        /* P=1 B=1 E=1, SID=0 TID=0 */
   feed_publisher_vp9(&f, 100, 9000, keyframe, sizeof(keyframe));
   feed_publisher_vp9(&f, 101, 9001, upper, sizeof(upper));
   feed_publisher_vp9(&f, 102, 9002, base_delta, sizeof(base_delta));
@@ -874,7 +874,7 @@ static void test_nack_wrong_stream_misses_cache(void) {
   sfu_write_be16(nack + 14, 0);
   feed_rtcp(&f, nack, hdr);
 
-  assert(f.cache->next_rtx_seq == 0);    /* no retransmission */
+  assert(f.cache->next_rtx_seq == 0);           /* no retransmission */
   assert(f.session->egress.last_pli_time != 0); /* miss -> keyframe fallback */
   fixture_destroy(&f);
 }
@@ -897,7 +897,7 @@ static void test_generation_bump_invalidates_cache(void) {
   size_t nack_len = build_nack(nack, (uint16_t[]){42, 0x0000}, 2);
   feed_rtcp(&f, nack, nack_len);
 
-  assert(f.cache->next_rtx_seq == 0);    /* stale entry not served */
+  assert(f.cache->next_rtx_seq == 0);           /* stale entry not served */
   assert(f.session->egress.last_pli_time != 0); /* miss -> keyframe fallback */
   fixture_destroy(&f);
 }
@@ -1211,7 +1211,7 @@ static void test_source_switch_colliding_seq_delayed_nack(void) {
   uint8_t nack[64];
   size_t nack_len = build_nack(nack, (uint16_t[]){42, 0x0000}, 2);
   feed_rtcp(&f, nack, nack_len);
-  assert(f.cache->next_rtx_seq == 0);    /* nothing served from stale gen */
+  assert(f.cache->next_rtx_seq == 0);           /* nothing served from stale gen */
   assert(f.session->egress.last_pli_time != 0); /* miss -> keyframe requested */
 
   /* New source's seq 42 arrives (colliding sequence number) and is cached

@@ -107,13 +107,15 @@ void sfu_srtp_ctx_destroy(sfu_srtp_ctx_t *ctx) {
   }
 }
 
-bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
-  srtp_err_status_t rc = srtp_unprotect(ctx->inbound, buf, len);
-  if (rc != srtp_err_status_ok) {
-    SFU_LOG_WARN("SRTP unprotect (RTP) failed: %d", (int)rc);
-    return false;
+srtp_err_status_t sfu_srtp_unprotect_rtp_status(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
+  if (!ctx || !ctx->inbound || !buf || !len) {
+    return srtp_err_status_no_ctx;
   }
-  return true;
+  return srtp_unprotect(ctx->inbound, buf, len);
+}
+
+bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
+  return sfu_srtp_unprotect_rtp_status(ctx, buf, len) == srtp_err_status_ok;
 }
 
 const char *sfu_srtp_status_name(srtp_err_status_t status) {
@@ -193,13 +195,15 @@ bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t ca
   return true;
 }
 
-bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
-  srtp_err_status_t rc = srtp_unprotect_rtcp(ctx->inbound, buf, len);
-  if (rc != srtp_err_status_ok) {
-    SFU_LOG_WARN("SRTP unprotect (RTCP) failed: %d", (int)rc);
-    return false;
+srtp_err_status_t sfu_srtp_unprotect_rtcp_status(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
+  if (!ctx || !ctx->inbound || !buf || !len) {
+    return srtp_err_status_no_ctx;
   }
-  return true;
+  return srtp_unprotect_rtcp(ctx->inbound, buf, len);
+}
+
+bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
+  return sfu_srtp_unprotect_rtcp_status(ctx, buf, len) == srtp_err_status_ok;
 }
 
 bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {

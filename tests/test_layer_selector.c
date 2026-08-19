@@ -285,16 +285,6 @@ static void test_temporal_transition_commits_on_end(void) {
   assert(sched.current_tid == 1 && !sched.temporal_transition_active);
 }
 
-static void test_output_sequence_translation(void) {
-  sfu_subscriber_scheduler_t sched;
-  sfu_subscriber_scheduler_init(&sched, 1);
-  assert(sfu_scheduler_assign_output_seq(&sched, 100) == 100);
-  assert(sfu_scheduler_assign_output_seq(&sched, 102) == 101);
-  sched.next_output_seq = UINT16_MAX;
-  assert(sfu_scheduler_assign_output_seq(&sched, 500) == UINT16_MAX);
-  assert(sfu_scheduler_assign_output_seq(&sched, 600) == 0);
-}
-
 int main(void) {
   test_up_needs_headroom();
   test_down_holds_at_rung_rate();
@@ -308,7 +298,6 @@ int main(void) {
   test_multi_packet_keyframe_transaction();
   test_keyframe_reject_keeps_gate_armed();
   test_temporal_transition_commits_on_end();
-  test_output_sequence_translation();
   printf("test_layer_selector: OK\n");
   return 0;
 }
