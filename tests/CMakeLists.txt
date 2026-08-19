@@ -1,3 +1,8 @@
+add_compile_options(
+  $<$<AND:$<CONFIG:Release>,$<COMPILE_LANG_AND_ID:C,GNU,Clang>>:-UNDEBUG>
+  $<$<AND:$<CONFIG:Release>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>:-UNDEBUG>
+)
+
 add_executable(test_memory_pool test_memory_pool.c)
 target_link_libraries(test_memory_pool PRIVATE sfu_core)
 add_test(NAME memory_pool COMMAND test_memory_pool)
