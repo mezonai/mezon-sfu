@@ -79,7 +79,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   uint8_t twcc_send_extmap_id = egress_msnap.twcc_send_extmap_id;
   if (twcc_send_extmap_id != 0) {
-    uint16_t twcc_seq = __atomic_fetch_add(&sub_session->egress.next_twcc_seq, 1, __ATOMIC_RELAXED);
+    uint16_t twcc_seq = atomic_fetch_add_explicit(&sub_session->egress.next_twcc_seq, 1, memory_order_relaxed);
     size_t new_len = (size_t)enc_len;
     if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, twcc_send_extmap_id, twcc_seq, &new_len)) {
       enc_len = (int)new_len;

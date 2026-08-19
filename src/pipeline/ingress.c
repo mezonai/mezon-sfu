@@ -232,7 +232,7 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       continue;
     }
 
-    uint16_t source_rtx_seq = __atomic_fetch_add(&sender_session->egress.rtx_cache->next_rtx_seq, 1, __ATOMIC_RELAXED);
+    uint16_t source_rtx_seq = atomic_fetch_add_explicit(&sender_session->egress.rtx_cache->next_rtx_seq, 1, memory_order_relaxed);
     uint16_t subscriber_rtx_seq = 0;
     pthread_mutex_lock(&sender_session->crypto_lock);
     bool translated = sfu_rtp_seq_translate(&sender_session->cold->rtp_seq_translator, rtx_ssrc, source_rtx_seq, &subscriber_rtx_seq);
@@ -251,7 +251,7 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 
     int64_t send_time_us = (int64_t)sfu_now_us();
     if (sender_session->media.twcc_send_extmap_id != 0) {
-      uint16_t twcc_seq = __atomic_fetch_add(&sender_session->egress.next_twcc_seq, 1, __ATOMIC_RELAXED);
+      uint16_t twcc_seq = atomic_fetch_add_explicit(&sender_session->egress.next_twcc_seq, 1, memory_order_relaxed);
       size_t rewritten_len = rtx_built_len;
       if (sfu_rtp_ext_write_twcc(rtx_enc->data, rtx_built_len, rtx_enc->cap, sender_session->media.twcc_send_extmap_id, twcc_seq, &rewritten_len)) {
         rtx_built_len = rewritten_len;

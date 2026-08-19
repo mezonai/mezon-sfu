@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 #define SFU_RTX_CACHE_SIZE 1024
@@ -21,7 +22,7 @@ typedef struct sfu_rtx_entry {
 
 typedef struct sfu_rtx_cache {
   sfu_rtx_entry_t entries[SFU_RTX_CACHE_SIZE];
-  uint16_t next_rtx_seq;
+  _Atomic uint16_t next_rtx_seq;
 } sfu_rtx_cache_t;
 
 // NACK Iteration State

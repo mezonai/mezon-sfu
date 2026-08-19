@@ -344,13 +344,13 @@ typedef struct sfu_peer_session {
   int64_t user_id;
   uint32_t peer_id;
   _Atomic uint32_t applied_answer_generation;
-  int fd;
   _Atomic uint64_t worker_owner;
   _Atomic uint32_t refcount;
   _Atomic uint8_t lifecycle;
   _Atomic bool accepts_work;
-  uint8_t state;
   _Atomic bool is_audience;
+  int fd;
+  uint8_t state;
   bool active;
 } sfu_peer_session_t;
 
