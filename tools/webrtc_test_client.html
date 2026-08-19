@@ -531,6 +531,7 @@
             let micEnabled = true;
             let camEnabled = false;
             let screenSharing = false;
+            let screenStopping = false;
             let screenStream = null;
             let cameraTrackBackup = null;
             let audioCtx = null;
@@ -805,6 +806,10 @@
                 const badges = [];
                 if (role === "audience") badges.push("Audience");
                 if (p.isMute) badges.push("Muted");
+                if (mergedMember.camera_active) badges.push("Camera on");
+                else if (mergedMember.camera_requested) badges.push("Camera pending");
+                if (mergedMember.screen_active) badges.push("Sharing screen");
+                else if (mergedMember.screen_requested) badges.push("Screen pending");
                 p.badges.textContent = badges.join(" · ");
 
                 for (const midValue of memberMids(member)) {
@@ -1214,22 +1219,28 @@
                 }
             }
 
-            function toggleCam() {
-                camEnabled = !camEnabled;
-                localStream
-                    .getVideoTracks()
-                    .forEach((t) => (t.enabled = camEnabled));
+            function applyCameraState(enabled) {
+                camEnabled = !!enabled;
+                if (localStream) {
+                    localStream.getVideoTracks().forEach((t) => (t.enabled = camEnabled));
+                }
                 const btn = document.getElementById("camBtn");
                 btn.textContent = camEnabled ? "📷" : "📵";
                 btn.classList.toggle("off", !camEnabled);
                 const local = participants.get("local");
-                if (local)
+                if (local) {
                     setTileStream(
                         local,
-                        localStream,
-                        camEnabled && localStream.getVideoTracks().length > 0,
+                        localStream || new MediaStream(),
+                        camEnabled && !!localStream && localStream.getVideoTracks().length > 0,
                     );
-                sendHook("camera", { active: camEnabled });
+                }
+            }
+
+            function toggleCam() {
+                const requested = !camEnabled;
+                applyCameraState(requested);
+                sendHook("camera", { active: requested });
             }
 
             function findUplinkVideoSender(mid = "1") {
@@ -1382,7 +1393,8 @@
             }
 
             async function stopScreenShare(opts = {}) {
-                if (!screenSharing && !screenStream) return;
+                if (screenStopping || (!screenSharing && !screenStream)) return;
+                screenStopping = true;
 
                 const screenTrack =
                     screenStream && screenStream.getVideoTracks
@@ -1434,12 +1446,15 @@
                     }
                 }
 
-                sendHook("share_screen", { active: false });
+                if (!opts.skipSignal) {
+                    sendHook("share_screen", { active: false });
+                }
                 if (!opts.fromTrackEnded) {
                     setConnState("screen share stopped", "ok");
                 } else {
                     setConnState("screen share ended", "warn");
                 }
+                screenStopping = false;
             }
 
             async function toggleScreenShare() {
@@ -2096,6 +2111,26 @@
                         }
 
                         if (msg.type === "peer_updated") {
+                            const peerId = msg.peer && msg.peer.peer_id != null ? String(msg.peer.peer_id) : null;
+                            const existing = peerId ? membersByPeerId.get(peerId) : null;
+                            if (existing && existing.isSelf) {
+                                applyCameraState(!!msg.peer.camera_requested);
+                                if (!msg.peer.screen_requested && (screenSharing || screenStream)) {
+                                    await stopScreenShare({ skipSignal: true });
+                                }
+                                if (!msg.peer.camera_requested) {
+                                    setConnState("camera stopped", "ok");
+                                } else if (msg.peer.camera_active) {
+                                    setConnState("camera active", "ok");
+                                }
+                                if (!msg.peer.screen_requested) {
+                                    setConnState("screen share stopped", "ok");
+                                } else if (msg.peer.screen_active) {
+                                    setConnState("sharing screen", "ok");
+                                } else {
+                                    setConnState("screen share pending", "warn");
+                                }
+                            }
                             upsertMember(msg.peer, false);
                             updateParticipantCount();
                             return;

@@ -328,7 +328,12 @@ static void test_audience_role_asymmetry_and_transition(void) {
   audience->media.screen.payload_type = 96;
   audience->media.screen.rtx_payload_type = 97;
   audience->media.screen.codec = SFU_VIDEO_CODEC_VP8;
-  audience->media.screen.active = true;
+  atomic_store(&audience->media.camera_enabled, true);
+  atomic_store(&audience->media.screen_enabled, true);
+  atomic_store(&audience->media.camera_rtp_observed, true);
+  atomic_store(&audience->media.screen_rtp_observed, true);
+  atomic_store(&audience->media.video_send_negotiated, true);
+  atomic_store(&audience->media.screen_send_negotiated, true);
 
   uint32_t speaker_next_mid = speaker->graph.next_remote_mid;
   assert(room_update_peer_role(&room, audience, false));

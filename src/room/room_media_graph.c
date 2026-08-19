@@ -498,6 +498,10 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     atomic_store_explicit(&peer->media.audio_send_negotiated, false, memory_order_release);
     atomic_store_explicit(&peer->media.video_send_negotiated, false, memory_order_release);
     atomic_store_explicit(&peer->media.screen_send_negotiated, false, memory_order_release);
+    atomic_store_explicit(&peer->media.camera_enabled, false, memory_order_release);
+    atomic_store_explicit(&peer->media.screen_enabled, false, memory_order_release);
+    atomic_store_explicit(&peer->media.camera_rtp_observed, false, memory_order_release);
+    atomic_store_explicit(&peer->media.screen_rtp_observed, false, memory_order_release);
   }
 
   pthread_mutex_lock(&peer->media.lock);
@@ -514,12 +518,7 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     if (peer->media.uplink_audio.ssrc != 0) {
       peer->media.uplink_audio.active = true;
     }
-    if (peer->media.uplink_video.ssrc != 0) {
-      peer->media.uplink_video.active = true;
-    }
-    if (peer->media.screen.ssrc != 0) {
-      peer->media.screen.active = true;
-    }
+    (void)sfu_session_recompute_video_activity_locked(peer);
   }
   sfu_session_publish_media(peer);
   pthread_mutex_unlock(&peer->media.lock);

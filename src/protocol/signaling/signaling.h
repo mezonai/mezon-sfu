@@ -27,9 +27,13 @@ typedef struct sfu_renegotiation_queue {
 
 typedef struct sfu_membership_queue {
   sfu_peer_session_t *items[SFU_MEMBERSHIP_QUEUE_CAP];
+  sfu_peer_session_t *media_items[SFU_MEMBERSHIP_QUEUE_CAP];
   uint32_t head;
   uint32_t tail;
   uint32_t count;
+  uint32_t media_head;
+  uint32_t media_tail;
+  uint32_t media_count;
   pthread_mutex_t lock;
 } sfu_membership_queue_t;
 
@@ -54,6 +58,7 @@ typedef struct sfu_signaling_server {
   sfu_session_table_t *sessions;
   sfu_room_registry_t *room_registry;
   sfu_routing_table_t *routing_table;
+  struct sfu_client_conn *connections_head;
   sfu_signaling_scratch_t scratch;
   char media_host[64];
   uint16_t media_port;
@@ -64,6 +69,8 @@ typedef struct sfu_client_conn {
   uv_poll_t poll_handle;
   uv_timer_t keepalive_timer;
   sfu_signaling_server_t *server;
+  struct sfu_client_conn *registry_prev;
+  struct sfu_client_conn *registry_next;
   sfu_room_t *joined_room;
   uint64_t joined_room_id;
   uint64_t last_activity_ms;
@@ -77,6 +84,7 @@ typedef struct sfu_client_conn {
   bool is_audience;
   bool disconnecting;
   bool keepalive_inited;
+  bool in_registry;
 } sfu_client_conn_t;
 
 int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, const char *media_host, uint16_t media_port,
@@ -86,6 +94,7 @@ void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 void sfu_signaling_trigger_peer_renegotiation(sfu_peer_session_t *session);
 void sfu_signaling_schedule_pending_peer(sfu_peer_session_t *session);
 void sfu_signaling_notify_peer_admitted(sfu_room_t *room, sfu_peer_session_t *peer);
+void sfu_signaling_notify_media_state(sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);
 uint32_t generate_unique_id(void);
