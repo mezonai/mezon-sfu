@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -197,7 +198,7 @@ typedef struct {
   struct sockaddr_storage addr;
   socklen_t addr_len;
   pthread_barrier_t barrier;
-  volatile uint64_t acquired_ok;
+  _Atomic uint64_t acquired_ok;
 } race_ctx_t;
 
 static void *race_reader(void *arg) {
@@ -214,7 +215,7 @@ static void *race_reader(void *arg) {
       ok++;
     }
   }
-  __atomic_fetch_add(&ctx->acquired_ok, ok, __ATOMIC_RELAXED);
+  atomic_fetch_add_explicit(&ctx->acquired_ok, ok, memory_order_relaxed);
   return NULL;
 }
 
@@ -251,7 +252,7 @@ static void test_concurrent_find_vs_close(void) {
     pthread_join(readers[i], NULL);
   }
 
-  assert(ctx.acquired_ok > 0); /* readers did acquire pins before/around close */
+  assert(atomic_load_explicit(&ctx.acquired_ok, memory_order_relaxed) > 0); /* readers did acquire pins before/around close */
   assert(sfu_session_table_find(&table, &ctx.addr, ctx.addr_len) == NULL);
 
   sfu_session_release(s); /* caller pin */

@@ -58,6 +58,7 @@ find_library(NATS_LIBRARY NAMES nats)
 add_library(sfu_core STATIC
   src/media/svc/svc_parser.c
   src/media/svc/svc_descriptor.c
+  src/media/svc/layer_scheduler.c
   src/memory/pool.c
   src/memory/packet_pool.c
   src/memory/refcount.c

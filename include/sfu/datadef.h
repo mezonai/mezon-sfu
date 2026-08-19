@@ -89,8 +89,7 @@ typedef struct sfu_room sfu_room_t;
 typedef struct gcc_bwe_context gcc_bwe_context_t;
 typedef struct sfu_twcc_history sfu_twcc_history_t;
 typedef struct sfu_twcc_recv_tracker sfu_twcc_recv_tracker_t;
-typedef struct sfu_subscriber_scheduler sfu_subscriber_scheduler_t;
-typedef struct sfu_session_scheduler_slot sfu_session_scheduler_slot_t;
+typedef struct sfu_layer_scheduler_slot sfu_layer_scheduler_slot_t;
 typedef struct sfu_rtx_cache sfu_rtx_cache_t;
 typedef struct sfu_receiver_snapshot sfu_receiver_snapshot_t;
 
@@ -315,7 +314,7 @@ typedef struct {
   gcc_bwe_context_t *gcc_ctx;
   sfu_twcc_history_t *twcc_history;
   sfu_twcc_recv_tracker_t *twcc_recv;
-  sfu_session_scheduler_slot_t *schedulers;
+  sfu_layer_scheduler_slot_t *schedulers;
   sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
   int64_t last_pli_time;
@@ -344,13 +343,13 @@ typedef struct sfu_peer_session {
   int64_t user_id;
   uint32_t peer_id;
   _Atomic uint32_t applied_answer_generation;
-  int fd;
   _Atomic uint64_t worker_owner;
   _Atomic uint32_t refcount;
   _Atomic uint8_t lifecycle;
   _Atomic bool accepts_work;
-  uint8_t state;
   _Atomic bool is_audience;
+  int fd;
+  uint8_t state;
   bool active;
 } sfu_peer_session_t;
 

@@ -26,7 +26,6 @@
 #include "room/room_media_graph.h"
 #include "room/room_registry.h"
 #include "runtime/routing_context.h"
-#include "runtime/scheduler.h"
 #include "runtime/timer.h"
 #include "util/alloc.h"
 #include "util/log.h"
