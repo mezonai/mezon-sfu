@@ -16,6 +16,8 @@ bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len);
 srtp_err_status_t sfu_srtp_protect_rtp_status(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap);
 bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap);
 const char *sfu_srtp_status_name(srtp_err_status_t status);
+srtp_err_status_t sfu_srtp_get_roc(sfu_srtp_ctx_t *ctx, uint32_t ssrc, uint32_t *roc);
+srtp_err_status_t sfu_srtp_set_roc(sfu_srtp_ctx_t *ctx, uint32_t ssrc, uint32_t roc);
 srtp_err_status_t sfu_srtp_unprotect_rtcp_status(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len);
 bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len);
 bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap);

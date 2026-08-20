@@ -118,6 +118,20 @@ bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
   return sfu_srtp_unprotect_rtp_status(ctx, buf, len) == srtp_err_status_ok;
 }
 
+srtp_err_status_t sfu_srtp_get_roc(sfu_srtp_ctx_t *ctx, uint32_t ssrc, uint32_t *roc) {
+  if (!ctx || !ctx->inbound || !roc) {
+    return srtp_err_status_bad_param;
+  }
+  return srtp_get_stream_roc(ctx->inbound, ssrc, roc);
+}
+
+srtp_err_status_t sfu_srtp_set_roc(sfu_srtp_ctx_t *ctx, uint32_t ssrc, uint32_t roc) {
+  if (!ctx || !ctx->inbound) {
+    return srtp_err_status_bad_param;
+  }
+  return srtp_set_stream_roc(ctx->inbound, ssrc, roc);
+}
+
 const char *sfu_srtp_status_name(srtp_err_status_t status) {
   switch (status) {
     case srtp_err_status_ok:
