@@ -181,8 +181,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   pthread_mutex_lock(&session->answer_lock);
   pthread_mutex_lock(&session->ingress_lock);
   uint16_t previous_worker = sfu_session_owner_worker(session);
-  bool transfer_owner = nominated &&
-                        (rebind_result == SFU_SESSION_REBIND_APPLIED || session->state != SFU_SESSION_ESTABLISHED || previous_worker == SFU_SESSION_OWNER_NONE);
+  bool transfer_owner =
+      nominated && (rebind_result == SFU_SESSION_REBIND_APPLIED || session->state != SFU_SESSION_ESTABLISHED || previous_worker == SFU_SESSION_OWNER_NONE);
   if (transfer_owner && previous_worker != w->worker_index) {
     if (!sfu_worker_register_session(w, session)) {
       SFU_LOG_ERROR("worker %u: failed to retain peer %u in local registry", w->worker_index, session->peer_id);
@@ -198,8 +198,8 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   pthread_mutex_unlock(&session->ingress_lock);
   pthread_mutex_unlock(&session->answer_lock);
   if (rebind_result == SFU_SESSION_REBIND_APPLIED) {
-    SFU_LOG_INFO("worker %u: authenticated ICE address rebind applied ufrag=%s peer_id=%u target=%s:%u worker=%u->%u state=%d", w->worker_index,
-                 client_ufrag, session->peer_id, ip, port, previous_worker, current_worker, session->state);
+    SFU_LOG_INFO("worker %u: authenticated ICE address rebind applied ufrag=%s peer_id=%u target=%s:%u worker=%u->%u state=%d", w->worker_index, client_ufrag,
+                 session->peer_id, ip, port, previous_worker, current_worker, session->state);
   }
 
   if (session->room && (newly_bound || role_changed || media_changed)) {
@@ -260,10 +260,9 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
       for (size_t _dr = 0; _dr < 32; _dr++) {
         snprintf(client_random_hex + _dr * 2, 3, "%02x", (unsigned)client_random[_dr]);
       }
-      SFU_LOG_WARN("worker %u: [DTLS DUPLICATE] peer=%u user_id=%" PRId64 " ufrag=%s %s:%u generation=%u client_random=%s",
-                   w->worker_index, session->peer_id, session->user_id,
-                   session->cold->ufrag[0] ? session->cold->ufrag : "(none)", ip, port,
-                   (unsigned)session->cold->transport_generation, client_random_hex);
+      SFU_LOG_WARN("worker %u: [DTLS DUPLICATE] peer=%u user_id=%" PRId64 " ufrag=%s %s:%u generation=%u client_random=%s", w->worker_index, session->peer_id,
+                   session->user_id, session->cold->ufrag[0] ? session->cold->ufrag : "(none)", ip, port, (unsigned)session->cold->transport_generation,
+                   client_random_hex);
 #endif
       pthread_mutex_unlock(&session->answer_lock);
       sfu_session_release(session);
@@ -322,14 +321,16 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
         session->cold->pending_dtls_started_ms = 0;
         session->cold->transport_generation++;
         sfu_metric_inc("dtls_restart_established");
+
+#ifdef SFU_DIAG_LOG
         char client_random_hex[65];
         for (size_t _cr = 0; _cr < 32; _cr++) {
           snprintf(client_random_hex + _cr * 2, 3, "%02x", (unsigned)session->cold->active_client_random[_cr]);
         }
         SFU_LOG_INFO("worker %u: DTLS transport restarted for peer %u user_id=%" PRId64 " ufrag=%s generation=%u at %s:%u profile=0x%lx client_random=%s",
-                     w->worker_index, session->peer_id, session->user_id,
-                     session->cold->ufrag[0] ? session->cold->ufrag : "(none)", (unsigned)session->cold->transport_generation,
-                     ip, port, session->cold->dtls.srtp_profile_id, client_random_hex);
+                     w->worker_index, session->peer_id, session->user_id, session->cold->ufrag[0] ? session->cold->ufrag : "(none)",
+                     (unsigned)session->cold->transport_generation, ip, port, session->cold->dtls.srtp_profile_id, client_random_hex);
+#endif
       } else if (session->state != SFU_SESSION_ESTABLISHED) {
         pthread_mutex_lock(&session->crypto_lock);
         int srtp_rc = sfu_srtp_ctx_init_from_dtls(&session->srtp, dtls->srtp_keying_material, dtls->srtp_profile_id, true);
@@ -342,16 +343,18 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
 
         session->cold->transport_generation = 1;
         session->state = SFU_SESSION_ESTABLISHED;
+
+#ifdef SFU_DIAG_LOG
         char client_random_hex[65];
         for (size_t _cr2 = 0; _cr2 < 32; _cr2++) {
           snprintf(client_random_hex + _cr2 * 2, 3, "%02x", (unsigned)session->cold->active_client_random[_cr2]);
         }
-        SFU_LOG_INFO("worker %u: DTLS established, SRTP sessions ready for peer=%u user_id=%" PRId64 " ufrag=%s at %s:%u gen=%u (room %s) profile=0x%lx client_random=%s",
-                     w->worker_index, session->peer_id, session->user_id,
-                     session->cold->ufrag[0] ? session->cold->ufrag : "(none)", ip, port,
-                     (unsigned)session->cold->transport_generation,
-                     session->room ? "BOUND" : "STILL UNBOUND -- media will be dropped until it binds",
+        SFU_LOG_INFO("worker %u: DTLS established, SRTP sessions ready for peer=%u user_id=%" PRId64
+                     " ufrag=%s at %s:%u gen=%u (room %s) profile=0x%lx client_random=%s",
+                     w->worker_index, session->peer_id, session->user_id, session->cold->ufrag[0] ? session->cold->ufrag : "(none)", ip, port,
+                     (unsigned)session->cold->transport_generation, session->room ? "BOUND" : "STILL UNBOUND -- media will be dropped until it binds",
                      dtls->srtp_profile_id, client_random_hex);
+#endif
 
         if (session->room) {
           sfu_signaling_schedule_pending_peer(session);
