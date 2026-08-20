@@ -13,6 +13,7 @@ typedef struct {
 
   char nats_url[256];
   char nats_client_name[128];
+  char nats_hook_topic[128];
 
   char jwt_secret[256];
 
