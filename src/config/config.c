@@ -33,6 +33,7 @@ void sfu_config_set_defaults(void) {
 
   snprintf(g_sfu_config.nats_url, sizeof(g_sfu_config.nats_url), "nats://127.0.0.1:4222");
   snprintf(g_sfu_config.nats_client_name, sizeof(g_sfu_config.nats_client_name), "sfu_nats_client");
+  snprintf(g_sfu_config.nats_hook_topic, sizeof(g_sfu_config.nats_hook_topic), "mezon_sfu_hook_event");
   g_sfu_config.jwt_secret[0] = '\0';
 
   g_sfu_config.packet_buf_size = 2048;
@@ -132,6 +133,8 @@ int sfu_config_load_ini(const char *filepath) {
       snprintf(g_sfu_config.nats_url, sizeof(g_sfu_config.nats_url), "%s", val);
     } else if (strcmp(key, "nats_client_name") == 0) {
       snprintf(g_sfu_config.nats_client_name, sizeof(g_sfu_config.nats_client_name), "%s", val);
+    } else if (strcmp(key, "nats_hook_topic") == 0) {
+      snprintf(g_sfu_config.nats_hook_topic, sizeof(g_sfu_config.nats_hook_topic), "%s", val);
     } else if (strcmp(key, "jwt_secret") == 0) {
       snprintf(g_sfu_config.jwt_secret, sizeof(g_sfu_config.jwt_secret), "%s", val);
     } else if (strcmp(key, "packet_buf_size") == 0) {
