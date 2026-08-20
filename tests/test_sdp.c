@@ -274,7 +274,8 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   assert(contains(offer, "a=mid:3"));
   assert(contains(offer, "a=mid:4"));
   assert(contains(offer, "a=mid:5"));
-  assert(!contains(offer, "a=ssrc:1111"));
+  assert(contains(offer, "a=ssrc:1111 cname:u1843252237590073344-p9"));
+  assert(contains(offer, "a=ssrc:1111 msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
   assert(!contains(offer, "a=ssrc:2222"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
@@ -631,7 +632,7 @@ static void test_299_audio_only_remote_offer(void) {
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
   assert(contains(offer, " 897 898 899\r\n"));
   assert(contains(offer, "a=msid:u1000000-p1 audio-u1000000-p1"));
-  assert(count_occurrences(offer, "a=ssrc:") == 0);
+  assert(count_occurrences(offer, "a=ssrc:") == SFU_MAX_REMOTE_SLOTS * 2);
 
   free(offer);
   cleanup_mock_session(&session, remotes);
