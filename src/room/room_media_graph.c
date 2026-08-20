@@ -640,6 +640,7 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
     SFU_LOG_WARN("ptt: rejected peer=%u user_id=%" PRId64 " ufrag=%s active=%d in_room=%d is_audience=%d audio_send_negotiated=%d", peer->peer_id,
                  peer->user_id, peer->cold ? peer->cold->ufrag : "", active, in_room, is_audience, audio_send_negotiated);
 #endif
+
     return false;
   }
 
@@ -648,9 +649,11 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
   bool audio_active = active && peer->media.uplink_audio.ssrc != 0;
   bool media_changed = peer->media.uplink_audio.active != audio_active;
   peer->media.uplink_audio.active = audio_active;
+
 #ifdef SFU_DIAG_LOG
   uint32_t uplink_ssrc = peer->media.uplink_audio.ssrc;
 #endif
+
   if (media_changed) {
     sfu_session_publish_media(peer);
   }

@@ -255,6 +255,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (session->state == SFU_SESSION_ESTABLISHED && is_client_hello && !session->cold->pending_dtls_active) {
     if (session->cold->active_client_random_valid && memcmp(client_random, session->cold->active_client_random, sizeof(client_random)) == 0) {
       sfu_metric_inc("dtls_restart_duplicate");
+
 #ifdef SFU_DIAG_LOG
       char client_random_hex[65];
       for (size_t _dr = 0; _dr < 32; _dr++) {
@@ -264,6 +265,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
                    session->user_id, session->cold->ufrag[0] ? session->cold->ufrag : "(none)", ip, port, (unsigned)session->cold->transport_generation,
                    client_random_hex);
 #endif
+
       pthread_mutex_unlock(&session->answer_lock);
       sfu_session_release(session);
       return;
@@ -331,6 +333,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
                      w->worker_index, session->peer_id, session->user_id, session->cold->ufrag[0] ? session->cold->ufrag : "(none)",
                      (unsigned)session->cold->transport_generation, ip, port, session->cold->dtls.srtp_profile_id, client_random_hex);
 #endif
+
       } else if (session->state != SFU_SESSION_ESTABLISHED) {
         pthread_mutex_lock(&session->crypto_lock);
         int srtp_rc = sfu_srtp_ctx_init_from_dtls(&session->srtp, dtls->srtp_keying_material, dtls->srtp_profile_id, true);
