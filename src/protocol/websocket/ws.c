@@ -138,6 +138,12 @@ int sfu_ws_handshake(int fd, sfu_ws_read_state_t *state) {
     return -1;
   }
 
+  char extensions[256];
+  if (extract_header(req, "Sec-WebSocket-Extensions:", extensions, sizeof(extensions)) == 0 ||
+      extract_header(req, "sec-websocket-extensions:", extensions, sizeof(extensions)) == 0) {
+    SFU_LOG_INFO("WS handshake: declining Sec-WebSocket-Extensions (%s)", extensions);
+  }
+
   char concat[256 + sizeof(WS_GUID)];
   int concat_len = snprintf(concat, sizeof(concat), "%s%s", key, WS_GUID);
 
@@ -166,9 +172,7 @@ int sfu_ws_handshake(int fd, sfu_ws_read_state_t *state) {
   return 0;
 }
 
-int sfu_ws_read_state_has_pending(const sfu_ws_read_state_t *state) {
-  return state && state->prefetched_offset < state->prefetched_len;
-}
+int sfu_ws_read_state_has_pending(const sfu_ws_read_state_t *state) { return state && state->prefetched_offset < state->prefetched_len; }
 
 static ssize_t read_exact(int fd, sfu_ws_read_state_t *state, uint8_t *buf, size_t len) {
   size_t total = 0;
@@ -265,7 +269,7 @@ ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t c
     int control = (opcode & 0x08) != 0;
 
     if ((header[0] & 0x70) != 0) {
-      SFU_LOG_WARN("WS: unsupported RSV bits, dropping connection");
+      SFU_LOG_WARN("WS: unsupported RSV bits (header=0x%02x opcode=%d), dropping connection", header[0], opcode);
       return -1;
     }
 
