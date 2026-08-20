@@ -4,6 +4,7 @@
 #include <nats/nats.h>
 #include <stdint.h>
 #include <string.h>
+#include "config/config.h"
 #include "util/log.h"
 
 static natsConnection *global_nats_nc;
@@ -80,7 +81,11 @@ bool dispatch_hook_event(const void *msg, int len) {
     return false;
   }
 
-  const char *topic = "mezon_sfu_hook_event";
+  const char *topic = g_sfu_config.nats_hook_topic;
+  if (!topic || topic[0] == '\0') {
+    SFU_LOG_DEBUG("NATS Publish skipped: nats_hook_topic is empty");
+    return false;
+  }
   natsStatus s = natsConnection_Publish(global_nats_nc, topic, (const void *)msg, len);
 
   if (s != NATS_OK) {
