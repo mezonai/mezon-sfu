@@ -80,7 +80,7 @@ bool dispatch_hook_event(const void *msg, int len) {
     return false;
   }
 
-  const char *topic = "SFU_HOOK_EVENT";
+  const char *topic = "mezon_sfu_hook_event";
   natsStatus s = natsConnection_Publish(global_nats_nc, topic, (const void *)msg, len);
 
   if (s != NATS_OK) {
