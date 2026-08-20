@@ -630,10 +630,16 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
   }
 
   pthread_mutex_lock(&room->lock);
-  bool allowed = peer->room == room && atomic_load_explicit(&peer->is_audience, memory_order_acquire) &&
-                 (!active || atomic_load_explicit(&peer->media.audio_send_negotiated, memory_order_acquire));
+  bool in_room = peer->room == room;
+  bool is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
+  bool audio_send_negotiated = atomic_load_explicit(&peer->media.audio_send_negotiated, memory_order_acquire);
+  bool allowed = in_room && is_audience && (!active || audio_send_negotiated);
   pthread_mutex_unlock(&room->lock);
   if (!allowed) {
+#ifdef SFU_DIAG_LOG
+    SFU_LOG_WARN("ptt: rejected peer=%u user_id=%" PRId64 " ufrag=%s active=%d in_room=%d is_audience=%d audio_send_negotiated=%d", peer->peer_id,
+                 peer->user_id, peer->cold ? peer->cold->ufrag : "", active, in_room, is_audience, audio_send_negotiated);
+#endif
     return false;
   }
 
@@ -642,10 +648,18 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
   bool audio_active = active && peer->media.uplink_audio.ssrc != 0;
   bool media_changed = peer->media.uplink_audio.active != audio_active;
   peer->media.uplink_audio.active = audio_active;
+#ifdef SFU_DIAG_LOG
+  uint32_t uplink_ssrc = peer->media.uplink_audio.ssrc;
+#endif
   if (media_changed) {
     sfu_session_publish_media(peer);
   }
   pthread_mutex_unlock(&peer->media.lock);
+
+#ifdef SFU_DIAG_LOG
+  SFU_LOG_INFO("ptt: applied peer=%u user_id=%" PRId64 " ufrag=%s active=%d old_active=%d uplink_ssrc=%u audio_active=%d media_changed=%d", peer->peer_id,
+               peer->user_id, peer->cold ? peer->cold->ufrag : "", active, old_active, uplink_ssrc, audio_active, media_changed);
+#endif
 
   if (old_active != active || media_changed) {
     room_refresh_peer_streams(room, peer);

@@ -1284,20 +1284,45 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
   }
 
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
-  bool accepted = session && session->room == c->joined_room && atomic_load_explicit(&session->is_audience, memory_order_acquire) &&
-                  (!active || atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire)) &&
-                  room_set_peer_ptt_active(c->joined_room, session, active);
+  bool has_session = session != NULL;
+  bool in_room = has_session && session->room == c->joined_room;
+  bool is_audience = has_session && atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  bool audio_send_negotiated = has_session && atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire);
+  bool negotiation_ok = !active || audio_send_negotiated;
+  bool accepted = has_session && in_room && is_audience && negotiation_ok && room_set_peer_ptt_active(c->joined_room, session, active);
   if (!accepted) {
     static const char rejected[] = "{\"type\":\"error\",\"message\":\"push_to_talk_rejected\"}";
     sfu_ws_send_text(c->fd, rejected, sizeof(rejected) - 1);
+#ifdef SFU_DIAG_LOG
+    if (!has_session) {
+      SFU_LOG_WARN("signaling: push_to_talk rejected user_id=%" PRId64 " ufrag=%s requested_active=%d reason=no_session", c->user_id, c->client_ufrag,
+                   active);
+    } else {
+      sfu_media_snapshot_t snap = sfu_session_load_media(session);
+      bool ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
+      uint32_t gen = session->cold ? session->cold->transport_generation : 0;
+      SFU_LOG_WARN("signaling: push_to_talk rejected user_id=%" PRId64 " ufrag=%s peer_id=%u requested_active=%d has_session=%d in_room=%d "
+                   "is_audience=%d audio_send_negotiated=%d negotiation_ok=%d ptt_active=%d audio_ssrc=%u audio_active=%d generation=%u",
+                   c->user_id, c->client_ufrag, session->peer_id, active, has_session, in_room, is_audience, audio_send_negotiated, negotiation_ok,
+                   ptt_active, snap.audio_ssrc, snap.audio_active, gen);
+    }
+#endif
   } else {
     char response[80];
     int response_len = snprintf(response, sizeof(response), "{\"type\":\"push_to_talk_changed\",\"active\":%s}", active ? "true" : "false");
     if (response_len > 0 && (size_t)response_len < sizeof(response)) {
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
-    SFU_LOG_INFO("signaling: push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u active=%d role=audience", c->user_id, c->client_ufrag, session->peer_id,
-                 active);
+#ifdef SFU_DIAG_LOG
+    sfu_media_snapshot_t snap = sfu_session_load_media(session);
+    bool ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
+    bool vis = atomic_load_explicit(&session->media.visible, memory_order_acquire);
+    uint32_t gen = session->cold ? session->cold->transport_generation : 0;
+    SFU_LOG_INFO("signaling: push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u active=%d role=audience ptt_active=%d visible=%d "
+                 "audio_ssrc=%u audio_active=%d generation=%u audio_send_negotiated=%d",
+                 c->user_id, c->client_ufrag, session->peer_id, active, ptt_active, vis, snap.audio_ssrc, snap.audio_active, gen,
+                 audio_send_negotiated);
+#endif
   }
   if (session) {
     sfu_session_release(session);

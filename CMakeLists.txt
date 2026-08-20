@@ -7,6 +7,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(SFU_ENABLE_ASAN "Build with AddressSanitizer" OFF)
 option(SFU_ENABLE_TSAN "Build with ThreadSanitizer" OFF)
+option(SFU_DIAG_LOG "Compile in diagnostic logging for the SRTP key-desync investigation (ON = verbose drops/dumps, OFF = silent)" ON)
+
+if(SFU_DIAG_LOG)
+  add_compile_definitions(SFU_DIAG_LOG=1)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
