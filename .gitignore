@@ -17,3 +17,5 @@ build-asan/
 build-sanitize/
 build-tsan/
 build-check/
+build-diag-off/
+build-diag-off-check/

@@ -60,6 +60,35 @@ int main(void) {
     close(fds[1]);
   }
 
+  /* permessage-deflate must not be accepted: RSV1 later kills the socket. */
+  {
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    const char *request =
+        "GET /chat HTTP/1.1\r\n"
+        "Host: server.example.com\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n";
+    assert(write(fds[1], request, strlen(request)) == (ssize_t)strlen(request));
+
+    assert(sfu_ws_handshake(fds[0], &state) == 0);
+
+    char response[512];
+    ssize_t n = read(fds[1], response, sizeof(response) - 1);
+    assert(n > 0);
+    response[n] = '\0';
+
+    assert(strstr(response, "101") != NULL);
+    assert(strstr(response, "Sec-WebSocket-Extensions") == NULL);
+
+    close(fds[0]);
+    close(fds[1]);
+  }
+
   /* Upgrade headers and the first frame may be coalesced into one TCP read.
    * Handshake must preserve every byte after the HTTP terminator. */
   {

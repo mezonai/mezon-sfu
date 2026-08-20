@@ -290,29 +290,40 @@ static void schedule_peer_renegotiation(sfu_peer_session_t *session, bool bump_r
     } else {
       uint64_t due_ms = now_ms + SFU_RENEGOTIATION_DEBOUNCE_MS;
       uint64_t deadline_ms = session->negotiation.negotiation_first_dirty_ms + SFU_RENEGOTIATION_MAX_DELAY_MS;
-      session->negotiation.negotiation_due_ms = due_ms < deadline_ms ? due_ms : deadline_ms;
+      uint64_t new_due = due_ms < deadline_ms ? due_ms : deadline_ms;
+      session->negotiation.negotiation_due_ms = new_due;
     }
   }
   pthread_mutex_unlock(&session->negotiation.lock);
 
   if (enqueue) {
     sfu_renegotiation_queue_t *queue = &g_signaling_server->renegotiation_queue;
+    sfu_peer_session_t *evicted = NULL;
     pthread_mutex_lock(&queue->lock);
     if (queue->count < SFU_RENEGOTIATION_QUEUE_CAP) {
       queue->items[queue->tail] = session;
       queue->tail = (queue->tail + 1) % SFU_RENEGOTIATION_QUEUE_CAP;
       queue->count++;
       session = NULL;
+    } else {
+      evicted = queue->items[queue->head];
+      queue->head = (queue->head + 1) % SFU_RENEGOTIATION_QUEUE_CAP;
+      queue->count--;
+      queue->items[queue->tail] = session;
+      queue->tail = (queue->tail + 1) % SFU_RENEGOTIATION_QUEUE_CAP;
+      queue->count++;
+      session = NULL;
     }
     pthread_mutex_unlock(&queue->lock);
+    if (evicted) {
+      SFU_LOG_WARN("signaling: renegotiation queue full, evicted oldest peer %u", evicted->peer_id);
+      pthread_mutex_lock(&evicted->negotiation.lock);
+      evicted->negotiation.negotiation_needed = false;
+      pthread_mutex_unlock(&evicted->negotiation.lock);
+      sfu_session_release(evicted);
+    }
   }
   if (session) {
-    if (enqueue) {
-      pthread_mutex_lock(&session->negotiation.lock);
-      session->negotiation.negotiation_needed = false;
-      pthread_mutex_unlock(&session->negotiation.lock);
-      SFU_LOG_WARN("signaling: renegotiation queue full for peer %u", session->peer_id);
-    }
     sfu_session_release(session);
   }
   uv_async_send(&g_signaling_server->renegotiation_waker);
@@ -1284,20 +1295,48 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
   }
 
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
-  bool accepted = session && session->room == c->joined_room && atomic_load_explicit(&session->is_audience, memory_order_acquire) &&
-                  (!active || atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire)) &&
-                  room_set_peer_ptt_active(c->joined_room, session, active);
+  bool has_session = session != NULL;
+  bool in_room = has_session && session->room == c->joined_room;
+  bool is_audience = has_session && atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  bool audio_send_negotiated = has_session && atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire);
+  bool negotiation_ok = !active || audio_send_negotiated;
+  bool accepted = has_session && in_room && is_audience && negotiation_ok && room_set_peer_ptt_active(c->joined_room, session, active);
   if (!accepted) {
     static const char rejected[] = "{\"type\":\"error\",\"message\":\"push_to_talk_rejected\"}";
     sfu_ws_send_text(c->fd, rejected, sizeof(rejected) - 1);
+
+#ifdef SFU_DIAG_LOG
+    if (!has_session) {
+      SFU_LOG_WARN("signaling: push_to_talk rejected user_id=%" PRId64 " ufrag=%s requested_active=%d reason=no_session", c->user_id, c->client_ufrag, active);
+    } else {
+      sfu_media_snapshot_t snap = sfu_session_load_media(session);
+      bool ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
+      uint32_t gen = session->cold ? session->cold->transport_generation : 0;
+      SFU_LOG_WARN("signaling: push_to_talk rejected user_id=%" PRId64
+                   " ufrag=%s peer_id=%u requested_active=%d has_session=%d in_room=%d "
+                   "is_audience=%d audio_send_negotiated=%d negotiation_ok=%d ptt_active=%d audio_ssrc=%u audio_active=%d generation=%u",
+                   c->user_id, c->client_ufrag, session->peer_id, active, has_session, in_room, is_audience, audio_send_negotiated, negotiation_ok, ptt_active,
+                   snap.audio_ssrc, snap.audio_active, gen);
+    }
+#endif
+
   } else {
     char response[80];
     int response_len = snprintf(response, sizeof(response), "{\"type\":\"push_to_talk_changed\",\"active\":%s}", active ? "true" : "false");
     if (response_len > 0 && (size_t)response_len < sizeof(response)) {
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
-    SFU_LOG_INFO("signaling: push_to_talk user_id=%" PRId64 " ufrag=%s peer_id=%u active=%d role=audience", c->user_id, c->client_ufrag, session->peer_id,
-                 active);
+
+#ifdef SFU_DIAG_LOG
+    sfu_media_snapshot_t snap = sfu_session_load_media(session);
+    bool ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
+    bool vis = atomic_load_explicit(&session->media.visible, memory_order_acquire);
+    uint32_t gen = session->cold ? session->cold->transport_generation : 0;
+    SFU_LOG_INFO("signaling: push_to_talk user_id=%" PRId64
+                 " ufrag=%s peer_id=%u active=%d role=audience ptt_active=%d visible=%d "
+                 "audio_ssrc=%u audio_active=%d generation=%u audio_send_negotiated=%d",
+                 c->user_id, c->client_ufrag, session->peer_id, active, ptt_active, vis, snap.audio_ssrc, snap.audio_active, gen, audio_send_negotiated);
+#endif
   }
   if (session) {
     sfu_session_release(session);
@@ -1998,6 +2037,7 @@ static bool renegotiation_queue_push_owned(sfu_renegotiation_queue_t *queue, sfu
   return queued;
 }
 
+static uint32_t renegotiation_queue_count(sfu_renegotiation_queue_t *queue) __attribute__((unused));
 static uint32_t renegotiation_queue_count(sfu_renegotiation_queue_t *queue) {
   pthread_mutex_lock(&queue->lock);
   uint32_t count = queue->count;
@@ -2017,9 +2057,8 @@ static void arm_renegotiation_timer(sfu_signaling_server_t *s, uint64_t due_ms) 
 }
 
 static void flush_pending_offers(sfu_signaling_server_t *s) {
-  uint32_t pending = renegotiation_queue_count(&s->renegotiation_queue);
   uint64_t earliest_due_ms = 0;
-  for (uint32_t i = 0; i < pending; i++) {
+  while (true) {
     sfu_peer_session_t *session = renegotiation_queue_pop(&s->renegotiation_queue);
     if (!session) {
       break;
@@ -2080,7 +2119,6 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
           retry_ms = SFU_RENEGOTIATION_RETRY_MAX_MS;
         }
         session->negotiation.negotiation_due_ms = sfu_now_ms() + retry_ms;
-        session->negotiation.negotiation_first_dirty_ms = sfu_now_ms();
         session->negotiation.negotiation_needed = true;
         due_ms = session->negotiation.negotiation_due_ms;
         requeue = true;
