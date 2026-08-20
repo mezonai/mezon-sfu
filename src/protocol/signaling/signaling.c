@@ -1146,7 +1146,7 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   uint32_t answered_offer_generation = 0;
   uint64_t answered_offer_revision = 0;
   pthread_mutex_lock(&session->negotiation.lock);
-  if (session->negotiation.offer_outstanding && answer_generation == session->negotiation.offer_generation) {
+  if (session->negotiation.offer_outstanding) {
     session->negotiation.offer_outstanding = false;
     answered_offer_generation = session->negotiation.offer_generation;
     answered_offer_revision = session->negotiation.offered_revision;
@@ -1154,13 +1154,8 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   }
   follow_up_pending = session->negotiation.desired_offer_revision > session->negotiation.answered_revision;
   session->negotiation.renegotiation_pending = follow_up_pending;
-  bool stale_answer = (answered_offer_generation == 0 && session->negotiation.offer_outstanding);
-  uint32_t expected_gen = session->negotiation.offer_generation;
   pthread_mutex_unlock(&session->negotiation.lock);
-  if (stale_answer) {
-    SFU_LOG_WARN("signaling: stale answer ignored ufrag=%s peer_id=%u gen=%u expected=%u", c->client_ufrag, session->peer_id, answer_generation,
-                 expected_gen);
-  } else if (answered_offer_generation != 0) {
+  if (answered_offer_generation != 0) {
     SFU_LOG_INFO("signaling: completed renegotiation answer ufrag=%s peer_id=%u generation=%u revision=%" PRIu64 " pending=%d", c->client_ufrag,
                  session->peer_id, answered_offer_generation, answered_offer_revision, follow_up_pending);
   }
