@@ -2,13 +2,13 @@
 
 #include "congestion/pacer.h"
 #include "congestion/twcc_history.h"
+#include "media/svc/layer_scheduler.h"
 #include "net/io_uring.h"
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
 #include "rtp/rtp_ext.h"
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
-#include "media/svc/layer_scheduler.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/srtp/srtp.h"
@@ -23,6 +23,11 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
                                      const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_layer_scheduler_t *sched,
                                      const sfu_layer_scheduler_decision_t *decision) {
   int enc_len = (int)pkt->len;
+
+  if (media->mid != 0 && media->mid >= atomic_load_explicit(&sub_session->graph.applied_remote_mid, memory_order_acquire)) {
+    sfu_metric_inc("egress_mid_not_negotiated");
+    return false;
+  }
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
   if (!media->is_audio && media->has_video && media->video_pt != 0 && incoming_pt != media->video_pt) {

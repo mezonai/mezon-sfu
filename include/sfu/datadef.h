@@ -280,6 +280,8 @@ typedef struct {
   _Atomic(sfu_video_route_snapshot_t *) video_fanout_targets;
   _Atomic(sfu_video_route_snapshot_t *) screen_fanout_targets;
   _Atomic uint32_t next_remote_mid;
+  _Atomic uint32_t applied_remote_mid;
+  _Atomic uint32_t offered_remote_mid;
   _Atomic bool membership_announced;
 } sfu_session_graph_t;
 

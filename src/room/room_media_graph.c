@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <string.h>
 #include "peer/session.h"
+#include "protocol/signaling/signaling.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -678,15 +679,23 @@ void room_refresh_peer_streams(sfu_room_t *room, sfu_peer_session_t *updated_pee
   sfu_deferred_reclaim_t deferred;
   deferred_init(&deferred);
 
+  sfu_peer_session_t *renegotiate[SFU_ROOM_MAX_PEERS];
+  uint32_t renegotiate_count = 0;
+
   pthread_mutex_lock(&room->lock);
   for (uint32_t i = 0; i < room->peer_count; i++) {
     sfu_peer_session_t *other = room->peers[i];
     if (!other || other == updated_peer || !sfu_session_accepts_work(other)) {
       continue;
     }
+    uint32_t mid_before = atomic_load_explicit(&other->graph.next_remote_mid, memory_order_acquire);
     sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, updated_peer, false);
     if (snap) {
       snapshot_replace(other, snap, &deferred);
+    }
+    if (atomic_load_explicit(&other->graph.next_remote_mid, memory_order_acquire) != mid_before && renegotiate_count < SFU_ROOM_MAX_PEERS) {
+      atomic_fetch_add_explicit(&other->refcount, 1, memory_order_relaxed);
+      renegotiate[renegotiate_count++] = other;
     }
     snap = snapshot_refresh_entry(updated_peer, other, true);
     if (snap) {
@@ -695,4 +704,9 @@ void room_refresh_peer_streams(sfu_room_t *room, sfu_peer_session_t *updated_pee
   }
   pthread_mutex_unlock(&room->lock);
   deferred_flush(&deferred);
+
+  for (uint32_t i = 0; i < renegotiate_count; i++) {
+    sfu_signaling_trigger_peer_renegotiation(renegotiate[i]);
+    sfu_session_release(renegotiate[i]);
+  }
 }
