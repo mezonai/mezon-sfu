@@ -42,7 +42,10 @@ in transport/dtls/dtls.c about the one API difference that mattered
 (EVP_EC_gen is OpenSSL-3.0-only, so cert generation uses the older,
 portable EC_KEY sequence that works on both).
 
-## libsrtp/, libjuice/, xxhash/
+## libsrtp/
+Should rebuild to use boringSSL as well.
+
+## libjuice/, xxhash/
 
 Not yet needed as vendored sources -- libsrtp2 is currently pulled from
 the system package (libsrtp2-dev) via pkg-config in CMakeLists.txt.
