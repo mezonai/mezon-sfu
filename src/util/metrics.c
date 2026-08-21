@@ -56,6 +56,7 @@ static const char *const k_metric_names[] = {
     "release_queue_full",
     "send_sq_full",
     "egress_admission_drop",
+    "egress_mid_not_negotiated",
     "egress_output_alloc",
     "egress_copied_bytes",
     "fanout_batch_jobs",

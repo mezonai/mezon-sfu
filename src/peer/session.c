@@ -773,6 +773,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->media.snapshot_seq, 0, memory_order_relaxed);
 
   s->graph.next_remote_mid = SFU_REMOTE_MID_BASE;
+  atomic_store_explicit(&s->graph.applied_remote_mid, SFU_REMOTE_MID_BASE, memory_order_relaxed);
+  atomic_store_explicit(&s->graph.offered_remote_mid, SFU_REMOTE_MID_BASE, memory_order_relaxed);
   {
     static atomic_uint_fast32_t peer_id_counter = 0;
     uint32_t id = (uint32_t)atomic_fetch_add_explicit(&peer_id_counter, 1, memory_order_relaxed) + 1;

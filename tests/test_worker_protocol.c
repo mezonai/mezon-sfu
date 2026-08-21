@@ -476,6 +476,8 @@ static void kf_fixture_init(kf_fixture_t *f) {
   f->publisher->media.uplink_audio.active = true;
   atomic_store_explicit(&f->publisher->media.audio_send_negotiated, true, memory_order_release);
   atomic_store_explicit(&f->publisher->media.video_send_negotiated, true, memory_order_release);
+  atomic_store_explicit(&f->base.session->graph.applied_remote_mid, UINT32_MAX, memory_order_release);
+  atomic_store_explicit(&f->publisher->graph.applied_remote_mid, UINT32_MAX, memory_order_release);
   sfu_session_publish_media(f->publisher);
 
   f->base.session->media.uplink_video.payload_type = SFU_PT_VP8;
@@ -751,10 +753,54 @@ static void test_egress_no_twcc_without_negotiation(void) {
   kf_fixture_destroy(&f);
 }
 
-/* CC-10: a publisher on worker 0 forwarding to a subscriber owned by worker
- * 1 must hand a FORWARD job through the fanout mesh; the destination worker
- * performs the full egress rewrite (TWCC extension + history) there — the
- * publisher worker touches none of the subscriber's egress state. */
+static void test_egress_drops_unapplied_remote_mid(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sub->media.twcc_send_extmap_id = 5;
+  sfu_session_publish_media(sub);
+  sub->egress.twcc_history = SFU_CALLOC(1, sizeof(*sub->egress.twcc_history));
+  assert(sub->egress.twcc_history != NULL);
+  sfu_twcc_history_init(sub->egress.twcc_history);
+
+  /* Roll the subscriber back to "no answer applied yet" — the state every
+   * freshly-subscribed peer is in between graph rebuild and answer. */
+  atomic_store_explicit(&sub->graph.applied_remote_mid, SFU_REMOTE_MID_BASE, memory_order_release);
+
+  f.publisher->media.uplink_video.payload_type = 0;
+  sfu_session_publish_media(f.publisher);
+  atomic_store_explicit(&f.publisher->media.audio_send_negotiated, true, memory_order_release);
+  sub->media.uplink_video.payload_type = 0;
+  sub->media.uplink_video.rtx_payload_type = 0;
+  sfu_session_publish_media(sub);
+
+  uint64_t gated_before = sfu_metric_get("egress_mid_not_negotiated");
+
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, 1002, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f.base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f.base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f.publisher->cold->addr;
+  pkt->peer_addr_len = f.publisher->cold->addr_len;
+  sfu_ingress_process(&f.base.w, pkt);
+
+  /* Nothing forwarded, and the drop is attributed to the negotiation gate. */
+  gcc_packet_info_t info = {0};
+  assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
+  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+
+  kf_fixture_destroy(&f);
+}
+
 static void test_remote_forward_egress_on_owner(void) {
   kf_fixture_t f;
   kf_fixture_init(&f);
@@ -1359,6 +1405,7 @@ int main(void) {
   test_pli_unknown_ssrc_falls_back();
   test_gcc_estimate_reaches_scheduler();
   test_egress_writes_twcc_extension();
+  test_egress_drops_unapplied_remote_mid();
   test_egress_no_twcc_without_negotiation();
   test_remote_forward_egress_on_owner();
   test_svc_filter_rewrites_sequence_and_cache_identity();
