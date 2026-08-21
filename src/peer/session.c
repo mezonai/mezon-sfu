@@ -187,8 +187,6 @@ bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session) {
   return true;
 }
 
-/* Epoch grace period only observes worker generation counters. Signaling,
- * dispatcher, and other threads must keep a refcount pin while using a session. */
 static uint64_t get_worker_generation(void *ctx, uint32_t worker_index) {
   sfu_worker_t *workers = (sfu_worker_t *)ctx;
   return atomic_load_explicit(&workers[worker_index].generation, memory_order_acquire);
@@ -241,7 +239,6 @@ int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx, voi
       return -1;
     }
     if (sfu_epoch_reclaimer_init(t->reclaimer, worker_count, get_worker_generation, workers) != 0) {
-      /* init failed before the reclaimer mutex was live; do not destroy it */
       SFU_FREE(t->reclaimer);
       t->reclaimer = NULL;
       SFU_FREE(t->sessions);
@@ -560,8 +557,6 @@ void sfu_session_release(sfu_peer_session_t *s) {
   if (atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel) == 1) {
     sfu_session_table_t *table = s->cold ? (sfu_session_table_t *)s->cold->table : NULL;
     if (table && table->reclaimer) {
-      /* Never immediate-free: that reopens the cross-worker UAF. Sweep to recycle
-       * retire nodes, then retry. A stalled worker applies backpressure here. */
       unsigned spins = 0;
       while (!sfu_epoch_reclaimer_retire(table->reclaimer, s, session_destructor)) {
         (void)sfu_epoch_reclaimer_sweep(table->reclaimer);
@@ -879,8 +874,6 @@ sfu_peer_session_t *sfu_session_table_get_or_create_by_ufrag(sfu_session_table_t
     return NULL;
   }
 
-  /* Serialize the compound find/create/index operation. Existing table helpers
-   * keep their own lock and remain safe for unrelated address lookups. */
   pthread_mutex_lock(&t->ice_lock);
 
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(t, ufrag);
