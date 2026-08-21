@@ -5,6 +5,7 @@
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "runtime/cpu.h"
+#include "runtime/epoch_reclaimer.h"
 #include "runtime/fanout.h"
 #include "runtime/fanout_job.h"
 #include "runtime/signal.h"
@@ -140,6 +141,7 @@ static void *worker_thread_main(void *arg) {
 
   uint32_t idle_sleep_us = SFU_WORKER_IDLE_SLEEP_MIN_US;
 
+  uint32_t loop_counter = 0;
   while (!sfu_shutdown_requested()) {
     bool did_work = false;
 
@@ -206,6 +208,13 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
+    if (++loop_counter % 100 == 0 && w->sessions && w->sessions->reclaimer) {
+      uint32_t reclaimed = sfu_epoch_reclaimer_sweep(w->sessions->reclaimer);
+      if (reclaimed > 0) {
+        did_work = true;
+      }
+    }
+
     if (!did_work) {
       usleep(idle_sleep_us);
       if (idle_sleep_us < SFU_WORKER_IDLE_SLEEP_MAX_US) {
@@ -242,6 +251,10 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
+    if (w->sessions && w->sessions->reclaimer) {
+      (void)sfu_epoch_reclaimer_sweep(w->sessions->reclaimer);
+    }
+
     if (did_work) {
       idle_passes = 0;
     } else {
@@ -250,6 +263,10 @@ static void *worker_thread_main(void *arg) {
     }
 
     atomic_fetch_add_explicit(&w->generation, 1, memory_order_release);
+  }
+
+  if (w->sessions && w->sessions->reclaimer) {
+    (void)sfu_epoch_reclaimer_sweep(w->sessions->reclaimer);
   }
 
   SFU_LOG_INFO("worker %u shutting down", w->worker_index);

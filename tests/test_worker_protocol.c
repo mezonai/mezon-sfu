@@ -130,7 +130,7 @@ static void fixture_init(fixture_t *f) {
   assert(sfu_packet_pool_init(&f->pp, POOL_CAPACITY, 2048) == 0);
   f->dtls_ctx.ssl_ctx = SSL_CTX_new(TLS_method());
   assert(f->dtls_ctx.ssl_ctx != NULL);
-  assert(sfu_session_table_init(&f->sessions, &f->dtls_ctx) == 0);
+  assert(sfu_session_table_init(&f->sessions, &f->dtls_ctx, NULL, 0) == 0);
   sfu_metrics_init();
 
   uint8_t key_material[SFU_SRTP_KEY_MATERIAL_LEN];

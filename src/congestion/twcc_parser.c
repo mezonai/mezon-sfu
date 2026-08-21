@@ -25,7 +25,7 @@ static size_t validate_chunks(const uint8_t *data, size_t len, uint16_t packet_s
       if (symbol == TWCC_STATUS_RESERVED || run == 0) {
         return 0;
       }
-      if (processed > packet_status_count - run) {
+      if (processed > (uint32_t)(packet_status_count - run)) {
         return 0;
       }
       processed += run;

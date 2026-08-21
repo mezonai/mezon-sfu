@@ -256,6 +256,7 @@ typedef struct {
   bool active_client_random_valid;
   bool pending_dtls_active;
   sfu_rtp_seq_translator_t rtp_seq_translator;
+  void *table; /* Back-reference to sfu_session_table_t for reclaimer */
 } sfu_peer_session_cold_t;
 
 typedef struct {
@@ -360,9 +361,12 @@ typedef struct sfu_hash_slot {
   uint32_t index;
 } sfu_hash_slot_t;
 
+typedef struct sfu_epoch_reclaimer sfu_epoch_reclaimer_t;
+
 typedef struct sfu_session_table {
   sfu_peer_session_t **sessions;
   sfu_dtls_ctx_t *dtls_ctx;
+  sfu_epoch_reclaimer_t *reclaimer;
   uint32_t capacity;
   uint32_t count;
   pthread_rwlock_t lock;

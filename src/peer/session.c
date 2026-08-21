@@ -11,6 +11,7 @@
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_kf.h"
 #include "rtp/rtx.h"
+#include "runtime/epoch_reclaimer.h"
 #include "runtime/routing_context.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
@@ -186,7 +187,34 @@ bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session) {
   return true;
 }
 
-int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
+/* Epoch grace period only observes worker generation counters. Signaling,
+ * dispatcher, and other threads must keep a refcount pin while using a session. */
+static uint64_t get_worker_generation(void *ctx, uint32_t worker_index) {
+  sfu_worker_t *workers = (sfu_worker_t *)ctx;
+  return atomic_load_explicit(&workers[worker_index].generation, memory_order_acquire);
+}
+
+static void sfu_session_free_resources(sfu_peer_session_t *s);
+
+static void session_destructor(void *ptr) {
+  sfu_peer_session_t *s = (sfu_peer_session_t *)ptr;
+  sfu_session_free_resources(s);
+  snapshot_wait_unhazarded(s);
+  SFU_FREE(s);
+}
+
+static void session_table_fail_cleanup(sfu_session_table_t *t) {
+  if (t->reclaimer) {
+    sfu_epoch_reclaimer_destroy_after_quiescence(t->reclaimer);
+    SFU_FREE(t->reclaimer);
+    t->reclaimer = NULL;
+  }
+  SFU_FREE(t->sessions);
+  t->sessions = NULL;
+  t->capacity = 0;
+}
+
+int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx, void *workers, uint32_t worker_count) {
   memset(t, 0, sizeof(*t));
   t->capacity = SFU_SESSION_TABLE_MAX;
   t->sessions = SFU_CALLOC(t->capacity, sizeof(*t->sessions));
@@ -204,33 +232,44 @@ int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx) {
 
   t->dtls_ctx = dtls_ctx;
 
+  if (workers && worker_count > 0) {
+    t->reclaimer = SFU_CALLOC(1, sizeof(*t->reclaimer));
+    if (!t->reclaimer) {
+      SFU_FREE(t->sessions);
+      t->sessions = NULL;
+      t->capacity = 0;
+      return -1;
+    }
+    if (sfu_epoch_reclaimer_init(t->reclaimer, worker_count, get_worker_generation, workers) != 0) {
+      /* init failed before the reclaimer mutex was live; do not destroy it */
+      SFU_FREE(t->reclaimer);
+      t->reclaimer = NULL;
+      SFU_FREE(t->sessions);
+      t->sessions = NULL;
+      t->capacity = 0;
+      return -1;
+    }
+  }
+
   pthread_rwlockattr_t rwattr;
   if (pthread_rwlockattr_init(&rwattr) != 0) {
-    SFU_FREE(t->sessions);
-    t->sessions = NULL;
-    t->capacity = 0;
+    session_table_fail_cleanup(t);
     return -1;
   }
   if (pthread_rwlockattr_setkind_np(&rwattr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP) != 0) {
     pthread_rwlockattr_destroy(&rwattr);
-    SFU_FREE(t->sessions);
-    t->sessions = NULL;
-    t->capacity = 0;
+    session_table_fail_cleanup(t);
     return -1;
   }
   int rwlock_rc = pthread_rwlock_init(&t->lock, &rwattr);
   pthread_rwlockattr_destroy(&rwattr);
   if (rwlock_rc != 0) {
-    SFU_FREE(t->sessions);
-    t->sessions = NULL;
-    t->capacity = 0;
+    session_table_fail_cleanup(t);
     return -1;
   }
   if (pthread_mutex_init(&t->ice_lock, NULL) != 0) {
     pthread_rwlock_destroy(&t->lock);
-    SFU_FREE(t->sessions);
-    t->sessions = NULL;
-    t->capacity = 0;
+    session_table_fail_cleanup(t);
     return -1;
   }
 
@@ -519,9 +558,23 @@ void sfu_session_release(sfu_peer_session_t *s) {
   }
 
   if (atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel) == 1) {
-    sfu_session_free_resources(s);
-    snapshot_wait_unhazarded(s);
-    SFU_FREE(s);
+    sfu_session_table_t *table = s->cold ? (sfu_session_table_t *)s->cold->table : NULL;
+    if (table && table->reclaimer) {
+      /* Never immediate-free: that reopens the cross-worker UAF. Sweep to recycle
+       * retire nodes, then retry. A stalled worker applies backpressure here. */
+      unsigned spins = 0;
+      while (!sfu_epoch_reclaimer_retire(table->reclaimer, s, session_destructor)) {
+        (void)sfu_epoch_reclaimer_sweep(table->reclaimer);
+        if ((++spins % 64u) == 0u) {
+          SFU_LOG_WARN("epoch reclaimer full, waiting for worker grace period (spins=%u)", spins);
+        }
+        sched_yield();
+      }
+    } else {
+      sfu_session_free_resources(s);
+      snapshot_wait_unhazarded(s);
+      SFU_FREE(s);
+    }
   }
 }
 
@@ -661,6 +714,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     return NULL;
   }
 
+  s->cold->table = t;
   memcpy(&s->cold->addr, addr, addr_len);
   s->cold->addr_len = addr_len;
   s->active = true;
@@ -1086,6 +1140,12 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
     sfu_session_release(orphans[i]);
   }
   SFU_FREE(orphans);
+
+  if (t->reclaimer) {
+    sfu_epoch_reclaimer_destroy_after_quiescence(t->reclaimer);
+    SFU_FREE(t->reclaimer);
+    t->reclaimer = NULL;
+  }
 
   SFU_FREE(t->sessions);
   t->sessions = NULL;

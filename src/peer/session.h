@@ -18,7 +18,7 @@ typedef enum sfu_session_rebind_result {
   SFU_SESSION_REBIND_REJECTED,
 } sfu_session_rebind_result_t;
 
-int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx);
+int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx, void *workers, uint32_t worker_count);
 void sfu_session_table_destroy(sfu_session_table_t *t);
 sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len);
 sfu_peer_session_t *sfu_session_table_get_or_create_by_ufrag(sfu_session_table_t *t, const struct sockaddr_storage *addr, socklen_t addr_len, const char *ufrag,
