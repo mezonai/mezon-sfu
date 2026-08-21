@@ -5,16 +5,11 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 
 ## features
 
-* **Decoupled Architecture:** Run both signaling and media processes together or distribute them independently.
-
-
+* **WebRTC Compliance:** Compatible with both standard WebRTC clients and libmezia.
 * **High-Performance Routing:** Low-latency packet pool design paired with multi-threaded worker pipelines.
-
-
 * **Native Security:** Integrated DTLS handshake and secure SRTP packet protection.
-
-
 * **WebRTC Test Client:** Includes a diagnostic HTML WebRTC client to verify connectivity.
+* **Simple, Standalone Setup:** No external dependencies required to get running.
 
 ## build prerequisites
 
