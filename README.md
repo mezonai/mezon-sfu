@@ -140,9 +140,8 @@ python3 -m http.server 3000
 
 3. Open your browser and navigate to `http://localhost:3000/webrtc_test_client.html`.
 4. Input your WebSocket signaling URL (e.g., `ws://127.0.0.1:8080`).
-
-
-5. Click **Connect** to start streaming!
+5. Input jwt_secret (in config.ini). This is for testing purpose
+6. Click **Connect** to start streaming!
 
 
 ## editor & debugger integration (Zed / VS Code)
