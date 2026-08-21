@@ -256,7 +256,7 @@ typedef struct {
   bool active_client_random_valid;
   bool pending_dtls_active;
   sfu_rtp_seq_translator_t rtp_seq_translator;
-  void *table; /* Back-reference to sfu_session_table_t for reclaimer */
+  void *table;
 } sfu_peer_session_cold_t;
 
 typedef struct {
@@ -382,6 +382,5 @@ typedef struct sfu_room {
   uint32_t peer_count;
   pthread_mutex_t lock;
 } sfu_room_t;
-
 
 #endif  // SFU_DATA_DEF_H
