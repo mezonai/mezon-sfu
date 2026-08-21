@@ -71,6 +71,10 @@ add_executable(test_epoch_reclaimer test_epoch_reclaimer.c)
 target_link_libraries(test_epoch_reclaimer PRIVATE sfu_core)
 add_test(NAME epoch_reclaimer COMMAND test_epoch_reclaimer)
 
+add_executable(test_session_load test_session_load.c)
+target_link_libraries(test_session_load PRIVATE sfu_core)
+add_test(NAME session_load COMMAND test_session_load)
+
 add_executable(test_rtcp_compound test_rtcp_compound.c)
 target_link_libraries(test_rtcp_compound PRIVATE sfu_core)
 add_test(NAME rtcp_compound COMMAND test_rtcp_compound)

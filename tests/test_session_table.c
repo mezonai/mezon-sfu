@@ -30,7 +30,7 @@ static void test_basic_lifecycle(void) {
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
 
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   struct sockaddr_storage addr1, addr2, addr3;
   socklen_t len1, len2, len3;
@@ -170,7 +170,7 @@ static void test_failed_construction(void) {
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
 
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   struct sockaddr_storage addr1;
   socklen_t len1;
@@ -224,7 +224,7 @@ static void test_concurrent_find_vs_close(void) {
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
 
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   race_ctx_t ctx;
   memset(&ctx, 0, sizeof(ctx));
@@ -327,7 +327,7 @@ static void test_duplicate_ufrag_rejected(void) {
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   struct sockaddr_storage addr1, addr2;
   socklen_t len1, len2;
@@ -377,7 +377,7 @@ static void test_concurrent_same_ufrag_creation(void) {
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   ice_create_ctx_t ctx;
   memset(&ctx, 0, sizeof(ctx));
@@ -420,7 +420,7 @@ static void test_pending_answer_application(void) {
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   struct sockaddr_storage addr;
   socklen_t addr_len;
@@ -470,7 +470,7 @@ static void test_established_session_rebind(void) {
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   struct sockaddr_storage addr1, addr2;
   socklen_t len1, len2;
@@ -519,7 +519,7 @@ static void test_established_rebind_conflict(void) {
   sfu_dtls_ctx_t dtls_ctx;
   assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
   sfu_session_table_t table;
-  assert(sfu_session_table_init(&table, &dtls_ctx) == 0);
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
 
   struct sockaddr_storage addr1, addr2;
   socklen_t len1, len2;

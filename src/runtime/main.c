@@ -183,17 +183,6 @@ int main(int argc, char **argv) {
   }
   mesh_initialized = true;
 
-  if (sfu_session_table_init(sessions, &dtls_ctx) != 0) {
-    goto cleanup;
-  }
-  sessions_initialized = true;
-
-  if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, routing_table, &ice_creds, g_sfu_config.provided_buf_group_id,
-                         g_sfu_config.provided_buf_count, g_sfu_config.packet_buf_size) != 0) {
-    goto cleanup;
-  }
-  scheduler_initialized = true;
-
   for (uint32_t i = 0; i < worker_count; i++) {
     int core_id = (int)(i + 1) % (online > 1 ? online : 1);
     int send_bgid = g_sfu_config.provided_buf_group_id + 1 + (int)i;
@@ -203,6 +192,17 @@ int main(int argc, char **argv) {
     }
     workers_initialized++;
   }
+
+  if (sfu_session_table_init(sessions, &dtls_ctx, workers, worker_count) != 0) {
+    goto cleanup;
+  }
+  sessions_initialized = true;
+
+  if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, routing_table, &ice_creds, g_sfu_config.provided_buf_group_id,
+                         g_sfu_config.provided_buf_count, g_sfu_config.packet_buf_size) != 0) {
+    goto cleanup;
+  }
+  scheduler_initialized = true;
 
   for (uint32_t i = 0; i < worker_count; i++) {
     if (sfu_worker_start(&workers[i]) != 0) {

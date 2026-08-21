@@ -25,10 +25,17 @@ static size_t validate_chunks(const uint8_t *data, size_t len, uint16_t packet_s
       if (symbol == TWCC_STATUS_RESERVED || run == 0) {
         return 0;
       }
+      if (processed > (uint32_t)(packet_status_count - run)) {
+        return 0;
+      }
       processed += run;
     } else {
       bool two_bit = (chunk & 0x4000) != 0;
-      processed += two_bit ? 7u : 14u;
+      uint32_t chunk_count = two_bit ? 7u : 14u;
+      if (processed > packet_status_count - chunk_count) {
+        return 0;
+      }
+      processed += chunk_count;
     }
   }
 

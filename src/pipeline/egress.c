@@ -24,7 +24,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
                                      const sfu_layer_scheduler_decision_t *decision) {
   int enc_len = (int)pkt->len;
 
-  if (media->mid != 0 && media->mid >= atomic_load_explicit(&sub_session->graph.applied_remote_mid, memory_order_acquire)) {
+  uint32_t applied = atomic_load_explicit(&sub_session->graph.applied_remote_mid, memory_order_acquire);
+  uint32_t offered = atomic_load_explicit(&sub_session->graph.offered_remote_mid, memory_order_acquire);
+  if (media->mid != 0 && (media->mid >= applied || media->mid >= offered)) {
     sfu_metric_inc("egress_mid_not_negotiated");
     return false;
   }

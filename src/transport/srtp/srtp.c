@@ -62,7 +62,11 @@ int sfu_srtp_ctx_init_from_dtls(sfu_srtp_ctx_t *ctx, const uint8_t *keying_mater
     salt_len = 12;
   }
 
-  // Layout: [client_key][server_key][client_salt][server_salt]
+  size_t required_size = (size_t)(2 * key_len + 2 * salt_len);
+  if (required_size > SFU_SRTP_KEY_MATERIAL_LEN) {
+    return -1;
+  }
+
   const uint8_t *client_key = keying_material;
   const uint8_t *server_key = keying_material + key_len;
   const uint8_t *client_salt = keying_material + (key_len * 2);
@@ -114,9 +118,7 @@ srtp_err_status_t sfu_srtp_unprotect_rtp_status(sfu_srtp_ctx_t *ctx, uint8_t *bu
   return srtp_unprotect(ctx->inbound, buf, len);
 }
 
-bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
-  return sfu_srtp_unprotect_rtp_status(ctx, buf, len) == srtp_err_status_ok;
-}
+bool sfu_srtp_unprotect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) { return sfu_srtp_unprotect_rtp_status(ctx, buf, len) == srtp_err_status_ok; }
 
 srtp_err_status_t sfu_srtp_get_roc(sfu_srtp_ctx_t *ctx, uint32_t ssrc, uint32_t *roc) {
   if (!ctx || !ctx->inbound || !roc) {
@@ -216,9 +218,7 @@ srtp_err_status_t sfu_srtp_unprotect_rtcp_status(sfu_srtp_ctx_t *ctx, uint8_t *b
   return srtp_unprotect_rtcp(ctx->inbound, buf, len);
 }
 
-bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) {
-  return sfu_srtp_unprotect_rtcp_status(ctx, buf, len) == srtp_err_status_ok;
-}
+bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) { return sfu_srtp_unprotect_rtcp_status(ctx, buf, len) == srtp_err_status_ok; }
 
 bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
   if (buf[1] == 206) {
