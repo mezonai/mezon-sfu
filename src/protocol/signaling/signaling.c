@@ -155,6 +155,7 @@ static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_signaling
 }
 
 static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s) {
+  uint32_t offered_mid = atomic_load_explicit(&session->graph.next_remote_mid, memory_order_acquire);
   int offer_len = sfu_sdp_build_offer(session, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, s->scratch.sdp,
                                       SFU_SIGNALING_SDP_CAP);
   if (offer_len < 0) {
@@ -165,6 +166,7 @@ static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signal
     SFU_LOG_WARN("signaling: failed to send server-initiated offer over WebSocket (fd=%d)", fd);
     return false;
   }
+  atomic_store_explicit(&session->graph.offered_remote_mid, offered_mid, memory_order_release);
   return true;
 }
 
@@ -1155,6 +1157,13 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   follow_up_pending = session->negotiation.desired_offer_revision > session->negotiation.answered_revision;
   session->negotiation.renegotiation_pending = follow_up_pending;
   pthread_mutex_unlock(&session->negotiation.lock);
+  {
+    uint32_t applied = atomic_load_explicit(&session->graph.offered_remote_mid, memory_order_acquire);
+    uint32_t prev = atomic_load_explicit(&session->graph.applied_remote_mid, memory_order_relaxed);
+    while (applied > prev &&
+           !atomic_compare_exchange_weak_explicit(&session->graph.applied_remote_mid, &prev, applied, memory_order_release, memory_order_relaxed)) {
+    }
+  }
   if (answered_offer_generation != 0) {
     SFU_LOG_INFO("signaling: completed renegotiation answer ufrag=%s peer_id=%u generation=%u revision=%" PRIu64 " pending=%d", c->client_ufrag,
                  session->peer_id, answered_offer_generation, answered_offer_revision, follow_up_pending);
