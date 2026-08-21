@@ -6,8 +6,6 @@
 #include <stdint.h>
 #include "sfu/config.h"
 
-/* Sized for a leave-storm: concurrent last-drops wait in retire until a sweep
- * recycles a node. Immediate-free on exhaustion is unsafe (use-after-free). */
 #define SFU_EPOCH_RECLAIMER_CAPACITY 4096
 
 typedef uint64_t (*sfu_epoch_generation_fn)(void *context, uint32_t worker_index);
