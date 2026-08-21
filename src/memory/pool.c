@@ -77,10 +77,10 @@ void sfu_pool_free(sfu_pool_t *pool, uint32_t index) {
     uint32_t old_idx = unpack_index(old_head);
     uint32_t tag = unpack_tag(old_head);
 
-    pool->next[index] = old_idx;
     uint64_t new_head = pack(tag + 1, index);
 
     if (atomic_compare_exchange_weak_explicit(&pool->head, &old_head, new_head, memory_order_acq_rel, memory_order_acquire)) {
+      pool->next[index] = old_idx;
       atomic_fetch_sub_explicit(&pool->in_use, 1, memory_order_relaxed);
       return;
     }

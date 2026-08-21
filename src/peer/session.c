@@ -7,11 +7,11 @@
 #include "congestion/pacer.h"
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
+#include "media/svc/layer_scheduler.h"
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_kf.h"
 #include "rtp/rtx.h"
 #include "runtime/routing_context.h"
-#include "media/svc/layer_scheduler.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/dtls/dtls.h"
@@ -87,10 +87,14 @@ static void *snapshot_acquire(const sfu_peer_session_t *owner, const _Atomic(voi
     pthread_mutex_unlock((pthread_mutex_t *)&owner->graph.lock);
     return snap;
   }
+
   for (;;) {
     void *snap = atomic_load_explicit(source, memory_order_seq_cst);
+    uint64_t gen_before = snap ? ((sfu_receiver_snapshot_t *)snap)->generation : 0;
     atomic_store_explicit(hazard, snap, memory_order_seq_cst);
-    if (atomic_load_explicit(source, memory_order_seq_cst) != snap) {
+    void *snap_check = atomic_load_explicit(source, memory_order_seq_cst);
+    uint64_t gen_after = snap_check ? ((sfu_receiver_snapshot_t *)snap_check)->generation : 0;
+    if (snap != snap_check || gen_before != gen_after) {
       atomic_store_explicit(hazard, NULL, memory_order_seq_cst);
       continue;
     }
@@ -513,8 +517,10 @@ void sfu_session_release(sfu_peer_session_t *s) {
   if (!s) {
     return;
   }
+
   if (atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel) == 1) {
     sfu_session_free_resources(s);
+    snapshot_wait_unhazarded(s);
     SFU_FREE(s);
   }
 }
@@ -1159,9 +1165,9 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   changed = session->media.uplink_audio.ssrc != audio_ssrc || session->media.uplink_audio.active != audio_active ||
             session->media.uplink_video.ssrc != video_ssrc || session->media.uplink_video.rtx_ssrc != rtx_ssrc ||
             session->media.uplink_video.payload_type != video_pt || session->media.uplink_video.rtx_payload_type != rtx_pt ||
-            session->media.uplink_video.codec != codec || session->media.screen.ssrc != screen_ssrc ||
-            session->media.screen.rtx_ssrc != screen_rtx_ssrc || session->media.screen.payload_type != screen_pt ||
-            session->media.screen.rtx_payload_type != screen_rtx_pt || session->media.screen.codec != screen_codec;
+            session->media.uplink_video.codec != codec || session->media.screen.ssrc != screen_ssrc || session->media.screen.rtx_ssrc != screen_rtx_ssrc ||
+            session->media.screen.payload_type != screen_pt || session->media.screen.rtx_payload_type != screen_rtx_pt ||
+            session->media.screen.codec != screen_codec;
 
   session->media.uplink_audio.ssrc = audio_ssrc;
   session->media.uplink_audio.active = audio_active;
