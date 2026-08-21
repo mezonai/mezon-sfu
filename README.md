@@ -5,7 +5,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 
 ## features
 
-* **WebRTC Compliance:** Compatible with both standard WebRTC clients and [libmezia] (https://github.com/mezonai/libmezia).
+* **WebRTC Compliance:** Compatible with both standard WebRTC clients and [libmezia](https://github.com/mezonai/libmezia)
 * **High-Performance Routing:** Low-latency packet pool design paired with multi-threaded worker pipelines.
 * **Native Security:** Integrated DTLS handshake and secure SRTP packet protection.
 * **WebRTC Test Client:** Includes a diagnostic HTML WebRTC client to verify connectivity.
