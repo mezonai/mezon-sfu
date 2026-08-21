@@ -5,16 +5,11 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 
 ## features
 
-* **Decoupled Architecture:** Run both signaling and media processes together or distribute them independently.
-
-
+* **WebRTC Compliance:** Compatible with both standard WebRTC clients and [libmezia] (https://github.com/mezonai/libmezia).
 * **High-Performance Routing:** Low-latency packet pool design paired with multi-threaded worker pipelines.
-
-
 * **Native Security:** Integrated DTLS handshake and secure SRTP packet protection.
-
-
 * **WebRTC Test Client:** Includes a diagnostic HTML WebRTC client to verify connectivity.
+* **Simple, Standalone Setup:** No external dependencies required to get running.
 
 ## build prerequisites
 
@@ -111,7 +106,7 @@ The compiled binary will be generated at `./build/mezon-sfu`.
 
 
 * Set publish_host to `127.0.0.1` for local testing.
-* Set this to your server's **external public IP** (e.g., `27.75.30.171`) when deploying to a remote host.
+* Set this to your server's **external public IP** (e.g., `203.0.113.88`) when deploying to a remote host.
 
 #### running both signaling & media
 
@@ -126,22 +121,10 @@ Best for local development or single-server environments.
 
 Modern WebRTC engines restrict local network discovery (mDNS protection) when running files directly off the hard drive. **You must host the test client over HTTP/HTTPS to test it successfully.**
 
-1. Navigate to your client folder.
-2. Spin up a local static server:
-```bash
-# Using Node.js
-npx serve .
-
-# OR using Python
-python3 -m http.server 3000
-
-```
-
-
-3. Open your browser and navigate to `http://localhost:3000/webrtc_test_client.html`.
-4. Input your WebSocket signaling URL (e.g., `ws://127.0.0.1:8080`).
-5. Input jwt_secret (in config.ini). This is for testing purpose
-6. Click **Connect** to start streaming!
+1. Open your browser and navigate to `http://localhost:3000/webrtc_test_client.html`.
+2. Input your WebSocket signaling URL (e.g., `ws://127.0.0.1:8080`).
+3. Input jwt_secret (in config.ini). This is for testing purpose
+4. Click **Connect** to start streaming!
 
 
 ## editor & debugger integration (Zed / VS Code)
