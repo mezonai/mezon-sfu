@@ -1766,6 +1766,18 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
   pthread_rwlock_destroy(&t->lock);
 }
 
+static uint32_t sfu_resolve_media_ssrc(uint32_t live, uint32_t live_rtx, uint32_t answer_ssrc, uint32_t answer_rtx) {
+  uint32_t rtx = answer_rtx != 0 ? answer_rtx : live_rtx;
+  uint32_t ssrc = answer_ssrc;
+  if (live != 0 && live != rtx) {
+    ssrc = live;
+  }
+  if (ssrc != 0 && rtx != 0 && ssrc == rtx) {
+    ssrc = (answer_ssrc != 0 && answer_ssrc != rtx) ? answer_ssrc : 0;
+  }
+  return ssrc;
+}
+
 bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pending_answer_t *answer, int fd, bool *role_changed, bool *media_changed) {
   if (!session || !answer || !answer->valid) {
     return false;
@@ -1816,10 +1828,30 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
 
   pthread_mutex_lock(&session->media.lock);
   audio_ssrc = answer->audio_section_present ? (answer->audio_sends ? answer->audio_ssrc : 0) : session->media.uplink_audio.ssrc;
-  video_ssrc = answer->video_section_present ? (answer->video_sends ? answer->video_ssrc : 0) : session->media.uplink_video.ssrc;
-  uint32_t rtx_ssrc = answer->video_section_present ? (answer->video_sends ? answer->rtx_ssrc : 0) : session->media.uplink_video.rtx_ssrc;
-  screen_ssrc = answer->screen_section_present ? (answer->screen_sends ? answer->screen_ssrc : 0) : session->media.screen.ssrc;
-  uint32_t screen_rtx_ssrc = answer->screen_section_present ? (answer->screen_sends ? answer->screen_rtx_ssrc : 0) : session->media.screen.rtx_ssrc;
+  uint32_t rtx_ssrc = session->media.uplink_video.rtx_ssrc;
+  uint32_t screen_rtx_ssrc = session->media.screen.rtx_ssrc;
+  if (answer->video_section_present) {
+    if (answer->video_sends) {
+      rtx_ssrc = answer->rtx_ssrc != 0 ? answer->rtx_ssrc : session->media.uplink_video.rtx_ssrc;
+      video_ssrc = sfu_resolve_media_ssrc(session->media.uplink_video.ssrc, session->media.uplink_video.rtx_ssrc, answer->video_ssrc, rtx_ssrc);
+    } else {
+      video_ssrc = 0;
+      rtx_ssrc = 0;
+    }
+  } else {
+    video_ssrc = session->media.uplink_video.ssrc;
+  }
+  if (answer->screen_section_present) {
+    if (answer->screen_sends) {
+      screen_rtx_ssrc = answer->screen_rtx_ssrc != 0 ? answer->screen_rtx_ssrc : session->media.screen.rtx_ssrc;
+      screen_ssrc = sfu_resolve_media_ssrc(session->media.screen.ssrc, session->media.screen.rtx_ssrc, answer->screen_ssrc, screen_rtx_ssrc);
+    } else {
+      screen_ssrc = 0;
+      screen_rtx_ssrc = 0;
+    }
+  } else {
+    screen_ssrc = session->media.screen.ssrc;
+  }
   uint8_t video_pt = answer->video_pt != 0 ? answer->video_pt : session->media.uplink_video.payload_type;
   uint8_t rtx_pt = answer->rtx_pt != 0 ? answer->rtx_pt : session->media.uplink_video.rtx_payload_type;
   uint8_t screen_pt = answer->screen_pt != 0 ? answer->screen_pt : session->media.screen.payload_type;

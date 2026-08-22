@@ -787,11 +787,14 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint32_t known_rtx_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_ssrc : pt_msnap.video_rtx_ssrc;
   uint8_t rtx_pt = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_pt : pt_msnap.video_rtx_pt;
   bool active = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_active : m.source == SFU_MEDIA_VIDEO ? pt_msnap.video_active : pt_msnap.audio_active;
-  bool is_rtx = !m.is_audio && in_pt == rtx_pt;
+  bool is_rtx = !m.is_audio && (in_pt == rtx_pt || (known_rtx_ssrc != 0 && m.rtp.ssrc == known_rtx_ssrc));
   bool need_learn = (m.rtp.ssrc != 0 && (is_rtx ? known_rtx_ssrc : known_ssrc) != m.rtp.ssrc) || !active;
 
   if (need_learn) {
     pthread_mutex_lock(&sender_session->media.lock);
+    if (!is_rtx && !m.is_audio && source->rtx_ssrc != 0 && m.rtp.ssrc == source->rtx_ssrc) {
+      is_rtx = true;
+    }
     if (is_rtx) {
       if (m.rtp.ssrc != 0 && source->rtx_ssrc != m.rtp.ssrc) {
 #ifdef SFU_DIAG_LOG
@@ -802,14 +805,21 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
         learned = true;
       }
     } else if (m.rtp.ssrc != 0 && source->ssrc != m.rtp.ssrc) {
+      if (source->rtx_ssrc != 0 && m.rtp.ssrc == source->rtx_ssrc) {
 #ifdef SFU_DIAG_LOG
-      SFU_LOG_WARN("ingress: SSRC learn media peer=%u ufrag=%s source=%d old_ssrc=%" PRIu32 " new=%" PRIu32
-                   " pt=%u rtx_pt=%u is_rtx=%d known_ssrc=%" PRIu32 " known_rtx=%" PRIu32 " active=%d",
-                   sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->ssrc, m.rtp.ssrc, in_pt, rtx_pt, is_rtx ? 1 : 0, known_ssrc,
-                   known_rtx_ssrc, active ? 1 : 0);
+        SFU_LOG_INFO("ingress: skip media SSRC learn of RTX ssrc peer=%u ufrag=%s source=%d ssrc=%" PRIu32 " pt=%u rtx_pt=%u", sender_session->peer_id,
+                     sender_session->cold->ufrag, (int)m.source, m.rtp.ssrc, in_pt, rtx_pt);
 #endif
-      source->ssrc = m.rtp.ssrc;
-      learned = true;
+      } else {
+#ifdef SFU_DIAG_LOG
+        SFU_LOG_WARN("ingress: SSRC learn media peer=%u ufrag=%s source=%d old_ssrc=%" PRIu32 " new=%" PRIu32
+                     " pt=%u rtx_pt=%u is_rtx=%d known_ssrc=%" PRIu32 " known_rtx=%" PRIu32 " active=%d",
+                     sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->ssrc, m.rtp.ssrc, in_pt, rtx_pt, is_rtx ? 1 : 0, known_ssrc,
+                     known_rtx_ssrc, active ? 1 : 0);
+#endif
+        source->ssrc = m.rtp.ssrc;
+        learned = true;
+      }
     }
     if (!is_rtx && m.source == SFU_MEDIA_VIDEO && !atomic_load_explicit(&sender_session->media.camera_rtp_observed, memory_order_acquire)) {
       atomic_store_explicit(&sender_session->media.camera_rtp_observed, true, memory_order_release);
