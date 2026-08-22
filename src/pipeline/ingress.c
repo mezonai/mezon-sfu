@@ -32,6 +32,7 @@
 #include "util/netbytes.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
@@ -57,9 +58,9 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
 
   pthread_mutex_lock(&room->lock);
   sfu_peer_session_t *result = NULL;
-  for (uint32_t i = 0; i < room->peer_count; i++) {
+  for (uint32_t i = 0; i < room->peer_capacity; i++) {
     sfu_peer_session_t *publisher = room->peers[i];
-    if (publisher == subscriber) {
+    if (!publisher || publisher == subscriber) {
       continue;
     }
     sfu_media_snapshot_t pub_msnap = sfu_session_load_media(publisher);
@@ -72,23 +73,19 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
     if (!media_matches) {
       continue;
     }
-    sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(publisher);
-    if (!snap) {
-      continue;
-    }
-    for (uint32_t j = 0; j < snap->count; j++) {
-      const sfu_receiver_entry_t *e = &snap->entries[j];
-      bool subscribed = source == SFU_MEDIA_SCREEN ? e->has_screen : e->has_video;
-      if (e->subscriber == subscriber && subscribed) {
+    sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(publisher);
+    sfu_fanout_iter_t iter;
+    sfu_fanout_iter_init(&iter, bundle, source);
+    const sfu_fanout_route_t *route;
+    while ((route = sfu_fanout_iter_next(&iter, NULL)) != NULL) {
+      if (route->subscriber == subscriber) {
         atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
-        if (out_source) {
-          *out_source = source;
-        }
+        if (out_source) *out_source = source;
         result = publisher;
         break;
       }
     }
-    sfu_subscriptions_snapshot_release(snap);
+    sfu_fanout_bundle_release(bundle);
     if (result) {
       break;
     }
@@ -743,6 +740,19 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool learned = false;
   if (!send_negotiated) {
     sfu_metric_inc("unnegotiated_rtp_drop");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t unnegotiated_drop_logs;
+    uint32_t n = atomic_fetch_add_explicit(&unnegotiated_drop_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_WARN("ingress: unnegotiated_rtp_drop n=%u peer=%u ufrag=%s source=%d pt=%u ssrc=%" PRIu32
+                   " audio_neg=%d video_neg=%d screen_neg=%d audience=%d",
+                   n + 1, sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, in_pt, m.rtp.ssrc,
+                   atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire) ? 1 : 0,
+                   atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire) ? 1 : 0,
+                   atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) ? 1 : 0,
+                   is_audience ? 1 : 0);
+    }
+#endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
@@ -750,6 +760,14 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (m.source == SFU_MEDIA_VIDEO && !atomic_load_explicit(&sender_session->media.camera_enabled, memory_order_acquire)) {
     sfu_metric_inc("camera_disabled_rtp_drop");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t camera_disabled_logs;
+    uint32_t n = atomic_fetch_add_explicit(&camera_disabled_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_WARN("ingress: camera_disabled_rtp_drop n=%u peer=%u ufrag=%s ssrc=%" PRIu32, n + 1, sender_session->peer_id, sender_session->cold->ufrag,
+                   m.rtp.ssrc);
+    }
+#endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
@@ -777,19 +795,39 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint32_t known_rtx_ssrc = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_ssrc : pt_msnap.video_rtx_ssrc;
   uint8_t rtx_pt = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_rtx_pt : pt_msnap.video_rtx_pt;
   bool active = m.source == SFU_MEDIA_SCREEN ? pt_msnap.screen_active : m.source == SFU_MEDIA_VIDEO ? pt_msnap.video_active : pt_msnap.audio_active;
-  bool is_rtx = !m.is_audio && in_pt == rtx_pt;
+  bool is_rtx = !m.is_audio && (in_pt == rtx_pt || (known_rtx_ssrc != 0 && m.rtp.ssrc == known_rtx_ssrc));
   bool need_learn = (m.rtp.ssrc != 0 && (is_rtx ? known_rtx_ssrc : known_ssrc) != m.rtp.ssrc) || !active;
 
   if (need_learn) {
     pthread_mutex_lock(&sender_session->media.lock);
+    if (!is_rtx && !m.is_audio && source->rtx_ssrc != 0 && m.rtp.ssrc == source->rtx_ssrc) {
+      is_rtx = true;
+    }
     if (is_rtx) {
       if (m.rtp.ssrc != 0 && source->rtx_ssrc != m.rtp.ssrc) {
+#ifdef SFU_DIAG_LOG
+        SFU_LOG_INFO("ingress: SSRC learn RTX peer=%u ufrag=%s source=%d old_rtx=%" PRIu32 " new=%" PRIu32 " pt=%u rtx_pt=%u active=%d",
+                     sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->rtx_ssrc, m.rtp.ssrc, in_pt, rtx_pt, active ? 1 : 0);
+#endif
         source->rtx_ssrc = m.rtp.ssrc;
         learned = true;
       }
     } else if (m.rtp.ssrc != 0 && source->ssrc != m.rtp.ssrc) {
-      source->ssrc = m.rtp.ssrc;
-      learned = true;
+      if (source->rtx_ssrc != 0 && m.rtp.ssrc == source->rtx_ssrc) {
+#ifdef SFU_DIAG_LOG
+        SFU_LOG_INFO("ingress: skip media SSRC learn of RTX ssrc peer=%u ufrag=%s source=%d ssrc=%" PRIu32 " pt=%u rtx_pt=%u", sender_session->peer_id,
+                     sender_session->cold->ufrag, (int)m.source, m.rtp.ssrc, in_pt, rtx_pt);
+#endif
+      } else {
+#ifdef SFU_DIAG_LOG
+        SFU_LOG_WARN("ingress: SSRC learn media peer=%u ufrag=%s source=%d old_ssrc=%" PRIu32 " new=%" PRIu32
+                     " pt=%u rtx_pt=%u is_rtx=%d known_ssrc=%" PRIu32 " known_rtx=%" PRIu32 " active=%d",
+                     sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->ssrc, m.rtp.ssrc, in_pt, rtx_pt, is_rtx ? 1 : 0, known_ssrc,
+                     known_rtx_ssrc, active ? 1 : 0);
+#endif
+        source->ssrc = m.rtp.ssrc;
+        learned = true;
+      }
     }
     if (!is_rtx && m.source == SFU_MEDIA_VIDEO && !atomic_load_explicit(&sender_session->media.camera_rtp_observed, memory_order_acquire)) {
       atomic_store_explicit(&sender_session->media.camera_rtp_observed, true, memory_order_release);
@@ -832,8 +870,16 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint32_t learned_video_ssrc = sender_session->media.uplink_video.ssrc;
     uint32_t learned_screen_ssrc = sender_session->media.screen.ssrc;
     pthread_mutex_unlock(&sender_session->media.lock);
+#ifdef SFU_DIAG_LOG
+    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP peer=%u ufrag=%s source=%d is_rtx=%d pt=%u rtx_pt=%u"
+                 " (audio=%u camera=%u screen=%u audio_active=%d video_active=%d screen_active=%d); refreshing forwarding",
+                 w->worker_index, sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, is_rtx ? 1 : 0, in_pt, rtx_pt, learned_audio_ssrc,
+                 learned_video_ssrc, learned_screen_ssrc, sender_session->media.uplink_audio.active ? 1 : 0, sender_session->media.uplink_video.active ? 1 : 0,
+                 sender_session->media.screen.active ? 1 : 0);
+#else
     SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing forwarding", w->worker_index,
                  sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc, learned_screen_ssrc);
+#endif
     room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
     if (m.source == SFU_MEDIA_VIDEO || m.source == SFU_MEDIA_SCREEN) {
       sfu_signaling_notify_media_state(sender_session);

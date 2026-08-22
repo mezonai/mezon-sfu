@@ -1,12 +1,16 @@
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
+#include "room/room.h"
+#include "room/room_media_graph.h"
 #include "runtime/routing_context.h"
 #include "transport/dtls/dtls.h"
 #include "util/alloc.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -41,6 +45,8 @@ static void test_basic_lifecycle(void) {
   /* Create sessions (each returns a caller pin). */
   sfu_peer_session_t *s1 = sfu_session_table_get_or_create(&table, &addr1, len1);
   assert(s1 != NULL);
+  assert(s1->cold->table_index == 0);
+  assert(table.active_count == 1);
   assert(s1->active == true);
   assert(sfu_session_accepts_work(s1));
   assert(atomic_load(&s1->lifecycle) == SFU_SESSION_LIFECYCLE_OPEN);
@@ -119,6 +125,9 @@ static void test_basic_lifecycle(void) {
 
   /* Close s1: first transition is effective, repeats are idempotent. */
   assert(sfu_session_begin_close(&table, s1));
+  assert(s1->cold->table_index == UINT32_MAX);
+  assert(table.active_count == 1);
+  assert(table.free_count == 1);
   assert(!sfu_session_begin_close(&table, s1));
   assert(!sfu_session_accepts_work(s1));
   assert(atomic_load(&s1->lifecycle) == SFU_SESSION_LIFECYCLE_CLOSING);
@@ -151,6 +160,9 @@ static void test_basic_lifecycle(void) {
   sfu_peer_session_t *s3 = sfu_session_table_get_or_create(&table, &addr1, len1);
   assert(s3 != NULL);
   assert(s3 != s1);
+  assert(s3->cold->table_index == 0);
+  assert(table.active_count == 2);
+  assert(table.free_count == 0);
   assert(table.count == count_before);
 
   /* Release caller pins; s1's final release frees it exactly once (the table
@@ -318,8 +330,83 @@ static void test_routing_table(void) {
   assert(sfu_routing_table_lookup_route(&rtable, "ufrag_bob", 3, &route));
   assert(route.pending_generation == generation2);
 
+  /* Indexed lookup survives dense swap-delete and repeated removals by fd. */
+  answer = make_pending(100, false);
+  assert(sfu_routing_table_register_answer(&rtable, "route_a", &dummy_room, 20, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  assert(sfu_routing_table_register_answer(&rtable, "route_b", &dummy_room, 30, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  assert(sfu_routing_table_register_answer(&rtable, "route_c", &dummy_room, 40, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  assert(sfu_routing_table_register_answer(&rtable, "route_d", &dummy_room, 20, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  assert(rtable.count == 5);
+
+  sfu_routing_table_unregister_fd(&rtable, 20);
+  assert(rtable.count == 3);
+  assert(!sfu_routing_table_peek_route(&rtable, "route_a", &route));
+  assert(!sfu_routing_table_peek_route(&rtable, "route_d", &route));
+  assert(sfu_routing_table_peek_route(&rtable, "route_b", &route) && route.fd == 30);
+  assert(sfu_routing_table_peek_route(&rtable, "route_c", &route) && route.fd == 40);
+  assert(sfu_routing_table_peek_route(&rtable, "ufrag_bob", &route) && route.fd == 10);
+
+  char max_ufrag[32];
+  memset(max_ufrag, 'x', sizeof(max_ufrag));
+  max_ufrag[31] = '\0';
+  assert(sfu_routing_table_register_answer(&rtable, max_ufrag, &dummy_room, 50, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  assert(sfu_routing_table_peek_route(&rtable, max_ufrag, &route) && route.fd == 50);
+  char too_long_ufrag[33];
+  memset(too_long_ufrag, 'y', sizeof(too_long_ufrag));
+  too_long_ufrag[32] = '\0';
+  uint32_t count_before_invalid = rtable.count;
+  assert(sfu_routing_table_register_answer(&rtable, too_long_ufrag, &dummy_room, 51, &answer, NULL) == SFU_ROUTING_REGISTER_INVALID_ARGUMENT);
+  assert(rtable.count == count_before_invalid);
+
   sfu_routing_table_unregister_fd(&rtable, 10);
+  sfu_routing_table_unregister_fd(&rtable, 30);
+  sfu_routing_table_unregister_fd(&rtable, 40);
+  sfu_routing_table_unregister_fd(&rtable, 50);
   assert(rtable.count == 0);
+
+  /* Deliberately exercise collision chains and tombstone reuse. */
+  int32_t first_by_bucket[SFU_ROUTING_UFRAG_HASH_SLOTS];
+  for (uint32_t i = 0; i < SFU_ROUTING_UFRAG_HASH_SLOTS; i++) {
+    first_by_bucket[i] = -1;
+  }
+  char collision_a[32] = {0};
+  char collision_b[32] = {0};
+  for (uint32_t i = 0; i < 200000 && collision_b[0] == '\0'; i++) {
+    char candidate[32];
+    snprintf(candidate, sizeof(candidate), "collision_%u", i);
+    uint32_t bucket = fnv1a(candidate, strlen(candidate)) & (SFU_ROUTING_UFRAG_HASH_SLOTS - 1);
+    if (first_by_bucket[bucket] >= 0) {
+      snprintf(collision_a, sizeof(collision_a), "collision_%u", (uint32_t)first_by_bucket[bucket]);
+      snprintf(collision_b, sizeof(collision_b), "%s", candidate);
+    } else {
+      first_by_bucket[bucket] = (int32_t)i;
+    }
+  }
+  assert(collision_a[0] != '\0' && collision_b[0] != '\0');
+  assert(sfu_routing_table_register_answer(&rtable, collision_a, &dummy_room, 60, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  assert(sfu_routing_table_register_answer(&rtable, collision_b, &dummy_room, 61, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  sfu_routing_table_unregister_fd(&rtable, 60);
+  assert(!sfu_routing_table_peek_route(&rtable, collision_a, &route));
+  assert(sfu_routing_table_peek_route(&rtable, collision_b, &route) && route.fd == 61);
+  assert(sfu_routing_table_register_answer(&rtable, collision_a, &dummy_room, 62, &answer, NULL) == SFU_ROUTING_REGISTER_OK);
+  assert(sfu_routing_table_peek_route(&rtable, collision_a, &route) && route.fd == 62);
+  sfu_routing_table_unregister_fd(&rtable, 61);
+  sfu_routing_table_unregister_fd(&rtable, 62);
+  assert(rtable.count == 0 && rtable.deleted_slots == 0);
+
+  sfu_routing_answer_reservation_t reservation;
+  assert(sfu_routing_table_prepare_answer(&rtable, "reserve_a", &dummy_room, 70, &answer, &reservation) == SFU_ROUTING_REGISTER_OK);
+  assert(rtable.count == 1);
+  sfu_routing_table_cancel_answer(&reservation);
+  assert(rtable.count == 0);
+  assert(sfu_routing_table_prepare_answer(&rtable, "reserve_a", &dummy_room, 70, &answer, &reservation) == SFU_ROUTING_REGISTER_OK);
+  uint32_t reserved_generation = 0;
+  assert(sfu_routing_table_commit_answer(&reservation, &reserved_generation));
+  assert(reserved_generation != 0);
+  assert(sfu_routing_table_peek_route(&rtable, "reserve_a", &route) && route.fd == 70);
+  sfu_routing_answer_reservation_t conflict;
+  assert(sfu_routing_table_prepare_answer(&rtable, "reserve_a", &other_room, 71, &answer, &conflict) == SFU_ROUTING_REGISTER_OWNERSHIP_CONFLICT);
+  sfu_routing_table_unregister_fd(&rtable, 70);
   sfu_routing_table_destroy(&rtable);
 }
 
@@ -547,8 +634,204 @@ static void test_established_rebind_conflict(void) {
   sfu_dtls_ctx_destroy(&dtls_ctx);
 }
 
+typedef struct {
+  sfu_session_table_t *table;
+  sfu_peer_session_t *session;
+  sfu_room_t *room;
+  _Atomic bool started;
+  bool result;
+} close_add_race_ctx_t;
+
+static void *begin_close_thread(void *arg) {
+  close_add_race_ctx_t *ctx = arg;
+  atomic_store_explicit(&ctx->started, true, memory_order_release);
+  ctx->result = sfu_session_begin_close(ctx->table, ctx->session);
+  return NULL;
+}
+
+static void *room_add_thread(void *arg) {
+  close_add_race_ctx_t *ctx = arg;
+  ctx->result = room_add_peer(ctx->room, ctx->session);
+  return NULL;
+}
+
+static void test_begin_close_serializes_room_admission(void) {
+  sfu_dtls_ctx_t dtls_ctx;
+  assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
+  sfu_session_table_t table;
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 17) == 0);
+
+  struct sockaddr_storage addr;
+  socklen_t addr_len;
+  make_addr(&addr, &addr_len, "127.0.0.1", 9701);
+  sfu_peer_session_t *session = sfu_session_table_get_or_create(&table, &addr, addr_len);
+  assert(session);
+
+  /* Hold the inner table lock so begin_close deterministically holds the outer
+   * membership lock while waiting.  Admission started afterward must wait and
+   * then observe CLOSING rather than commit a room membership. */
+  pthread_rwlock_wrlock(&table.lock);
+  close_add_race_ctx_t close_ctx = {.table = &table, .session = session};
+  pthread_t close_tid;
+  assert(pthread_create(&close_tid, NULL, begin_close_thread, &close_ctx) == 0);
+  while (!atomic_load_explicit(&close_ctx.started, memory_order_acquire)) sched_yield();
+  for (;;) {
+    int rc = pthread_mutex_trylock(&session->membership_lock);
+    if (rc == EBUSY) break;
+    assert(rc == 0);
+    pthread_mutex_unlock(&session->membership_lock);
+    sched_yield();
+  }
+
+  close_add_race_ctx_t add_ctx = {.session = session, .room = &room};
+  pthread_t add_tid;
+  assert(pthread_create(&add_tid, NULL, room_add_thread, &add_ctx) == 0);
+  pthread_rwlock_unlock(&table.lock);
+
+  pthread_join(close_tid, NULL);
+  pthread_join(add_tid, NULL);
+  assert(close_ctx.result);
+  assert(!add_ctx.result);
+  assert(atomic_load(&session->lifecycle) == SFU_SESSION_LIFECYCLE_CLOSING);
+  assert(session->room == NULL && session->room_slot == UINT32_MAX);
+  assert(room.peer_count == 0 && room.membership_revision == 0);
+
+  sfu_session_release(session);
+  sfu_session_table_destroy(&table);
+  sfu_room_destroy(&room);
+  sfu_dtls_ctx_destroy(&dtls_ctx);
+}
+
+static void test_destroy_cleans_room_memberships(void) {
+  sfu_dtls_ctx_t dtls_ctx;
+  assert(sfu_dtls_ctx_init(&dtls_ctx) == 0);
+  sfu_session_table_t table;
+  assert(sfu_session_table_init(&table, &dtls_ctx, NULL, 0) == 0);
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 16) == 0);
+
+  struct sockaddr_storage addr1, addr2;
+  socklen_t len1, len2;
+  make_addr(&addr1, &len1, "127.0.0.1", 9601);
+  make_addr(&addr2, &len2, "127.0.0.1", 9602);
+  sfu_peer_session_t *a = sfu_session_table_get_or_create(&table, &addr1, len1);
+  sfu_peer_session_t *b = sfu_session_table_get_or_create(&table, &addr2, len2);
+  assert(a && b);
+  assert(room_add_peer(&room, a));
+  assert(room_add_peer(&room, b));
+  assert(room.peer_count == 2);
+
+  sfu_session_table_destroy(&table);
+
+  assert(room.peer_count == 0);
+  assert(a->room == NULL && a->room_slot == UINT32_MAX);
+  assert(b->room == NULL && b->room_slot == UINT32_MAX);
+  assert(atomic_load(&a->lifecycle) == SFU_SESSION_LIFECYCLE_CLOSING);
+  assert(atomic_load(&b->lifecycle) == SFU_SESSION_LIFECYCLE_CLOSING);
+  sfu_session_release(a);
+  sfu_session_release(b);
+  sfu_room_destroy(&room);
+  sfu_dtls_ctx_destroy(&dtls_ctx);
+}
+
+static void test_remote_slot_lifecycle(void) {
+  sfu_peer_session_t session = {0};
+  session.room_slot = UINT32_MAX;
+  assert(pthread_mutex_init(&session.graph.lock, NULL) == 0);
+
+  uint32_t slot0, slot1;
+  uint64_t generation0, generation1;
+  assert(sfu_session_remote_slot_reserve(&session, 1001, 11, &slot0, &generation0));
+  assert(slot0 == 0 && generation0 != 0);
+  assert(sfu_session_remote_slot_reserve(&session, 1002, 12, &slot1, &generation1));
+  assert(slot1 == 1 && generation1 != 0 && generation1 != generation0);
+  assert(sfu_session_remote_slot_high_water(&session) == 2);
+
+  sfu_remote_offer_manifest_t *first = sfu_session_remote_offer_capture(&session);
+  assert(first && first->high_water_slots == 2);
+  assert(first->assignment_generations[slot0] == generation0);
+  assert(first->assignment_generations[slot1] == generation1);
+  assert(!sfu_session_remote_slot_authorized(&session, slot0, generation0));
+  assert(sfu_session_remote_offer_install(&session, first));
+  assert(sfu_session_remote_offer_apply_answer(&session, first));
+  assert(sfu_session_remote_slot_authorized(&session, slot0, generation0));
+  assert(sfu_session_remote_slot_authorized(&session, slot1, generation1));
+  sfu_remote_offer_manifest_release(first);
+
+  assert(sfu_session_remote_slot_retire(&session, slot0, generation0));
+  uint32_t no_slot;
+  uint64_t no_generation;
+  assert(sfu_session_remote_slot_reserve(&session, 1003, 13, &no_slot, &no_generation));
+  assert(no_slot == 2); /* RETIRING is not reusable before its omission is answered. */
+  sfu_remote_offer_manifest_t *second = sfu_session_remote_offer_capture(&session);
+  assert(second && second->assignment_generations[slot0] == 0);
+  assert(sfu_session_remote_offer_install(&session, second));
+  assert(sfu_session_remote_offer_apply_answer(&session, second));
+  assert(!sfu_session_remote_slot_authorized(&session, slot0, generation0));
+  sfu_remote_offer_manifest_release(second);
+
+  uint32_t reused;
+  uint64_t reused_generation;
+  assert(sfu_session_remote_slot_reserve(&session, 1004, 14, &reused, &reused_generation));
+  assert(reused == slot0 && reused_generation != 0 && reused_generation != generation0);
+
+  sfu_remote_offer_manifest_t *stale = sfu_session_remote_offer_capture(&session);
+  sfu_remote_offer_manifest_t *current = sfu_session_remote_offer_capture(&session);
+  assert(stale && current && stale->offer_generation != current->offer_generation);
+  assert(sfu_session_remote_offer_install(&session, current));
+  assert(!sfu_session_remote_offer_apply_answer(&session, stale));
+  assert(sfu_session_remote_offer_apply_answer(&session, current));
+  sfu_remote_offer_manifest_release(stale);
+  sfu_remote_offer_manifest_release(current);
+
+  /* Trailing FREE slots trim high-water after the inactive offer is answered. */
+  assert(sfu_session_remote_slot_retire(&session, no_slot, no_generation));
+  sfu_remote_offer_manifest_t *trim = sfu_session_remote_offer_capture(&session);
+  assert(sfu_session_remote_offer_install(&session, trim));
+  assert(sfu_session_remote_offer_apply_answer(&session, trim));
+  sfu_remote_offer_manifest_release(trim);
+  assert(sfu_session_remote_slot_high_water(&session) <= 2);
+
+  assert(sfu_session_remote_slot_retire(&session, slot1, generation1));
+  sfu_remote_offer_manifest_t *trim_slot1 = sfu_session_remote_offer_capture(&session);
+  assert(sfu_session_remote_offer_install(&session, trim_slot1));
+  assert(sfu_session_remote_offer_apply_answer(&session, trim_slot1));
+  sfu_remote_offer_manifest_release(trim_slot1);
+
+  uint32_t last_slot = reused;
+  uint64_t last_generation = reused_generation;
+  for (int i = 0; i < 1000; i++) {
+    assert(sfu_session_remote_slot_retire(&session, last_slot, last_generation));
+    sfu_remote_offer_manifest_t *inactive = sfu_session_remote_offer_capture(&session);
+    assert(inactive && inactive->assignment_generations[last_slot] == 0);
+    assert(sfu_session_remote_offer_install(&session, inactive));
+    assert(sfu_session_remote_offer_apply_answer(&session, inactive));
+    sfu_remote_offer_manifest_release(inactive);
+    assert(sfu_session_remote_slot_reserve(&session, 2000 + i, (uint32_t)(20 + i), &last_slot, &last_generation));
+    sfu_remote_offer_manifest_t *active = sfu_session_remote_offer_capture(&session);
+    assert(active && active->assignment_generations[last_slot] == last_generation);
+    assert(!sfu_session_remote_slot_authorized(&session, last_slot, last_generation));
+    assert(sfu_session_remote_offer_install(&session, active));
+    assert(sfu_session_remote_offer_apply_answer(&session, active));
+    assert(sfu_session_remote_slot_authorized(&session, last_slot, last_generation));
+    sfu_remote_offer_manifest_release(active);
+  }
+  assert(last_slot == slot0);
+  sfu_session_graph_assert_invariants(&session);
+
+  sfu_session_remote_slots_teardown(&session);
+  assert(sfu_session_remote_slot_high_water(&session) == 0);
+  pthread_mutex_destroy(&session.graph.lock);
+}
+
 int main(void) {
+  sfu_signaling_server_t signaling;
+  sfu_signaling_membership_test_server_init(&signaling);
+  signaling.test_auto_drain = true;
   test_basic_lifecycle();
+  test_remote_slot_lifecycle();
   test_failed_construction();
   test_concurrent_find_vs_close();
   test_routing_table();
@@ -557,6 +840,9 @@ int main(void) {
   test_pending_answer_application();
   test_established_session_rebind();
   test_established_rebind_conflict();
+  test_begin_close_serializes_room_admission();
+  test_destroy_cleans_room_memberships();
+  sfu_signaling_membership_test_server_stop(&signaling);
 
   printf("test_session_table: OK\n");
   return 0;

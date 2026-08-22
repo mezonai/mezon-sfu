@@ -19,7 +19,8 @@ typedef struct sfu_fanout_target {
   sfu_peer_session_t *subscriber;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
-  uint32_t mid;
+  uint64_t assignment_generation;
+  uint32_t remote_slot;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   uint8_t source;
@@ -42,7 +43,8 @@ typedef struct sfu_fanout_job {
   sfu_svc_descriptor_t svc;
   uint32_t video_ssrc;
   uint32_t video_rtx_ssrc;
-  uint32_t mid;
+  uint64_t assignment_generation;
+  uint32_t remote_slot;
   uint32_t pool_index;
   uint32_t pool_dst;
   uint8_t video_pt;

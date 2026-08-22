@@ -7,6 +7,10 @@
 #include "sfu/datadef.h"
 
 #define SFU_MAX_UFRAG_MAPPINGS SFU_SESSION_TABLE_MAX
+#define SFU_ROUTING_UFRAG_HASH_SLOTS SFU_SESSION_UFRAG_HASH_SLOTS
+
+_Static_assert(SFU_ROUTING_UFRAG_HASH_SLOTS >= SFU_MAX_UFRAG_MAPPINGS * 2, "routing ufrag hash table must keep load factor at or below 0.5");
+_Static_assert((SFU_ROUTING_UFRAG_HASH_SLOTS & (SFU_ROUTING_UFRAG_HASH_SLOTS - 1)) == 0, "routing ufrag hash table size must be a power of two");
 
 typedef struct sfu_pending_answer {
   uint32_t audio_ssrc;
@@ -62,16 +66,36 @@ typedef enum sfu_routing_register_result {
 
 typedef struct {
   sfu_routing_entry_t entries[SFU_MAX_UFRAG_MAPPINGS];
-  int count;
+  sfu_hash_slot_t ufrag_index[SFU_ROUTING_UFRAG_HASH_SLOTS];
+  uint32_t count;
+  uint32_t deleted_slots;
   pthread_mutex_t mutex;
 } sfu_routing_table_t;
+
+typedef struct sfu_routing_answer_reservation {
+  sfu_routing_table_t *table;
+  sfu_routing_entry_t *entry;
+  sfu_pending_answer_t answer;
+  uint32_t generation;
+  uint32_t entry_index;
+  size_t ufrag_len;
+  char ufrag[32];
+  sfu_room_t *room;
+  int fd;
+  bool new_entry;
+  bool active;
+} sfu_routing_answer_reservation_t;
 
 int sfu_routing_table_init(sfu_routing_table_t *table);
 void sfu_routing_table_destroy(sfu_routing_table_t *table);
 void sfu_routing_table_unregister_fd(sfu_routing_table_t *table, int fd);
 
 sfu_routing_register_result_t sfu_routing_table_register_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
-                                                                 const sfu_pending_answer_t *answer, uint32_t *out_generation);
+                                                                const sfu_pending_answer_t *answer, uint32_t *out_generation);
+sfu_routing_register_result_t sfu_routing_table_prepare_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd,
+                                                               const sfu_pending_answer_t *answer, sfu_routing_answer_reservation_t *reservation);
+bool sfu_routing_table_commit_answer(sfu_routing_answer_reservation_t *reservation, uint32_t *out_generation);
+void sfu_routing_table_cancel_answer(sfu_routing_answer_reservation_t *reservation);
 bool sfu_routing_table_lookup_route(sfu_routing_table_t *table, const char *client_ufrag, uint32_t worker_index, sfu_routing_snapshot_t *out);
 bool sfu_routing_table_peek_route(sfu_routing_table_t *table, const char *client_ufrag, sfu_routing_snapshot_t *out);
 bool sfu_routing_table_reconcile_answer(sfu_routing_table_t *table, const char *client_ufrag, sfu_room_t *room, int fd, uint32_t generation,

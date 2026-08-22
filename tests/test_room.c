@@ -5,9 +5,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "peer/session.h"
+#include "protocol/signaling/signaling.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"
 #include "util/alloc.h"
+
+static sfu_signaling_server_t signaling_test_server;
 
 /* Heap-allocated refcounted mock session (no DTLS/RTX; construction bypasses
  * the session table because these tests exercise the room graph, not DTLS). */
@@ -16,12 +19,23 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   assert(s != NULL);
   s->cold = SFU_CALLOC(1, sizeof(*s->cold));
   assert(s->cold != NULL);
+  s->room_slot = UINT32_MAX;
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
+  static _Atomic uint32_t next_peer_id = 1;
+  s->peer_id = atomic_fetch_add_explicit(&next_peer_id, 1, memory_order_relaxed);
+  s->user_id = s->peer_id;
   s->active = true;
   assert(pthread_mutex_init(&s->answer_lock, NULL) == 0);
   assert(pthread_mutex_init(&s->negotiation.lock, NULL) == 0);
   assert(pthread_mutex_init(&s->media.lock, NULL) == 0);
   assert(pthread_mutex_init(&s->graph.lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->crypto_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->ingress_lock, NULL) == 0);
+  assert(pthread_mutex_init(&s->membership_lock, NULL) == 0);
+  s->leave_event = SFU_CALLOC(1, sizeof(*s->leave_event));
+  assert(s->leave_event != NULL);
+  s->leave_event->preallocated_storage = true;
+  s->leave_event->storage_owner = s;
   atomic_store(&s->refcount, 1);
   atomic_store(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN);
   atomic_store(&s->accepts_work, true);
@@ -30,7 +44,6 @@ static sfu_peer_session_t *mock_session(const char *ufrag) {
   s->media.uplink_video.owner = s;
   s->media.uplink_audio.active = true;
   s->media.uplink_video.active = true;
-  s->graph.next_remote_mid = SFU_REMOTE_MID_BASE;
   return s;
 }
 
@@ -42,47 +55,37 @@ static uint32_t receiver_count(sfu_peer_session_t *peer) {
 }
 
 static uint32_t fanout_target_count(sfu_peer_session_t *peer) {
-  sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(peer);
-  uint32_t n = snap ? snap->count : 0;
-  sfu_subscriptions_snapshot_release(snap);
+  sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(peer);
+  uint32_t n = bundle ? bundle->count : 0;
+  sfu_fanout_bundle_release(bundle);
   return n;
 }
 
-static bool fanout_targets(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
-  sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(peer);
-  bool found = false;
-  if (snap) {
-    for (uint32_t i = 0; i < snap->count; i++) {
-      if (snap->entries[i].subscriber == dest) {
-        found = true;
-        break;
-      }
-    }
-  }
-  sfu_subscriptions_snapshot_release(snap);
+static bool fanout_has_peer(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
+  sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(peer);
+  bool found = sfu_fanout_bundle_find_peer(bundle, dest, NULL) != NULL;
+  sfu_fanout_bundle_release(bundle);
   return found;
 }
 
-static uint32_t audio_route_count(sfu_peer_session_t *peer) {
-  sfu_audio_route_snapshot_t *snap = sfu_session_audio_fanout_acquire(peer);
-  uint32_t n = snap ? snap->count : 0;
-  sfu_audio_route_snapshot_release(snap);
-  return n;
+static uint32_t route_count(sfu_peer_session_t *peer, sfu_media_kind_t kind) {
+  sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(peer);
+  sfu_fanout_iter_t iter; sfu_fanout_iter_init(&iter, bundle, kind);
+  uint32_t n = 0; while (sfu_fanout_iter_next(&iter, NULL)) n++;
+  sfu_fanout_bundle_release(bundle); return n;
 }
-
-static uint32_t video_route_count(sfu_peer_session_t *peer) {
-  sfu_video_route_snapshot_t *snap = sfu_session_video_fanout_acquire(peer);
-  uint32_t n = snap ? snap->count : 0;
-  sfu_video_route_snapshot_release(snap);
-  return n;
-}
+static uint32_t audio_route_count(sfu_peer_session_t *peer) { return route_count(peer, SFU_MEDIA_AUDIO); }
+static uint32_t video_route_count(sfu_peer_session_t *peer) { return route_count(peer, SFU_MEDIA_VIDEO); }
 
 static bool subscribes_to(sfu_peer_session_t *peer, sfu_peer_session_t *dest) {
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(peer);
   bool found = false;
   if (snap) {
-    for (uint32_t i = 0; i < snap->count; i++) {
-      if (snap->entries[i].subscriber == dest) {
+    sfu_receiver_snapshot_iter_t iter;
+    sfu_receiver_snapshot_iter_init(&iter, snap);
+    const sfu_receiver_entry_t *entry;
+    while ((entry = sfu_receiver_snapshot_iter_next(&iter, NULL)) != NULL) {
+      if (entry->subscriber == dest) {
         found = true;
         break;
       }
@@ -102,6 +105,8 @@ static void test_add_remove(void) {
   sfu_peer_session_t *c = mock_session("c");
 
   room_add_peer(&room, a);
+  assert(a->room_slot == 0);
+  assert(room.occupied[a->room_slot]);
   assert(receiver_count(a) == 0);
 
   room_add_peer(&room, b);
@@ -122,6 +127,10 @@ static void test_add_remove(void) {
   assert(video_route_count(b) == 1);
 
   room_add_peer(&room, c);
+  uint32_t a_slot = a->room_slot;
+  uint32_t b_slot = b->room_slot;
+  uint32_t c_slot = c->room_slot;
+  assert(a_slot != b_slot && a_slot != c_slot && b_slot != c_slot);
   assert(receiver_count(a) == 2);
   assert(receiver_count(b) == 2);
   assert(receiver_count(c) == 2);
@@ -133,10 +142,13 @@ static void test_add_remove(void) {
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(a);
     assert(snap != NULL);
-    for (uint32_t i = 0; i < snap->count; i++) {
-      if (snap->entries[i].subscriber == c) {
-        a_mid_for_c_audio = snap->entries[i].mid_audio;
-        a_mid_for_c_video = snap->entries[i].mid_video;
+    sfu_receiver_snapshot_iter_t iter;
+    sfu_receiver_snapshot_iter_init(&iter, snap);
+    const sfu_receiver_entry_t *entry;
+    while ((entry = sfu_receiver_snapshot_iter_next(&iter, NULL)) != NULL) {
+      if (entry->subscriber == c) {
+        a_mid_for_c_audio = sfu_remote_slot_first_mid(entry->remote_slot);
+        a_mid_for_c_video = sfu_remote_slot_first_mid(entry->remote_slot) + 1;
       }
     }
     sfu_subscriptions_snapshot_release(snap);
@@ -144,6 +156,11 @@ static void test_add_remove(void) {
   assert(a_mid_for_c_audio != 0 || a_mid_for_c_video != 0);
 
   room_remove_peer(&room, b);
+  assert(b->room_slot == UINT32_MAX);
+  assert(!room.occupied[b_slot]);
+  assert(room.peers[b_slot] == NULL);
+  assert(a->room_slot == a_slot && c->room_slot == c_slot);
+  assert(room.peers[a_slot] == a && room.peers[c_slot] == c);
   assert(receiver_count(a) == 1);
   assert(receiver_count(c) == 1);
   assert(!subscribes_to(a, b));
@@ -155,9 +172,9 @@ static void test_add_remove(void) {
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(a);
     assert(snap != NULL && snap->count == 1);
-    assert(snap->entries[0].subscriber == c);
-    assert(snap->entries[0].mid_audio == a_mid_for_c_audio);
-    assert(snap->entries[0].mid_video == a_mid_for_c_video);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).subscriber == c);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) == a_mid_for_c_audio);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) + 1 == a_mid_for_c_video);
     sfu_subscriptions_snapshot_release(snap);
   }
 
@@ -174,7 +191,9 @@ static void test_add_remove(void) {
   /* Closing peer c (accepts_work=false) keeps it out of future snapshots. */
   atomic_store(&c->accepts_work, false);
   room_add_peer(&room, b);
-  /* re-add is a no-op: b is still a member from the rejoin above */
+  assert(b->room_slot == b_slot);
+  assert(a->room_slot == a_slot && c->room_slot == c_slot);
+  /* re-add occupies the freed sparse slot without moving surviving peers */
   assert(receiver_count(b) == 1); /* b sees a only */
   assert(!subscribes_to(b, c));
   assert(subscribes_to(a, b)); /* a still accepts work, so it routes to b */
@@ -218,57 +237,57 @@ static void test_audience_role_asymmetry_and_transition(void) {
   /* Audience receives the speaker SDP source but never owns an RTP fanout
    * snapshot. The speaker forwards to the audience. */
   assert(receiver_count(audience) == 1);
-  assert(audience->graph.next_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(sfu_session_remote_slot_high_water(audience) == 1);
   assert(subscribes_to(audience, speaker));
   assert(receiver_count(speaker) == 1);
   assert(subscribes_to(speaker, audience));
   assert(fanout_target_count(speaker) == 1);
-  assert(fanout_targets(speaker, audience));
+  assert(fanout_has_peer(speaker, audience));
   assert(fanout_target_count(audience) == 1);
-  assert(fanout_targets(audience, speaker));
+  assert(fanout_has_peer(audience, speaker));
   uint32_t audience_mid_before_ptt = 0;
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
     assert(snap != NULL && snap->count == 1);
-    audience_mid_before_ptt = snap->entries[0].mid_audio;
-    assert(snap->entries[0].has_audio);
-    assert(!snap->entries[0].has_video);
-    assert(!snap->entries[0].has_screen);
-    assert(!snap->entries[0].audio_active);
+    audience_mid_before_ptt = sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).has_audio);
+    assert(!(*sfu_receiver_snapshot_nth(snap, 0, NULL)).has_video);
+    assert(!(*sfu_receiver_snapshot_nth(snap, 0, NULL)).has_screen);
+    assert(!(*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_active);
     sfu_subscriptions_snapshot_release(snap);
   }
-  uint32_t speaker_next_mid_before_ptt = speaker->graph.next_remote_mid;
+  uint32_t speaker_slots_before_ptt = sfu_session_remote_slot_high_water(speaker);
   assert(audio_route_count(audience) == 0);
   assert(room_set_peer_ptt_active(&room, audience, true));
   assert(atomic_load(&audience->is_audience));
   assert(atomic_load(&audience->media.ptt_active));
   assert(audio_route_count(audience) == 1);
-  assert(speaker->graph.next_remote_mid == speaker_next_mid_before_ptt);
+  assert(sfu_session_remote_slot_high_water(speaker) == speaker_slots_before_ptt);
   assert(room_set_peer_ptt_active(&room, audience, false));
   assert(!atomic_load(&audience->media.ptt_active));
   assert(audio_route_count(audience) == 0);
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
     assert(snap != NULL && snap->count == 1);
-    assert(snap->entries[0].mid_audio == audience_mid_before_ptt);
-    assert(!snap->entries[0].audio_active);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) == audience_mid_before_ptt);
+    assert(!(*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_active);
     sfu_subscriptions_snapshot_release(snap);
   }
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(audience);
     assert(snap != NULL && snap->count == 1);
-    assert(snap->entries[0].subscriber == speaker);
-    assert(snap->entries[0].mid_audio == SFU_REMOTE_MID_BASE);
-    assert(snap->entries[0].mid_video == SFU_REMOTE_MID_BASE + 1);
-    assert(snap->entries[0].mid_screen == SFU_REMOTE_MID_BASE + 2);
-    assert(snap->entries[0].audio_active);
-    assert(snap->entries[0].video_active);
-    assert(snap->entries[0].audio_ssrc == 1111);
-    assert(snap->entries[0].video_ssrc == 2222);
-    assert(snap->entries[0].video_rtx_ssrc == 3333);
-    assert(snap->entries[0].video_pt == 96);
-    assert(snap->entries[0].video_rtx_pt == 97);
-    assert(snap->entries[0].video_codec == SFU_VIDEO_CODEC_VP8);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).subscriber == speaker);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) == SFU_REMOTE_MID_BASE);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) + 1 == SFU_REMOTE_MID_BASE + 1);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) + 2 == SFU_REMOTE_MID_BASE + 2);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_active);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_active);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_ssrc == 1111);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_ssrc == 2222);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_rtx_ssrc == 3333);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_pt == 96);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_rtx_pt == 97);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_codec == SFU_VIDEO_CODEC_VP8);
     sfu_subscriptions_snapshot_release(snap);
   }
 
@@ -277,7 +296,7 @@ static void test_audience_role_asymmetry_and_transition(void) {
   assert(receiver_count(speaker) == 1);
   assert(subscribes_to(speaker, audience));
   assert(fanout_target_count(audience) == 1);
-  assert(fanout_targets(audience, speaker));
+  assert(fanout_has_peer(audience, speaker));
 
   assert(room_update_peer_role(&room, audience, true));
   assert(atomic_load(&audience->is_audience));
@@ -286,23 +305,23 @@ static void test_audience_role_asymmetry_and_transition(void) {
    * targets but the speaker still receives from it. */
   assert(receiver_count(speaker) == 1);
   assert(fanout_target_count(audience) == 1);
-  assert(fanout_targets(speaker, audience));
+  assert(fanout_has_peer(speaker, audience));
 
   /* The deactivated slot has its media state cleared... */
   uint32_t mid_audio = 0, mid_video = 0, mid_screen = 0;
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
     assert(snap != NULL && snap->count == 1);
-    assert(snap->entries[0].subscriber == audience);
-    assert(!snap->entries[0].audio_active);
-    assert(!snap->entries[0].video_active);
-    assert(!snap->entries[0].screen_active);
-    assert(snap->entries[0].audio_ssrc == 0);
-    assert(snap->entries[0].video_ssrc == 0);
-    assert(snap->entries[0].screen_ssrc == 0);
-    mid_audio = snap->entries[0].mid_audio;
-    mid_video = snap->entries[0].mid_video;
-    mid_screen = snap->entries[0].mid_screen;
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).subscriber == audience);
+    assert(!(*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_active);
+    assert(!(*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_active);
+    assert(!(*sfu_receiver_snapshot_nth(snap, 0, NULL)).screen_active);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_ssrc == 0);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_ssrc == 0);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).screen_ssrc == 0);
+    mid_audio = sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot);
+    mid_video = sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) + 1;
+    mid_screen = sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) + 2;
     sfu_subscriptions_snapshot_release(snap);
   }
   /* ...and the demoted peer's uplink state is reset so a re-promotion with
@@ -334,29 +353,29 @@ static void test_audience_role_asymmetry_and_transition(void) {
   atomic_store(&audience->media.video_send_negotiated, true);
   atomic_store(&audience->media.screen_send_negotiated, true);
 
-  uint32_t speaker_next_mid = speaker->graph.next_remote_mid;
+  uint32_t speaker_slot_high_water = sfu_session_remote_slot_high_water(speaker);
   assert(room_update_peer_role(&room, audience, false));
   assert(receiver_count(speaker) == 1);
-  assert(fanout_targets(audience, speaker));
+  assert(fanout_has_peer(audience, speaker));
   {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker);
     assert(snap != NULL && snap->count == 1);
-    assert(snap->entries[0].subscriber == audience);
-    assert(snap->entries[0].mid_audio == mid_audio);
-    assert(snap->entries[0].mid_video == mid_video);
-    assert(snap->entries[0].mid_screen == mid_screen);
-    assert(snap->entries[0].audio_active);
-    assert(snap->entries[0].video_active);
-    assert(snap->entries[0].screen_active);
-    assert(snap->entries[0].audio_ssrc == 1111);
-    assert(snap->entries[0].video_ssrc == 2222);
-    assert(snap->entries[0].video_rtx_ssrc == 3333);
-    assert(snap->entries[0].screen_ssrc == 4444);
-    assert(snap->entries[0].screen_rtx_ssrc == 5555);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).subscriber == audience);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) == mid_audio);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) + 1 == mid_video);
+    assert(sfu_remote_slot_first_mid((*sfu_receiver_snapshot_nth(snap, 0, NULL)).remote_slot) + 2 == mid_screen);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_active);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_active);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).screen_active);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).audio_ssrc == 1111);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_ssrc == 2222);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).video_rtx_ssrc == 3333);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).screen_ssrc == 4444);
+    assert((*sfu_receiver_snapshot_nth(snap, 0, NULL)).screen_rtx_ssrc == 5555);
     sfu_subscriptions_snapshot_release(snap);
   }
   /* No fresh mid pair was allocated for the re-promoted peer. */
-  assert(speaker->graph.next_remote_mid == speaker_next_mid);
+  assert(sfu_session_remote_slot_high_water(speaker) == speaker_slot_high_water);
 
   room_remove_peer(&room, audience);
   room_remove_peer(&room, speaker);
@@ -379,29 +398,29 @@ static void test_snapshot_hold_across_replace(void) {
   /* Hold the current snapshot of a. */
   sfu_receiver_snapshot_t *held = sfu_session_subscriptions_acquire(a);
   assert(held != NULL && held->count == 1);
-  assert(held->exclusive_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
-  assert(held->entries[0].subscriber == b);
+  assert(sfu_session_remote_slot_high_water(a) == 1);
+  assert((*sfu_receiver_snapshot_nth(held, 0, NULL)).subscriber == b);
 
   /* Writer publishes a replacement while we hold the old one. */
   room_add_peer(&room, c);
 
   /* The held (old) snapshot is unchanged and its entries are still valid. */
   assert(held->count == 1);
-  assert(held->entries[0].subscriber == b);
-  assert(held->entries[0].subscriber->cold != NULL);
+  assert((*sfu_receiver_snapshot_nth(held, 0, NULL)).subscriber == b);
+  assert((*sfu_receiver_snapshot_nth(held, 0, NULL)).subscriber->cold != NULL);
 
   /* New acquisitions see the replacement. */
   sfu_receiver_snapshot_t *fresh = sfu_session_subscriptions_acquire(a);
   assert(fresh != NULL && fresh->count == 2);
   assert(fresh != held);
   assert(fresh->generation == held->generation + 1);
-  assert(fresh->exclusive_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(sfu_session_remote_slot_high_water(a) == 2);
   sfu_subscriptions_snapshot_release(fresh);
 
   room_remove_peer(&room, c);
   fresh = sfu_session_subscriptions_acquire(a);
   assert(fresh != NULL && fresh->count == 1);
-  assert(fresh->exclusive_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(sfu_session_remote_slot_high_water(a) == 2);
   sfu_subscriptions_snapshot_release(fresh);
 
   /* Releasing the held snapshot must not free b (still referenced by the new
@@ -429,10 +448,13 @@ static void *snap_reader(void *arg) {
   for (int i = 0; i < 500; i++) {
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(ctx->peers[0]);
     if (snap) {
-      for (uint32_t e = 0; e < snap->count; e++) {
+      sfu_receiver_snapshot_iter_t iter;
+      sfu_receiver_snapshot_iter_init(&iter, snap);
+      const sfu_receiver_entry_t *entry;
+      while ((entry = sfu_receiver_snapshot_iter_next(&iter, NULL)) != NULL) {
         /* Entries must be coherent: retained subscriber with valid cold. */
-        assert(snap->entries[e].subscriber != NULL);
-        assert(snap->entries[e].subscriber->cold != NULL);
+        assert(entry->subscriber != NULL);
+        assert(entry->subscriber->cold != NULL);
       }
       sfu_subscriptions_snapshot_release(snap);
     }
@@ -484,6 +506,68 @@ static void test_concurrent_snapshot_read_write(void) {
   sfu_room_destroy(&room);
 }
 
+typedef struct {
+  sfu_room_t *room;
+  sfu_peer_session_t *publisher;
+  sfu_peer_session_t *flapper;
+  pthread_barrier_t barrier;
+} fanout_race_ctx_t;
+
+static void *fanout_churn_writer(void *arg) {
+  fanout_race_ctx_t *ctx = arg;
+  pthread_barrier_wait(&ctx->barrier);
+  for (int i = 0; i < 100; i++) {
+    room_add_peer(ctx->room, ctx->flapper);
+    room_remove_peer(ctx->room, ctx->flapper);
+  }
+  return NULL;
+}
+
+static void *fanout_churn_reader(void *arg) {
+  fanout_race_ctx_t *ctx = arg;
+  pthread_barrier_wait(&ctx->barrier);
+  for (int i = 0; i < 2000; i++) {
+    sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(ctx->publisher);
+    sfu_fanout_iter_t iter;
+    sfu_fanout_iter_init(&iter, bundle, SFU_MEDIA_AUDIO);
+    uint32_t slot;
+    const sfu_fanout_route_t *route;
+    while ((route = sfu_fanout_iter_next(&iter, &slot)) != NULL) {
+      assert(slot < SFU_MAX_REMOTE_SLOTS);
+      assert(route == sfu_fanout_bundle_at(bundle, slot));
+      assert(route->subscriber == ctx->flapper);
+      assert(route->subscriber->cold != NULL);
+    }
+    sfu_fanout_bundle_release(bundle);
+  }
+  return NULL;
+}
+
+/* Acquired fanout bundles and their routes remain valid while room churn
+ * concurrently replaces and reclaims the publisher's current root. */
+static void test_concurrent_fanout_bundle_acquire_iterate_churn(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 12) == 0);
+  sfu_peer_session_t *publisher = mock_session("fanout-publisher");
+  sfu_peer_session_t *flapper = mock_session("fanout-flapper");
+  room_add_peer(&room, publisher);
+
+  fanout_race_ctx_t ctx = {.room = &room, .publisher = publisher, .flapper = flapper};
+  assert(pthread_barrier_init(&ctx.barrier, NULL, 2) == 0);
+  pthread_t reader, writer;
+  assert(pthread_create(&reader, NULL, fanout_churn_reader, &ctx) == 0);
+  assert(pthread_create(&writer, NULL, fanout_churn_writer, &ctx) == 0);
+  pthread_join(reader, NULL);
+  pthread_join(writer, NULL);
+  pthread_barrier_destroy(&ctx.barrier);
+
+  assert(fanout_target_count(publisher) == 0);
+  room_remove_peer(&room, publisher);
+  sfu_session_release(flapper);
+  sfu_session_release(publisher);
+  sfu_room_destroy(&room);
+}
+
 /* #86: multi-publisher room churn — one stable subscriber, several
  * publisher threads concurrently add/remove themselves while a reader
  * thread continuously acquires each publisher's receiver snapshot and
@@ -520,10 +604,13 @@ static void *churn_reader(void *arg) {
     sfu_peer_session_t *pub = ctx->publishers[i % ctx->publisher_count];
     sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(pub);
     if (snap) {
-      for (uint32_t e = 0; e < snap->count; e++) {
+      sfu_receiver_snapshot_iter_t iter;
+      sfu_receiver_snapshot_iter_init(&iter, snap);
+      const sfu_receiver_entry_t *entry;
+      while ((entry = sfu_receiver_snapshot_iter_next(&iter, NULL)) != NULL) {
         /* Coherence: retained subscriber with valid cold, even mid-churn. */
-        assert(snap->entries[e].subscriber != NULL);
-        assert(snap->entries[e].subscriber->cold != NULL);
+        assert(entry->subscriber != NULL);
+        assert(entry->subscriber->cold != NULL);
       }
       sfu_subscriptions_snapshot_release(snap);
     }
@@ -599,24 +686,22 @@ static void test_fanout_uses_publisher_stream_identity(void) {
   room_add_peer(&room, publisher);
   room_add_peer(&room, subscriber);
 
-  sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(publisher);
-  assert(snap != NULL && snap->count == 1);
-  const sfu_receiver_entry_t *entry = &snap->entries[0];
-  assert(entry->subscriber == subscriber);
-  assert(entry->video_ssrc == publisher->media.uplink_video.ssrc);
-  assert(entry->video_rtx_ssrc == publisher->media.uplink_video.rtx_ssrc);
-  assert(entry->mid_audio == SFU_REMOTE_MID_BASE);
-  assert(entry->mid_video == SFU_REMOTE_MID_BASE + 1);
-  assert(entry->mid_screen == SFU_REMOTE_MID_BASE + 2);
-  assert(entry->video_pt == publisher->media.uplink_video.payload_type);
-  assert(entry->video_rtx_pt == publisher->media.uplink_video.rtx_payload_type);
-  assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);
-  assert(strcmp(entry->subscriber_ufrag, publisher->cold->ufrag) == 0);
-  sfu_subscriptions_snapshot_release(snap);
+  sfu_fanout_bundle_t *fanout = sfu_session_fanout_acquire(publisher);
+  assert(fanout != NULL && fanout->count == 1);
+  const sfu_fanout_route_t *route = sfu_fanout_bundle_find_peer(fanout, subscriber, NULL);
+  assert(route != NULL && route->subscriber == subscriber);
+  assert(route->video_ssrc == publisher->media.uplink_video.ssrc);
+  assert(route->video_rtx_ssrc == publisher->media.uplink_video.rtx_ssrc);
+  assert(sfu_remote_slot_first_mid(route->remote_slot) == SFU_REMOTE_MID_BASE);
+  assert(sfu_remote_slot_first_mid(route->remote_slot) + 1 == SFU_REMOTE_MID_BASE + 1);
+  assert(sfu_remote_slot_first_mid(route->remote_slot) + 2 == SFU_REMOTE_MID_BASE + 2);
+  assert(route->video_pt == publisher->media.uplink_video.payload_type);
+  assert(route->video_rtx_pt == publisher->media.uplink_video.rtx_payload_type);
+  sfu_fanout_bundle_release(fanout);
 
-  snap = sfu_session_subscriptions_acquire(subscriber);
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(subscriber);
   assert(snap != NULL && snap->count == 1);
-  entry = &snap->entries[0];
+  const sfu_receiver_entry_t *entry = sfu_receiver_snapshot_nth(snap, 0, NULL);
   assert(entry->subscriber == publisher);
   assert(entry->video_ssrc == publisher->media.uplink_video.ssrc);
   assert(entry->video_codec == SFU_VIDEO_CODEC_VP9);
@@ -630,28 +715,29 @@ static void test_fanout_uses_publisher_stream_identity(void) {
 }
 
 static void assert_fanout_mids_match_subscriptions(sfu_peer_session_t *publisher, uint32_t expected_targets) {
-  sfu_receiver_snapshot_t *fanout = sfu_session_fanout_targets_acquire(publisher);
+  sfu_fanout_bundle_t *fanout = sfu_session_fanout_acquire(publisher);
   assert(fanout != NULL && fanout->count == expected_targets);
-  for (uint32_t i = 0; i < fanout->count; i++) {
-    const sfu_receiver_entry_t *route = &fanout->entries[i];
+  for (uint32_t slot = 0; slot < SFU_MAX_REMOTE_SLOTS; slot++) {
+    const sfu_fanout_route_t *route = sfu_fanout_bundle_at(fanout, slot);
+    if (!route) continue;
     sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(route->subscriber);
-    uint32_t pos = UINT32_MAX;
-    for (uint32_t j = 0; subscriptions && j < subscriptions->count; j++) {
-      if (subscriptions->entries[j].subscriber == publisher) {
-        pos = j;
+    sfu_receiver_snapshot_iter_t subscription_iter;
+    sfu_receiver_snapshot_iter_init(&subscription_iter, subscriptions);
+    const sfu_receiver_entry_t *subscription = NULL;
+    const sfu_receiver_entry_t *candidate;
+    while ((candidate = sfu_receiver_snapshot_iter_next(&subscription_iter, NULL)) != NULL) {
+      if (candidate->subscriber == publisher) {
+        subscription = candidate;
         break;
       }
     }
-    assert(pos != UINT32_MAX);
-    assert(route->mid_audio == subscriptions->entries[pos].mid_audio);
-    assert(route->mid_video == subscriptions->entries[pos].mid_video);
-    assert(route->mid_screen == subscriptions->entries[pos].mid_screen);
-    assert(route->mid_audio >= SFU_REMOTE_MID_BASE);
-    assert(route->mid_video == route->mid_audio + 1);
-    assert(route->mid_screen == route->mid_audio + 2);
+    assert(subscription != NULL);
+    assert(route->remote_slot == subscription->remote_slot);
+    assert(route->assignment_generation == subscription->assignment_generation);
+    assert(route->assignment_generation != 0);
     sfu_subscriptions_snapshot_release(subscriptions);
   }
-  sfu_subscriptions_snapshot_release(fanout);
+  sfu_fanout_bundle_release(fanout);
 }
 
 static void test_three_peer_route_mids(void) {
@@ -671,9 +757,9 @@ static void test_three_peer_route_mids(void) {
   assert_fanout_mids_match_subscriptions(a, 2);
   assert_fanout_mids_match_subscriptions(b, 2);
   assert_fanout_mids_match_subscriptions(c, 2);
-  assert(a->graph.next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
-  assert(b->graph.next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
-  assert(c->graph.next_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(sfu_session_remote_slot_high_water(a) == 2);
+  assert(sfu_session_remote_slot_high_water(b) == 2);
+  assert(sfu_session_remote_slot_high_water(c) == 2);
 
   room_remove_peer(&room, c);
   room_remove_peer(&room, b);
@@ -684,15 +770,313 @@ static void test_three_peer_route_mids(void) {
   sfu_room_destroy(&room);
 }
 
+static void test_add_rejects_exhausted_mid_capacity_transactionally(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 13) == 0);
+  sfu_peer_session_t *member = mock_session("mid-full-member");
+  sfu_peer_session_t *candidate = mock_session("mid-candidate");
+  room_add_peer(&room, member);
+
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    uint32_t slot;
+    uint64_t generation;
+    assert(sfu_session_remote_slot_reserve(member, 100000 + i, 100000 + i, &slot, &generation));
+    assert(slot == i);
+  }
+  uint32_t candidate_high_water = sfu_session_remote_slot_high_water(candidate);
+  uint32_t member_slot = member->room_slot;
+  uint32_t free_count = room.free_count;
+
+  assert(room_add_peer_result(&room, candidate) == SFU_ROOM_ADMISSION_CAPACITY);
+
+  assert(room.peer_count == 1);
+  assert(room.free_count == free_count);
+  assert(room.peers[member_slot] == member && room.occupied[member_slot]);
+  assert(candidate->room == NULL && candidate->room_slot == UINT32_MAX);
+  assert(receiver_count(member) == 0 && fanout_target_count(member) == 0);
+  assert(receiver_count(candidate) == 0 && fanout_target_count(candidate) == 0);
+  assert(sfu_session_remote_slot_high_water(member) == SFU_MAX_REMOTE_SLOTS);
+  assert(sfu_session_remote_slot_high_water(candidate) == candidate_high_water);
+
+  room_remove_peer(&room, member);
+  sfu_session_release(candidate);
+  sfu_session_release(member);
+  sfu_room_destroy(&room);
+}
+
+static void test_removed_peer_refresh_is_noop(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 14) == 0);
+  sfu_peer_session_t *publisher = mock_session("removed-refresh-publisher");
+  sfu_peer_session_t *subscriber = mock_session("removed-refresh-subscriber");
+  room_add_peer(&room, publisher);
+  room_add_peer(&room, subscriber);
+  room_remove_peer(&room, publisher);
+  assert(fanout_target_count(publisher) == 0);
+
+  /* Model a stale subscription observed by a delayed refresh. A departed
+   * publisher must not rebuild fanout even if such stale graph data exists. */
+  sfu_receiver_snapshot_t *stale = sfu_receiver_snapshot_alloc();
+  assert(stale != NULL);
+  sfu_receiver_entry_t entry = {
+      .subscriber = publisher,
+      .remote_slot = 0,
+      .assignment_generation = 1,
+      .has_audio = true,
+      .has_video = true,
+  };
+  assert(sfu_receiver_snapshot_set(stale, 0, &entry));
+  sfu_snapshot_reclaim_receivers(sfu_session_publish_receivers_swap(subscriber, stale));
+
+  room_refresh_peer_streams(&room, publisher);
+  assert(fanout_target_count(publisher) == 0);
+
+  sfu_snapshot_reclaim_receivers(sfu_session_publish_receivers_swap(subscriber, NULL));
+  room_remove_peer(&room, subscriber);
+  sfu_session_release(subscriber);
+  sfu_session_release(publisher);
+  sfu_room_destroy(&room);
+}
+
+static void test_chunked_subscription_root_copy(void) {
+  sfu_peer_session_t *a = mock_session("chunk-a");
+  sfu_peer_session_t *b = mock_session("chunk-b");
+  sfu_receiver_snapshot_t *root = sfu_receiver_snapshot_alloc();
+  assert(root != NULL);
+
+  sfu_receiver_entry_t a_entry = {.subscriber = a, .remote_slot = 1, .assignment_generation = 1};
+  sfu_receiver_entry_t b_entry = {.subscriber = b, .remote_slot = 40, .assignment_generation = 2};
+  assert(sfu_receiver_snapshot_set(root, 1, &a_entry));
+  assert(sfu_receiver_snapshot_set(root, 31, &a_entry));
+  assert(sfu_receiver_snapshot_set(root, 40, &b_entry));
+  assert(atomic_load(&a->refcount) == 3);
+  assert(atomic_load(&b->refcount) == 2);
+  assert(root->count == 3);
+  assert(sfu_receiver_snapshot_at(root, 40)->subscriber == b);
+  assert(sfu_receiver_snapshot_find_peer(root, a, NULL) == sfu_receiver_snapshot_at(root, 1));
+
+  sfu_receiver_snapshot_iter_t iter;
+  sfu_receiver_snapshot_iter_init(&iter, root);
+  uint32_t remote_slot = UINT32_MAX;
+  assert(sfu_receiver_snapshot_iter_next(&iter, &remote_slot) == sfu_receiver_snapshot_at(root, 1));
+  assert(remote_slot == 1);
+  assert(sfu_receiver_snapshot_iter_next(&iter, &remote_slot) == sfu_receiver_snapshot_at(root, 31));
+  assert(remote_slot == 31);
+  assert(sfu_receiver_snapshot_iter_next(&iter, &remote_slot) == sfu_receiver_snapshot_at(root, 40));
+  assert(remote_slot == 40);
+  assert(sfu_receiver_snapshot_iter_next(&iter, &remote_slot) == NULL);
+  assert(sfu_receiver_snapshot_nth(root, 2, &remote_slot) == sfu_receiver_snapshot_at(root, 40));
+  assert(remote_slot == 40);
+
+  b_entry.audio_active = true;
+  sfu_receiver_snapshot_t *copy = sfu_receiver_snapshot_copy_set(root, 40, &b_entry);
+  assert(copy != NULL && copy->count == 3);
+  assert(atomic_load(&a->refcount) == 3);
+  assert(atomic_load(&b->refcount) == 3);
+  assert(copy->chunks[0] == root->chunks[0]);
+  assert(copy->chunks[1] != root->chunks[1]);
+  assert(!sfu_receiver_snapshot_at(root, 40)->audio_active);
+  assert(sfu_receiver_snapshot_at(copy, 40)->audio_active);
+
+  sfu_subscriptions_snapshot_release(copy);
+  assert(atomic_load(&b->refcount) == 2);
+  sfu_subscriptions_snapshot_release(root);
+  assert(atomic_load(&a->refcount) == 1);
+  assert(atomic_load(&b->refcount) == 1);
+  sfu_session_release(b);
+  sfu_session_release(a);
+}
+
+static void test_membership_revision_and_capture_failure(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 15) == 0);
+  sfu_peer_session_t *a = mock_session("revision-a");
+  sfu_peer_session_t *b = mock_session("revision-b");
+
+  assert(room.membership_revision == 0);
+  assert(room_add_peer(&room, a));
+  assert(room.membership_revision == 1);
+
+  sfu_membership_event_test_fail_allocations(1);
+  assert(!room_add_peer(&room, b));
+  assert(room.peer_count == 1);
+  assert(room.membership_revision == 1);
+  assert(b->room == NULL);
+  assert(receiver_count(a) == 0);
+
+  assert(room_add_peer(&room, b));
+  assert(room.membership_revision == 2);
+  uint32_t a_high_water = sfu_session_remote_slot_high_water(a);
+  uint32_t b_high_water = sfu_session_remote_slot_high_water(b);
+
+  sfu_membership_event_test_fail_allocations(1);
+  room_remove_peer(&room, b);
+  assert(!atomic_load(&b->leave_event_in_use));
+  sfu_membership_event_test_fail_allocations(0);
+  assert(room.membership_revision == 3);
+  assert(room.peer_count == 1);
+  assert(a_high_water == 1);
+  assert(b_high_water == 1);
+  assert(receiver_count(a) == 0);
+
+  room_remove_peer(&room, a);
+  assert(room.membership_revision == 4);
+  sfu_session_release(b);
+  sfu_session_release(a);
+  sfu_room_destroy(&room);
+}
+
+typedef struct room_add_race_ctx {
+  sfu_room_t *room;
+  sfu_peer_session_t *peer;
+  pthread_barrier_t *barrier;
+  bool added;
+} room_add_race_ctx_t;
+
+static void *room_add_race_thread(void *arg) {
+  room_add_race_ctx_t *ctx = arg;
+  pthread_barrier_wait(ctx->barrier);
+  ctx->added = room_add_peer(ctx->room, ctx->peer);
+  return NULL;
+}
+
+static void test_same_session_concurrent_room_add_has_one_winner(void) {
+  sfu_room_t first, second;
+  assert(sfu_room_init(&first, 17) == 0);
+  assert(sfu_room_init(&second, 18) == 0);
+  sfu_peer_session_t *peer = mock_session("two-room-race");
+  pthread_barrier_t barrier;
+  assert(pthread_barrier_init(&barrier, NULL, 2) == 0);
+  room_add_race_ctx_t a = {.room = &first, .peer = peer, .barrier = &barrier};
+  room_add_race_ctx_t b = {.room = &second, .peer = peer, .barrier = &barrier};
+  pthread_t ta, tb;
+  assert(pthread_create(&ta, NULL, room_add_race_thread, &a) == 0);
+  assert(pthread_create(&tb, NULL, room_add_race_thread, &b) == 0);
+  pthread_join(ta, NULL);
+  pthread_join(tb, NULL);
+  assert(a.added != b.added);
+  sfu_room_t *winner = a.added ? &first : &second;
+  sfu_room_t *loser = a.added ? &second : &first;
+  assert(peer->room == winner && winner->peer_count == 1 && winner->membership_revision == 1);
+  assert(loser->peer_count == 0 && loser->membership_revision == 0 && loser->free_count == loser->peer_capacity);
+  room_remove_peer(winner, peer);
+  pthread_barrier_destroy(&barrier);
+  sfu_session_release(peer);
+  sfu_room_destroy(&second);
+  sfu_room_destroy(&first);
+}
+
+static void *room_add_remove_once(void *arg) {
+  room_add_race_ctx_t *ctx = arg;
+  pthread_barrier_wait(ctx->barrier);
+  assert(room_add_peer(ctx->room, ctx->peer));
+  room_remove_peer(ctx->room, ctx->peer);
+  return NULL;
+}
+
+static void test_concurrent_room_events_preserve_revision_order(void) {
+  signaling_test_server.test_auto_drain = false;
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 19) == 0);
+  sfu_peer_session_t *a = mock_session("ordered-a");
+  sfu_peer_session_t *b = mock_session("ordered-b");
+  pthread_barrier_t barrier;
+  assert(pthread_barrier_init(&barrier, NULL, 2) == 0);
+  room_add_race_ctx_t ca = {.room = &room, .peer = a, .barrier = &barrier};
+  room_add_race_ctx_t cb = {.room = &room, .peer = b, .barrier = &barrier};
+  pthread_t ta, tb;
+  assert(pthread_create(&ta, NULL, room_add_remove_once, &ca) == 0);
+  assert(pthread_create(&tb, NULL, room_add_remove_once, &cb) == 0);
+  pthread_join(ta, NULL);
+  pthread_join(tb, NULL);
+  for (uint64_t revision = 1; revision <= 4; revision++) {
+    sfu_membership_event_t *event = sfu_signaling_membership_test_pop(&signaling_test_server);
+    assert(event != NULL);
+    assert(event->room_id == room.room_id);
+    assert(event->room_revision == revision);
+    sfu_membership_event_release(event);
+  }
+  assert(sfu_signaling_membership_test_pop(&signaling_test_server) == NULL);
+  signaling_test_server.test_auto_drain = true;
+  pthread_barrier_destroy(&barrier);
+  sfu_session_release(b);
+  sfu_session_release(a);
+  sfu_room_destroy(&room);
+}
+
+static void test_join_rejects_unavailable_signaling_transactionally(void) {
+  sfu_signaling_membership_test_server_stop(&signaling_test_server);
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 16) == 0);
+  sfu_peer_session_t *peer = mock_session("no-signaling");
+  uint32_t initial_refcount = atomic_load(&peer->refcount);
+  uint32_t initial_high_water = sfu_session_remote_slot_high_water(peer);
+
+  assert(!room_add_peer(&room, peer));
+  assert(room.peer_count == 0);
+  assert(room.membership_revision == 0);
+  assert(peer->room == NULL);
+  assert(peer->room_slot == UINT32_MAX);
+  assert(receiver_count(peer) == 0);
+  assert(fanout_target_count(peer) == 0);
+  assert(sfu_session_remote_slot_high_water(peer) == initial_high_water);
+  assert(atomic_load(&peer->refcount) == initial_refcount);
+
+  sfu_session_release(peer);
+  sfu_room_destroy(&room);
+  sfu_signaling_membership_test_server_init(&signaling_test_server);
+  signaling_test_server.test_auto_drain = true;
+}
+
+static void test_remote_slot_reuse_over_1000_churn(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 20) == 0);
+  sfu_peer_session_t *stable = mock_session("slot-reuse-stable");
+  sfu_peer_session_t *flapper = mock_session("slot-reuse-flapper");
+  assert(room_add_peer(&room, stable));
+
+  uint64_t previous_generation = 0;
+  for (uint32_t i = 0; i < 1200; i++) {
+    assert(room_add_peer(&room, flapper));
+    sfu_receiver_snapshot_t *snapshot = sfu_session_subscriptions_acquire(stable);
+    assert(snapshot != NULL && snapshot->count == 1);
+    const sfu_receiver_entry_t *entry = sfu_receiver_snapshot_nth(snapshot, 0, NULL);
+    assert(entry != NULL && entry->remote_slot == 0 && entry->assignment_generation != 0);
+    assert(entry->assignment_generation != previous_generation);
+    previous_generation = entry->assignment_generation;
+    sfu_subscriptions_snapshot_release(snapshot);
+    room_remove_peer(&room, flapper);
+    assert(receiver_count(stable) == 0);
+    assert(sfu_session_remote_slot_high_water(stable) == 1);
+  }
+
+  room_remove_peer(&room, stable);
+  sfu_session_release(flapper);
+  sfu_session_release(stable);
+  sfu_room_destroy(&room);
+}
+
 int main(void) {
+  sfu_signaling_membership_test_server_init(&signaling_test_server);
+  signaling_test_server.test_auto_drain = true;
+  test_membership_revision_and_capture_failure();
+  test_chunked_subscription_root_copy();
   test_add_remove();
   test_audience_role_asymmetry_and_transition();
   test_snapshot_hold_across_replace();
   test_concurrent_snapshot_read_write();
+  test_concurrent_fanout_bundle_acquire_iterate_churn();
   test_multi_publisher_concurrent_churn();
   test_fanout_uses_publisher_stream_identity();
   test_three_peer_route_mids();
+  test_add_rejects_exhausted_mid_capacity_transactionally();
+  test_removed_peer_refresh_is_noop();
+  test_same_session_concurrent_room_add_has_one_winner();
+  test_concurrent_room_events_preserve_revision_order();
+  test_join_rejects_unavailable_signaling_transactionally();
+  test_remote_slot_reuse_over_1000_churn();
 
+  sfu_signaling_membership_test_server_stop(&signaling_test_server);
   printf("test_room: OK\n");
   return 0;
 }

@@ -27,6 +27,10 @@ add_executable(test_room test_room.c)
 target_link_libraries(test_room PRIVATE sfu_core)
 add_test(NAME room COMMAND test_room)
 
+add_executable(test_signaling_membership test_signaling_membership.c)
+target_link_libraries(test_signaling_membership PRIVATE sfu_core)
+add_test(NAME signaling_membership COMMAND test_signaling_membership)
+
 add_executable(test_stun test_stun.c)
 target_link_libraries(test_stun PRIVATE sfu_core)
 add_test(NAME stun COMMAND test_stun)

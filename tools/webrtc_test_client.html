@@ -527,7 +527,7 @@
             // Latest offer wins while a prior answer is in flight. Dropping offers
             // (old "ignore while negotiating") leaves remote m-lines stuck inactive
             // after push-to-talk / SSRC-learn races → black video on 2nd promote.
-            let pendingOfferSdp = null;
+            let pendingOffer = null;
             let micEnabled = true;
             let camEnabled = false;
             let screenSharing = false;
@@ -540,10 +540,10 @@
             const membersByPeerId = new Map();
             const peerIdByUfrag = new Map();
             const peerIdByMid = new Map();
-            // Remote mids whose publisher left the room. Historical SDP keeps those
-            // m-lines as inactive tombstones; without this set, resyncRemoteMedia
-            // would recreate empty tiles after peer_left.
-            const leftRemoteMids = new Set();
+            // Phase 4 makes remote-slot assignments authoritative. Each entry is
+            // guarded by assignment_generation so a delayed leave cannot retire a
+            // slot that has already been recycled for another publisher.
+            const remoteAssignmentsBySlot = new Map();
 
             const joinPreview = document.getElementById("joinPreview");
             const joinStatus = document.getElementById("joinStatus");
@@ -680,15 +680,65 @@
                 return [member && member.mid_audio, member && member.mid_video, member && member.mid_screen];
             }
 
+            function assignmentIdentity(value) {
+                return value == null ? null : String(value);
+            }
+
+            function memberSlot(member) {
+                if (!member) return null;
+                if (member.remote_slot != null) return member.remote_slot;
+                return member.slot;
+            }
+
+            function memberAssignment(member) {
+                const rawSlot = memberSlot(member);
+                if (rawSlot == null || member == null || member.assignment_generation == null) return null;
+                const slot = Number(rawSlot);
+                const generation = assignmentIdentity(member.assignment_generation);
+                if (!Number.isInteger(slot) || slot < 0 || generation === "0") return null;
+                return { slot, generation };
+            }
+
+            function clearMemberMapping(member) {
+                const assignment = memberAssignment(member);
+                if (!assignment || member.peer_id == null) return false;
+                const peerId = String(member.peer_id);
+                const current = remoteAssignmentsBySlot.get(assignment.slot);
+                if (!current || current.peerId !== peerId || current.generation !== assignment.generation) {
+                    return false;
+                }
+                remoteAssignmentsBySlot.delete(assignment.slot);
+                for (const mid of current.mids) {
+                    if (peerIdByMid.get(mid) === peerId) peerIdByMid.delete(mid);
+                }
+                return true;
+            }
+
+            function installMemberMapping(member) {
+                const assignment = memberAssignment(member);
+                if (!assignment || member.peer_id == null) return;
+                const peerId = String(member.peer_id);
+                const previous = remoteAssignmentsBySlot.get(assignment.slot);
+                if (previous) {
+                    for (const mid of previous.mids) {
+                        if (peerIdByMid.get(mid) === previous.peerId) peerIdByMid.delete(mid);
+                    }
+                }
+                const mids = memberMids(member)
+                    .filter((mid) => mid != null && String(mid) !== "0")
+                    .map(String);
+                remoteAssignmentsBySlot.set(assignment.slot, {
+                    peerId,
+                    generation: assignment.generation,
+                    mids,
+                });
+                for (const mid of mids) peerIdByMid.set(mid, peerId);
+            }
+
             function mediaTileId(baseId, mid, trackKind = null, isScreen = false) {
                 const kind = remoteKindFromMid(mid);
                 if (trackKind === "audio" || kind === "audio") return baseId;
                 return isScreen || kind === "screen" ? baseId + "-screen" : baseId;
-            }
-
-            function parsePublisherStreamId(streamId) {
-                const match = /^u(-?\d+)-p(\d+)$/.exec(String(streamId || ""));
-                return match ? { userId: match[1], peerId: match[2] } : null;
             }
 
             function updateParticipantCount(authoritativeCount = null) {
@@ -780,15 +830,18 @@
                 isSelf = isSelf || !!(existingMember && existingMember.isSelf);
                 const role = member.role || "audience";
                 const mergedMember = { ...existingMember, ...member, role, isSelf };
+                const oldAssignment = memberAssignment(existingMember);
+                const newAssignment = memberAssignment(mergedMember);
+                if (oldAssignment && (!newAssignment ||
+                    oldAssignment.slot !== newAssignment.slot ||
+                    oldAssignment.generation !== newAssignment.generation)) {
+                    clearMemberMapping(existingMember);
+                }
                 const id = memberTileId(mergedMember);
                 mergedMember.tileId = id;
                 membersByPeerId.set(peerId, mergedMember);
                 if (member.ufrag) peerIdByUfrag.set(String(member.ufrag), peerId);
-                for (const midValue of memberMids(member)) {
-                    if (midValue != null && String(midValue) !== "0") {
-                        peerIdByMid.set(String(midValue), peerId);
-                    }
-                }
+                installMemberMapping(mergedMember);
 
                 const label = member.user_id && member.user_id !== "0"
                     ? `User ${member.user_id}`
@@ -828,6 +881,7 @@
                         .forEach((el) => { el.dataset.owner = targetId; });
                     removeTile(oldId);
                 }
+                if (pc) resyncRemoteMedia(pc);
                 return p;
             }
 
@@ -835,6 +889,7 @@
                 membersByPeerId.clear();
                 peerIdByUfrag.clear();
                 peerIdByMid.clear();
+                remoteAssignmentsBySlot.clear();
                 const liveIds = new Set();
                 for (const member of msg.members || []) {
                     const baseId = memberTileId(member);
@@ -853,73 +908,52 @@
                 updateParticipantCount(msg.participant_count);
             }
 
-            /* Leave (not demote): server sends peer_left with the remote mids
-             * that were allocated for the departing publisher on this client.
-             * Demote keeps the same mids inactive for push-to-talk re-promote. */
+            /* Leave (not demote): Phase 4 identifies the exact remote-slot
+             * assignment being retired. Ignore a delayed leave after that slot has
+             * been recycled with a newer assignment_generation. */
             function handlePeerLeft(msg) {
-                if (msg.peer_id != null) {
-                    const peerId = String(msg.peer_id);
-                    const member = membersByPeerId.get(peerId);
-                    if (member && member.ufrag) peerIdByUfrag.delete(String(member.ufrag));
-                    const tileId = member ? memberTileId(member) : "peer-" + peerId;
-                    membersByPeerId.delete(peerId);
-                    const tileStillUsed = [...membersByPeerId.values()].some((other) => memberTileId(other) === tileId);
-                    if (!tileStillUsed) {
-                        removeTile(tileId);
-                        removeTile(tileId + "-camera");
-                        removeTile(tileId + "-screen");
-                    }
+                const assignment = memberAssignment(msg);
+                const peerId = msg.peer_id != null ? String(msg.peer_id) : null;
+                const current = assignment ? remoteAssignmentsBySlot.get(assignment.slot) : null;
+                const assignmentMatches = !!(
+                    assignment && peerId && current &&
+                    current.peerId === peerId &&
+                    current.generation === assignment.generation
+                );
+                if (!assignmentMatches) {
+                    console.log("Ignoring stale/unmapped peer_left", {
+                        peer_id: peerId,
+                        slot: memberSlot(msg),
+                        assignment_generation: msg.assignment_generation,
+                    });
+                    return;
                 }
-                const mids = [];
-                const addMid = (v) => {
-                    if (v == null || v === "" || v === 0 || v === "0") return;
-                    mids.push(String(v));
-                };
-                addMid(msg.mid_video);
-                addMid(msg.mid_audio);
-                addMid(msg.mid_screen);
 
-                for (const mid of mids) {
-                    peerIdByMid.delete(mid);
-                    leftRemoteMids.add(mid);
+                const member = membersByPeerId.get(peerId);
+                if (member && member.ufrag) peerIdByUfrag.delete(String(member.ufrag));
+                const tileId = member ? memberTileId(member) : "peer-" + peerId;
+                clearMemberMapping(msg);
+                membersByPeerId.delete(peerId);
+                const tileStillUsed = [...membersByPeerId.values()].some((other) => memberTileId(other) === tileId);
+                if (!tileStillUsed) {
+                    removeTile(tileId);
+                    removeTile(tileId + "-camera");
+                    removeTile(tileId + "-screen");
+                }
+                for (const mid of current.mids) {
                     removeTile("mid-" + mid);
                     document
-                        .querySelectorAll(
-                            `audio[data-owner="${CSS.escape("mid-" + mid)}"]`
-                        )
+                        .querySelectorAll(`audio[data-owner="${CSS.escape("mid-" + mid)}"]`)
                         .forEach((el) => el.remove());
                 }
 
-                // Fallback: if the server could not resolve mids (0/0), drop remote
-                // tiles whose transceiver is currently inactive. Demote is not a
-                // peer_left, so this path only runs on leave.
-                if (mids.length === 0 && pc) {
-                    for (const t of pc.getTransceivers()) {
-                        if (!t.mid || isLocalUplinkMid(t.mid)) continue;
-                        const dir = t.currentDirection || t.direction;
-                        if (dir === "inactive" || dir === "stopped") {
-                            leftRemoteMids.add(String(t.mid));
-                            removeTile("mid-" + t.mid);
-                            document
-                                .querySelectorAll(
-                                    `audio[data-owner="${CSS.escape("mid-" + t.mid)}"]`
-                                )
-                                .forEach((el) => el.remove());
-                        }
-                    }
-                }
-
                 updateParticipantCount(msg.participant_count);
-                console.log(
-                    "peer_left:",
-                    msg.ufrag || "",
-                    "mids",
-                    mids.join(",") || "(fallback inactive)",
-                    "peer_id",
-                    msg.peer_id,
-                    "leftRemoteMids",
-                    [...leftRemoteMids]
-                );
+                console.log("peer_left applied", {
+                    peer_id: peerId,
+                    remote_slot: assignment.slot,
+                    assignment_generation: assignment.generation,
+                    mids: current.mids,
+                });
             }
 
             function ensureParticipant(id, opts) {
@@ -984,13 +1018,13 @@
                 if (!pc) return;
                 for (const t of pc.getTransceivers()) {
                     if (!t.mid || isLocalUplinkMid(t.mid)) continue;
-                    // Publisher left: keep historical inactive m-line, no tile.
-                    if (leftRemoteMids.has(String(t.mid))) continue;
+                    const mappedPeerId = peerIdByMid.get(String(t.mid));
+                    if (!mappedPeerId) continue;
+                    const mappedMember = membersByPeerId.get(String(mappedPeerId));
+                    if (!mappedMember) continue;
                     const track = t.receiver && t.receiver.track;
                     if (!track || track.readyState === "ended") continue;
-                    const mappedPeerId = peerIdByMid.get(String(t.mid));
-                    const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
-                    const baseId = mappedMember ? memberTileId(mappedMember) : "mid-" + t.mid;
+                    const baseId = memberTileId(mappedMember);
                     const id = mediaTileId(baseId, t.mid, track.kind);
                     if (track.kind === "video") {
                         // Do not invent a tile for an already-inactive remote mid
@@ -1033,24 +1067,26 @@
                         if (cur !== track) {
                             audioEl.srcObject = new MediaStream([track]);
                         }
+                        const ap = audioEl.play();
+                        if (ap && typeof ap.catch === "function") ap.catch(() => {});
                     }
                 }
             }
 
-            async function handleServerOffer(sdp) {
+            async function handleServerOffer(offer) {
                 if (!pc || !ws) return;
                 if (isNegotiating) {
-                    // Keep only the newest offer; older mid-flight snapshots are
-                    // stale (e.g. inactive before SSRC-learn).
-                    pendingOfferSdp = sdp;
+                    // Keep only the newest complete offer; its generation must be
+                    // echoed in the corresponding answer.
+                    pendingOffer = offer;
                     console.log("Offer queued (already negotiating); will apply latest after answer.");
                     return;
                 }
                 isNegotiating = true;
-                while (sdp) {
+                while (offer) {
                 try {
                     await pc.setRemoteDescription(
-                        new RTCSessionDescription({ type: "offer", sdp })
+                        new RTCSessionDescription({ type: "offer", sdp: offer.sdp })
                     );
 
                     if (!localTracksAdded && localStream) {
@@ -1127,6 +1163,7 @@
                             JSON.stringify({
                                 type: "answer",
                                 sdp: pc.localDescription.sdp,
+                                offer_generation: offer.offer_generation,
                             })
                         );
                     }
@@ -1145,9 +1182,9 @@
                         }
                     }
                 } finally {
-                    sdp = pendingOfferSdp;
-                    pendingOfferSdp = null;
-                    if (sdp) {
+                    offer = pendingOffer;
+                    pendingOffer = null;
+                    if (offer) {
                         // Yield to the event loop between consecutive offer/answer
                         // cycles. Chrome's SRTP demuxer needs a tick to finalize
                         // SSRC-to-mid bindings from the previous setLocalDescription;
@@ -1479,7 +1516,8 @@
                     pc.close();
                     pc = null;
                 }
-                leftRemoteMids.clear();
+                remoteAssignmentsBySlot.clear();
+                peerIdByMid.clear();
                 participants.forEach((_, id) => removeTile(id));
                 document.getElementById("meetingRoom").style.display = "none";
                 document.getElementById("joinScreen").style.display = "flex";
@@ -1868,7 +1906,7 @@
                 }
                 localTracksAdded = false;
                 isNegotiating = false;
-                pendingOfferSdp = null;
+                pendingOffer = null;
             }
 
             async function connectAndJoin() {
@@ -1938,31 +1976,13 @@
                         if (isLocalUplinkMid(mid)) {
                             return;
                         }
-                        if (mid && leftRemoteMids.has(String(mid))) {
-                            console.log("ontrack ignored for left remote mid", mid);
-                            return;
-                        }
-                        const streamId = event.streams && event.streams.length > 0
-                            ? event.streams[0].id
-                            : null;
-                        const publisherIdentity = parsePublisherStreamId(streamId);
-                        let mappedPeerId = (publisherIdentity && publisherIdentity.peerId)
-                            || (mid ? peerIdByMid.get(String(mid)) : null)
-                            || (streamId ? peerIdByUfrag.get(String(streamId)) : null);
-                        if (!mappedPeerId) {
-                            const remoteCandidates = [...membersByPeerId.entries()].filter(([, member]) => !member.isSelf && member.role === "speaker");
-                            if (remoteCandidates.length === 1) mappedPeerId = remoteCandidates[0][0];
-                        }
+                        const mappedPeerId = mid ? peerIdByMid.get(String(mid)) : null;
                         const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
-                        const baseId = mappedMember
-                            ? memberTileId(mappedMember)
-                            : publisherIdentity && publisherIdentity.userId !== "0"
-                                ? "user-" + publisherIdentity.userId
-                                : (mid ? "mid-" + mid : (streamId || track.id));
-                        const isScreenTrack = track.kind === "video" &&
-                            (remoteKindFromMid(mid) === "screen" ||
-                             (track.id && track.id.toLowerCase().includes("screen")) ||
-                             (streamId && streamId.toLowerCase().includes("screen")));
+                        const isScreenTrack = track.kind === "video" && remoteKindFromMid(mid) === "screen";
+                        const baseId = mappedMember ? memberTileId(mappedMember) : ("mid-" + String(mid || "unknown"));
+                        if (!mappedMember) {
+                            console.log("ontrack before membership map; using fallback tile", mid);
+                        }
                         const id = mediaTileId(baseId, mid, track.kind, isScreenTrack);
 
                         if (track.kind === "video") {
@@ -1996,6 +2016,8 @@
                             audioEl.srcObject = new MediaStream([track]);
                             audioEl.dataset.owner = id;
                             document.body.appendChild(audioEl);
+                            const ap = audioEl.play();
+                            if (ap && typeof ap.catch === "function") ap.catch(() => {});
 
                             track.addEventListener("ended", () => {
                                 audioEl.remove();
@@ -2219,11 +2241,14 @@
                         }
 
                         if (msg.type === "offer") {
-                            if (typeof msg.sdp !== "string" || msg.sdp.length === 0) {
-                                console.error("Received offer with missing or empty SDP, ignoring.");
+                            if (typeof msg.sdp !== "string" || msg.sdp.length === 0 || msg.offer_generation == null) {
+                                console.error("Received offer with missing SDP or offer_generation, ignoring.");
                                 return;
                             }
-                            await handleServerOffer(msg.sdp);
+                            await handleServerOffer({
+                                sdp: msg.sdp,
+                                offer_generation: msg.offer_generation,
+                            });
                             return;
                         }
                     };
@@ -2239,7 +2264,7 @@
                         setConnState("disconnected", "err");
                         localTracksAdded = false;
                         isNegotiating = false;
-                        pendingOfferSdp = null;
+                        pendingOffer = null;
                     };
                     ws.onerror = () => {
                         const stillOnJoin = document.getElementById("joinScreen").style.display !== "none";

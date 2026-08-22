@@ -216,15 +216,15 @@ int main(int argc, char **argv) {
   }
   scheduler_started = true;
 
-  if (sfu_signaling_server_start(&signaling, signaling_port, public_host, port, &ice_creds, &dtls_ctx, sessions, room_registry, routing_table) != 0) {
-    goto cleanup;
-  }
-  signaling_started = true;
-
   if (init_nats_connection(g_sfu_config.nats_url, g_sfu_config.nats_client_name) != NATS_OK) {
     goto cleanup;
   }
   nats_producer_started = true;
+
+  if (sfu_signaling_server_start(&signaling, signaling_port, public_host, port, &ice_creds, &dtls_ctx, sessions, room_registry, routing_table) != 0) {
+    goto cleanup;
+  }
+  signaling_started = true;
 
   SFU_LOG_INFO("mezon-sfu ready: media UDP port %u, signaling ws://%s:%u (pid=%d)", port, public_host, signaling_port, getpid());
   sfu_scheduler_join(scheduler);

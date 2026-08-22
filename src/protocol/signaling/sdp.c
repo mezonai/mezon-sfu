@@ -77,6 +77,8 @@ static int append_mid_recv_attribute(char *out, size_t out_cap, size_t *offset);
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, sfu_video_codec_t codec, uint8_t video_pt, uint8_t rtx_pt);
 static int append_remote_audio_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id, uint32_t audio_ssrc);
 static int append_remote_video_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id, const char *track_prefix);
+static int append_remote_ssrc_cname(char *out, size_t out_cap, size_t *offset, uint32_t ssrc, int64_t user_id, uint32_t peer_id);
+static int append_remote_fid_group(char *out, size_t out_cap, size_t *offset, uint32_t media_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id);
 
 static int append_bundled_transport_headers(char *out, size_t out_cap, size_t *offset, const char *host, const char *ufrag, const char *pwd,
                                             const char *fingerprint) {
@@ -162,6 +164,10 @@ static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, uint1
   if (live && (!slot || append_remote_audio_msid(out, out_cap, offset, slot->publisher_user_id, slot->publisher_peer_id, slot->audio_ssrc) != 0)) {
     return -1;
   }
+  if (live && slot &&
+      append_remote_ssrc_cname(out, out_cap, offset, slot->audio_ssrc, slot->publisher_user_id, slot->publisher_peer_id) != 0) {
+    return -1;
+  }
   return 0;
 }
 
@@ -234,6 +240,13 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint1
   }
   if (append_remote_video_msid(out, out_cap, offset, slot->publisher_user_id, slot->publisher_peer_id, screen ? "screen" : "video") != 0) {
     return -1;
+  }
+  {
+    uint32_t media_ssrc = screen ? slot->screen_ssrc : slot->video_ssrc;
+    uint32_t rtx_ssrc = screen ? slot->screen_rtx_ssrc : slot->video_rtx_ssrc;
+    if (append_remote_fid_group(out, out_cap, offset, media_ssrc, rtx_ssrc, slot->publisher_user_id, slot->publisher_peer_id) != 0) {
+      return -1;
+    }
   }
   return 0;
 }
@@ -343,6 +356,33 @@ static int append_remote_video_msid(char *out, size_t out_cap, size_t *offset, i
   }
   n = snprintf(line, sizeof(line), "a=msid:%s %s-%s", stream_id, track_prefix, stream_id);
   return n < 0 || (size_t)n >= sizeof(line) ? -1 : append_line_n(out, out_cap, offset, line, (size_t)n);
+}
+
+static int append_remote_ssrc_cname(char *out, size_t out_cap, size_t *offset, uint32_t ssrc, int64_t user_id, uint32_t peer_id) {
+  if (ssrc == 0) {
+    return 0;
+  }
+  char line[160];
+  int n = snprintf(line, sizeof(line), "a=ssrc:%u cname:u%" PRId64 "-p%u", ssrc, user_id, peer_id);
+  return n < 0 || (size_t)n >= sizeof(line) ? -1 : append_line_n(out, out_cap, offset, line, (size_t)n);
+}
+
+static int append_remote_fid_group(char *out, size_t out_cap, size_t *offset, uint32_t media_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id) {
+  if (media_ssrc == 0) {
+    return 0;
+  }
+  if (rtx_ssrc != 0 && rtx_ssrc != media_ssrc) {
+    char line[160];
+    int n = snprintf(line, sizeof(line), "a=ssrc-group:FID %u %u", media_ssrc, rtx_ssrc);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+    if (append_remote_ssrc_cname(out, out_cap, offset, media_ssrc, user_id, peer_id) != 0) {
+      return -1;
+    }
+    return append_remote_ssrc_cname(out, out_cap, offset, rtx_ssrc, user_id, peer_id);
+  }
+  return append_remote_ssrc_cname(out, out_cap, offset, media_ssrc, user_id, peer_id);
 }
 
 int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, bool is_audience, char *out,
@@ -458,11 +498,10 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   return (int)off;
 }
 
-static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t i, sfu_sdp_receiver_view_t *view) {
-  if (!snap) {
+static bool sfu_sdp_receiver_view(const sfu_receiver_entry_t *e, sfu_sdp_receiver_view_t *view) {
+  if (!e) {
     return false;
   }
-  const sfu_receiver_entry_t *e = &snap->entries[i];
   if (!e->has_audio && !e->has_video && !e->has_screen) {
     return false;
   }
@@ -473,9 +512,9 @@ static bool sfu_sdp_receiver_view(const sfu_receiver_snapshot_t *snap, uint32_t 
   view->video_rtx_ssrc = e->video_rtx_ssrc;
   view->screen_ssrc = e->screen_ssrc;
   view->screen_rtx_ssrc = e->screen_rtx_ssrc;
-  view->mid_audio = e->mid_audio;
-  view->mid_video = e->mid_video;
-  view->mid_screen = e->mid_screen;
+  view->mid_audio = sfu_remote_slot_first_mid(e->remote_slot);
+  view->mid_video = view->mid_audio + 1;
+  view->mid_screen = view->mid_audio + 2;
   view->video_pt = e->video_pt;
   view->video_rtx_pt = e->video_rtx_pt;
   view->screen_pt = e->screen_pt;
@@ -502,7 +541,6 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
   assert(session != NULL);
 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
-  uint32_t receiver_count = snap ? snap->count : 0;
 
   uint8_t video_pt = session->media.uplink_video.payload_type ? session->media.uplink_video.payload_type : SFU_PT_VP8;
   uint8_t rtx_pt = session->media.uplink_video.rtx_payload_type ? session->media.uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
@@ -534,9 +572,12 @@ int sfu_sdp_build_answer(sfu_peer_session_t *session, const char *offer, size_t 
       bundle_line[blen] = '\0';
 
       uint32_t tmp_mid = 100;
-      for (uint32_t i = 0; i < receiver_count; i++) {
+      sfu_receiver_snapshot_iter_t iter;
+      sfu_receiver_snapshot_iter_init(&iter, snap);
+      const sfu_receiver_entry_t *entry;
+      while ((entry = sfu_receiver_snapshot_iter_next(&iter, NULL)) != NULL) {
         sfu_sdp_receiver_view_t slot;
-        if (!sfu_sdp_receiver_view(snap, i, &slot)) {
+        if (!sfu_sdp_receiver_view(entry, &slot)) {
           continue;
         }
 
@@ -690,17 +731,19 @@ fail:
   return -1;
 }
 
-int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, char *out,
-                        size_t out_cap, uint32_t *exclusive_remote_mid) {
+int sfu_sdp_build_offer_manifest(sfu_peer_session_t *session, const sfu_remote_offer_manifest_t *manifest, const char *host, uint16_t port, const char *ufrag,
+                                 const char *pwd, const char *fingerprint, char *out, size_t out_cap, uint32_t *exposed_remote_mid) {
   size_t off = 0;
   char buf[512];
   int n;
 
   assert(session != NULL);
+  if (!manifest) return -1;
 
-  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
+  const sfu_receiver_snapshot_t *snap = manifest->receiver_root;
   uint32_t receiver_count = snap ? snap->count : 0;
-  uint32_t next_remote_mid = snap ? snap->exclusive_remote_mid : SFU_REMOTE_MID_BASE;
+  uint32_t high_water_slots = manifest->high_water_slots;
+  uint32_t next_remote_mid = sfu_remote_slot_first_mid(high_water_slots);
   char bundled_transport[512];
   size_t bundled_transport_len = 0;
   if (append_bundled_transport_headers(bundled_transport, sizeof(bundled_transport), &bundled_transport_len, host, ufrag, pwd, fingerprint) != 0) {
@@ -710,8 +753,12 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     mid_index[i] = -1;
   }
-  for (uint32_t i = 0; i < receiver_count; i++) {
-    uint32_t mid = snap->entries[i].mid_audio;
+  sfu_receiver_snapshot_iter_t iter;
+  sfu_receiver_snapshot_iter_init(&iter, snap);
+  const sfu_receiver_entry_t *entry;
+  uint32_t remote_slot;
+  while ((entry = sfu_receiver_snapshot_iter_next(&iter, &remote_slot)) != NULL) {
+    uint32_t mid = sfu_remote_slot_first_mid(remote_slot);
     if (mid < SFU_REMOTE_MID_BASE || ((mid - SFU_REMOTE_MID_BASE) % SFU_REMOTE_TRANSCEIVERS_PER_SLOT) != 0) {
       SFU_LOG_WARN("SDP_BUILD: invalid audio mid %u", mid);
       goto fail;
@@ -721,7 +768,7 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
       SFU_LOG_WARN("SDP_BUILD: duplicate/out-of-range audio mid %u", mid);
       goto fail;
     }
-    mid_index[slot] = (int16_t)i;
+    mid_index[slot] = (int16_t)remote_slot;
   }
   bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
   uint8_t local_video_pt = 0;
@@ -834,7 +881,14 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
     memset(&slot, 0, sizeof(slot));
     uint32_t map_slot = (mid_audio - SFU_REMOTE_MID_BASE) / SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
     int16_t entry_index = map_slot < SFU_MAX_REMOTE_SLOTS ? mid_index[map_slot] : -1;
-    bool found = entry_index >= 0 && sfu_sdp_receiver_view(snap, (uint32_t)entry_index, &slot);
+    const sfu_receiver_entry_t *mapped_entry = entry_index >= 0 ? sfu_receiver_snapshot_at(snap, (uint32_t)entry_index) : NULL;
+    uint64_t offered_assignment =
+        map_slot < SFU_MAX_REMOTE_SLOTS && map_slot < manifest->high_water_slots ? manifest->assignment_generations[map_slot] : 0;
+    if (!mapped_entry || (manifest->offer_generation != 0 &&
+        (offered_assignment == 0 || mapped_entry->assignment_generation != offered_assignment || mapped_entry->remote_slot != map_slot))) {
+      mapped_entry = NULL;
+    }
+    bool found = sfu_sdp_receiver_view(mapped_entry, &slot);
 
     bool audio_live = found && slot.has_audio;
     bool video_live = found && slot.has_video;
@@ -850,18 +904,30 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
     }
   }
 
-  if (snap) {
-    sfu_subscriptions_snapshot_release(snap);
-  }
-  if (exclusive_remote_mid) {
-    *exclusive_remote_mid = next_remote_mid;
+  if (exposed_remote_mid) {
+    *exposed_remote_mid = next_remote_mid;
   }
 
   return (int)off;
 
 fail:
-  if (snap) {
-    sfu_subscriptions_snapshot_release(snap);
-  }
   return -1;
+}
+
+int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, char *out,
+                        size_t out_cap, uint32_t *exposed_remote_mid) {
+  sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
+  sfu_remote_offer_manifest_t manifest;
+  memset(&manifest, 0, sizeof(manifest));
+  manifest.receiver_root = snap;
+  manifest.high_water_slots = sfu_session_remote_slot_high_water(session);
+  pthread_mutex_lock(&session->graph.lock);
+  for (uint32_t i = 0; i < manifest.high_water_slots; i++) {
+    if (session->graph.remote_slots.slots[i].state == SFU_REMOTE_SLOT_ACTIVE)
+      manifest.assignment_generations[i] = session->graph.remote_slots.slots[i].assignment_generation;
+  }
+  pthread_mutex_unlock(&session->graph.lock);
+  int result = sfu_sdp_build_offer_manifest(session, &manifest, host, port, ufrag, pwd, fingerprint, out, out_cap, exposed_remote_mid);
+  sfu_subscriptions_snapshot_release(snap);
+  return result;
 }
