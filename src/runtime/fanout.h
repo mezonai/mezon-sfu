@@ -71,10 +71,6 @@ void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh);
 
 bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, const struct sockaddr_storage *dst_addr,
                              socklen_t dst_len);
-bool sfu_fanout_mesh_enqueue_forward(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt, sfu_peer_session_t *subscriber,
-                                     sfu_peer_session_t *publisher, const struct sockaddr_storage *dst_addr, socklen_t dst_len, uint32_t video_ssrc,
-                                     uint32_t video_rtx_ssrc, uint32_t mid, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video, bool is_audio,
-                                     const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe);
 bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *source,
                                            sfu_peer_session_t *publisher, const sfu_fanout_target_t *targets, uint8_t target_count, bool is_audio,
                                            const sfu_svc_descriptor_t *svc, bool has_svc, bool is_keyframe);
