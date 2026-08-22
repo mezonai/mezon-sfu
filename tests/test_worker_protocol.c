@@ -13,6 +13,7 @@
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "pipeline/router.h"
+#include "protocol/signaling/signaling.h"
 #include "room/room.h"
 #include "room/room_media_graph.h"
 #include "rtp/rtp_packet.h"
@@ -476,13 +477,6 @@ static void kf_fixture_init(kf_fixture_t *f) {
   f->publisher->media.uplink_audio.active = true;
   atomic_store_explicit(&f->publisher->media.audio_send_negotiated, true, memory_order_release);
   atomic_store_explicit(&f->publisher->media.video_send_negotiated, true, memory_order_release);
-  /* Egress forwards a remote MID only if it is below both the offered and
-   * applied exclusive bounds. Tests that drive the forward path skip SDP, so
-   * open both gates. */
-  atomic_store_explicit(&f->base.session->graph.applied_remote_mid, UINT32_MAX, memory_order_release);
-  atomic_store_explicit(&f->base.session->graph.offered_remote_mid, UINT32_MAX, memory_order_release);
-  atomic_store_explicit(&f->publisher->graph.applied_remote_mid, UINT32_MAX, memory_order_release);
-  atomic_store_explicit(&f->publisher->graph.offered_remote_mid, UINT32_MAX, memory_order_release);
   sfu_session_publish_media(f->publisher);
 
   f->base.session->media.uplink_video.payload_type = SFU_PT_VP8;
@@ -494,6 +488,14 @@ static void kf_fixture_init(kf_fixture_t *f) {
 
   room_add_peer(&f->room, f->publisher);
   room_add_peer(&f->room, f->base.session);
+  sfu_remote_offer_manifest_t *subscriber_offer = sfu_session_remote_offer_capture(f->base.session);
+  sfu_remote_offer_manifest_t *publisher_offer = sfu_session_remote_offer_capture(f->publisher);
+  assert(subscriber_offer && sfu_session_remote_offer_install(f->base.session, subscriber_offer) &&
+         sfu_session_remote_offer_apply_answer(f->base.session, subscriber_offer));
+  assert(publisher_offer && sfu_session_remote_offer_install(f->publisher, publisher_offer) &&
+         sfu_session_remote_offer_apply_answer(f->publisher, publisher_offer));
+  sfu_remote_offer_manifest_release(subscriber_offer);
+  sfu_remote_offer_manifest_release(publisher_offer);
   /* add order: publisher first, so the subscriber is in the publisher's
    * receiver snapshot with the publisher's own uplink SSRCs. */
 }
@@ -527,8 +529,7 @@ static void kf_fixture_destroy(kf_fixture_t *f) {
   room_remove_peer(&f->room, f->publisher);
   room_remove_peer(&f->room, f->base.session);
   sfu_session_release(f->publisher);
-  pthread_mutex_destroy(&f->room.lock);
-  SFU_FREE(f->room.peers);
+  sfu_room_destroy(&f->room);
   fixture_destroy(&f->base);
 }
 
@@ -563,14 +564,14 @@ static void test_audience_pli_routes_to_source_publisher(void) {
   room_add_peer(&f.room, f.base.session);
   sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(f.publisher);
   assert(subscriptions != NULL && subscriptions->count == 1);
-  assert(subscriptions->entries[0].subscriber == f.base.session);
-  assert(subscriptions->entries[0].has_audio);
-  assert(!subscriptions->entries[0].has_video);
-  assert(!subscriptions->entries[0].has_screen);
+  assert((*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).subscriber == f.base.session);
+  assert((*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).has_audio);
+  assert(!(*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).has_video);
+  assert(!(*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).has_screen);
   sfu_subscriptions_snapshot_release(subscriptions);
-  sfu_receiver_snapshot_t *fanout = sfu_session_fanout_targets_acquire(f.publisher);
-  assert(fanout != NULL && fanout->count == 1 && fanout->entries[0].subscriber == f.base.session);
-  sfu_subscriptions_snapshot_release(fanout);
+  sfu_fanout_bundle_t *fanout = sfu_session_fanout_acquire(f.publisher);
+  assert(fanout != NULL && fanout->count == 1 && sfu_fanout_bundle_find_peer(fanout, f.base.session, NULL) != NULL);
+  sfu_fanout_bundle_release(fanout);
 
   uint8_t pli[64];
   size_t pli_len = rtcp_member_header(pli, 1, 206, MEDIA_SSRC, 4);
@@ -758,7 +759,7 @@ static void test_egress_no_twcc_without_negotiation(void) {
   kf_fixture_destroy(&f);
 }
 
-static void test_egress_drops_unapplied_remote_mid(void) {
+static void test_egress_rejects_new_generation_before_answer(void) {
   kf_fixture_t f;
   kf_fixture_init(&f);
 
@@ -769,9 +770,11 @@ static void test_egress_drops_unapplied_remote_mid(void) {
   assert(sub->egress.twcc_history != NULL);
   sfu_twcc_history_init(sub->egress.twcc_history);
 
-  /* Roll the subscriber back to "no answer applied yet" — the state every
-   * freshly-subscribed peer is in between graph rebuild and answer. */
-  atomic_store_explicit(&sub->graph.applied_remote_mid, SFU_REMOTE_MID_BASE, memory_order_release);
+  sfu_fanout_bundle_t *fanout = sfu_session_fanout_acquire(f.publisher);
+  const sfu_fanout_route_t *route = sfu_fanout_bundle_find_peer(fanout, sub, NULL);
+  assert(route != NULL);
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[route->remote_slot], 0, memory_order_release);
+  sfu_fanout_bundle_release(fanout);
 
   f.publisher->media.uplink_video.payload_type = 0;
   sfu_session_publish_media(f.publisher);
@@ -841,44 +844,56 @@ static void feed_plain_video(kf_fixture_t *f, uint16_t seq) {
   sfu_ingress_process(&f->base.w, pkt);
 }
 
-/* Egress requires mid < applied AND mid < offered. Opening only one bound is
- * not enough to forward. */
-static void test_egress_forwards_only_after_both_mid_bounds(void) {
+/* A route captured before slot reassignment must not pass authorization once
+ * the same slot has a different applied assignment generation. */
+static void test_egress_rejects_old_assignment_generation(void) {
   kf_fixture_t f;
   kf_fixture_init(&f);
   setup_plain_video_forward(&f);
 
   sfu_peer_session_t *sub = f.base.session;
-  /* First remote slot occupies mids [3, 6). The exclusive bound is next_remote_mid. */
-  const uint32_t closed = SFU_REMOTE_MID_BASE;
-  const uint32_t open = SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
+  sfu_fanout_bundle_t *fanout = sfu_session_fanout_acquire(f.publisher);
+  const sfu_fanout_route_t *route = sfu_fanout_bundle_find_peer(fanout, sub, NULL);
+  assert(route != NULL);
+  uint32_t remote_slot = route->remote_slot;
+  uint64_t old_generation = route->assignment_generation;
+  sfu_fanout_bundle_release(fanout);
 
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[remote_slot], old_generation + 1, memory_order_release);
   gcc_packet_info_t info = {0};
   uint64_t gated_before = sfu_metric_get("egress_mid_not_negotiated");
-
-  atomic_store_explicit(&sub->graph.applied_remote_mid, closed, memory_order_release);
-  atomic_store_explicit(&sub->graph.offered_remote_mid, closed, memory_order_release);
   feed_plain_video(&f, 1100);
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
 
-  gated_before = sfu_metric_get("egress_mid_not_negotiated");
-  atomic_store_explicit(&sub->graph.offered_remote_mid, open, memory_order_release);
+  kf_fixture_destroy(&f);
+}
+
+/* A newly assigned route is not authorized merely because it has been
+ * published into the fanout graph; its exact generation must be answered. */
+static void test_egress_rejects_new_assignment_before_answer(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+  setup_plain_video_forward(&f);
+
+  sfu_peer_session_t *sub = f.base.session;
+  sfu_fanout_bundle_t *old = sfu_session_fanout_acquire(f.publisher);
+  uint32_t bundle_slot = UINT32_MAX;
+  const sfu_fanout_route_t *current = sfu_fanout_bundle_find_peer(old, sub, &bundle_slot);
+  assert(current != NULL);
+  sfu_fanout_route_t replacement = *current;
+  replacement.assignment_generation++;
+  sfu_fanout_bundle_t *updated = sfu_fanout_bundle_copy_set(old, bundle_slot, &replacement,
+                                                            SFU_FANOUT_AUDIO | SFU_FANOUT_VIDEO | SFU_FANOUT_SCREEN);
+  sfu_fanout_bundle_release(old);
+  assert(updated != NULL);
+  sfu_session_publish_fanout(f.publisher, updated);
+
+  gcc_packet_info_t info = {0};
+  uint64_t gated_before = sfu_metric_get("egress_mid_not_negotiated");
   feed_plain_video(&f, 1101);
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
-
-  gated_before = sfu_metric_get("egress_mid_not_negotiated");
-  atomic_store_explicit(&sub->graph.offered_remote_mid, closed, memory_order_release);
-  atomic_store_explicit(&sub->graph.applied_remote_mid, open, memory_order_release);
-  feed_plain_video(&f, 1102);
-  assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
-  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
-
-  atomic_store_explicit(&sub->graph.offered_remote_mid, open, memory_order_release);
-  atomic_store_explicit(&sub->graph.applied_remote_mid, open, memory_order_release);
-  feed_plain_video(&f, 1103);
-  assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
 
   kf_fixture_destroy(&f);
 }
@@ -1472,6 +1487,9 @@ static void test_kf_enqueue_ring_full_drops_ref(void) {
 }
 
 int main(void) {
+  sfu_signaling_server_t signaling;
+  sfu_signaling_membership_test_server_init(&signaling);
+  signaling.test_auto_drain = true;
   test_malformed_rtp_dropped_by_ingress_parser();
   test_compound_nack_rtx_dispatch();
   test_compound_nack_then_pli();
@@ -1487,8 +1505,9 @@ int main(void) {
   test_pli_unknown_ssrc_falls_back();
   test_gcc_estimate_reaches_scheduler();
   test_egress_writes_twcc_extension();
-  test_egress_drops_unapplied_remote_mid();
-  test_egress_forwards_only_after_both_mid_bounds();
+  test_egress_rejects_new_generation_before_answer();
+  test_egress_rejects_old_assignment_generation();
+  test_egress_rejects_new_assignment_before_answer();
   test_egress_no_twcc_without_negotiation();
   test_remote_forward_egress_on_owner();
   test_svc_filter_rewrites_sequence_and_cache_identity();
@@ -1501,6 +1520,7 @@ int main(void) {
   test_source_switch_colliding_seq_delayed_nack();
   test_kf_request_cross_worker_no_packet_leak();
   test_kf_enqueue_ring_full_drops_ref();
+  sfu_signaling_membership_test_server_stop(&signaling);
   printf("test_worker_protocol: OK\n");
   return 0;
 }

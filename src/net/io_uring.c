@@ -5,12 +5,30 @@
 #include "sfu/config.h"
 #include "util/alloc.h"
 #include "util/log.h"
+#include "util/metrics.h"
 
 #include <arpa/inet.h>
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+
+#define SFU_CQE_PKT_PTR_MASK 0x0000ffffffffffffULL
+#define SFU_CQE_PKT_GEN_SHIFT 48
+
+static uint64_t sfu_cqe_pack_packet(sfu_packet_t *pkt) {
+  uint32_t gen = sfu_packet_generation(pkt) & 0xffffu;
+  return ((uint64_t)gen << SFU_CQE_PKT_GEN_SHIFT) | ((uintptr_t)pkt & SFU_CQE_PKT_PTR_MASK);
+}
+
+static sfu_packet_t *sfu_cqe_unpack_packet(uint64_t data) {
+  sfu_packet_t *pkt = (sfu_packet_t *)(uintptr_t)(data & SFU_CQE_PKT_PTR_MASK);
+  uint32_t gen = (uint32_t)(data >> SFU_CQE_PKT_GEN_SHIFT);
+  if (!pkt || (sfu_packet_generation(pkt) & 0xffffu) != gen) {
+    return NULL;
+  }
+  return pkt;
+}
 
 uint32_t sfu_ring_recv_overhead(void) {
   return (uint32_t)sizeof(struct io_uring_recvmsg_out) + (uint32_t)sizeof(struct sockaddr_storage) + SFU_RECV_CMSG_BUFSIZE;
@@ -138,7 +156,7 @@ int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockad
   sfu_packet_retain(pkt, 1);
   io_uring_prep_send_zc(sqe, r->fd, pkt->data, pkt->len, 0, 0);
   io_uring_prep_send_set_addr(sqe, (const struct sockaddr *)&pkt->peer_addr, pkt->peer_addr_len);
-  io_uring_sqe_set_data(sqe, pkt);
+  io_uring_sqe_set_data64(sqe, sfu_cqe_pack_packet(pkt));
   r->outstanding_sends++;
 
   return 0;
@@ -269,6 +287,14 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
 
   void *payload = io_uring_recvmsg_payload(o, &r->recv_msg_template);
   uint32_t payload_len = io_uring_recvmsg_payload_length(o, cqe->res, &r->recv_msg_template);
+  if (!payload || payload_len == 0) {
+    SFU_LOG_WARN("recv completion with empty payload on fd=%d from %s:%u (bid=%u len=%u), dropping", r->fd, peer_ip, peer_port, bid, payload_len);
+    sfu_packet_pool_free_meta(pp, pkt);
+    int mask = io_uring_buf_ring_mask(r->buf_count);
+    io_uring_buf_ring_add(r->buf_ring, buf, r->buf_size, bid, mask, 0);
+    io_uring_buf_ring_advance(r->buf_ring, 1);
+    goto maybe_rearm;
+  }
 
   pkt->data = (uint8_t *)payload;
   pkt->len = payload_len;
@@ -312,7 +338,12 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
       handle_recv_cqe(r, cqe, pp, on_recv, user_data);
       needs_submit = true;
     } else {
-      sfu_packet_t *pkt = (sfu_packet_t *)(uintptr_t)data;
+      sfu_packet_t *pkt = sfu_cqe_unpack_packet(data);
+      if (!pkt) {
+        sfu_metric_inc("send_cqe_stale_packet");
+        SFU_LOG_WARN("send_zc completion for recycled packet on fd=%d flags=0x%x res=%d", r->fd, cqe->flags, cqe->res);
+        continue;
+      }
       if (cqe->flags & IORING_CQE_F_NOTIF) {
         if (r->outstanding_sends > 0) {
           r->outstanding_sends--;

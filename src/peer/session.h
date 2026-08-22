@@ -41,28 +41,63 @@ static inline bool sfu_session_video_runtime_ready(const sfu_peer_session_t *ses
 void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir, sfu_media_kind_t source);
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir);
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher);
+typedef struct sfu_receiver_snapshot_iter {
+  const sfu_receiver_snapshot_t *snapshot;
+  uint32_t chunk_index;
+  uint32_t occupied;
+} sfu_receiver_snapshot_iter_t;
+
+sfu_receiver_snapshot_t *sfu_receiver_snapshot_alloc(void);
+const sfu_receiver_entry_t *sfu_receiver_snapshot_at(const sfu_receiver_snapshot_t *snap, uint32_t remote_slot);
+void sfu_receiver_snapshot_iter_init(sfu_receiver_snapshot_iter_t *iter, const sfu_receiver_snapshot_t *snap);
+const sfu_receiver_entry_t *sfu_receiver_snapshot_iter_next(sfu_receiver_snapshot_iter_t *iter, uint32_t *remote_slot);
+const sfu_receiver_entry_t *sfu_receiver_snapshot_nth(const sfu_receiver_snapshot_t *snap, uint32_t ordinal, uint32_t *remote_slot);
+const sfu_receiver_entry_t *sfu_receiver_snapshot_find_peer(const sfu_receiver_snapshot_t *snap, const sfu_peer_session_t *peer, uint32_t *remote_slot);
+bool sfu_receiver_snapshot_set(sfu_receiver_snapshot_t *snap, uint32_t remote_slot, const sfu_receiver_entry_t *entry);
+sfu_receiver_snapshot_t *sfu_receiver_snapshot_copy_set(const sfu_receiver_snapshot_t *old, uint32_t remote_slot, const sfu_receiver_entry_t *entry);
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s);
 void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap);
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
 sfu_receiver_snapshot_t *sfu_session_publish_receivers_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
-sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s);
-void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
-sfu_receiver_snapshot_t *sfu_session_publish_fanout_targets_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap);
-sfu_audio_route_snapshot_t *sfu_session_audio_fanout_acquire(const sfu_peer_session_t *s);
-void sfu_audio_route_snapshot_release(sfu_audio_route_snapshot_t *snap);
-void sfu_session_publish_audio_fanout(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap);
-sfu_audio_route_snapshot_t *sfu_session_publish_audio_fanout_swap(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap);
-sfu_video_route_snapshot_t *sfu_session_video_fanout_acquire(const sfu_peer_session_t *s);
-void sfu_video_route_snapshot_release(sfu_video_route_snapshot_t *snap);
-void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
-sfu_video_route_snapshot_t *sfu_session_publish_video_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
-sfu_video_route_snapshot_t *sfu_session_screen_fanout_acquire(const sfu_peer_session_t *s);
-void sfu_session_publish_screen_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
-sfu_video_route_snapshot_t *sfu_session_publish_screen_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap);
+typedef struct sfu_fanout_iter {
+  const sfu_fanout_bundle_t *bundle;
+  uint32_t chunk_index;
+  uint32_t eligible;
+  sfu_media_kind_t kind;
+} sfu_fanout_iter_t;
+
+sfu_fanout_bundle_t *sfu_fanout_bundle_alloc(void);
+const sfu_fanout_route_t *sfu_fanout_bundle_at(const sfu_fanout_bundle_t *bundle, uint32_t slot);
+const sfu_fanout_route_t *sfu_fanout_bundle_find_peer(const sfu_fanout_bundle_t *bundle, const sfu_peer_session_t *peer, uint32_t *slot);
+bool sfu_fanout_bundle_set(sfu_fanout_bundle_t *bundle, uint32_t slot, const sfu_fanout_route_t *route, uint8_t eligibility);
+sfu_fanout_bundle_t *sfu_fanout_bundle_copy_set(const sfu_fanout_bundle_t *old, uint32_t slot, const sfu_fanout_route_t *route, uint8_t eligibility);
+void sfu_fanout_iter_init(sfu_fanout_iter_t *iter, const sfu_fanout_bundle_t *bundle, sfu_media_kind_t kind);
+const sfu_fanout_route_t *sfu_fanout_iter_next(sfu_fanout_iter_t *iter, uint32_t *slot);
+sfu_fanout_bundle_t *sfu_session_fanout_acquire(const sfu_peer_session_t *s);
+void sfu_fanout_bundle_release(sfu_fanout_bundle_t *bundle);
+void sfu_session_publish_fanout(sfu_peer_session_t *owner, sfu_fanout_bundle_t *bundle);
+sfu_fanout_bundle_t *sfu_session_publish_fanout_swap(sfu_peer_session_t *owner, sfu_fanout_bundle_t *bundle);
 
 void sfu_snapshot_reclaim_receivers(sfu_receiver_snapshot_t *old);
-void sfu_snapshot_reclaim_audio(sfu_audio_route_snapshot_t *old);
-void sfu_snapshot_reclaim_video(sfu_video_route_snapshot_t *old);
+void sfu_snapshot_reclaim_fanout(sfu_fanout_bundle_t *old);
+
+bool sfu_session_remote_slot_reserve(sfu_peer_session_t *session, int64_t publisher_user_id, uint32_t publisher_peer_id, uint32_t *slot,
+                                     uint64_t *assignment_generation);
+bool sfu_session_remote_slot_retire(sfu_peer_session_t *session, uint32_t slot, uint64_t assignment_generation);
+sfu_remote_offer_manifest_t *sfu_session_remote_offer_capture(sfu_peer_session_t *session);
+bool sfu_session_remote_offer_install(sfu_peer_session_t *session, sfu_remote_offer_manifest_t *manifest);
+sfu_remote_offer_manifest_t *sfu_session_remote_offer_acquire_current(sfu_peer_session_t *session);
+void sfu_remote_offer_manifest_retain(sfu_remote_offer_manifest_t *manifest);
+void sfu_remote_offer_manifest_release(sfu_remote_offer_manifest_t *manifest);
+bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sfu_remote_offer_manifest_t *manifest);
+bool sfu_session_remote_slot_authorized(const sfu_peer_session_t *session, uint32_t slot, uint64_t assignment_generation);
+uint32_t sfu_session_remote_slot_high_water(const sfu_peer_session_t *session);
+void sfu_session_remote_slots_teardown(sfu_peer_session_t *session);
+void sfu_session_graph_assert_invariants(const sfu_peer_session_t *session);
+
+static inline uint32_t sfu_remote_slot_first_mid(uint32_t slot) {
+  return SFU_REMOTE_MID_BASE + slot * SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
+}
 
 static inline bool sfu_session_accepts_work(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->accepts_work, memory_order_acquire); }
 

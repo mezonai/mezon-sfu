@@ -81,5 +81,7 @@ sfu_packet_t *sfu_packet_pool_alloc_meta(sfu_packet_pool_t *pp) {
 
 void sfu_packet_pool_free_meta(sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
   pkt->data = NULL;
+  pkt->len = 0;
+  pkt->cap = 0;
   sfu_pool_free(&pp->meta, pkt->pool_index);
 }

@@ -17,6 +17,7 @@
 #include "util/netbytes.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #if defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
@@ -36,12 +37,27 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
                                      const sfu_layer_scheduler_decision_t *decision, bool profile) {
   int enc_len = (int)pkt->len;
 
-  uint32_t applied = atomic_load_explicit(&sub_session->graph.applied_remote_mid, memory_order_acquire);
-  uint32_t offered = atomic_load_explicit(&sub_session->graph.offered_remote_mid, memory_order_acquire);
-  if (media->mid != 0 && (media->mid >= applied || media->mid >= offered)) {
+  if (!sfu_session_remote_slot_authorized(sub_session, media->remote_slot, media->assignment_generation)) {
     sfu_metric_inc("egress_mid_not_negotiated");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t unauthorized_logs;
+    uint32_t n = atomic_fetch_add_explicit(&unauthorized_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      uint64_t applied = 0;
+      if (media->remote_slot < SFU_MAX_REMOTE_SLOTS) {
+        applied = atomic_load_explicit(&sub_session->graph.remote_slots.applied_assignment_generations[media->remote_slot], memory_order_acquire);
+      }
+      uint32_t mid = sfu_remote_slot_first_mid(media->remote_slot) + (media->is_audio ? 0u : media->source == SFU_MEDIA_SCREEN ? 2u : 1u);
+      SFU_LOG_WARN("egress: unauthorized n=%u sub_peer=%u pub_peer=%u slot=%u mid=%u audio=%d source=%d route_gen=%" PRIu64 " applied_gen=%" PRIu64,
+                   n + 1, sub_session->peer_id, media->publisher ? media->publisher->peer_id : 0, media->remote_slot, mid, media->is_audio ? 1 : 0,
+                   (int)media->source, media->assignment_generation, applied);
+    }
+#endif
     return false;
   }
+
+  uint32_t mid = sfu_remote_slot_first_mid(media->remote_slot) +
+                 (media->is_audio ? 0u : media->source == SFU_MEDIA_SCREEN ? 2u : 1u);
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
   if (!media->is_audio && media->has_video && media->video_pt != 0 && incoming_pt != media->video_pt) {
@@ -79,12 +95,21 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
   sfu_media_snapshot_t egress_msnap = sfu_session_load_media(sub_session);
   uint8_t mid_send_extmap_id = egress_msnap.mid_recv_extmap_id;
-  if (mid_send_extmap_id != 0 && media->mid != 0) {
-    char mid[12];
-    int mid_len = snprintf(mid, sizeof(mid), "%u", media->mid);
+  if (mid_send_extmap_id != 0) {
+    char mid_text[12];
+    int mid_len = snprintf(mid_text, sizeof(mid_text), "%u", mid);
     size_t new_len = (size_t)enc_len;
-    if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid) || !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid, &new_len)) {
+    if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid_text) ||
+        !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid_text, &new_len)) {
       sfu_metric_inc("mid_write_fail");
+#ifdef SFU_DIAG_LOG
+      static _Atomic uint32_t mid_write_fail_logs;
+      uint32_t n = atomic_fetch_add_explicit(&mid_write_fail_logs, 1, memory_order_relaxed);
+      if (n == 0 || (n & 127u) == 0) {
+        SFU_LOG_WARN("egress: mid_write_fail n=%u sub_peer=%u slot=%u mid=%u extmap=%u pkt_len=%d cap=%u", n + 1, sub_session->peer_id, media->remote_slot, mid,
+                     mid_send_extmap_id, enc_len, pkt->cap);
+      }
+#endif
       return false;
     }
     enc_len = (int)new_len;
@@ -124,8 +149,26 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     }
     sfu_metric_inc(media->is_audio ? "egress_protect_fail_audio" : "egress_protect_fail_video");
     sfu_metric_inc("egress_protect_fail");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t protect_fail_logs;
+    uint32_t n = atomic_fetch_add_explicit(&protect_fail_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_WARN("egress: protect_fail n=%u sub_peer=%u pub_peer=%u slot=%u audio=%d status=%d", n + 1, sub_session->peer_id,
+                   media->publisher ? media->publisher->peer_id : 0, media->remote_slot, media->is_audio ? 1 : 0, (int)protect_status);
+    }
+#endif
     return false;
   }
+#ifdef SFU_DIAG_LOG
+  {
+    static _Atomic uint32_t egress_ok_logs;
+    uint32_t n = atomic_fetch_add_explicit(&egress_ok_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_INFO("egress: ok n=%u sub_peer=%u pub_peer=%u slot=%u mid=%u audio=%d ssrc=%" PRIu32 " pt=%u len=%d", n + 1, sub_session->peer_id,
+                   media->publisher ? media->publisher->peer_id : 0, media->remote_slot, mid, media->is_audio ? 1 : 0, outbound_ssrc, incoming_pt, enc_len);
+    }
+  }
+#endif
   pkt->len = (uint32_t)enc_len;
 
   if (sfu_ring_queue_send_zc(&w->send_ring, pkt, (const struct sockaddr *)dst, dst_len) != 0) {

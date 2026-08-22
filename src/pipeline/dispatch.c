@@ -170,7 +170,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     room_add_peer(route.room, session);
     newly_bound = session->room == route.room;
     if (newly_bound) {
-      sfu_signaling_notify_peer_admitted(route.room, session);
     }
   } else if (session->room != route.room) {
     SFU_LOG_WARN("worker %u: session ufrag=%s belongs to another room; rejecting route bind", w->worker_index, client_ufrag);
@@ -385,6 +384,18 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
 }
 
 void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
+  if (!w || !pkt) {
+    return;
+  }
+  if (!pkt->data || pkt->len == 0) {
+    sfu_metric_inc("dispatch_null_payload");
+    SFU_LOG_WARN("worker %u: dropping packet with null payload len=%u cap=%u src=%u", w->worker_index, pkt->len, pkt->cap, pkt->buf_source);
+    if (pkt->data) {
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    }
+    return;
+  }
+
   char ip[64];
   uint16_t port;
   format_peer_endpoint(&pkt->peer_addr, ip, &port);
