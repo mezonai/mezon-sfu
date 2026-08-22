@@ -684,9 +684,16 @@
                 return value == null ? null : String(value);
             }
 
+            function memberSlot(member) {
+                if (!member) return null;
+                if (member.remote_slot != null) return member.remote_slot;
+                return member.slot;
+            }
+
             function memberAssignment(member) {
-                if (!member || member.remote_slot == null || member.assignment_generation == null) return null;
-                const slot = Number(member.remote_slot);
+                const rawSlot = memberSlot(member);
+                if (rawSlot == null || member == null || member.assignment_generation == null) return null;
+                const slot = Number(rawSlot);
                 const generation = assignmentIdentity(member.assignment_generation);
                 if (!Number.isInteger(slot) || slot < 0 || generation === "0") return null;
                 return { slot, generation };
@@ -874,6 +881,7 @@
                         .forEach((el) => { el.dataset.owner = targetId; });
                     removeTile(oldId);
                 }
+                if (pc) resyncRemoteMedia(pc);
                 return p;
             }
 
@@ -915,7 +923,7 @@
                 if (!assignmentMatches) {
                     console.log("Ignoring stale/unmapped peer_left", {
                         peer_id: peerId,
-                        remote_slot: msg.remote_slot,
+                        slot: memberSlot(msg),
                         assignment_generation: msg.assignment_generation,
                     });
                     return;
@@ -1059,6 +1067,8 @@
                         if (cur !== track) {
                             audioEl.srcObject = new MediaStream([track]);
                         }
+                        const ap = audioEl.play();
+                        if (ap && typeof ap.catch === "function") ap.catch(() => {});
                     }
                 }
             }
@@ -1967,14 +1977,12 @@
                             return;
                         }
                         const mappedPeerId = mid ? peerIdByMid.get(String(mid)) : null;
-                        if (!mappedPeerId) {
-                            console.log("ontrack ignored for unmapped remote mid", mid);
-                            return;
-                        }
-                        const mappedMember = membersByPeerId.get(String(mappedPeerId));
-                        if (!mappedMember) return;
-                        const baseId = memberTileId(mappedMember);
+                        const mappedMember = mappedPeerId ? membersByPeerId.get(String(mappedPeerId)) : null;
                         const isScreenTrack = track.kind === "video" && remoteKindFromMid(mid) === "screen";
+                        const baseId = mappedMember ? memberTileId(mappedMember) : ("mid-" + String(mid || "unknown"));
+                        if (!mappedMember) {
+                            console.log("ontrack before membership map; using fallback tile", mid);
+                        }
                         const id = mediaTileId(baseId, mid, track.kind, isScreenTrack);
 
                         if (track.kind === "video") {
@@ -2008,6 +2016,8 @@
                             audioEl.srcObject = new MediaStream([track]);
                             audioEl.dataset.owner = id;
                             document.body.appendChild(audioEl);
+                            const ap = audioEl.play();
+                            if (ap && typeof ap.catch === "function") ap.catch(() => {});
 
                             track.addEventListener("ended", () => {
                                 audioEl.remove();
