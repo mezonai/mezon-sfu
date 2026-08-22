@@ -23,7 +23,7 @@ static bool affinity_addr_equal(const sfu_affinity_entry_t *entry, uint32_t hash
 
 static uint32_t scheduler_select_worker(sfu_scheduler_t *s, sfu_packet_t *pkt, uint32_t hash) {
   uint32_t fallback = hash % s->worker_count;
-  bool is_stun = sfu_stun_is_stun_packet(pkt->data, pkt->len);
+  bool is_stun = pkt->data && sfu_stun_is_stun_packet(pkt->data, pkt->len);
   sfu_affinity_entry_t *entry = &s->affinity[hash & (SFU_AFFINITY_CACHE_CAP - 1)];
   bool cache_hit = affinity_addr_equal(entry, hash, &pkt->peer_addr, pkt->peer_addr_len);
   if (cache_hit && !is_stun) {
