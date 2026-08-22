@@ -10,9 +10,31 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
 
   if (job->kind == SFU_FANOUT_JOB_BATCH) {
     for (uint8_t i = 0; i < job->target_count; i++) {
+      w->reserved_outputs[i] = NULL;
+      sfu_peer_session_t *subscriber = job->targets[i].subscriber;
+      if (w->output_arena.packets && subscriber && sfu_session_owner_worker(subscriber) == w->worker_index && sfu_session_accepts_work(subscriber)) {
+        w->reserved_outputs[i] = sfu_worker_packet_arena_alloc(&w->output_arena);
+        if (w->reserved_outputs[i]) {
+          w->hot.output_reserved++;
+          w->hot.output_arena_allocated++;
+        } else {
+          w->reserved_outputs[i] = sfu_packet_pool_alloc(w->pp);
+          if (w->reserved_outputs[i]) {
+            w->hot.output_reserved++;
+            w->hot.output_pool_fallback++;
+          }
+        }
+      }
+    }
+
+    for (uint8_t i = 0; i < job->target_count; i++) {
       sfu_fanout_target_t *target = &job->targets[i];
       sfu_peer_session_t *subscriber = target->subscriber;
       if (!subscriber || sfu_session_owner_worker(subscriber) != w->worker_index || !sfu_session_accepts_work(subscriber)) {
+        if (w->reserved_outputs[i]) {
+          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, w->reserved_outputs[i]);
+          w->reserved_outputs[i] = NULL;
+        }
         if (subscriber) {
           sfu_session_release(subscriber);
         }
@@ -33,7 +55,8 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
           .has_svc = job->has_svc,
           .is_keyframe = job->is_keyframe,
       };
-      (void)sfu_egress_process_plaintext(w, subscriber, job->pkt, &target->dst, target->dst_len, &media);
+      (void)sfu_egress_process_plaintext_reserved(w, subscriber, job->pkt, w->reserved_outputs[i], &target->dst, target->dst_len, &media);
+      w->reserved_outputs[i] = NULL;
       sfu_session_release(subscriber);
     }
     if (job->publisher) {

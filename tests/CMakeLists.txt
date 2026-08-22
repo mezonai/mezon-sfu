@@ -15,6 +15,10 @@ add_executable(test_packet_pool test_packet_pool.c)
 target_link_libraries(test_packet_pool PRIVATE sfu_core)
 add_test(NAME packet_pool COMMAND test_packet_pool)
 
+add_executable(test_worker_packet_arena test_worker_packet_arena.c)
+target_link_libraries(test_worker_packet_arena PRIVATE sfu_core)
+add_test(NAME worker_packet_arena COMMAND test_worker_packet_arena)
+
 add_executable(test_fanout_mesh test_fanout_mesh.c)
 target_link_libraries(test_fanout_mesh PRIVATE sfu_core)
 add_test(NAME fanout_mesh COMMAND test_fanout_mesh)
