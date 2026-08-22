@@ -77,6 +77,8 @@ static int append_mid_recv_attribute(char *out, size_t out_cap, size_t *offset);
 static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offset, sfu_video_codec_t codec, uint8_t video_pt, uint8_t rtx_pt);
 static int append_remote_audio_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id);
 static int append_remote_video_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id, const char *track_prefix);
+static int append_remote_ssrc_cname(char *out, size_t out_cap, size_t *offset, uint32_t ssrc, int64_t user_id, uint32_t peer_id);
+static int append_remote_fid_group(char *out, size_t out_cap, size_t *offset, uint32_t media_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id);
 
 static int append_bundled_transport_headers(char *out, size_t out_cap, size_t *offset, const char *host, const char *ufrag, const char *pwd,
                                             const char *fingerprint) {
@@ -162,6 +164,10 @@ static int append_bundled_audio(char *out, size_t out_cap, size_t *offset, uint1
   if (live && (!slot || append_remote_audio_msid(out, out_cap, offset, slot->publisher_user_id, slot->publisher_peer_id) != 0)) {
     return -1;
   }
+  if (live && slot &&
+      append_remote_ssrc_cname(out, out_cap, offset, slot->audio_ssrc, slot->publisher_user_id, slot->publisher_peer_id) != 0) {
+    return -1;
+  }
   return 0;
 }
 
@@ -234,6 +240,13 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint1
   }
   if (append_remote_video_msid(out, out_cap, offset, slot->publisher_user_id, slot->publisher_peer_id, screen ? "screen" : "video") != 0) {
     return -1;
+  }
+  {
+    uint32_t media_ssrc = screen ? slot->screen_ssrc : slot->video_ssrc;
+    uint32_t rtx_ssrc = screen ? slot->screen_rtx_ssrc : slot->video_rtx_ssrc;
+    if (append_remote_fid_group(out, out_cap, offset, media_ssrc, rtx_ssrc, slot->publisher_user_id, slot->publisher_peer_id) != 0) {
+      return -1;
+    }
   }
   return 0;
 }
@@ -330,6 +343,33 @@ static int append_remote_video_msid(char *out, size_t out_cap, size_t *offset, i
   }
   n = snprintf(line, sizeof(line), "a=msid:%s %s-%s", stream_id, track_prefix, stream_id);
   return n < 0 || (size_t)n >= sizeof(line) ? -1 : append_line_n(out, out_cap, offset, line, (size_t)n);
+}
+
+static int append_remote_ssrc_cname(char *out, size_t out_cap, size_t *offset, uint32_t ssrc, int64_t user_id, uint32_t peer_id) {
+  if (ssrc == 0) {
+    return 0;
+  }
+  char line[160];
+  int n = snprintf(line, sizeof(line), "a=ssrc:%u cname:u%" PRId64 "-p%u", ssrc, user_id, peer_id);
+  return n < 0 || (size_t)n >= sizeof(line) ? -1 : append_line_n(out, out_cap, offset, line, (size_t)n);
+}
+
+static int append_remote_fid_group(char *out, size_t out_cap, size_t *offset, uint32_t media_ssrc, uint32_t rtx_ssrc, int64_t user_id, uint32_t peer_id) {
+  if (media_ssrc == 0) {
+    return 0;
+  }
+  if (rtx_ssrc != 0 && rtx_ssrc != media_ssrc) {
+    char line[160];
+    int n = snprintf(line, sizeof(line), "a=ssrc-group:FID %u %u", media_ssrc, rtx_ssrc);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+    if (append_remote_ssrc_cname(out, out_cap, offset, media_ssrc, user_id, peer_id) != 0) {
+      return -1;
+    }
+    return append_remote_ssrc_cname(out, out_cap, offset, rtx_ssrc, user_id, peer_id);
+  }
+  return append_remote_ssrc_cname(out, out_cap, offset, media_ssrc, user_id, peer_id);
 }
 
 int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, bool is_audience, char *out,

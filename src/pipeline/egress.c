@@ -149,8 +149,26 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     }
     sfu_metric_inc(media->is_audio ? "egress_protect_fail_audio" : "egress_protect_fail_video");
     sfu_metric_inc("egress_protect_fail");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t protect_fail_logs;
+    uint32_t n = atomic_fetch_add_explicit(&protect_fail_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_WARN("egress: protect_fail n=%u sub_peer=%u pub_peer=%u slot=%u audio=%d status=%d", n + 1, sub_session->peer_id,
+                   media->publisher ? media->publisher->peer_id : 0, media->remote_slot, media->is_audio ? 1 : 0, (int)protect_status);
+    }
+#endif
     return false;
   }
+#ifdef SFU_DIAG_LOG
+  {
+    static _Atomic uint32_t egress_ok_logs;
+    uint32_t n = atomic_fetch_add_explicit(&egress_ok_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_INFO("egress: ok n=%u sub_peer=%u pub_peer=%u slot=%u mid=%u audio=%d ssrc=%" PRIu32 " pt=%u len=%d", n + 1, sub_session->peer_id,
+                   media->publisher ? media->publisher->peer_id : 0, media->remote_slot, mid, media->is_audio ? 1 : 0, outbound_ssrc, incoming_pt, enc_len);
+    }
+  }
+#endif
   pkt->len = (uint32_t)enc_len;
 
   if (sfu_ring_queue_send_zc(&w->send_ring, pkt, (const struct sockaddr *)dst, dst_len) != 0) {

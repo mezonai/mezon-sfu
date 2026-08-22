@@ -292,12 +292,12 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   assert(contains(offer, "a=mid:3"));
   assert(contains(offer, "a=mid:4"));
   assert(contains(offer, "a=mid:5"));
-  assert(!contains(offer, "a=ssrc:1111"));
+  assert(contains(offer, "a=ssrc:1111 cname:u1843252237590073344-p9"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 audio-u1843252237590073344-p9"));
-  assert(!contains(offer, "a=ssrc:2222"));
+  assert(contains(offer, "a=ssrc:2222 cname:u1843252237590073344-p9"));
   assert(contains(offer, "a=msid:u1843252237590073344-p9 video-u1843252237590073344-p9"));
-  assert(!contains(offer, "a=ssrc:3333"));
-  assert(!contains(offer, "a=ssrc-group:FID 2222 3333"));
+  assert(contains(offer, "a=ssrc:3333 cname:u1843252237590073344-p9"));
+  assert(contains(offer, "a=ssrc-group:FID 2222 3333"));
   assert(count_occurrences(offer, "a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid") == 6);
 
   video[0].ssrc = 0;
@@ -384,10 +384,10 @@ static void test_screen_only_remote_offer(void) {
   assert(count_occurrences(offer, "a=inactive") == 4);
   assert(count_occurrences(offer, "a=recvonly") == 1);
   assert(contains(offer, "a=mid:5\r\n"));
-  assert(!contains(offer, "a=ssrc:4444"));
+  assert(contains(offer, "a=ssrc:4444 cname:u42-p7"));
   assert(contains(offer, "a=msid:u42-p7 screen-u42-p7"));
-  assert(!contains(offer, "a=ssrc:5555"));
-  assert(!contains(offer, "a=ssrc-group:FID 4444 5555"));
+  assert(contains(offer, "a=ssrc:5555 cname:u42-p7"));
+  assert(contains(offer, "a=ssrc-group:FID 4444 5555"));
   assert(!contains(offer, "a=ssrc:1111"));
   assert(!contains(offer, "a=ssrc:2222"));
 
@@ -655,7 +655,7 @@ static void test_299_audio_only_remote_offer(void) {
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
   assert(contains(offer, " 897 898 899\r\n"));
   assert(contains(offer, "a=msid:u1000000-p1 audio-u1000000-p1"));
-  assert(count_occurrences(offer, "a=ssrc:") == 0);
+  assert(count_occurrences(offer, "a=ssrc:") == SFU_MAX_REMOTE_SLOTS);
 
   free(offer);
   cleanup_mock_session(&session, remotes);
@@ -772,9 +772,9 @@ static void *run_sdp_tests(void *unused) {
                             sizeof(server_offer), NULL);
   assert(len > 0);
   server_offer[len] = '\0';
-  assert(!contains(server_offer, "a=ssrc:987654321"));
-  assert(!contains(server_offer, "a=ssrc:987654322"));
-  assert(!contains(server_offer, "a=ssrc-group:FID 987654321 987654322"));
+  assert(contains(server_offer, "a=ssrc:987654321"));
+  assert(contains(server_offer, "a=ssrc:987654322"));
+  assert(contains(server_offer, "a=ssrc-group:FID 987654321 987654322"));
   assert(contains(server_offer, "a=msid:u77-p9 video-u77-p9"));
   assert(count_occurrences(server_offer, "a=ice-ufrag:XKrsH3xm") == 6);
   assert(count_occurrences(server_offer, "a=fingerprint:sha-256") == 6);

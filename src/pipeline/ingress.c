@@ -760,6 +760,14 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (m.source == SFU_MEDIA_VIDEO && !atomic_load_explicit(&sender_session->media.camera_enabled, memory_order_acquire)) {
     sfu_metric_inc("camera_disabled_rtp_drop");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t camera_disabled_logs;
+    uint32_t n = atomic_fetch_add_explicit(&camera_disabled_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_WARN("ingress: camera_disabled_rtp_drop n=%u peer=%u ufrag=%s ssrc=%" PRIu32, n + 1, sender_session->peer_id, sender_session->cold->ufrag,
+                   m.rtp.ssrc);
+    }
+#endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
