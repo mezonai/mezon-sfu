@@ -170,7 +170,6 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     room_add_peer(route.room, session);
     newly_bound = session->room == route.room;
     if (newly_bound) {
-      sfu_signaling_notify_peer_admitted(route.room, session);
     }
   } else if (session->room != route.room) {
     SFU_LOG_WARN("worker %u: session ufrag=%s belongs to another room; rejecting route bind", w->worker_index, client_ufrag);

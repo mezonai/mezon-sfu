@@ -57,9 +57,9 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
 
   pthread_mutex_lock(&room->lock);
   sfu_peer_session_t *result = NULL;
-  for (uint32_t i = 0; i < room->peer_count; i++) {
+  for (uint32_t i = 0; i < room->peer_capacity; i++) {
     sfu_peer_session_t *publisher = room->peers[i];
-    if (publisher == subscriber) {
+    if (!publisher || publisher == subscriber) {
       continue;
     }
     sfu_media_snapshot_t pub_msnap = sfu_session_load_media(publisher);
@@ -72,23 +72,19 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
     if (!media_matches) {
       continue;
     }
-    sfu_receiver_snapshot_t *snap = sfu_session_fanout_targets_acquire(publisher);
-    if (!snap) {
-      continue;
-    }
-    for (uint32_t j = 0; j < snap->count; j++) {
-      const sfu_receiver_entry_t *e = &snap->entries[j];
-      bool subscribed = source == SFU_MEDIA_SCREEN ? e->has_screen : e->has_video;
-      if (e->subscriber == subscriber && subscribed) {
+    sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(publisher);
+    sfu_fanout_iter_t iter;
+    sfu_fanout_iter_init(&iter, bundle, source);
+    const sfu_fanout_route_t *route;
+    while ((route = sfu_fanout_iter_next(&iter, NULL)) != NULL) {
+      if (route->subscriber == subscriber) {
         atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
-        if (out_source) {
-          *out_source = source;
-        }
+        if (out_source) *out_source = source;
         result = publisher;
         break;
       }
     }
-    sfu_subscriptions_snapshot_release(snap);
+    sfu_fanout_bundle_release(bundle);
     if (result) {
       break;
     }

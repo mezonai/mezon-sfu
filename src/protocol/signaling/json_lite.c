@@ -126,6 +126,32 @@ int sfu_json_extract_bool(const char *json, size_t json_len, const char *field, 
   return -1;
 }
 
+int sfu_json_extract_uint64(const char *json, size_t json_len, const char *field, uint64_t *out) {
+  if (!json || !field || !out || !*field) return -1;
+  char needle[128];
+  int needle_len = snprintf(needle, sizeof(needle), "\"%s\"", field);
+  if (needle_len <= 0 || (size_t)needle_len >= sizeof(needle)) return -1;
+  const char *end = json + json_len;
+  const char *p = NULL;
+  for (const char *candidate = json; candidate + needle_len <= end; candidate++) {
+    if (memcmp(candidate, needle, (size_t)needle_len) == 0) { p = candidate + needle_len; break; }
+  }
+  if (!p) return -1;
+  while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+  if (p == end || *p++ != ':') return -1;
+  while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+  if (p == end || *p < '0' || *p > '9') return -1;
+  uint64_t value = 0;
+  do {
+    uint32_t digit = (uint32_t)(*p++ - '0');
+    if (value > (UINT64_MAX - digit) / 10) return -1;
+    value = value * 10 + digit;
+  } while (p < end && *p >= '0' && *p <= '9');
+  if (p < end && *p != ',' && *p != '}' && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') return -1;
+  *out = value;
+  return 0;
+}
+
 int sfu_json_escape(const char *value, size_t value_len, char *out, size_t out_cap) {
   if (out == NULL || out_cap == 0) {
     return -1;

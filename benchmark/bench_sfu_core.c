@@ -1,6 +1,5 @@
 #include "memory/packet_pool.h"
 #include "memory/refcount.h"
-#include "net/io_uring.h"
 #include "peer/session.h"
 #include "pipeline/router.h"
 #include "rtp/rtp_packet.h"
@@ -203,35 +202,35 @@ static bool parse_args(int argc, char **argv, bench_config_t *cfg) {
     }
   }
 
-  if (cfg->iterations == 0 || cfg->packet_size < 12 || cfg->workers < 2 || cfg->fanout == 0 || cfg->fanout > SFU_FANOUT_BATCH_CAP || cfg->fanout >= cfg->workers || cfg->subscribers == 0 || cfg->subscribers > SFU_FANOUT_BATCH_CAP) {
+  if (cfg->iterations == 0 || cfg->packet_size < 12 || cfg->workers < 2 || cfg->fanout == 0 || cfg->fanout > SFU_FANOUT_BATCH_CAP ||
+      cfg->fanout >= cfg->workers || cfg->subscribers == 0 || cfg->subscribers > SFU_FANOUT_BATCH_CAP) {
     fprintf(stderr, "invalid benchmark configuration\n");
     return false;
   }
   return true;
 }
 
-static void print_csv_header(void) {
-  printf("benchmark,iterations,jobs,total_ns,ns_per_op,ops_per_sec,workers,fanout,packet_size\n");
-}
+static void print_csv_header(void) { printf("benchmark,iterations,jobs,total_ns,ns_per_op,ops_per_sec,workers,fanout,packet_size\n"); }
 
 static void print_result(const bench_result_t *r, bool csv) {
   double denom = r->jobs ? (double)r->jobs : (double)r->iterations;
   double ns_per_op = (double)r->total_ns / denom;
   double ops_per_sec = denom * 1000000000.0 / (double)r->total_ns;
   if (csv) {
-    printf("%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%.2f,%u,%u,%u\n", r->name, r->iterations, r->jobs, r->total_ns, ns_per_op, ops_per_sec,
-           r->workers, r->fanout, r->packet_size);
+    printf("%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%.2f,%u,%u,%u\n", r->name, r->iterations, r->jobs, r->total_ns, ns_per_op, ops_per_sec, r->workers,
+           r->fanout, r->packet_size);
     return;
   }
   if (strcmp(r->name, "fanout_mesh") == 0) {
     printf("benchmark=%s iterations=%" PRIu64 " jobs=%" PRIu64 " workers=%u fanout=%u packet_size=%u total_ns=%" PRIu64 " ns_per_job=%.2f jobs_per_sec=%.2f\n",
            r->name, r->iterations, r->jobs, r->workers, r->fanout, r->packet_size, r->total_ns, ns_per_op, ops_per_sec);
   } else if (strcmp(r->name, "media_fanout") == 0) {
-    printf("benchmark=%s iterations=%" PRIu64 " jobs=%" PRIu64 " workers=%u subscribers=%u packet_size=%u total_ns=%" PRIu64 " ns_per_target=%.2f targets_per_sec=%.2f\n",
+    printf("benchmark=%s iterations=%" PRIu64 " jobs=%" PRIu64 " workers=%u subscribers=%u packet_size=%u total_ns=%" PRIu64
+           " ns_per_target=%.2f targets_per_sec=%.2f\n",
            r->name, r->iterations, r->jobs, r->workers, r->fanout, r->packet_size, r->total_ns, ns_per_op, ops_per_sec);
   } else {
-    printf("benchmark=%s iterations=%" PRIu64 " packet_size=%u total_ns=%" PRIu64 " ns_per_op=%.2f ops_per_sec=%.2f\n", r->name, r->iterations,
-           r->packet_size, r->total_ns, ns_per_op, ops_per_sec);
+    printf("benchmark=%s iterations=%" PRIu64 " packet_size=%u total_ns=%" PRIu64 " ns_per_op=%.2f ops_per_sec=%.2f\n", r->name, r->iterations, r->packet_size,
+           r->total_ns, ns_per_op, ops_per_sec);
   }
 }
 
@@ -436,6 +435,7 @@ static sfu_peer_session_t *mock_media_session(const char *ufrag, uint16_t owner_
     exit(1);
   }
 
+  s->room_slot = UINT32_MAX;
   snprintf(s->cold->ufrag, sizeof(s->cold->ufrag), "%s", ufrag);
   s->cold->addr = make_addr(port);
   s->cold->addr_len = sizeof(struct sockaddr_in);
@@ -454,7 +454,6 @@ static sfu_peer_session_t *mock_media_session(const char *ufrag, uint16_t owner_
   s->media.uplink_audio.owner = s;
   s->media.uplink_video.owner = s;
   s->media.uplink_video.active = true;
-  atomic_store(&s->graph.next_remote_mid, SFU_REMOTE_MID_BASE);
   return s;
 }
 
@@ -471,26 +470,31 @@ static void free_mock_media_session(sfu_peer_session_t *s) {
   SFU_FREE(s);
 }
 
-static sfu_video_route_snapshot_t *make_video_route_snapshot(sfu_peer_session_t **subs, uint32_t count) {
-  size_t bytes = sizeof(sfu_video_route_snapshot_t) + (size_t)count * sizeof(sfu_video_route_entry_t);
-  sfu_video_route_snapshot_t *snap = SFU_CALLOC(1, bytes);
-  if (!snap) {
+static sfu_fanout_bundle_t *make_video_fanout_bundle(sfu_peer_session_t **subs, uint32_t count) {
+  sfu_fanout_bundle_t *bundle = sfu_fanout_bundle_alloc();
+  if (!bundle) {
     perror("SFU_CALLOC");
     exit(1);
   }
-  atomic_store(&snap->refcount, 1);
-  snap->generation = 1;
-  snap->count = count;
-  snap->capacity = count;
+  bundle->generation = 1;
   for (uint32_t i = 0; i < count; i++) {
-    snap->entries[i].subscriber = subs[i];
-    snap->entries[i].video_ssrc = 0x11110000u + i;
-    snap->entries[i].video_rtx_ssrc = 0x22220000u + i;
-    snap->entries[i].video_pt = 96;
-    snap->entries[i].video_rtx_pt = 97;
-    snap->entries[i].has_video = true;
+    const uint32_t remote_slot = 0;
+    const uint64_t assignment_generation = (uint64_t)i + 1;
+    atomic_store_explicit(&subs[i]->graph.remote_slots.applied_assignment_generations[remote_slot], assignment_generation, memory_order_release);
+    sfu_fanout_route_t route = {.subscriber = subs[i],
+                                .video_ssrc = 0x11110000u + i,
+                                .video_rtx_ssrc = 0x22220000u + i,
+                                .remote_slot = remote_slot,
+                                .assignment_generation = assignment_generation,
+                                .video_pt = 96,
+                                .video_rtx_pt = 97};
+    if (!sfu_fanout_bundle_set(bundle, i, &route, SFU_FANOUT_VIDEO)) {
+      sfu_fanout_bundle_release(bundle);
+      fprintf(stderr, "fanout bundle allocation failed\n");
+      exit(1);
+    }
   }
-  return snap;
+  return bundle;
 }
 
 static void init_bench_worker(sfu_worker_t *w, sfu_packet_pool_t *pool, sfu_fanout_mesh_t *mesh) {
@@ -581,8 +585,8 @@ static bench_result_t bench_media_fanout(const bench_config_t *cfg) {
     subscribers[i] = mock_media_session(ufrag, owner, (uint16_t)(10000 + i));
   }
 
-  sfu_video_route_snapshot_t *snap = make_video_route_snapshot(subscribers, cfg->subscribers);
-  sfu_session_publish_video_fanout(publisher, snap);
+  sfu_fanout_bundle_t *bundle = make_video_fanout_bundle(subscribers, cfg->subscribers);
+  sfu_session_publish_fanout(publisher, bundle);
 
   uint8_t *template_data = malloc(cfg->packet_size);
   if (!template_data) {
@@ -615,8 +619,8 @@ static bench_result_t bench_media_fanout(const bench_config_t *cfg) {
   }
   g_sink += collector.drained_jobs + collector.drained_targets;
 
-  sfu_video_route_snapshot_t *old = sfu_session_publish_video_fanout_swap(publisher, NULL);
-  sfu_video_route_snapshot_release(old);
+  sfu_fanout_bundle_t *old = sfu_session_publish_fanout_swap(publisher, NULL);
+  sfu_fanout_bundle_release(old);
   free(template_data);
   for (uint32_t i = 0; i < cfg->subscribers; i++) {
     free_mock_media_session(subscribers[i]);
@@ -638,21 +642,21 @@ static bench_result_t bench_media_fanout(const bench_config_t *cfg) {
 static void run_one(bench_kind_t kind, const bench_config_t *cfg) {
   bench_result_t result;
   switch (kind) {
-  case BENCH_RTP_PARSE:
-    result = bench_rtp_parse(cfg);
-    break;
-  case BENCH_PACKET_POOL:
-    result = bench_packet_pool(cfg);
-    break;
-  case BENCH_FANOUT_MESH:
-    result = bench_fanout_mesh(cfg);
-    break;
-  case BENCH_MEDIA_FANOUT:
-    result = bench_media_fanout(cfg);
-    break;
-  case BENCH_ALL:
-  default:
-    return;
+    case BENCH_RTP_PARSE:
+      result = bench_rtp_parse(cfg);
+      break;
+    case BENCH_PACKET_POOL:
+      result = bench_packet_pool(cfg);
+      break;
+    case BENCH_FANOUT_MESH:
+      result = bench_fanout_mesh(cfg);
+      break;
+    case BENCH_MEDIA_FANOUT:
+      result = bench_media_fanout(cfg);
+      break;
+    case BENCH_ALL:
+    default:
+      return;
   }
   print_result(&result, cfg->csv);
 }

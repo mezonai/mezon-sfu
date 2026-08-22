@@ -8,6 +8,7 @@
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
+#include "protocol/signaling/signaling.h"
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_kf.h"
 #include "rtp/rtx.h"
@@ -91,11 +92,8 @@ static void *snapshot_acquire(const sfu_peer_session_t *owner, const _Atomic(voi
 
   for (;;) {
     void *snap = atomic_load_explicit(source, memory_order_seq_cst);
-    uint64_t gen_before = snap ? ((sfu_receiver_snapshot_t *)snap)->generation : 0;
     atomic_store_explicit(hazard, snap, memory_order_seq_cst);
-    void *snap_check = atomic_load_explicit(source, memory_order_seq_cst);
-    uint64_t gen_after = snap_check ? ((sfu_receiver_snapshot_t *)snap_check)->generation : 0;
-    if (snap != snap_check || gen_before != gen_after) {
+    if (snap != atomic_load_explicit(source, memory_order_seq_cst)) {
       atomic_store_explicit(hazard, NULL, memory_order_seq_cst);
       continue;
     }
@@ -208,7 +206,9 @@ static void session_table_fail_cleanup(sfu_session_table_t *t) {
     t->reclaimer = NULL;
   }
   SFU_FREE(t->sessions);
+  SFU_FREE(t->free_indices);
   t->sessions = NULL;
+  t->free_indices = NULL;
   t->capacity = 0;
 }
 
@@ -216,8 +216,10 @@ int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx, voi
   memset(t, 0, sizeof(*t));
   t->capacity = SFU_SESSION_TABLE_MAX;
   t->sessions = SFU_CALLOC(t->capacity, sizeof(*t->sessions));
+  t->free_indices = SFU_CALLOC(t->capacity, sizeof(*t->free_indices));
 
-  if (!t->sessions) {
+  if (!t->sessions || !t->free_indices) {
+    session_table_fail_cleanup(t);
     return -1;
   }
 
@@ -233,17 +235,13 @@ int sfu_session_table_init(sfu_session_table_t *t, sfu_dtls_ctx_t *dtls_ctx, voi
   if (workers && worker_count > 0) {
     t->reclaimer = SFU_CALLOC(1, sizeof(*t->reclaimer));
     if (!t->reclaimer) {
-      SFU_FREE(t->sessions);
-      t->sessions = NULL;
-      t->capacity = 0;
+      session_table_fail_cleanup(t);
       return -1;
     }
     if (sfu_epoch_reclaimer_init(t->reclaimer, worker_count, get_worker_generation, workers) != 0) {
       SFU_FREE(t->reclaimer);
       t->reclaimer = NULL;
-      SFU_FREE(t->sessions);
-      t->sessions = NULL;
-      t->capacity = 0;
+      session_table_fail_cleanup(t);
       return -1;
     }
   }
@@ -294,6 +292,192 @@ static uint32_t addr_probe(sfu_hash_slot_t *table, uint32_t cap, uint32_t hash, 
   return for_insert && first_deleted >= 0 ? (uint32_t)first_deleted : SFU_HASH_EMPTY;
 }
 
+static void receiver_chunk_release(sfu_receiver_chunk_t *chunk) {
+  if (!chunk) {
+    return;
+  }
+  uint32_t prev = atomic_fetch_sub_explicit(&chunk->refcount, 1, memory_order_acq_rel);
+  assert(prev != 0 && "receiver chunk refcount underflow");
+  if (prev != 1) {
+    return;
+  }
+  for (uint32_t i = 0; i < SFU_RECEIVER_CHUNK_SIZE; i++) {
+    if (chunk->occupied & (1u << i)) {
+      sfu_session_release(chunk->entries[i].subscriber);
+    }
+  }
+  SFU_FREE(chunk);
+}
+
+sfu_receiver_snapshot_t *sfu_receiver_snapshot_alloc(void) {
+  sfu_receiver_snapshot_t *snap = SFU_CALLOC(1, sizeof(*snap));
+  if (!snap) {
+    return NULL;
+  }
+  atomic_store_explicit(&snap->refcount, 1, memory_order_relaxed);
+  return snap;
+}
+
+const sfu_receiver_entry_t *sfu_receiver_snapshot_at(const sfu_receiver_snapshot_t *snap, uint32_t remote_slot) {
+  if (!snap || remote_slot >= SFU_MAX_REMOTE_SLOTS) {
+    return NULL;
+  }
+  sfu_receiver_chunk_t *chunk = snap->chunks[remote_slot >> SFU_RECEIVER_CHUNK_SHIFT];
+  uint32_t offset = remote_slot & SFU_RECEIVER_CHUNK_MASK;
+  return chunk && (chunk->occupied & (1u << offset)) ? &chunk->entries[offset] : NULL;
+}
+
+void sfu_receiver_snapshot_iter_init(sfu_receiver_snapshot_iter_t *iter, const sfu_receiver_snapshot_t *snap) {
+  iter->snapshot = snap;
+  iter->chunk_index = 0;
+  iter->occupied = 0;
+}
+
+const sfu_receiver_entry_t *sfu_receiver_snapshot_iter_next(sfu_receiver_snapshot_iter_t *iter, uint32_t *remote_slot) {
+  if (!iter || !iter->snapshot) {
+    return NULL;
+  }
+  while (iter->occupied == 0) {
+    if (iter->chunk_index >= SFU_RECEIVER_CHUNK_COUNT) {
+      return NULL;
+    }
+    const sfu_receiver_chunk_t *chunk = iter->snapshot->chunks[iter->chunk_index];
+    iter->occupied = chunk ? chunk->occupied : 0;
+    if (iter->occupied == 0) {
+      iter->chunk_index++;
+    }
+  }
+
+  uint32_t offset = (uint32_t)__builtin_ctz(iter->occupied);
+  const sfu_receiver_chunk_t *chunk = iter->snapshot->chunks[iter->chunk_index];
+  uint32_t slot = (iter->chunk_index << SFU_RECEIVER_CHUNK_SHIFT) + offset;
+  iter->occupied &= iter->occupied - 1;
+  if (iter->occupied == 0) {
+    iter->chunk_index++;
+  }
+  if (remote_slot) {
+    *remote_slot = slot;
+  }
+  return &chunk->entries[offset];
+}
+
+const sfu_receiver_entry_t *sfu_receiver_snapshot_nth(const sfu_receiver_snapshot_t *snap, uint32_t ordinal, uint32_t *remote_slot) {
+  if (!snap || ordinal >= snap->count) {
+    return NULL;
+  }
+  sfu_receiver_snapshot_iter_t iter;
+  sfu_receiver_snapshot_iter_init(&iter, snap);
+  const sfu_receiver_entry_t *entry;
+  while ((entry = sfu_receiver_snapshot_iter_next(&iter, remote_slot)) != NULL) {
+    if (ordinal-- == 0) {
+      return entry;
+    }
+  }
+  return NULL;
+}
+
+const sfu_receiver_entry_t *sfu_receiver_snapshot_find_peer(const sfu_receiver_snapshot_t *snap, const sfu_peer_session_t *peer, uint32_t *remote_slot) {
+  sfu_receiver_snapshot_iter_t iter;
+  sfu_receiver_snapshot_iter_init(&iter, snap);
+  const sfu_receiver_entry_t *entry;
+  uint32_t slot;
+  while ((entry = sfu_receiver_snapshot_iter_next(&iter, &slot)) != NULL) {
+    if (entry->subscriber == peer) {
+      if (remote_slot) {
+        *remote_slot = slot;
+      }
+      return entry;
+    }
+  }
+  return NULL;
+}
+
+bool sfu_receiver_snapshot_set(sfu_receiver_snapshot_t *snap, uint32_t remote_slot, const sfu_receiver_entry_t *entry) {
+  if (!snap || remote_slot >= SFU_MAX_REMOTE_SLOTS) {
+    return false;
+  }
+  uint32_t chunk_index = remote_slot >> SFU_RECEIVER_CHUNK_SHIFT;
+  uint32_t offset = remote_slot & SFU_RECEIVER_CHUNK_MASK;
+  uint32_t bit = 1u << offset;
+  sfu_receiver_chunk_t *chunk = snap->chunks[chunk_index];
+  if (!chunk) {
+    if (!entry) {
+      return true;
+    }
+    chunk = SFU_CALLOC(1, sizeof(*chunk));
+    if (!chunk) {
+      return false;
+    }
+    atomic_store_explicit(&chunk->refcount, 1, memory_order_relaxed);
+    snap->chunks[chunk_index] = chunk;
+  }
+  bool occupied = (chunk->occupied & bit) != 0;
+  if (occupied) {
+    sfu_session_release(chunk->entries[offset].subscriber);
+  }
+  if (entry) {
+    chunk->entries[offset] = *entry;
+    atomic_fetch_add_explicit(&entry->subscriber->refcount, 1, memory_order_relaxed);
+    chunk->occupied |= bit;
+    if (!occupied) {
+      snap->count++;
+    }
+  } else {
+    memset(&chunk->entries[offset], 0, sizeof(chunk->entries[offset]));
+    chunk->occupied &= ~bit;
+    if (occupied) {
+      snap->count--;
+    }
+  }
+  return true;
+}
+
+sfu_receiver_snapshot_t *sfu_receiver_snapshot_copy_set(const sfu_receiver_snapshot_t *old, uint32_t remote_slot, const sfu_receiver_entry_t *entry) {
+  if (remote_slot >= SFU_MAX_REMOTE_SLOTS) {
+    return NULL;
+  }
+  sfu_receiver_snapshot_t *snap = sfu_receiver_snapshot_alloc();
+  if (!snap) {
+    return NULL;
+  }
+  if (old) {
+    snap->generation = old->generation + 1;
+    snap->count = old->count;
+    for (uint32_t i = 0; i < SFU_RECEIVER_CHUNK_COUNT; i++) {
+      snap->chunks[i] = old->chunks[i];
+      if (snap->chunks[i]) {
+        atomic_fetch_add_explicit(&snap->chunks[i]->refcount, 1, memory_order_relaxed);
+      }
+    }
+  } else {
+    snap->generation = 1;
+  }
+  uint32_t ci = remote_slot >> SFU_RECEIVER_CHUNK_SHIFT;
+  sfu_receiver_chunk_t *shared = snap->chunks[ci];
+  if (shared) {
+    sfu_receiver_chunk_t *copy = SFU_CALLOC(1, sizeof(*copy));
+    if (!copy) {
+      sfu_subscriptions_snapshot_release(snap);
+      return NULL;
+    }
+    atomic_store_explicit(&copy->refcount, 1, memory_order_relaxed);
+    copy->occupied = shared->occupied;
+    memcpy(copy->entries, shared->entries, sizeof(copy->entries));
+    for (uint32_t i = 0; i < SFU_RECEIVER_CHUNK_SIZE; i++) {
+      if (copy->occupied & (1u << i)) {
+        atomic_fetch_add_explicit(&copy->entries[i].subscriber->refcount, 1, memory_order_relaxed);
+      }
+    }
+    snap->chunks[ci] = copy;
+    receiver_chunk_release(shared);
+  }
+  if (!sfu_receiver_snapshot_set(snap, remote_slot, entry)) {
+    sfu_subscriptions_snapshot_release(snap);
+    return NULL;
+  }
+  return snap;
+}
+
 sfu_receiver_snapshot_t *sfu_session_subscriptions_acquire(const sfu_peer_session_t *s) {
   return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->graph.receivers) : NULL;
 }
@@ -305,8 +489,8 @@ void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap) {
   uint32_t prev = atomic_fetch_sub_explicit(&snap->refcount, 1, memory_order_acq_rel);
   assert(prev != 0 && "snapshot refcount underflow");
   if (prev == 1) {
-    for (uint32_t i = 0; i < snap->count; i++) {
-      sfu_session_release(snap->entries[i].subscriber);
+    for (uint32_t i = 0; i < SFU_RECEIVER_CHUNK_COUNT; i++) {
+      receiver_chunk_release(snap->chunks[i]);
     }
     SFU_FREE(snap);
   }
@@ -315,7 +499,7 @@ void sfu_subscriptions_snapshot_release(sfu_receiver_snapshot_t *snap) {
 void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
   pthread_mutex_lock(&owner->graph.lock);
   sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->graph.receivers, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.receivers, new_snap, memory_order_release);
+  atomic_store_explicit(&owner->graph.receivers, new_snap, memory_order_seq_cst);
   pthread_mutex_unlock(&owner->graph.lock);
   snapshot_wait_unhazarded(old);
   sfu_subscriptions_snapshot_release(old);
@@ -324,121 +508,224 @@ void sfu_session_publish_receivers(sfu_peer_session_t *owner, sfu_receiver_snaps
 sfu_receiver_snapshot_t *sfu_session_publish_receivers_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
   pthread_mutex_lock(&owner->graph.lock);
   sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->graph.receivers, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.receivers, new_snap, memory_order_release);
+  atomic_store_explicit(&owner->graph.receivers, new_snap, memory_order_seq_cst);
   pthread_mutex_unlock(&owner->graph.lock);
   return old;
 }
 
-sfu_receiver_snapshot_t *sfu_session_fanout_targets_acquire(const sfu_peer_session_t *s) {
-  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->graph.fanout_targets) : NULL;
-}
-
-void sfu_session_publish_fanout_targets(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
-  pthread_mutex_lock(&owner->graph.lock);
-  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->graph.fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.fanout_targets, new_snap, memory_order_release);
-  pthread_mutex_unlock(&owner->graph.lock);
-  snapshot_wait_unhazarded(old);
-  sfu_subscriptions_snapshot_release(old);
-}
-
-sfu_receiver_snapshot_t *sfu_session_publish_fanout_targets_swap(sfu_peer_session_t *owner, sfu_receiver_snapshot_t *new_snap) {
-  pthread_mutex_lock(&owner->graph.lock);
-  sfu_receiver_snapshot_t *old = atomic_load_explicit(&owner->graph.fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.fanout_targets, new_snap, memory_order_release);
-  pthread_mutex_unlock(&owner->graph.lock);
-  return old;
-}
-
-sfu_audio_route_snapshot_t *sfu_session_audio_fanout_acquire(const sfu_peer_session_t *s) {
-  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->graph.audio_fanout_targets) : NULL;
-}
-
-void sfu_audio_route_snapshot_release(sfu_audio_route_snapshot_t *snap) {
-  if (!snap) {
+static void fanout_chunk_release(sfu_fanout_chunk_t *chunk) {
+  if (!chunk) {
     return;
   }
-  uint32_t prev = atomic_fetch_sub_explicit(&snap->refcount, 1, memory_order_acq_rel);
-  assert(prev != 0 && "audio route snapshot refcount underflow");
-  if (prev == 1) {
-    for (uint32_t i = 0; i < snap->count; i++) {
-      sfu_session_release(snap->entries[i].subscriber);
-    }
-    SFU_FREE(snap);
-  }
-}
-
-void sfu_session_publish_audio_fanout(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap) {
-  pthread_mutex_lock(&owner->graph.lock);
-  sfu_audio_route_snapshot_t *old = atomic_load_explicit(&owner->graph.audio_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.audio_fanout_targets, new_snap, memory_order_release);
-  pthread_mutex_unlock(&owner->graph.lock);
-  snapshot_wait_unhazarded(old);
-  sfu_audio_route_snapshot_release(old);
-}
-
-sfu_audio_route_snapshot_t *sfu_session_publish_audio_fanout_swap(sfu_peer_session_t *owner, sfu_audio_route_snapshot_t *new_snap) {
-  pthread_mutex_lock(&owner->graph.lock);
-  sfu_audio_route_snapshot_t *old = atomic_load_explicit(&owner->graph.audio_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.audio_fanout_targets, new_snap, memory_order_release);
-  pthread_mutex_unlock(&owner->graph.lock);
-  return old;
-}
-
-sfu_video_route_snapshot_t *sfu_session_video_fanout_acquire(const sfu_peer_session_t *s) {
-  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->graph.video_fanout_targets) : NULL;
-}
-
-void sfu_video_route_snapshot_release(sfu_video_route_snapshot_t *snap) {
-  if (!snap) {
+  uint32_t prev = atomic_fetch_sub_explicit(&chunk->refcount, 1, memory_order_acq_rel);
+  assert(prev != 0 && "fanout chunk refcount underflow");
+  if (prev != 1) {
     return;
   }
-  uint32_t prev = atomic_fetch_sub_explicit(&snap->refcount, 1, memory_order_acq_rel);
-  assert(prev != 0 && "video route snapshot refcount underflow");
-  if (prev == 1) {
-    for (uint32_t i = 0; i < snap->count; i++) {
-      sfu_session_release(snap->entries[i].subscriber);
+  for (uint32_t i = 0; i < SFU_FANOUT_CHUNK_SIZE; i++) {
+    if (chunk->occupied & (1u << i)) {
+      sfu_session_release(chunk->routes[i].subscriber);
     }
-    SFU_FREE(snap);
   }
+  SFU_FREE(chunk);
 }
 
-void sfu_session_publish_video_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
-  pthread_mutex_lock(&owner->graph.lock);
-  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->graph.video_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.video_fanout_targets, new_snap, memory_order_release);
-  pthread_mutex_unlock(&owner->graph.lock);
-  snapshot_wait_unhazarded(old);
-  sfu_video_route_snapshot_release(old);
+sfu_fanout_bundle_t *sfu_fanout_bundle_alloc(void) {
+  sfu_fanout_bundle_t *bundle = SFU_CALLOC(1, sizeof(*bundle));
+  if (bundle) {
+    atomic_store_explicit(&bundle->refcount, 1, memory_order_relaxed);
+  }
+  return bundle;
 }
 
-sfu_video_route_snapshot_t *sfu_session_publish_video_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
+const sfu_fanout_route_t *sfu_fanout_bundle_at(const sfu_fanout_bundle_t *bundle, uint32_t slot) {
+  if (!bundle || slot >= SFU_MAX_REMOTE_SLOTS) {
+    return NULL;
+  }
+  const sfu_fanout_chunk_t *chunk = bundle->chunks[slot >> SFU_FANOUT_CHUNK_SHIFT];
+  uint32_t offset = slot & SFU_FANOUT_CHUNK_MASK;
+  return chunk && (chunk->occupied & (1u << offset)) ? &chunk->routes[offset] : NULL;
+}
+
+const sfu_fanout_route_t *sfu_fanout_bundle_find_peer(const sfu_fanout_bundle_t *bundle, const sfu_peer_session_t *peer, uint32_t *slot) {
+  if (!bundle) {
+    return NULL;
+  }
+  for (uint32_t ci = 0; ci < SFU_FANOUT_CHUNK_COUNT; ci++) {
+    const sfu_fanout_chunk_t *chunk = bundle->chunks[ci];
+    uint32_t occupied = chunk ? chunk->occupied : 0;
+    while (occupied) {
+      uint32_t offset = (uint32_t)__builtin_ctz(occupied);
+      if (chunk->routes[offset].subscriber == peer) {
+        if (slot) {
+          *slot = (ci << SFU_FANOUT_CHUNK_SHIFT) + offset;
+        }
+        return &chunk->routes[offset];
+      }
+      occupied &= occupied - 1;
+    }
+  }
+  return NULL;
+}
+
+bool sfu_fanout_bundle_set(sfu_fanout_bundle_t *bundle, uint32_t slot, const sfu_fanout_route_t *route, uint8_t eligibility) {
+  if (!bundle || slot >= SFU_MAX_REMOTE_SLOTS) {
+    return false;
+  }
+  uint32_t ci = slot >> SFU_FANOUT_CHUNK_SHIFT, offset = slot & SFU_FANOUT_CHUNK_MASK, bit = 1u << offset;
+  sfu_fanout_chunk_t *chunk = bundle->chunks[ci];
+  if (!chunk) {
+    if (!route) {
+      return true;
+    }
+    chunk = SFU_CALLOC(1, sizeof(*chunk));
+    if (!chunk) {
+      return false;
+    }
+    atomic_store_explicit(&chunk->refcount, 1, memory_order_relaxed);
+    bundle->chunks[ci] = chunk;
+  }
+  bool occupied = (chunk->occupied & bit) != 0;
+  if (occupied) {
+    sfu_session_release(chunk->routes[offset].subscriber);
+  }
+  if (route) {
+    chunk->routes[offset] = *route;
+    atomic_fetch_add_explicit(&route->subscriber->refcount, 1, memory_order_relaxed);
+    chunk->occupied |= bit;
+    if (!occupied) {
+      bundle->count++;
+    }
+  } else {
+    memset(&chunk->routes[offset], 0, sizeof(chunk->routes[offset]));
+    chunk->occupied &= ~bit;
+    if (occupied) {
+      bundle->count--;
+    }
+  }
+  chunk->audio_eligible = (chunk->audio_eligible & ~bit) | ((route && (eligibility & SFU_FANOUT_AUDIO)) ? bit : 0);
+  chunk->video_eligible = (chunk->video_eligible & ~bit) | ((route && (eligibility & SFU_FANOUT_VIDEO)) ? bit : 0);
+  chunk->screen_eligible = (chunk->screen_eligible & ~bit) | ((route && (eligibility & SFU_FANOUT_SCREEN)) ? bit : 0);
+  return true;
+}
+
+sfu_fanout_bundle_t *sfu_fanout_bundle_copy_set(const sfu_fanout_bundle_t *old, uint32_t slot, const sfu_fanout_route_t *route, uint8_t eligibility) {
+  if (slot >= SFU_MAX_REMOTE_SLOTS) {
+    return NULL;
+  }
+  sfu_fanout_bundle_t *bundle = sfu_fanout_bundle_alloc();
+  if (!bundle) {
+    return NULL;
+  }
+  if (old) {
+    bundle->generation = old->generation + 1;
+    bundle->count = old->count;
+    for (uint32_t i = 0; i < SFU_FANOUT_CHUNK_COUNT; i++) {
+      bundle->chunks[i] = old->chunks[i];
+      if (bundle->chunks[i]) {
+        atomic_fetch_add_explicit(&bundle->chunks[i]->refcount, 1, memory_order_relaxed);
+      }
+    }
+  } else {
+    bundle->generation = 1;
+  }
+  uint32_t ci = slot >> SFU_FANOUT_CHUNK_SHIFT;
+  sfu_fanout_chunk_t *shared = bundle->chunks[ci];
+  if (shared) {
+    sfu_fanout_chunk_t *copy = SFU_CALLOC(1, sizeof(*copy));
+    if (!copy) {
+      sfu_fanout_bundle_release(bundle);
+      return NULL;
+    }
+    atomic_store_explicit(&copy->refcount, 1, memory_order_relaxed);
+    copy->occupied = shared->occupied;
+    copy->audio_eligible = shared->audio_eligible;
+    copy->video_eligible = shared->video_eligible;
+    copy->screen_eligible = shared->screen_eligible;
+    memcpy(copy->routes, shared->routes, sizeof(copy->routes));
+    for (uint32_t i = 0; i < SFU_FANOUT_CHUNK_SIZE; i++) {
+      if (copy->occupied & (1u << i)) {
+        atomic_fetch_add_explicit(&copy->routes[i].subscriber->refcount, 1, memory_order_relaxed);
+      }
+    }
+    bundle->chunks[ci] = copy;
+    fanout_chunk_release(shared);
+  }
+  if (!sfu_fanout_bundle_set(bundle, slot, route, eligibility)) {
+    sfu_fanout_bundle_release(bundle);
+    return NULL;
+  }
+  return bundle;
+}
+
+void sfu_fanout_iter_init(sfu_fanout_iter_t *iter, const sfu_fanout_bundle_t *bundle, sfu_media_kind_t kind) {
+  iter->bundle = bundle;
+  iter->chunk_index = 0;
+  iter->eligible = 0;
+  iter->kind = kind;
+}
+
+const sfu_fanout_route_t *sfu_fanout_iter_next(sfu_fanout_iter_t *iter, uint32_t *slot) {
+  if (!iter || !iter->bundle) {
+    return NULL;
+  }
+  while (!iter->eligible) {
+    if (iter->chunk_index >= SFU_FANOUT_CHUNK_COUNT) {
+      return NULL;
+    }
+    const sfu_fanout_chunk_t *chunk = iter->bundle->chunks[iter->chunk_index];
+    iter->eligible = !chunk                           ? 0
+                     : iter->kind == SFU_MEDIA_AUDIO  ? chunk->audio_eligible
+                     : iter->kind == SFU_MEDIA_SCREEN ? chunk->screen_eligible
+                                                      : chunk->video_eligible;
+    if (!iter->eligible) {
+      iter->chunk_index++;
+    }
+  }
+  uint32_t offset = (uint32_t)__builtin_ctz(iter->eligible);
+  const sfu_fanout_chunk_t *chunk = iter->bundle->chunks[iter->chunk_index];
+  uint32_t absolute = (iter->chunk_index << SFU_FANOUT_CHUNK_SHIFT) + offset;
+  iter->eligible &= iter->eligible - 1;
+  if (!iter->eligible) {
+    iter->chunk_index++;
+  }
+  if (slot) {
+    *slot = absolute;
+  }
+  return &chunk->routes[offset];
+}
+
+sfu_fanout_bundle_t *sfu_session_fanout_acquire(const sfu_peer_session_t *s) {
+  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->graph.fanout_bundle) : NULL;
+}
+
+void sfu_fanout_bundle_release(sfu_fanout_bundle_t *bundle) {
+  if (!bundle) {
+    return;
+  }
+  uint32_t prev = atomic_fetch_sub_explicit(&bundle->refcount, 1, memory_order_acq_rel);
+  assert(prev != 0 && "fanout bundle refcount underflow");
+  if (prev != 1) {
+    return;
+  }
+  for (uint32_t i = 0; i < SFU_FANOUT_CHUNK_COUNT; i++) {
+    fanout_chunk_release(bundle->chunks[i]);
+  }
+  SFU_FREE(bundle);
+}
+
+sfu_fanout_bundle_t *sfu_session_publish_fanout_swap(sfu_peer_session_t *owner, sfu_fanout_bundle_t *bundle) {
   pthread_mutex_lock(&owner->graph.lock);
-  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->graph.video_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.video_fanout_targets, new_snap, memory_order_release);
+  sfu_fanout_bundle_t *old = atomic_load_explicit(&owner->graph.fanout_bundle, memory_order_relaxed);
+  atomic_store_explicit(&owner->graph.fanout_bundle, bundle, memory_order_seq_cst);
   pthread_mutex_unlock(&owner->graph.lock);
   return old;
 }
 
-sfu_video_route_snapshot_t *sfu_session_screen_fanout_acquire(const sfu_peer_session_t *s) {
-  return s ? snapshot_acquire(s, (const _Atomic(void *) *)&s->graph.screen_fanout_targets) : NULL;
-}
-
-void sfu_session_publish_screen_fanout(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
-  pthread_mutex_lock(&owner->graph.lock);
-  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->graph.screen_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.screen_fanout_targets, new_snap, memory_order_release);
-  pthread_mutex_unlock(&owner->graph.lock);
+void sfu_session_publish_fanout(sfu_peer_session_t *owner, sfu_fanout_bundle_t *bundle) {
+  sfu_fanout_bundle_t *old = sfu_session_publish_fanout_swap(owner, bundle);
   snapshot_wait_unhazarded(old);
-  sfu_video_route_snapshot_release(old);
-}
-
-sfu_video_route_snapshot_t *sfu_session_publish_screen_fanout_swap(sfu_peer_session_t *owner, sfu_video_route_snapshot_t *new_snap) {
-  pthread_mutex_lock(&owner->graph.lock);
-  sfu_video_route_snapshot_t *old = atomic_load_explicit(&owner->graph.screen_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&owner->graph.screen_fanout_targets, new_snap, memory_order_release);
-  pthread_mutex_unlock(&owner->graph.lock);
-  return old;
+  sfu_fanout_bundle_release(old);
 }
 
 void sfu_snapshot_reclaim_receivers(sfu_receiver_snapshot_t *old) {
@@ -449,20 +736,321 @@ void sfu_snapshot_reclaim_receivers(sfu_receiver_snapshot_t *old) {
   sfu_subscriptions_snapshot_release(old);
 }
 
-void sfu_snapshot_reclaim_audio(sfu_audio_route_snapshot_t *old) {
+void sfu_snapshot_reclaim_fanout(sfu_fanout_bundle_t *old) {
   if (!old) {
     return;
   }
   snapshot_wait_unhazarded(old);
-  sfu_audio_route_snapshot_release(old);
+  sfu_fanout_bundle_release(old);
 }
 
-void sfu_snapshot_reclaim_video(sfu_video_route_snapshot_t *old) {
-  if (!old) {
+void sfu_remote_offer_manifest_retain(sfu_remote_offer_manifest_t *manifest) {
+  if (manifest) {
+    atomic_fetch_add_explicit(&manifest->refcount, 1, memory_order_relaxed);
+  }
+}
+
+void sfu_remote_offer_manifest_release(sfu_remote_offer_manifest_t *manifest) {
+  if (manifest && atomic_fetch_sub_explicit(&manifest->refcount, 1, memory_order_acq_rel) == 1) {
+    sfu_subscriptions_snapshot_release(manifest->receiver_root);
+    SFU_FREE(manifest);
+  }
+}
+
+static uint64_t remote_slot_next_nonzero(uint64_t *counter) {
+  uint64_t generation = ++*counter;
+  if (generation == 0) {
+    generation = ++*counter;
+  }
+  return generation;
+}
+
+bool sfu_session_remote_slot_reserve(sfu_peer_session_t *session, int64_t publisher_user_id, uint32_t publisher_peer_id, uint32_t *slot,
+                                     uint64_t *assignment_generation) {
+  if (!session || publisher_peer_id == 0) {
+    return false;
+  }
+  pthread_mutex_lock(&session->graph.lock);
+  sfu_remote_slot_table_t *table = &session->graph.remote_slots;
+  uint32_t free_slot = UINT32_MAX;
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_remote_slot_t *candidate = &table->slots[i];
+    if (candidate->state == SFU_REMOTE_SLOT_ACTIVE && candidate->publisher_peer_id == publisher_peer_id && candidate->publisher_user_id == publisher_user_id) {
+      if (slot) {
+        *slot = i;
+      }
+      if (assignment_generation) {
+        *assignment_generation = candidate->assignment_generation;
+      }
+      pthread_mutex_unlock(&session->graph.lock);
+      return true;
+    }
+    if (free_slot == UINT32_MAX && candidate->state == SFU_REMOTE_SLOT_FREE) {
+      free_slot = i;
+    }
+  }
+  if (free_slot == UINT32_MAX) {
+    pthread_mutex_unlock(&session->graph.lock);
+    return false;
+  }
+  sfu_remote_slot_t *reserved = &table->slots[free_slot];
+  reserved->assignment_generation = remote_slot_next_nonzero(&table->next_assignment_generation);
+  reserved->publisher_user_id = publisher_user_id;
+  reserved->publisher_peer_id = publisher_peer_id;
+  reserved->state = SFU_REMOTE_SLOT_ACTIVE;
+  if (free_slot >= table->high_water_slots) {
+    table->high_water_slots = free_slot + 1;
+  }
+  if (slot) {
+    *slot = free_slot;
+  }
+  if (assignment_generation) {
+    *assignment_generation = reserved->assignment_generation;
+  }
+  pthread_mutex_unlock(&session->graph.lock);
+  return true;
+}
+
+bool sfu_session_remote_slot_retire(sfu_peer_session_t *session, uint32_t slot, uint64_t assignment_generation) {
+  if (!session || slot >= SFU_MAX_REMOTE_SLOTS || assignment_generation == 0) {
+    return false;
+  }
+  pthread_mutex_lock(&session->graph.lock);
+  sfu_remote_slot_t *remote = &session->graph.remote_slots.slots[slot];
+  bool matched = remote->state == SFU_REMOTE_SLOT_ACTIVE && remote->assignment_generation == assignment_generation;
+  if (matched) {
+    uint64_t applied = atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[slot], memory_order_acquire);
+    bool offered =
+        session->graph.remote_slots.offered_manifest && session->graph.remote_slots.offered_manifest->assignment_generations[slot] == assignment_generation;
+    if (offered) {
+      remote->state = SFU_REMOTE_SLOT_RETIRING_OFFERED;
+    } else if (applied == assignment_generation) {
+      remote->state = SFU_REMOTE_SLOT_RETIRING;
+    } else {
+      memset(remote, 0, sizeof(*remote));
+    }
+  }
+  pthread_mutex_unlock(&session->graph.lock);
+  return matched;
+}
+
+sfu_remote_offer_manifest_t *sfu_session_remote_offer_capture(sfu_peer_session_t *session) {
+  if (!session) {
+    return NULL;
+  }
+  sfu_remote_offer_manifest_t *manifest = SFU_CALLOC(1, sizeof(*manifest));
+  if (!manifest) {
+    return NULL;
+  }
+  atomic_store_explicit(&manifest->refcount, 1, memory_order_relaxed);
+
+  pthread_mutex_lock(&session->graph.lock);
+  sfu_remote_slot_table_t *table = &session->graph.remote_slots;
+  manifest->offer_generation = remote_slot_next_nonzero(&table->next_offer_generation);
+  manifest->high_water_slots = table->high_water_slots;
+  manifest->receiver_root = atomic_load_explicit(&session->graph.receivers, memory_order_acquire);
+  if (manifest->receiver_root) {
+    atomic_fetch_add_explicit(&manifest->receiver_root->refcount, 1, memory_order_relaxed);
+  }
+  for (uint32_t i = 0; i < manifest->high_water_slots; i++) {
+    if (table->slots[i].state == SFU_REMOTE_SLOT_ACTIVE) {
+      manifest->assignment_generations[i] = table->slots[i].assignment_generation;
+    }
+  }
+  pthread_mutex_unlock(&session->graph.lock);
+  return manifest;
+}
+
+bool sfu_session_remote_offer_install(sfu_peer_session_t *session, sfu_remote_offer_manifest_t *manifest) {
+  if (!session || !manifest || manifest->offer_generation == 0) {
+    return false;
+  }
+  pthread_mutex_lock(&session->graph.lock);
+  sfu_remote_slot_table_t *table = &session->graph.remote_slots;
+  if (table->offered_manifest && table->offered_manifest->offer_generation >= manifest->offer_generation) {
+    pthread_mutex_unlock(&session->graph.lock);
+    return false;
+  }
+  for (uint32_t i = 0; i < table->high_water_slots; i++) {
+    if (table->slots[i].state == SFU_REMOTE_SLOT_RETIRING && (i >= manifest->high_water_slots || manifest->assignment_generations[i] == 0)) {
+      table->slots[i].state = SFU_REMOTE_SLOT_RETIRING_OFFERED;
+    }
+  }
+  sfu_remote_offer_manifest_t *old = table->offered_manifest;
+  table->offered_manifest = manifest;
+  sfu_remote_offer_manifest_retain(manifest);
+  pthread_mutex_unlock(&session->graph.lock);
+  sfu_remote_offer_manifest_release(old);
+  return true;
+}
+
+sfu_remote_offer_manifest_t *sfu_session_remote_offer_acquire_current(sfu_peer_session_t *session) {
+  if (!session) {
+    return NULL;
+  }
+  pthread_mutex_lock(&session->graph.lock);
+  sfu_remote_offer_manifest_t *manifest = session->graph.remote_slots.offered_manifest;
+  sfu_remote_offer_manifest_retain(manifest);
+  pthread_mutex_unlock(&session->graph.lock);
+  return manifest;
+}
+
+bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sfu_remote_offer_manifest_t *manifest) {
+  if (!session || !manifest || manifest->offer_generation == 0) {
+    return false;
+  }
+  pthread_mutex_lock(&session->graph.lock);
+  sfu_remote_slot_table_t *table = &session->graph.remote_slots;
+  if (table->offered_manifest != manifest) {
+    pthread_mutex_unlock(&session->graph.lock);
+    return false;
+  }
+  for (uint32_t i = 0; i < manifest->high_water_slots; i++) {
+    uint64_t offered = manifest->assignment_generations[i];
+    sfu_remote_slot_t *remote = &table->slots[i];
+    if (offered != 0 && remote->assignment_generation != offered) {
+      pthread_mutex_unlock(&session->graph.lock);
+      return false;
+    }
+  }
+  for (uint32_t i = 0; i < table->high_water_slots; i++) {
+    uint64_t offered = i < manifest->high_water_slots ? manifest->assignment_generations[i] : 0;
+    atomic_store_explicit(&table->applied_assignment_generations[i], offered, memory_order_release);
+    sfu_remote_slot_t *remote = &table->slots[i];
+    if (offered == 0 && (remote->state == SFU_REMOTE_SLOT_RETIRING || remote->state == SFU_REMOTE_SLOT_RETIRING_OFFERED)) {
+      memset(remote, 0, sizeof(*remote));
+    } else if (offered != 0 && (remote->state == SFU_REMOTE_SLOT_RETIRING || remote->state == SFU_REMOTE_SLOT_RETIRING_OFFERED)) {
+      remote->state = SFU_REMOTE_SLOT_RETIRING;
+    }
+  }
+  while (table->high_water_slots > 0) {
+    uint32_t last = table->high_water_slots - 1;
+    if (table->slots[last].state != SFU_REMOTE_SLOT_FREE) {
+      break;
+    }
+    if (atomic_load_explicit(&table->applied_assignment_generations[last], memory_order_acquire) != 0) {
+      break;
+    }
+    table->high_water_slots = last;
+  }
+  table->offered_manifest = NULL;
+  pthread_mutex_unlock(&session->graph.lock);
+  sfu_remote_offer_manifest_release((sfu_remote_offer_manifest_t *)manifest);
+  return true;
+}
+
+bool sfu_session_remote_slot_authorized(const sfu_peer_session_t *session, uint32_t slot, uint64_t assignment_generation) {
+  return session && slot < SFU_MAX_REMOTE_SLOTS && assignment_generation != 0 &&
+         atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[slot], memory_order_acquire) == assignment_generation;
+}
+
+uint32_t sfu_session_remote_slot_high_water(const sfu_peer_session_t *session) {
+  if (!session) {
+    return 0;
+  }
+  pthread_mutex_lock((pthread_mutex_t *)&session->graph.lock);
+  uint32_t high_water = session->graph.remote_slots.high_water_slots;
+  pthread_mutex_unlock((pthread_mutex_t *)&session->graph.lock);
+  return high_water;
+}
+
+void sfu_session_remote_slots_teardown(sfu_peer_session_t *session) {
+  if (!session) {
     return;
   }
-  snapshot_wait_unhazarded(old);
-  sfu_video_route_snapshot_release(old);
+  pthread_mutex_lock(&session->graph.lock);
+  sfu_remote_offer_manifest_t *manifest = session->graph.remote_slots.offered_manifest;
+  session->graph.remote_slots.offered_manifest = NULL;
+  memset(session->graph.remote_slots.slots, 0, sizeof(session->graph.remote_slots.slots));
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    atomic_store_explicit(&session->graph.remote_slots.applied_assignment_generations[i], 0, memory_order_release);
+  }
+  session->graph.remote_slots.high_water_slots = 0;
+  pthread_mutex_unlock(&session->graph.lock);
+  sfu_remote_offer_manifest_release(manifest);
+}
+
+void sfu_session_graph_assert_invariants(const sfu_peer_session_t *session) {
+#ifndef NDEBUG
+  if (!session) {
+    return;
+  }
+  pthread_mutex_lock((pthread_mutex_t *)&session->graph.lock);
+  sfu_room_t *room = session->room;
+  if (room) {
+    assert(session->room_slot < SFU_ROOM_MAX_PEERS);
+    assert(session->room_slot < room->peer_capacity);
+    assert(room->occupied[session->room_slot]);
+    assert(room->peers[session->room_slot] == session);
+  } else {
+    assert(session->room_slot == UINT32_MAX);
+  }
+
+  const sfu_remote_slot_table_t *table = &session->graph.remote_slots;
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    const sfu_remote_slot_t *slot = &table->slots[i];
+    uint64_t applied = atomic_load_explicit(&table->applied_assignment_generations[i], memory_order_acquire);
+    if (slot->state == SFU_REMOTE_SLOT_FREE) {
+      assert(applied == 0);
+      continue;
+    }
+    assert(slot->assignment_generation != 0);
+    for (uint32_t j = i + 1; j < SFU_MAX_REMOTE_SLOTS; j++) {
+      const sfu_remote_slot_t *other = &table->slots[j];
+      if (other->state != SFU_REMOTE_SLOT_ACTIVE || slot->state != SFU_REMOTE_SLOT_ACTIVE) {
+        continue;
+      }
+      assert(!(other->publisher_user_id == slot->publisher_user_id && other->publisher_peer_id == slot->publisher_peer_id));
+    }
+    if (slot->state == SFU_REMOTE_SLOT_RETIRING || slot->state == SFU_REMOTE_SLOT_RETIRING_OFFERED) {
+      if (applied != 0) {
+        assert(applied == slot->assignment_generation);
+      }
+    }
+  }
+
+  sfu_receiver_snapshot_t *subs = atomic_load_explicit(&session->graph.receivers, memory_order_acquire);
+  if (subs) {
+    sfu_receiver_snapshot_iter_t iter;
+    sfu_receiver_snapshot_iter_init(&iter, subs);
+    const sfu_receiver_entry_t *entry;
+    uint32_t remote_slot;
+    while ((entry = sfu_receiver_snapshot_iter_next(&iter, &remote_slot)) != NULL) {
+      assert(remote_slot < SFU_MAX_REMOTE_SLOTS);
+      assert(entry->remote_slot == 0 || entry->remote_slot == remote_slot);
+      assert(entry->assignment_generation != 0);
+      assert(table->slots[remote_slot].state != SFU_REMOTE_SLOT_FREE);
+      if (table->slots[remote_slot].state == SFU_REMOTE_SLOT_ACTIVE) {
+        assert(table->slots[remote_slot].assignment_generation == entry->assignment_generation);
+      }
+    }
+  }
+
+  sfu_fanout_bundle_t *bundle = atomic_load_explicit(&session->graph.fanout_bundle, memory_order_acquire);
+  if (bundle) {
+    atomic_fetch_add_explicit(&bundle->refcount, 1, memory_order_relaxed);
+  }
+  pthread_mutex_unlock((pthread_mutex_t *)&session->graph.lock);
+
+  if (bundle) {
+    for (uint32_t slot = 0; slot < SFU_MAX_REMOTE_SLOTS; slot++) {
+      const sfu_fanout_route_t *route = sfu_fanout_bundle_at(bundle, slot);
+      if (!route) {
+        continue;
+      }
+      assert(route->subscriber);
+      assert(route->assignment_generation != 0);
+      sfu_receiver_snapshot_t *peer_subs = sfu_session_subscriptions_acquire(route->subscriber);
+      const sfu_receiver_entry_t *peer_entry = sfu_receiver_snapshot_find_peer(peer_subs, session, NULL);
+      assert(peer_entry);
+      assert(peer_entry->assignment_generation == route->assignment_generation);
+      sfu_subscriptions_snapshot_release(peer_subs);
+    }
+    sfu_fanout_bundle_release(bundle);
+  }
+#else
+  (void)session;
+#endif
 }
 
 static void sfu_session_free_resources(sfu_peer_session_t *s) {
@@ -481,6 +1069,8 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     }
   }
 
+  sfu_session_remote_slots_teardown(s);
+
   pthread_mutex_lock(&s->graph.lock);
   sfu_receiver_snapshot_t *snap = atomic_load_explicit(&s->graph.receivers, memory_order_acquire);
   atomic_store_explicit(&s->graph.receivers, NULL, memory_order_release);
@@ -489,32 +1079,11 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
   sfu_subscriptions_snapshot_release(snap);
 
   pthread_mutex_lock(&s->graph.lock);
-  snap = atomic_load_explicit(&s->graph.fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&s->graph.fanout_targets, NULL, memory_order_release);
+  sfu_fanout_bundle_t *fanout = atomic_load_explicit(&s->graph.fanout_bundle, memory_order_relaxed);
+  atomic_store_explicit(&s->graph.fanout_bundle, NULL, memory_order_seq_cst);
   pthread_mutex_unlock(&s->graph.lock);
-  snapshot_wait_unhazarded(snap);
-  sfu_subscriptions_snapshot_release(snap);
-
-  pthread_mutex_lock(&s->graph.lock);
-  sfu_audio_route_snapshot_t *audio_routes = atomic_load_explicit(&s->graph.audio_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&s->graph.audio_fanout_targets, NULL, memory_order_release);
-  pthread_mutex_unlock(&s->graph.lock);
-  snapshot_wait_unhazarded(audio_routes);
-  sfu_audio_route_snapshot_release(audio_routes);
-
-  pthread_mutex_lock(&s->graph.lock);
-  sfu_video_route_snapshot_t *video_routes = atomic_load_explicit(&s->graph.video_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&s->graph.video_fanout_targets, NULL, memory_order_release);
-  pthread_mutex_unlock(&s->graph.lock);
-  snapshot_wait_unhazarded(video_routes);
-  sfu_video_route_snapshot_release(video_routes);
-
-  pthread_mutex_lock(&s->graph.lock);
-  sfu_video_route_snapshot_t *screen_routes = atomic_load_explicit(&s->graph.screen_fanout_targets, memory_order_acquire);
-  atomic_store_explicit(&s->graph.screen_fanout_targets, NULL, memory_order_release);
-  pthread_mutex_unlock(&s->graph.lock);
-  snapshot_wait_unhazarded(screen_routes);
-  sfu_video_route_snapshot_release(screen_routes);
+  snapshot_wait_unhazarded(fanout);
+  sfu_fanout_bundle_release(fanout);
 
   if (s->egress.rtx_cache) {
     sfu_rtx_cache_destroy(s->egress.rtx_cache);
@@ -537,10 +1106,16 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     SFU_FREE(s->egress.schedulers);
     s->egress.schedulers = NULL;
   }
+  if (s->leave_event) {
+    assert(!atomic_load_explicit(&s->leave_event_in_use, memory_order_acquire));
+    SFU_FREE(s->leave_event);
+    s->leave_event = NULL;
+  }
   if (s->cold) {
     SFU_FREE(s->cold);
     s->cold = NULL;
   }
+  pthread_mutex_destroy(&s->membership_lock);
   pthread_mutex_destroy(&s->ingress_lock);
   pthread_mutex_destroy(&s->crypto_lock);
   pthread_mutex_destroy(&s->graph.lock);
@@ -581,12 +1156,11 @@ static bool addr_equal(const struct sockaddr_storage *a, socklen_t a_len, const 
 }
 
 static uint32_t table_member_index(const sfu_session_table_t *t, const sfu_peer_session_t *session) {
-  for (uint32_t i = 0; i < t->count; i++) {
-    if (t->sessions[i] == session) {
-      return i;
-    }
+  if (!session->cold) {
+    return UINT32_MAX;
   }
-  return UINT32_MAX;
+  uint32_t index = session->cold->table_index;
+  return index < t->count && t->sessions[index] == session ? index : UINT32_MAX;
 }
 
 static bool addr_matches_direct(uint32_t idx, void *ctx_) {
@@ -631,13 +1205,24 @@ static void table_remove_ufrag_hash(sfu_session_table_t *t, sfu_peer_session_t *
   }
 }
 
-static void table_index_addr_locked(sfu_session_table_t *t, sfu_peer_session_t *session, uint32_t idx) {
+static bool table_index_addr_locked(sfu_session_table_t *t, sfu_peer_session_t *session, uint32_t idx) {
   uint32_t hash = fnv1a(&session->cold->addr, session->cold->addr_len);
   addr_match_ctx_t ctx = {t, &session->cold->addr, session->cold->addr_len};
   uint32_t slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, hash, addr_matches_direct, &ctx, true);
-  if (slot != SFU_HASH_EMPTY) {
-    t->addr_index[slot].hash = hash;
-    t->addr_index[slot].index = idx;
+  if (slot == SFU_HASH_EMPTY) {
+    return false;
+  }
+  t->addr_index[slot].hash = hash;
+  t->addr_index[slot].index = idx;
+  return true;
+}
+
+static void table_rollback_reserved_slot(sfu_session_table_t *t, uint32_t index, bool reused) {
+  if (reused) {
+    t->free_indices[t->free_count++] = index;
+  } else {
+    assert(index + 1 == t->count);
+    t->count--;
   }
 }
 
@@ -660,28 +1245,24 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   pthread_rwlock_wrlock(&t->lock);
 
-  for (uint32_t i = 0; i < t->count; i++) {
-    sfu_peer_session_t *session = t->sessions[i];
-
-    if (!session) {
-      continue;
-    }
-
-    if (addr_equal(&session->cold->addr, session->cold->addr_len, addr, addr_len)) {
+  uint32_t addr_hash = fnv1a(addr, addr_len);
+  addr_match_ctx_t addr_ctx = {t, addr, addr_len};
+  uint32_t addr_slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, addr_hash, addr_matches_direct, &addr_ctx, false);
+  if (addr_slot != SFU_HASH_EMPTY) {
+    uint32_t existing_index = t->addr_index[addr_slot].index;
+    sfu_peer_session_t *session = existing_index < t->count ? t->sessions[existing_index] : NULL;
+    if (session) {
       atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
       pthread_rwlock_unlock(&t->lock);
       return session;
     }
   }
 
-  uint32_t index = UINT32_MAX;
-  for (uint32_t i = 0; i < t->count; i++) {
-    if (!t->sessions[i]) {
-      index = i;
-      break;
-    }
-  }
-  if (index == UINT32_MAX) {
+  bool reused = t->free_count > 0;
+  uint32_t index;
+  if (reused) {
+    index = t->free_indices[--t->free_count];
+  } else {
     if (t->count >= t->capacity) {
       SFU_LOG_WARN("session table full (%u), rejecting new peer", t->capacity);
       pthread_rwlock_unlock(&t->lock);
@@ -692,9 +1273,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   sfu_peer_session_t *s = SFU_CALLOC(1, sizeof(sfu_peer_session_t));
   if (!s) {
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
@@ -702,14 +1281,14 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->cold = SFU_CALLOC(1, sizeof(sfu_peer_session_cold_t));
   if (!s->cold) {
     SFU_FREE(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
 
   s->cold->table = t;
+  s->cold->table_index = UINT32_MAX;
+  s->room_slot = UINT32_MAX;
   memcpy(&s->cold->addr, addr, addr_len);
   s->cold->addr_len = addr_len;
   s->active = true;
@@ -719,9 +1298,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   if (pthread_mutex_init(&s->answer_lock, NULL) != 0) {
     SFU_FREE(s->cold);
     SFU_FREE(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
@@ -729,9 +1306,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
@@ -740,9 +1315,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
@@ -752,9 +1325,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
@@ -765,9 +1336,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
@@ -779,12 +1348,41 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     pthread_mutex_destroy(&s->answer_lock);
     SFU_FREE(s->cold);
     SFU_FREE(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
+  if (pthread_mutex_init(&s->membership_lock, NULL) != 0) {
+    pthread_mutex_destroy(&s->ingress_lock);
+    pthread_mutex_destroy(&s->crypto_lock);
+    pthread_mutex_destroy(&s->graph.lock);
+    pthread_mutex_destroy(&s->media.lock);
+    pthread_mutex_destroy(&s->negotiation.lock);
+    pthread_mutex_destroy(&s->answer_lock);
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    table_rollback_reserved_slot(t, index, reused);
+    pthread_rwlock_unlock(&t->lock);
+    return NULL;
+  }
+  s->leave_event = SFU_CALLOC(1, sizeof(*s->leave_event));
+  if (!s->leave_event) {
+    pthread_mutex_destroy(&s->membership_lock);
+    pthread_mutex_destroy(&s->ingress_lock);
+    pthread_mutex_destroy(&s->crypto_lock);
+    pthread_mutex_destroy(&s->graph.lock);
+    pthread_mutex_destroy(&s->media.lock);
+    pthread_mutex_destroy(&s->negotiation.lock);
+    pthread_mutex_destroy(&s->answer_lock);
+    SFU_FREE(s->cold);
+    SFU_FREE(s);
+    table_rollback_reserved_slot(t, index, reused);
+    pthread_rwlock_unlock(&t->lock);
+    return NULL;
+  }
+  s->leave_event->preallocated_storage = true;
+  s->leave_event->storage_owner = s;
+  atomic_store_explicit(&s->leave_event_in_use, false, memory_order_relaxed);
 
   for (int i = 0; i < 128; i++) {
     s->media.pt_map[i] = (uint8_t)i;
@@ -801,10 +1399,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   s->media.screen.kind = SFU_MEDIA_SCREEN;
 
   atomic_store_explicit(&s->graph.receivers, NULL, memory_order_relaxed);
-  atomic_store_explicit(&s->graph.fanout_targets, NULL, memory_order_relaxed);
-  atomic_store_explicit(&s->graph.audio_fanout_targets, NULL, memory_order_relaxed);
-  atomic_store_explicit(&s->graph.video_fanout_targets, NULL, memory_order_relaxed);
-  atomic_store_explicit(&s->graph.screen_fanout_targets, NULL, memory_order_relaxed);
+  atomic_store_explicit(&s->graph.fanout_bundle, NULL, memory_order_relaxed);
   atomic_store_explicit(&s->is_audience, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.ptt_active, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.camera_enabled, true, memory_order_relaxed);
@@ -827,9 +1422,6 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->media.snapshot_words[4], 0, memory_order_relaxed);
   atomic_store_explicit(&s->media.snapshot_seq, 0, memory_order_relaxed);
 
-  s->graph.next_remote_mid = SFU_REMOTE_MID_BASE;
-  atomic_store_explicit(&s->graph.applied_remote_mid, SFU_REMOTE_MID_BASE, memory_order_relaxed);
-  atomic_store_explicit(&s->graph.offered_remote_mid, SFU_REMOTE_MID_BASE, memory_order_relaxed);
   {
     static atomic_uint_fast32_t peer_id_counter = 0;
     uint32_t id = (uint32_t)atomic_fetch_add_explicit(&peer_id_counter, 1, memory_order_relaxed) + 1;
@@ -847,9 +1439,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   if (sfu_dtls_conn_init(&s->cold->dtls, t->dtls_ctx) != 0) {
     SFU_LOG_ERROR("failed to init DTLS connection for new peer session");
     session_destroy_unpublished(s);
-    if (index + 1 == t->count) {
-      t->count--;
-    }
+    table_rollback_reserved_slot(t, index, reused);
     pthread_rwlock_unlock(&t->lock);
     return NULL;
   }
@@ -858,8 +1448,17 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_OPEN, memory_order_relaxed);
   atomic_store_explicit(&s->accepts_work, true, memory_order_relaxed);
 
+  s->cold->table_index = index;
   t->sessions[index] = s;
-  table_index_addr_locked(t, s, index);
+  if (!table_index_addr_locked(t, s, index)) {
+    t->sessions[index] = NULL;
+    s->cold->table_index = UINT32_MAX;
+    table_rollback_reserved_slot(t, index, reused);
+    session_destroy_unpublished(s);
+    pthread_rwlock_unlock(&t->lock);
+    return NULL;
+  }
+  t->active_count++;
 
   pthread_rwlock_unlock(&t->lock);
   return s;
@@ -1003,10 +1602,15 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
     return false;
   }
 
+  /* Membership is the outer lifecycle lock: admission/removal take it before a
+   * room lock, and close takes it before the session-table lock.  Never wait
+   * for membership while holding the table lock. */
+  pthread_mutex_lock(&s->membership_lock);
   pthread_rwlock_wrlock(&t->lock);
 
   if (atomic_load_explicit(&s->lifecycle, memory_order_acquire) != SFU_SESSION_LIFECYCLE_OPEN) {
     pthread_rwlock_unlock(&t->lock);
+    pthread_mutex_unlock(&s->membership_lock);
     return false;
   }
 
@@ -1018,14 +1622,20 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
     table_remove_addr_hash(t, s, idx);
     table_remove_ufrag_hash(t, s, idx);
     t->sessions[idx] = NULL;
+    s->cold->table_index = UINT32_MAX;
+    t->free_indices[t->free_count++] = idx;
+    if (t->active_count > 0) {
+      t->active_count--;
+    }
   }
 
   pthread_rwlock_unlock(&t->lock);
 
   sfu_room_t *room = (sfu_room_t *)s->room;
   if (room) {
-    room_remove_peer(room, s);
+    room_remove_peer_membership_locked(room, s);
   }
+  pthread_mutex_unlock(&s->membership_lock);
 
   sfu_session_release(s);
   return true;
@@ -1056,10 +1666,17 @@ bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s
     return false;
   }
 
+  uint32_t insert_slot = addr_probe(t->addr_index, SFU_SESSION_ADDR_HASH_SLOTS, new_hash, addr_matches_direct, &new_ctx, true);
+  if (insert_slot == SFU_HASH_EMPTY) {
+    pthread_rwlock_unlock(&t->lock);
+    return false;
+  }
+
   table_remove_addr_hash(t, s, idx);
   memcpy(&s->cold->addr, addr, addr_len);
   s->cold->addr_len = addr_len;
-  table_index_addr_locked(t, s, idx);
+  t->addr_index[insert_slot].hash = new_hash;
+  t->addr_index[insert_slot].index = idx;
 
   pthread_rwlock_unlock(&t->lock);
   return true;
@@ -1101,38 +1718,28 @@ bool sfu_session_table_index_ufrag(sfu_session_table_t *t, sfu_peer_session_t *s
 }
 
 void sfu_session_table_destroy(sfu_session_table_t *t) {
-  sfu_peer_session_t **orphans = SFU_CALLOC(t->count ? t->count : 1, sizeof(*orphans));
-  uint32_t orphan_count = 0;
+  for (;;) {
+    sfu_peer_session_t *orphan = NULL;
 
-  pthread_rwlock_wrlock(&t->lock);
+    /* Pin a table member, then close it through the normal membership-first
+     * protocol.  Taking membership while the table lock is held would invert
+     * begin_close's ordering and can deadlock with room admission. */
+    pthread_rwlock_rdlock(&t->lock);
+    for (uint32_t i = 0; i < t->count; i++) {
+      orphan = t->sessions[i];
+      if (orphan) {
+        atomic_fetch_add_explicit(&orphan->refcount, 1, memory_order_relaxed);
+        break;
+      }
+    }
+    pthread_rwlock_unlock(&t->lock);
 
-  for (uint32_t i = 0; i < t->count; i++) {
-    sfu_peer_session_t *s = t->sessions[i];
-    if (!s) {
-      continue;
+    if (!orphan) {
+      break;
     }
-    if (atomic_load_explicit(&s->lifecycle, memory_order_acquire) == SFU_SESSION_LIFECYCLE_OPEN) {
-      atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_CLOSING, memory_order_release);
-      atomic_store_explicit(&s->accepts_work, false, memory_order_release);
-      table_remove_addr_hash(t, s, i);
-      table_remove_ufrag_hash(t, s, i);
-    }
-    t->sessions[i] = NULL;
-    if (orphans) {
-      orphans[orphan_count++] = s;
-    }
+    (void)sfu_session_begin_close(t, orphan);
+    sfu_session_release(orphan);
   }
-
-  pthread_rwlock_unlock(&t->lock);
-
-  for (uint32_t i = 0; i < orphan_count; i++) {
-    sfu_room_t *room = (sfu_room_t *)orphans[i]->room;
-    if (room) {
-      room_remove_peer(room, orphans[i]);
-    }
-    sfu_session_release(orphans[i]);
-  }
-  SFU_FREE(orphans);
 
   if (t->reclaimer) {
     sfu_epoch_reclaimer_destroy_after_quiescence(t->reclaimer);
@@ -1141,8 +1748,12 @@ void sfu_session_table_destroy(sfu_session_table_t *t) {
   }
 
   SFU_FREE(t->sessions);
+  SFU_FREE(t->free_indices);
   t->sessions = NULL;
+  t->free_indices = NULL;
   t->count = 0;
+  t->active_count = 0;
+  t->free_count = 0;
   t->capacity = 0;
 
   pthread_mutex_destroy(&t->ice_lock);
