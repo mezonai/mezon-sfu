@@ -146,7 +146,8 @@ set_target_properties(sfu_core PROPERTIES LINKER_LANGUAGE CXX)
 
 add_executable(mezon-sfu src/runtime/main.c)
 target_link_libraries(mezon-sfu PRIVATE sfu_core mimalloc)
-set_target_properties(mezon-sfu PROPERTIES LINKER_LANGUAGE CXX)
+set_target_properties(mezon-sfu PROPERTIES LINKER_LANGUAGE CXX ENABLE_EXPORTS ON)
+target_link_options(mezon-sfu PRIVATE -rdynamic)
 
 target_compile_options(mezon-sfu PRIVATE
     $<$<CONFIG:Debug>:-g3>
