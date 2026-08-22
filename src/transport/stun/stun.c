@@ -34,7 +34,7 @@ void sfu_ice_credentials_generate(sfu_ice_credentials_t *out) {
 }
 
 bool sfu_stun_is_stun_packet(const uint8_t *data, size_t len) {
-  if (len < STUN_HEADER_LEN) {
+  if (!data || len < STUN_HEADER_LEN) {
     return false;
   }
 
