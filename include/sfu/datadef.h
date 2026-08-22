@@ -164,6 +164,7 @@ struct sfu_receiver_snapshot {
   uint64_t generation;
   uint32_t count;
   uint32_t capacity;
+  uint32_t exclusive_remote_mid;
   sfu_receiver_entry_t entries[];
 };
 

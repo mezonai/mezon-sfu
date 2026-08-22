@@ -106,6 +106,7 @@ static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *a
   atomic_store(&snap->refcount, 1);
   snap->count = SFU_MAX_REMOTE_SLOTS;
   snap->capacity = SFU_MAX_REMOTE_SLOTS;
+  snap->exclusive_remote_mid = SFU_REMOTE_MID_BASE + SFU_MAX_REMOTE_SLOTS * SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
 
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     audio[i].owner = &remotes[i];
@@ -129,6 +130,13 @@ static void setup_mock_session(sfu_peer_session_t *session, sfu_transceiver_t *a
   }
 
   atomic_store(&session->graph.receivers, snap);
+}
+
+static void limit_mock_snapshot(sfu_peer_session_t *session, uint32_t count) {
+  sfu_receiver_snapshot_t *snap = atomic_load(&session->graph.receivers);
+  assert(snap != NULL && count <= snap->capacity);
+  snap->count = count;
+  snap->exclusive_remote_mid = SFU_REMOTE_MID_BASE + count * SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
 }
 
 /* Publishes the mock audio/video transceiver state into the snapshot entries
@@ -221,13 +229,13 @@ static void test_renegotiation_offer_role_directions(void) {
   session.graph.next_remote_mid = SFU_REMOTE_MID_BASE;
 
   char offer[4096];
-  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=recvonly") == 3);
 
   atomic_store(&session.is_audience, true);
-  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=inactive") == 2);
@@ -243,6 +251,7 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   sfu_transceiver_t audio[SFU_MAX_REMOTE_SLOTS], video[SFU_MAX_REMOTE_SLOTS];
   sfu_peer_session_t remotes[SFU_MAX_REMOTE_SLOTS];
   setup_mock_session(&session, audio, video, remotes);
+  limit_mock_snapshot(&session, 1);
 
   atomic_store(&session.is_audience, true);
   session.graph.next_remote_mid = SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
@@ -260,9 +269,11 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   sync_mock_snapshot(&session, audio, video);
 
   char offer[4096];
-  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  uint32_t exclusive_remote_mid = 0;
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), &exclusive_remote_mid);
   assert(len > 0);
   offer[len] = '\0';
+  assert(exclusive_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   assert(count_occurrences(offer, "m=audio") == 2);
   assert(count_occurrences(offer, "m=video") == 4);
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
@@ -284,7 +295,7 @@ static void test_audience_offer_with_active_remote_speaker(void) {
 
   video[0].ssrc = 0;
   sync_mock_snapshot(&session, audio, video);
-  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=sendonly") == 2);
@@ -295,11 +306,45 @@ static void test_audience_offer_with_active_remote_speaker(void) {
   cleanup_mock_session(&session, remotes);
 }
 
+static void test_offer_uses_snapshot_remote_mid_bound(void) {
+  sfu_peer_session_t session;
+  sfu_transceiver_t audio[SFU_MAX_REMOTE_SLOTS], video[SFU_MAX_REMOTE_SLOTS];
+  sfu_peer_session_t remotes[SFU_MAX_REMOTE_SLOTS];
+  setup_mock_session(&session, audio, video, remotes);
+  limit_mock_snapshot(&session, 1);
+
+  atomic_store(&session.graph.next_remote_mid, SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  remotes[0].user_id = 42;
+  remotes[0].peer_id = 7;
+  snprintf(remotes[0].cold->ufrag, sizeof(remotes[0].cold->ufrag), "speakerUfrag");
+  audio[0].ssrc = 1111;
+  audio[0].active = true;
+  sync_mock_snapshot(&session, audio, video);
+
+  char offer[4096];
+  uint32_t exclusive_remote_mid = 0;
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer),
+                                &exclusive_remote_mid);
+  assert(len > 0);
+  offer[len] = '\0';
+
+  assert(exclusive_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5\r\n"));
+  assert(!contains(offer, "a=mid:6\r\n"));
+  assert(!contains(offer, "a=mid:7\r\n"));
+  assert(!contains(offer, "a=mid:8\r\n"));
+  assert(count_occurrences(offer, "m=audio") == 2);
+  assert(count_occurrences(offer, "m=video") == 4);
+
+  cleanup_mock_session(&session, remotes);
+}
+
 static void test_screen_only_remote_offer(void) {
   sfu_peer_session_t session;
   sfu_transceiver_t audio[SFU_MAX_REMOTE_SLOTS], video[SFU_MAX_REMOTE_SLOTS];
   sfu_peer_session_t remotes[SFU_MAX_REMOTE_SLOTS];
   setup_mock_session(&session, audio, video, remotes);
+  limit_mock_snapshot(&session, 1);
 
   atomic_store(&session.is_audience, true);
   atomic_store(&session.graph.next_remote_mid, SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
@@ -324,7 +369,7 @@ static void test_screen_only_remote_offer(void) {
   snprintf(entry->subscriber_ufrag, sizeof(entry->subscriber_ufrag), "%s", remotes[0].cold->ufrag);
 
   char offer[4096];
-  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
   assert(len > 0);
   offer[len] = '\0';
 
@@ -342,7 +387,7 @@ static void test_screen_only_remote_offer(void) {
   entry->screen_active = false;
   entry->screen_ssrc = 0;
   entry->screen_rtx_ssrc = 0;
-  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer));
+  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=sendonly") == 1);
@@ -507,6 +552,7 @@ static void *sdp_race_publisher(void *arg) {
     atomic_store(&snap->refcount, 2); /* writer ref + test stash ref */
     snap->capacity = 1;
     snap->count = 1;
+    snap->exclusive_remote_mid = SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
     snap->generation = (uint64_t)i;
     sfu_receiver_entry_t *e = &snap->entries[0];
     e->subscriber = ctx->publisher;
@@ -541,7 +587,7 @@ static void *sdp_race_builder(void *arg) {
      * snapshot holds many entries (output buffer exhaustion); only memory
      * safety and snapshot coherence are asserted here. */
     int len = sfu_sdp_build_offer(ctx->subscriber, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
-                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out, SFU_SIGNALING_SDP_CAP);
+                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out, SFU_SIGNALING_SDP_CAP, NULL);
     if (len < 0) {
       atomic_fetch_add(&ctx->build_failures, 1);
     }
@@ -562,6 +608,7 @@ static void test_concurrent_build_vs_teardown(void) {
 
   ctx.subscriber = race_mock_session("subscriber");
   ctx.publisher = race_mock_session("publisher");
+  atomic_store(&ctx.subscriber->graph.next_remote_mid, SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   pthread_barrier_init(&ctx.barrier, NULL, 3);
 
   pthread_t pub, builder;
@@ -614,7 +661,7 @@ static void test_299_audio_only_remote_offer(void) {
   assert(offer != NULL);
   int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
                                 "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", offer,
-                                SFU_SIGNALING_SDP_CAP);
+                                SFU_SIGNALING_SDP_CAP, NULL);
   assert(len > 0 && (size_t)len < SFU_SIGNALING_SDP_CAP);
   offer[len] = '\0';
 
@@ -691,6 +738,7 @@ int main(void) {
   sfu_transceiver_t a2[SFU_MAX_REMOTE_SLOTS], v2[SFU_MAX_REMOTE_SLOTS];
   sfu_peer_session_t r2[SFU_MAX_REMOTE_SLOTS];
   setup_mock_session(&session2, a2, v2, r2);
+  limit_mock_snapshot(&session2, 1);
 
   session2.media.uplink_video.payload_type = 120;
   session2.media.uplink_video.rtx_payload_type = 121;
@@ -743,7 +791,7 @@ int main(void) {
   char server_offer[8192];
   len = sfu_sdp_build_offer(&session2, "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
                             "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", server_offer,
-                            sizeof(server_offer));
+                            sizeof(server_offer), NULL);
   assert(len > 0);
   server_offer[len] = '\0';
   assert(!contains(server_offer, "a=ssrc:987654321"));
@@ -766,6 +814,7 @@ int main(void) {
   test_initial_offer_role_directions();
   test_renegotiation_offer_role_directions();
   test_audience_offer_with_active_remote_speaker();
+  test_offer_uses_snapshot_remote_mid_bound();
   test_screen_only_remote_offer();
   test_299_audio_only_remote_offer();
   test_twcc_extmap_extraction();

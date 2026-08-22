@@ -379,6 +379,7 @@ static void test_snapshot_hold_across_replace(void) {
   /* Hold the current snapshot of a. */
   sfu_receiver_snapshot_t *held = sfu_session_subscriptions_acquire(a);
   assert(held != NULL && held->count == 1);
+  assert(held->exclusive_remote_mid == SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   assert(held->entries[0].subscriber == b);
 
   /* Writer publishes a replacement while we hold the old one. */
@@ -394,6 +395,13 @@ static void test_snapshot_hold_across_replace(void) {
   assert(fresh != NULL && fresh->count == 2);
   assert(fresh != held);
   assert(fresh->generation == held->generation + 1);
+  assert(fresh->exclusive_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
+  sfu_subscriptions_snapshot_release(fresh);
+
+  room_remove_peer(&room, c);
+  fresh = sfu_session_subscriptions_acquire(a);
+  assert(fresh != NULL && fresh->count == 1);
+  assert(fresh->exclusive_remote_mid == SFU_REMOTE_MID_BASE + 2 * SFU_REMOTE_TRANSCEIVERS_PER_SLOT);
   sfu_subscriptions_snapshot_release(fresh);
 
   /* Releasing the held snapshot must not free b (still referenced by the new
