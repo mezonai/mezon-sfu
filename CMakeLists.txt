@@ -68,6 +68,7 @@ add_library(sfu_core STATIC
   src/media/svc/layer_scheduler.c
   src/memory/pool.c
   src/memory/packet_pool.c
+  src/memory/worker_packet_arena.c
   src/memory/refcount.c
   src/util/ringbuffer.c
   src/util/log.c

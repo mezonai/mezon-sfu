@@ -120,6 +120,7 @@ static sfu_receiver_snapshot_t *snapshot_alloc(uint32_t capacity) {
   }
   atomic_store_explicit(&snap->refcount, 1, memory_order_relaxed);
   snap->capacity = capacity;
+  snap->exclusive_remote_mid = SFU_REMOTE_MID_BASE;
   return snap;
 }
 
@@ -138,6 +139,7 @@ static sfu_receiver_snapshot_t *snapshot_refresh_entry(sfu_peer_session_t *owner
     return NULL;
   }
   snap->generation = old->generation + 1;
+  snap->exclusive_remote_mid = old->exclusive_remote_mid;
 
   for (uint32_t i = 0; i < old_count; i++) {
     snap->entries[i] = old->entries[i];
@@ -173,6 +175,7 @@ static sfu_receiver_snapshot_t *snapshot_deactivate_entry(sfu_peer_session_t *ow
     return NULL;
   }
   snap->generation = old->generation + 1;
+  snap->exclusive_remote_mid = old->exclusive_remote_mid;
 
   for (uint32_t i = 0; i < old_count; i++) {
     snap->entries[i] = old->entries[i];
@@ -208,6 +211,7 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
     return NULL;
   }
   snap->generation = (old ? old->generation : 0) + 1;
+  snap->exclusive_remote_mid = old ? old->exclusive_remote_mid : SFU_REMOTE_MID_BASE;
 
   for (uint32_t i = 0; i < old_count; i++) {
     snap->entries[i] = old->entries[i];
@@ -220,6 +224,7 @@ static sfu_receiver_snapshot_t *snapshot_build_with(sfu_peer_session_t *owner, s
     e->mid_audio = atomic_fetch_add_explicit(&owner->graph.next_remote_mid, SFU_REMOTE_TRANSCEIVERS_PER_SLOT, memory_order_relaxed);
     e->mid_video = e->mid_audio + 1;
     e->mid_screen = e->mid_audio + 2;
+    snap->exclusive_remote_mid = e->mid_audio + SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
   }
   snapshot_fill_entry(e, dst, fanout ? owner : dst);
   if (fanout) {
@@ -247,6 +252,7 @@ static sfu_receiver_snapshot_t *snapshot_build_without(sfu_peer_session_t *owner
     return NULL;
   }
   snap->generation = old->generation + 1;
+  snap->exclusive_remote_mid = old->exclusive_remote_mid;
 
   uint32_t out = 0;
   for (uint32_t i = 0; i < old_count; i++) {
@@ -387,6 +393,7 @@ static sfu_receiver_snapshot_t *snapshot_build_batch(sfu_peer_session_t *owner, 
       e->mid_audio = atomic_fetch_add_explicit(&owner->graph.next_remote_mid, SFU_REMOTE_TRANSCEIVERS_PER_SLOT, memory_order_relaxed);
       e->mid_video = e->mid_audio + 1;
       e->mid_screen = e->mid_audio + 2;
+      snap->exclusive_remote_mid = e->mid_audio + SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
     }
     snapshot_fill_entry(e, dst, fanout ? owner : dst);
     if (fanout) {
@@ -603,9 +610,17 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
     }
   }
 
+  uint32_t exclusive_remote_mid = SFU_REMOTE_MID_BASE;
+  sfu_receiver_snapshot_t *current = sfu_session_subscriptions_acquire(peer);
+  if (current) {
+    exclusive_remote_mid = current->exclusive_remote_mid;
+    sfu_subscriptions_snapshot_release(current);
+  }
+
   sfu_receiver_snapshot_t *empty = snapshot_alloc(0);
   if (empty) {
     empty->generation = 0;
+    empty->exclusive_remote_mid = exclusive_remote_mid;
     sfu_receiver_snapshot_t *old = sfu_session_publish_receivers_swap(peer, empty);
     deferred_push(&deferred, old, SFU_RECLAIM_RECEIVERS);
   } else {

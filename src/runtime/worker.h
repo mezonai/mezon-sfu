@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "memory/packet_pool.h"
+#include "memory/worker_packet_arena.h"
 #include "net/io_uring.h"
 #include "room/room_registry.h"
 #include "runtime/fanout.h"
@@ -14,10 +15,27 @@
 
 typedef struct sfu_scheduler sfu_scheduler_t;
 
+#define SFU_WORKER_OUTPUT_ARENA_CAPACITY 2048u
+
+typedef struct sfu_worker_hot_counters {
+  uint64_t output_reserved;
+  uint64_t output_arena_allocated;
+  uint64_t output_pool_fallback;
+  uint64_t output_queued;
+  uint64_t copied_bytes;
+  uint64_t profile_samples;
+  uint64_t copy_cycles;
+  uint64_t crypto_cycles;
+  uint32_t profile_sequence;
+} sfu_worker_hot_counters_t;
+
 typedef struct sfu_worker {
   sfu_ring_t send_ring;
   sfu_spsc_ring_t inbox;
   sfu_spsc_ring_t release_to_dispatcher;
+  sfu_worker_packet_arena_t output_arena;
+  sfu_packet_t *reserved_outputs[SFU_FANOUT_BATCH_CAP];
+  sfu_worker_hot_counters_t hot;
   sfu_packet_pool_t *pp;
   sfu_room_registry_t *room_registry;
   sfu_fanout_mesh_t *mesh;

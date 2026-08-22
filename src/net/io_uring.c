@@ -1,5 +1,6 @@
 #include "net/io_uring.h"
 #include "memory/refcount.h"
+#include "memory/worker_packet_arena.h"
 #include "net/batch.h"
 #include "sfu/config.h"
 #include "util/alloc.h"
@@ -138,6 +139,7 @@ int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockad
   io_uring_prep_send_zc(sqe, r->fd, pkt->data, pkt->len, 0, 0);
   io_uring_prep_send_set_addr(sqe, (const struct sockaddr *)&pkt->peer_addr, pkt->peer_addr_len);
   io_uring_sqe_set_data(sqe, pkt);
+  r->outstanding_sends++;
 
   return 0;
 }
@@ -161,6 +163,8 @@ void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t 
     io_uring_buf_ring_add(r->buf_ring, addr, r->buf_size, pkt->kbuf_index, mask, 0);
     io_uring_buf_ring_advance(r->buf_ring, 1);
     sfu_packet_pool_free_meta(pp, pkt);
+  } else if (pkt->buf_source == SFU_BUF_SOURCE_WORKER_ARENA) {
+    sfu_worker_packet_arena_free(pkt);
   } else {
     sfu_packet_pool_free(pp, pkt);
   }
@@ -179,6 +183,8 @@ void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispat
     while (!sfu_spsc_ring_push(to_dispatcher, item)) {
       sched_yield();
     }
+  } else if (pkt->buf_source == SFU_BUF_SOURCE_WORKER_ARENA) {
+    sfu_worker_packet_arena_free(pkt);
   } else {
     sfu_packet_pool_free(pp, pkt);
   }
@@ -308,6 +314,9 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
     } else {
       sfu_packet_t *pkt = (sfu_packet_t *)(uintptr_t)data;
       if (cqe->flags & IORING_CQE_F_NOTIF) {
+        if (r->outstanding_sends > 0) {
+          r->outstanding_sends--;
+        }
         if (on_send_complete) {
           on_send_complete(user_data, pkt);
         }
@@ -317,8 +326,20 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
         } else {
           sfu_ring_release_packet(r, pp, pkt);
         }
-      } else if (cqe->res < 0) {
-        SFU_LOG_WARN("send_zc error on fd=%d: %s", r->fd, strerror(-cqe->res));
+      } else {
+        if (cqe->res < 0) {
+          SFU_LOG_WARN("send_zc error on fd=%d: %s", r->fd, strerror(-cqe->res));
+        }
+        if (!(cqe->flags & IORING_CQE_F_MORE)) {
+          if (r->outstanding_sends > 0) {
+            r->outstanding_sends--;
+          }
+          if (release_to_dispatcher) {
+            sfu_worker_release_packet(pp, release_to_dispatcher, pkt);
+          } else {
+            sfu_ring_release_packet(r, pp, pkt);
+          }
+        }
       }
     }
   }

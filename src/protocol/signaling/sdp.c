@@ -691,7 +691,7 @@ fail:
 }
 
 int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t port, const char *ufrag, const char *pwd, const char *fingerprint, char *out,
-                        size_t out_cap) {
+                        size_t out_cap, uint32_t *exclusive_remote_mid) {
   size_t off = 0;
   char buf[512];
   int n;
@@ -700,6 +700,7 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
 
   sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
   uint32_t receiver_count = snap ? snap->count : 0;
+  uint32_t next_remote_mid = snap ? snap->exclusive_remote_mid : SFU_REMOTE_MID_BASE;
   char bundled_transport[512];
   size_t bundled_transport_len = 0;
   if (append_bundled_transport_headers(bundled_transport, sizeof(bundled_transport), &bundled_transport_len, host, ufrag, pwd, fingerprint) != 0) {
@@ -754,7 +755,6 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
 
   SFU_LOG_DEBUG("SDP_BUILD: ufrag=%s receiver_count=%u", ufrag ? ufrag : "unknown", receiver_count);
 
-  uint32_t next_remote_mid = atomic_load_explicit(&session->graph.next_remote_mid, memory_order_acquire);
   if (append_bundle_group(out, out_cap, &off, next_remote_mid) != 0) {
     goto fail;
   }
@@ -852,6 +852,9 @@ int sfu_sdp_build_offer(sfu_peer_session_t *session, const char *host, uint16_t 
 
   if (snap) {
     sfu_subscriptions_snapshot_release(snap);
+  }
+  if (exclusive_remote_mid) {
+    *exclusive_remote_mid = next_remote_mid;
   }
 
   return (int)off;

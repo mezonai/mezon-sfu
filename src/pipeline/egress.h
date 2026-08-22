@@ -30,5 +30,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
                         const sfu_egress_media_t *media);
 bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, const struct sockaddr_storage *dst,
                                   socklen_t dst_len, const sfu_egress_media_t *media);
+bool sfu_egress_process_plaintext_reserved(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, sfu_packet_t *output,
+                                           const struct sockaddr_storage *dst, socklen_t dst_len, const sfu_egress_media_t *media);
 
 #endif /* SFU_PIPELINE_EGRESS_H */

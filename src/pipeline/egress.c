@@ -18,10 +18,22 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <x86intrin.h>
+#endif
+
+static inline uint64_t sfu_egress_profile_cycles(void) {
+#if defined(__x86_64__) || defined(__i386__)
+  unsigned aux;
+  return __rdtscp(&aux);
+#else
+  return 0;
+#endif
+}
 
 static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                                      const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_layer_scheduler_t *sched,
-                                     const sfu_layer_scheduler_decision_t *decision) {
+                                     const sfu_layer_scheduler_decision_t *decision, bool profile) {
   int enc_len = (int)pkt->len;
 
   uint32_t applied = atomic_load_explicit(&sub_session->graph.applied_remote_mid, memory_order_acquire);
@@ -97,9 +109,13 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     }
   }
 
+  uint64_t crypto_start = profile ? sfu_egress_profile_cycles() : 0;
   pthread_mutex_lock(&sub_session->crypto_lock);
   srtp_err_status_t protect_status = sfu_srtp_protect_rtp_status(&sub_session->srtp, pkt->data, &enc_len, pkt->cap);
   pthread_mutex_unlock(&sub_session->crypto_lock);
+  if (profile) {
+    w->hot.crypto_cycles += sfu_egress_profile_cycles() - crypto_start;
+  }
   if (protect_status != srtp_err_status_ok) {
     if (protect_status == srtp_err_status_replay_old) {
       sfu_metric_inc("egress_protect_replay_old");
@@ -118,12 +134,16 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     sfu_metric_inc("send_sq_full");
     return false;
   }
+  w->hot.output_queued++;
   return true;
 }
 
-bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, const struct sockaddr_storage *dst,
-                                  socklen_t dst_len, const sfu_egress_media_t *media) {
+static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, sfu_packet_t *reserved_output,
+                                                const struct sockaddr_storage *dst, socklen_t dst_len, const sfu_egress_media_t *media) {
   if (!w || !sub_session || !plain || !dst || !media || sfu_session_owner_worker(sub_session) != w->worker_index || !sfu_session_accepts_work(sub_session)) {
+    if (w && reserved_output) {
+      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
+    }
     return false;
   }
 
@@ -139,6 +159,9 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
       if (!sched || !sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
         if (sched) {
           sfu_layer_scheduler_reject_packet(sched, &decision);
+        }
+        if (reserved_output) {
+          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
         }
         sfu_metric_inc("egress_admission_drop");
         return false;
@@ -156,12 +179,33 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
       if (has_decision) {
         sfu_layer_scheduler_reject_packet(sched, &decision);
       }
+      if (reserved_output) {
+        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
+      }
       sfu_metric_inc("egress_admission_drop");
       return false;
     }
   }
 
-  sfu_packet_t *output = sfu_packet_pool_alloc(w->pp);
+  sfu_packet_t *output = reserved_output;
+  if (!output) {
+    output = sfu_worker_packet_arena_alloc(&w->output_arena);
+    if (output) {
+      w->hot.output_arena_allocated++;
+    } else {
+      output = sfu_packet_pool_alloc(w->pp);
+      if (output) {
+        w->hot.output_pool_fallback++;
+      }
+    }
+  }
+  if (output && plain->len > output->cap && output->buf_source == SFU_BUF_SOURCE_WORKER_ARENA) {
+    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
+    output = sfu_packet_pool_alloc(w->pp);
+    if (output) {
+      w->hot.output_pool_fallback++;
+    }
+  }
   if (!output || plain->len > output->cap) {
     if (output) {
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
@@ -171,12 +215,20 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
     }
     return false;
   }
+
+  bool profile = (++w->hot.profile_sequence & 1023u) == 0;
+  uint64_t copy_start = profile ? sfu_egress_profile_cycles() : 0;
   memcpy(output->data, plain->data, plain->len);
+  if (profile) {
+    w->hot.copy_cycles += sfu_egress_profile_cycles() - copy_start;
+    w->hot.profile_samples++;
+  }
   output->len = plain->len;
+  w->hot.copied_bytes += output->len;
   sfu_metric_inc("egress_output_alloc");
   sfu_metric_add("egress_copied_bytes", output->len);
 
-  bool admitted = sfu_egress_process_local(w, sub_session, output, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL);
+  bool admitted = sfu_egress_process_local(w, sub_session, output, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL, profile);
   if (has_decision) {
     if (admitted) {
       sfu_layer_scheduler_commit_packet(sched, &decision);
@@ -186,6 +238,16 @@ bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_sessi
   }
   sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
   return admitted;
+}
+
+bool sfu_egress_process_plaintext(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, const struct sockaddr_storage *dst,
+                                  socklen_t dst_len, const sfu_egress_media_t *media) {
+  return sfu_egress_process_plaintext_output(w, sub_session, plain, NULL, dst, dst_len, media);
+}
+
+bool sfu_egress_process_plaintext_reserved(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, sfu_packet_t *output,
+                                           const struct sockaddr_storage *dst, socklen_t dst_len, const sfu_egress_media_t *media) {
+  return sfu_egress_process_plaintext_output(w, sub_session, plain, output, dst, dst_len, media);
 }
 
 bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
@@ -224,7 +286,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
     }
   }
 
-  bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL);
+  bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL, false);
   if (has_decision) {
     if (admitted) {
       sfu_layer_scheduler_commit_packet(sched, &decision);

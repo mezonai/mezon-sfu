@@ -204,9 +204,9 @@ static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_signaling
 }
 
 static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s) {
-  uint32_t offered_mid = atomic_load_explicit(&session->graph.next_remote_mid, memory_order_acquire);
+  uint32_t offered_mid = 0;
   int offer_len = sfu_sdp_build_offer(session, s->media_host, s->media_port, s->ice_creds->ufrag, s->ice_creds->pwd, s->dtls_ctx->fingerprint, s->scratch.sdp,
-                                      SFU_SIGNALING_SDP_CAP);
+                                      SFU_SIGNALING_SDP_CAP, &offered_mid);
   if (offer_len < 0) {
     SFU_LOG_WARN("signaling: failed to build server-initiated SDP offer (fd=%d)", fd);
     return false;

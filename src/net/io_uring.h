@@ -20,6 +20,7 @@ typedef struct sfu_ring {
   uint32_t buf_count;
   uint32_t buf_size;
   uint32_t payload_cap;
+  uint32_t outstanding_sends;
   int bgid;
   int fd;
 } sfu_ring_t;
