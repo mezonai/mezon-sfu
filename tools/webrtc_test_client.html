@@ -81,15 +81,6 @@
                 outline: none;
                 border-color: var(--accent);
             }
-            #joinPreview {
-                width: 100%;
-                aspect-ratio: 16/9;
-                background: #000;
-                border-radius: 10px;
-                margin-bottom: 14px;
-                object-fit: cover;
-                transform: scaleX(-1);
-            }
             button {
                 background: var(--accent);
                 color: #11111b;
@@ -386,9 +377,6 @@
             <div id="joinCard">
                 <h1>Mezon SFU</h1>
                 <p class="sub">VP9 / SVC Test Client</p>
-
-                <video id="joinPreview" autoplay playsinline muted></video>
-
                 <div class="form-group">
                     <label for="wsUrl">Signaling WebSocket URL</label>
                     <input
@@ -544,8 +532,6 @@
             // guarded by assignment_generation so a delayed leave cannot retire a
             // slot that has already been recycled for another publisher.
             const remoteAssignmentsBySlot = new Map();
-
-            const joinPreview = document.getElementById("joinPreview");
             const joinStatus = document.getElementById("joinStatus");
             const joinBtn = document.getElementById("joinBtn");
 
@@ -632,7 +618,6 @@
                 localStream.getVideoTracks().forEach((t) => {
                     t.enabled = false;
                 });
-                joinPreview.srcObject = localStream;
 
                 const hasVideo = localStream.getVideoTracks().length > 0;
                 const hasAudio = localStream.getAudioTracks().length > 0;
