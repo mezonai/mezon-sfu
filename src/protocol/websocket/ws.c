@@ -246,6 +246,21 @@ static int send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t len
 
 int sfu_ws_send_text(int fd, const char *data, size_t len) { return send_frame(fd, 0x1, (const uint8_t *)data, len); }
 
+int sfu_ws_send_close(int fd, uint16_t code, const char *reason, size_t reason_len) {
+  size_t payload_len = 2 + reason_len;
+  if (payload_len > 125) {
+    reason_len = 125 - 2;
+    payload_len = 125;
+  }
+  uint8_t payload[125];
+  payload[0] = (uint8_t)(code >> 8);
+  payload[1] = (uint8_t)(code & 0xFF);
+  if (reason_len > 0 && reason) {
+    memcpy(payload + 2, reason, reason_len);
+  }
+  return send_frame(fd, 0x8, payload, payload_len);
+}
+
 ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t cap) {
   if (!state || !buf || cap == 0) {
     errno = EINVAL;

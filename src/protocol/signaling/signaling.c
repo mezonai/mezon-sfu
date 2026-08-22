@@ -30,6 +30,55 @@
 #include "util/alloc.h"
 #include "util/log.h"
 
+typedef enum sfu_sdp_direction {
+  SFU_SDP_DIRECTION_NONE = 0,
+  SFU_SDP_DIRECTION_SENDONLY,
+  SFU_SDP_DIRECTION_RECVONLY,
+  SFU_SDP_DIRECTION_SENDRECV,
+  SFU_SDP_DIRECTION_INACTIVE,
+} sfu_sdp_direction_t;
+
+typedef struct sfu_answer_section {
+  int media_kind;
+  int mid;
+  sfu_sdp_direction_t direction;
+  uint8_t payloads[16];
+  uint8_t payload_count;
+  sfu_video_codec_t codecs[128];
+  uint8_t rtx_apt[128];
+  bool is_rtx[128];
+  uint32_t ssrcs[4];
+  uint8_t ssrc_count;
+  uint32_t fid_media_ssrc;
+  uint32_t fid_rtx_ssrc;
+  uint8_t twcc_extmap_id;
+  uint8_t mid_extmap_id;
+  bool rejected;
+} sfu_answer_section_t;
+
+typedef struct sfu_answer_media {
+  uint32_t audio_ssrc;
+  uint32_t video_ssrc;
+  uint32_t rtx_ssrc;
+  uint32_t screen_ssrc;
+  uint32_t screen_rtx_ssrc;
+  uint8_t video_pt;
+  uint8_t rtx_pt;
+  uint8_t screen_pt;
+  uint8_t screen_rtx_pt;
+  sfu_video_codec_t video_codec;
+  sfu_video_codec_t screen_codec;
+  uint8_t twcc_recv_extmap_id;
+  uint8_t twcc_send_extmap_id;
+  uint8_t mid_recv_extmap_id;
+  bool audio_section_present;
+  bool video_section_present;
+  bool screen_section_present;
+  bool audio_sends;
+  bool video_sends;
+  bool screen_sends;
+} sfu_answer_media_t;
+
 uint32_t generate_unique_id(void) {
   static atomic_uint_fast32_t counter = 0;
   return atomic_fetch_add(&counter, 1) + 1;
@@ -454,55 +503,6 @@ static uint8_t extract_sdp_twcc_extmap_id(const char *sdp, size_t sdp_len) {
 
 uint8_t sfu_test_extract_twcc_extmap_id(const char *sdp, size_t sdp_len) { return extract_sdp_twcc_extmap_id(sdp, sdp_len); }
 
-typedef enum sfu_sdp_direction {
-  SFU_SDP_DIRECTION_NONE = 0,
-  SFU_SDP_DIRECTION_SENDONLY,
-  SFU_SDP_DIRECTION_RECVONLY,
-  SFU_SDP_DIRECTION_SENDRECV,
-  SFU_SDP_DIRECTION_INACTIVE,
-} sfu_sdp_direction_t;
-
-typedef struct sfu_answer_section {
-  int media_kind;
-  int mid;
-  sfu_sdp_direction_t direction;
-  uint8_t payloads[16];
-  uint8_t payload_count;
-  sfu_video_codec_t codecs[128];
-  uint8_t rtx_apt[128];
-  bool is_rtx[128];
-  uint32_t ssrcs[4];
-  uint8_t ssrc_count;
-  uint32_t fid_media_ssrc;
-  uint32_t fid_rtx_ssrc;
-  uint8_t twcc_extmap_id;
-  uint8_t mid_extmap_id;
-  bool rejected;
-} sfu_answer_section_t;
-
-typedef struct sfu_answer_media {
-  uint32_t audio_ssrc;
-  uint32_t video_ssrc;
-  uint32_t rtx_ssrc;
-  uint32_t screen_ssrc;
-  uint32_t screen_rtx_ssrc;
-  uint8_t video_pt;
-  uint8_t rtx_pt;
-  uint8_t screen_pt;
-  uint8_t screen_rtx_pt;
-  sfu_video_codec_t video_codec;
-  sfu_video_codec_t screen_codec;
-  uint8_t twcc_recv_extmap_id;
-  uint8_t twcc_send_extmap_id;
-  uint8_t mid_recv_extmap_id;
-  bool audio_section_present;
-  bool video_section_present;
-  bool screen_section_present;
-  bool audio_sends;
-  bool video_sends;
-  bool screen_sends;
-} sfu_answer_media_t;
-
 static void answer_section_reset(sfu_answer_section_t *section) {
   memset(section, 0, sizeof(*section));
   section->mid = -1;
@@ -826,7 +826,7 @@ static int extract_header_val(const char *handshake, const char *header_name, ch
   return 0;
 }
 
-static void disconnect_client(sfu_client_conn_t *c);
+static void disconnect_client(sfu_client_conn_t *c, sfu_disconnect_reason_t reason);
 
 static void register_client(sfu_client_conn_t *c) {
   if (!c || !c->server || c->in_registry) {
@@ -922,14 +922,14 @@ static void on_keepalive_timer(uv_timer_t *timer) {
   const uint64_t now_ms = sfu_now_ms();
   if (c->last_activity_ms != 0 && now_ms >= c->last_activity_ms && (now_ms - c->last_activity_ms) >= SFU_SIGNALING_IDLE_TIMEOUT_MS) {
     SFU_LOG_WARN("signaling: idle timeout (%u ms) fd=%d ufrag=%s; closing peer/session", SFU_SIGNALING_IDLE_TIMEOUT_MS, c->fd, c->client_ufrag);
-    disconnect_client(c);
+    disconnect_client(c, SFU_DISCONNECT_IDLE_TIMEOUT);
     return;
   }
 
   static const char ping_msg[] = "{\"type\":\"ping\"}";
   if (sfu_ws_send_text(c->fd, ping_msg, sizeof(ping_msg) - 1) != 0) {
     SFU_LOG_WARN("signaling: failed to send ping fd=%d; closing", c->fd);
-    disconnect_client(c);
+    disconnect_client(c, SFU_DISCONNECT_PING_FAILED);
   }
 }
 
@@ -950,11 +950,15 @@ static void start_client_keepalive(sfu_client_conn_t *c) {
   }
 }
 
-static void disconnect_client(sfu_client_conn_t *c) {
+static void disconnect_client(sfu_client_conn_t *c, sfu_disconnect_reason_t reason) {
   if (!c || c->disconnecting) {
     return;
   }
   c->disconnecting = true;
+
+  if (c->handshake_done) {
+    sfu_ws_send_close(c->fd, (uint16_t)reason, NULL, 0);
+  }
 
   if (c->keepalive_inited) {
     uv_timer_stop(&c->keepalive_timer);
@@ -973,7 +977,7 @@ static void handle_ping(sfu_client_conn_t *c) {
   static const char pong_msg[] = "{\"type\":\"pong\"}";
   if (sfu_ws_send_text(c->fd, pong_msg, sizeof(pong_msg) - 1) != 0) {
     SFU_LOG_WARN("signaling: failed to send pong fd=%d; closing", c->fd);
-    disconnect_client(c);
+    disconnect_client(c, SFU_DISCONNECT_PING_FAILED);
   }
 }
 
@@ -992,7 +996,7 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
   if (jwt_secret[0] == '\0') {
     SFU_LOG_ERROR("signaling: jwt_secret is empty; rejecting join (fd=%d)", c->fd);
     sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"auth_not_configured\"}", 48);
-    disconnect_client(c);
+    disconnect_client(c, SFU_DISCONNECT_AUTH_NOT_CONFIGURED);
     return;
   }
 
@@ -1000,14 +1004,14 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
   if (token_len < 0) {
     SFU_LOG_WARN("signaling: join missing token (fd=%d)", c->fd);
     sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"missing_token\"}", 42);
-    disconnect_client(c);
+    disconnect_client(c, SFU_DISCONNECT_MISSING_TOKEN);
     return;
   }
   uint64_t token_room = 0;
   if (sfu_handshake_verify_join_token(token, (size_t)token_len, jwt_secret, &user_id, &token_room) != 0) {
     SFU_LOG_WARN("signaling: join JWT invalid (fd=%d)", c->fd);
     sfu_ws_send_text(c->fd, "{\"type\":\"error\",\"message\":\"invalid_token\"}", 42);
-    disconnect_client(c);
+    disconnect_client(c, SFU_DISCONNECT_INVALID_TOKEN);
     return;
   }
   room_id = token_room;
@@ -1632,7 +1636,7 @@ static void handle_participant_action(sfu_client_conn_t *c, const char *buf, siz
     for (sfu_client_conn_t *target = c->server->connections_head; target;) {
       sfu_client_conn_t *next = target->registry_next;
       if (!target->disconnecting && target->joined_room == c->joined_room && target->joined_room_id == claims.room_id && target->user_id == claims.user_id) {
-        disconnect_client(target);
+        disconnect_client(target, SFU_DISCONNECT_KICKED);
       }
       target = next;
     }
@@ -1717,7 +1721,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
   sfu_signaling_server_t *s = c->server;
 
   if (status < 0 || (events & UV_DISCONNECT)) {
-    disconnect_client(c);
+    disconnect_client(c, SFU_DISCONNECT_TRANSPORT_ERROR);
     return;
   }
 
@@ -1739,7 +1743,7 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
 
     if (sfu_ws_handshake(c->fd, &c->ws_read) != 0) {
       SFU_LOG_WARN("signaling: WebSocket handshake failed");
-      disconnect_client(c);
+      disconnect_client(c, SFU_DISCONNECT_WS_HANDSHAKE_FAILED);
       return;
     }
 
@@ -1771,11 +1775,11 @@ static void on_client_readable(uv_poll_t *handle, int status, int events) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         return;
       }
-      disconnect_client(c);
+      disconnect_client(c, SFU_DISCONNECT_RECV_ERROR);
       return;
     }
     if (n == 0) {
-      disconnect_client(c);
+      disconnect_client(c, SFU_DISCONNECT_RECV_ERROR);
       return;
     }
 
@@ -1842,7 +1846,7 @@ static void on_server_readable(uv_poll_t *handle, int status, int events) {
       rc = uv_poll_start(&c->poll_handle, UV_READABLE, on_client_readable);
       if (rc != 0) {
         SFU_LOG_ERROR("signaling: uv_poll_start failed: %s", uv_strerror(rc));
-        disconnect_client(c);
+        disconnect_client(c, SFU_DISCONNECT_POLL_START_FAILED);
       }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
       SFU_LOG_ERROR("signaling: accept failed: %s", strerror(errno));
@@ -2185,11 +2189,11 @@ static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
     return;
   }
   if (handle->type == UV_POLL && handle->data != NULL && handle->data != s) {
-    disconnect_client((sfu_client_conn_t *)handle->data);
+    disconnect_client((sfu_client_conn_t *)handle->data, SFU_DISCONNECT_GOING_AWAY);
     return;
   }
   if (handle->type == UV_TIMER && handle->data != NULL && handle->data != s) {
-    disconnect_client((sfu_client_conn_t *)handle->data);
+    disconnect_client((sfu_client_conn_t *)handle->data, SFU_DISCONNECT_GOING_AWAY);
     return;
   }
   uv_close(handle, NULL);

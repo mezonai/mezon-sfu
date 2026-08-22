@@ -18,6 +18,26 @@
 #define SFU_RENEGOTIATION_RETRY_MAX_MS 500u
 #define SFU_MEMBERSHIP_QUEUE_CAP 2048u
 
+typedef enum sfu_disconnect_reason {
+  SFU_DISCONNECT_NORMAL = 1000,         /* Normal closure */
+  SFU_DISCONNECT_GOING_AWAY = 1001,     /* Server shutting down */
+  SFU_DISCONNECT_PROTOCOL_ERROR = 1002, /* Protocol error */
+  SFU_DISCONNECT_POLICY_VIOLATION = 1008,
+  SFU_DISCONNECT_INTERNAL_ERROR = 1011, /* Internal server error */
+
+  /* Application-specific (4000+) */
+  SFU_DISCONNECT_IDLE_TIMEOUT = 4001, /* Client idle too long */
+  SFU_DISCONNECT_PING_FAILED = 4002,  /* Failed to send ping */
+  SFU_DISCONNECT_AUTH_NOT_CONFIGURED = 4003,
+  SFU_DISCONNECT_MISSING_TOKEN = 4004,
+  SFU_DISCONNECT_INVALID_TOKEN = 4005,
+  SFU_DISCONNECT_KICKED = 4006, /* Kicked by admin */
+  SFU_DISCONNECT_WS_HANDSHAKE_FAILED = 4007,
+  SFU_DISCONNECT_RECV_ERROR = 4008, /* WebSocket recv failure */
+  SFU_DISCONNECT_POLL_START_FAILED = 4009,
+  SFU_DISCONNECT_TRANSPORT_ERROR = 4010, /* UV_DISCONNECT / poll error */
+} sfu_disconnect_reason_t;
+
 typedef struct sfu_renegotiation_queue {
   sfu_peer_session_t *items[SFU_RENEGOTIATION_QUEUE_CAP];
   uint32_t head;
