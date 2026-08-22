@@ -514,10 +514,8 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool diag_roc_valid = false;
   bool diag_roc_retry = false;
 #endif
-  if ((unprotect_status == srtp_err_status_replay_old || unprotect_status == srtp_err_status_replay_fail) && !is_rtcp && have_ciphertext &&
-      pkt->len >= 12) {
+  if ((unprotect_status == srtp_err_status_replay_old || unprotect_status == srtp_err_status_replay_fail) && !is_rtcp && have_ciphertext && pkt->len >= 12) {
     uint32_t raw_ssrc = sfu_read_be32(pkt->data + 8);
-    // Also try ciphertext header (replay_old may have corrupted pkt->data in-place)
     uint32_t ct_ssrc = sfu_read_be32(ciphertext + 8);
     if (raw_ssrc == 0) {
       raw_ssrc = ct_ssrc;
@@ -604,8 +602,8 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
         raw_seq = sfu_read_be16(pkt->data + 2);
         raw_ssrc = sfu_read_be32(pkt->data + 8);
       }
-      SFU_LOG_INFO("worker %u: [INGRESS ROC] recovered peer=%u ufrag=%s ssrc=%" PRIu32 " seq=%" PRIu16 " roc=%" PRIu32 "->%" PRIu32,
-                   w->worker_index, sender_session->peer_id, sender_session->cold->ufrag, raw_ssrc, raw_seq, diag_roc_before, diag_roc_after);
+      SFU_LOG_INFO("worker %u: [INGRESS ROC] recovered peer=%u ufrag=%s ssrc=%" PRIu32 " seq=%" PRIu16 " roc=%" PRIu32 "->%" PRIu32, w->worker_index,
+                   sender_session->peer_id, sender_session->cold->ufrag, raw_ssrc, raw_seq, diag_roc_before, diag_roc_after);
     }
 #endif
   }
@@ -661,14 +659,15 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
                    " srtp_profile=0x%lx pending_dtls=%d client_random_valid=%d"
                    " transport_gen=%" PRIu32
                    " owner=%u is_audience=%d ptt_active=%d audio_send_negotiated=%d visible=%d is_mute=%d"
-                   " audio_ssrc=%" PRIu32 " audio_active=%d state=%d verified=%d"
+                   " audio_ssrc=%" PRIu32
+                   " audio_active=%d state=%d verified=%d"
                    " roc_valid=%d roc_retry=%d roc_before=%" PRIu32 " roc_after=%" PRIu32,
                    w->worker_index, sender_session->peer_id, dump_user_id, sender_session->cold->ufrag, dump_addr_str, raw_ssrc, raw_pt, raw_seq,
                    has_inbound_ctx ? 1 : 0, has_previous_ctx ? 1 : 0, previous_remaining_ms, dump_profile, dump_pending_dtls ? 1 : 0,
                    dump_client_random_valid ? 1 : 0, dump_transport_gen, sfu_session_owner_worker(sender_session), dump_is_audience ? 1 : 0,
                    dump_ptt_active ? 1 : 0, dump_audio_send ? 1 : 0, dump_vis ? 1 : 0, dump_is_mute ? 1 : 0, dump_msnap.audio_ssrc,
-                   dump_msnap.audio_active ? 1 : 0, (int)sender_session->state, sender_session->cold->dtls.established ? 1 : 0,
-                   diag_roc_valid ? 1 : 0, diag_roc_retry ? 1 : 0, diag_roc_before, diag_roc_after);
+                   dump_msnap.audio_active ? 1 : 0, (int)sender_session->state, sender_session->cold->dtls.established ? 1 : 0, diag_roc_valid ? 1 : 0,
+                   diag_roc_retry ? 1 : 0, diag_roc_before, diag_roc_after);
     }
 #endif
 

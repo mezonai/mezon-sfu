@@ -9,6 +9,7 @@
 typedef enum sfu_buf_source {
   SFU_BUF_SOURCE_POOL = 0,
   SFU_BUF_SOURCE_KERNEL = 1,
+  SFU_BUF_SOURCE_WORKER_ARENA = 2,
 } sfu_buf_source_t;
 
 typedef struct sfu_packet {
@@ -20,6 +21,7 @@ typedef struct sfu_packet {
   uint32_t pool_index;
   uint32_t kbuf_index;
   uint8_t buf_source;
+  void *buf_owner;
   struct sockaddr_storage peer_addr;
   socklen_t peer_addr_len;
   uint64_t recv_ts_ns;

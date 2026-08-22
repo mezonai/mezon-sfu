@@ -164,6 +164,7 @@ struct sfu_receiver_snapshot {
   uint64_t generation;
   uint32_t count;
   uint32_t capacity;
+  uint32_t exclusive_remote_mid;
   sfu_receiver_entry_t entries[];
 };
 
@@ -256,6 +257,7 @@ typedef struct {
   bool active_client_random_valid;
   bool pending_dtls_active;
   sfu_rtp_seq_translator_t rtp_seq_translator;
+  void *table;
 } sfu_peer_session_cold_t;
 
 typedef struct {
@@ -360,9 +362,12 @@ typedef struct sfu_hash_slot {
   uint32_t index;
 } sfu_hash_slot_t;
 
+typedef struct sfu_epoch_reclaimer sfu_epoch_reclaimer_t;
+
 typedef struct sfu_session_table {
   sfu_peer_session_t **sessions;
   sfu_dtls_ctx_t *dtls_ctx;
+  sfu_epoch_reclaimer_t *reclaimer;
   uint32_t capacity;
   uint32_t count;
   pthread_rwlock_t lock;
@@ -378,6 +383,5 @@ typedef struct sfu_room {
   uint32_t peer_count;
   pthread_mutex_t lock;
 } sfu_room_t;
-
 
 #endif  // SFU_DATA_DEF_H

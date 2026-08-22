@@ -15,6 +15,10 @@ add_executable(test_packet_pool test_packet_pool.c)
 target_link_libraries(test_packet_pool PRIVATE sfu_core)
 add_test(NAME packet_pool COMMAND test_packet_pool)
 
+add_executable(test_worker_packet_arena test_worker_packet_arena.c)
+target_link_libraries(test_worker_packet_arena PRIVATE sfu_core)
+add_test(NAME worker_packet_arena COMMAND test_worker_packet_arena)
+
 add_executable(test_fanout_mesh test_fanout_mesh.c)
 target_link_libraries(test_fanout_mesh PRIVATE sfu_core)
 add_test(NAME fanout_mesh COMMAND test_fanout_mesh)
@@ -70,6 +74,10 @@ add_test(NAME rtx_capacity COMMAND test_rtx_capacity)
 add_executable(test_epoch_reclaimer test_epoch_reclaimer.c)
 target_link_libraries(test_epoch_reclaimer PRIVATE sfu_core)
 add_test(NAME epoch_reclaimer COMMAND test_epoch_reclaimer)
+
+add_executable(test_session_load test_session_load.c)
+target_link_libraries(test_session_load PRIVATE sfu_core)
+add_test(NAME session_load COMMAND test_session_load)
 
 add_executable(test_rtcp_compound test_rtcp_compound.c)
 target_link_libraries(test_rtcp_compound PRIVATE sfu_core)

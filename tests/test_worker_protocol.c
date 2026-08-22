@@ -130,7 +130,7 @@ static void fixture_init(fixture_t *f) {
   assert(sfu_packet_pool_init(&f->pp, POOL_CAPACITY, 2048) == 0);
   f->dtls_ctx.ssl_ctx = SSL_CTX_new(TLS_method());
   assert(f->dtls_ctx.ssl_ctx != NULL);
-  assert(sfu_session_table_init(&f->sessions, &f->dtls_ctx) == 0);
+  assert(sfu_session_table_init(&f->sessions, &f->dtls_ctx, NULL, 0) == 0);
   sfu_metrics_init();
 
   uint8_t key_material[SFU_SRTP_KEY_MATERIAL_LEN];
@@ -476,8 +476,13 @@ static void kf_fixture_init(kf_fixture_t *f) {
   f->publisher->media.uplink_audio.active = true;
   atomic_store_explicit(&f->publisher->media.audio_send_negotiated, true, memory_order_release);
   atomic_store_explicit(&f->publisher->media.video_send_negotiated, true, memory_order_release);
+  /* Egress forwards a remote MID only if it is below both the offered and
+   * applied exclusive bounds. Tests that drive the forward path skip SDP, so
+   * open both gates. */
   atomic_store_explicit(&f->base.session->graph.applied_remote_mid, UINT32_MAX, memory_order_release);
+  atomic_store_explicit(&f->base.session->graph.offered_remote_mid, UINT32_MAX, memory_order_release);
   atomic_store_explicit(&f->publisher->graph.applied_remote_mid, UINT32_MAX, memory_order_release);
+  atomic_store_explicit(&f->publisher->graph.offered_remote_mid, UINT32_MAX, memory_order_release);
   sfu_session_publish_media(f->publisher);
 
   f->base.session->media.uplink_video.payload_type = SFU_PT_VP8;
@@ -797,6 +802,83 @@ static void test_egress_drops_unapplied_remote_mid(void) {
   gcc_packet_info_t info = {0};
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+
+  kf_fixture_destroy(&f);
+}
+
+static void setup_plain_video_forward(kf_fixture_t *f) {
+  sfu_peer_session_t *sub = f->base.session;
+  sub->media.twcc_send_extmap_id = 5;
+  sfu_session_publish_media(sub);
+  if (sub->egress.twcc_history == NULL) {
+    sub->egress.twcc_history = SFU_CALLOC(1, sizeof(*sub->egress.twcc_history));
+    assert(sub->egress.twcc_history != NULL);
+    sfu_twcc_history_init(sub->egress.twcc_history);
+  }
+  f->publisher->media.uplink_video.payload_type = 0;
+  sfu_session_publish_media(f->publisher);
+  atomic_store_explicit(&f->publisher->media.audio_send_negotiated, true, memory_order_release);
+  sub->media.uplink_video.payload_type = 0;
+  sub->media.uplink_video.rtx_payload_type = 0;
+  sfu_session_publish_media(sub);
+}
+
+static void feed_plain_video(kf_fixture_t *f, uint16_t seq) {
+  uint8_t plain[512];
+  size_t plain_len;
+  build_rtp_video(plain, seq, 60, &plain_len);
+  uint8_t wire[1024];
+  memcpy(wire, plain, plain_len);
+  int wire_len = (int)plain_len;
+  assert(sfu_srtp_protect_rtp(&f->base.srtp, wire, &wire_len, sizeof(wire)));
+
+  sfu_packet_t *pkt = sfu_packet_pool_alloc(&f->base.pp);
+  assert(pkt != NULL);
+  memcpy(pkt->data, wire, (size_t)wire_len);
+  pkt->len = (uint32_t)wire_len;
+  pkt->peer_addr = f->publisher->cold->addr;
+  pkt->peer_addr_len = f->publisher->cold->addr_len;
+  sfu_ingress_process(&f->base.w, pkt);
+}
+
+/* Egress requires mid < applied AND mid < offered. Opening only one bound is
+ * not enough to forward. */
+static void test_egress_forwards_only_after_both_mid_bounds(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+  setup_plain_video_forward(&f);
+
+  sfu_peer_session_t *sub = f.base.session;
+  /* First remote slot occupies mids [3, 6). The exclusive bound is next_remote_mid. */
+  const uint32_t closed = SFU_REMOTE_MID_BASE;
+  const uint32_t open = SFU_REMOTE_MID_BASE + SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
+
+  gcc_packet_info_t info = {0};
+  uint64_t gated_before = sfu_metric_get("egress_mid_not_negotiated");
+
+  atomic_store_explicit(&sub->graph.applied_remote_mid, closed, memory_order_release);
+  atomic_store_explicit(&sub->graph.offered_remote_mid, closed, memory_order_release);
+  feed_plain_video(&f, 1100);
+  assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
+  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+
+  gated_before = sfu_metric_get("egress_mid_not_negotiated");
+  atomic_store_explicit(&sub->graph.offered_remote_mid, open, memory_order_release);
+  feed_plain_video(&f, 1101);
+  assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
+  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+
+  gated_before = sfu_metric_get("egress_mid_not_negotiated");
+  atomic_store_explicit(&sub->graph.offered_remote_mid, closed, memory_order_release);
+  atomic_store_explicit(&sub->graph.applied_remote_mid, open, memory_order_release);
+  feed_plain_video(&f, 1102);
+  assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
+  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+
+  atomic_store_explicit(&sub->graph.offered_remote_mid, open, memory_order_release);
+  atomic_store_explicit(&sub->graph.applied_remote_mid, open, memory_order_release);
+  feed_plain_video(&f, 1103);
+  assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
 
   kf_fixture_destroy(&f);
 }
@@ -1406,6 +1488,7 @@ int main(void) {
   test_gcc_estimate_reaches_scheduler();
   test_egress_writes_twcc_extension();
   test_egress_drops_unapplied_remote_mid();
+  test_egress_forwards_only_after_both_mid_bounds();
   test_egress_no_twcc_without_negotiation();
   test_remote_forward_egress_on_owner();
   test_svc_filter_rewrites_sequence_and_cache_identity();

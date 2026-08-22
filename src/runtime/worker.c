@@ -1,10 +1,12 @@
 #include "runtime/worker.h"
+#include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
 #include "config/config.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "runtime/cpu.h"
+#include "runtime/epoch_reclaimer.h"
 #include "runtime/fanout.h"
 #include "runtime/fanout_job.h"
 #include "runtime/signal.h"
@@ -102,8 +104,17 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
     return -1;
   }
 
+  if (sfu_worker_packet_arena_init(&w->output_arena, SFU_WORKER_OUTPUT_ARENA_CAPACITY, g_sfu_config.packet_buf_size) != 0) {
+    SFU_LOG_ERROR("worker %u: failed to init output arena", worker_index);
+    sfu_spsc_ring_destroy(&w->release_to_dispatcher);
+    sfu_spsc_ring_destroy(&w->inbox);
+    pthread_mutex_destroy(&w->local_sessions_lock);
+    return -1;
+  }
+
   if (sfu_ring_init(&w->send_ring, fd, SFU_WORKER_SEND_SQ_ENTRIES, SFU_WORKER_SEND_CQ_ENTRIES, 0, 0, send_bgid, false) != 0) {
     SFU_LOG_ERROR("worker %u: failed to init send ring", worker_index);
+    sfu_worker_packet_arena_destroy(&w->output_arena);
     sfu_spsc_ring_destroy(&w->release_to_dispatcher);
     sfu_spsc_ring_destroy(&w->inbox);
     pthread_mutex_destroy(&w->local_sessions_lock);
@@ -128,6 +139,10 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   pthread_mutex_unlock(&w->local_sessions_lock);
   pthread_mutex_destroy(&w->local_sessions_lock);
   sfu_ring_destroy(&w->send_ring);
+  if (w->output_arena.in_use != 0) {
+    SFU_LOG_WARN("worker %u: destroying output arena with %u sends still outstanding", w->worker_index, w->output_arena.in_use);
+  }
+  sfu_worker_packet_arena_destroy(&w->output_arena);
   sfu_spsc_ring_destroy(&w->release_to_dispatcher);
   sfu_spsc_ring_destroy(&w->inbox);
 }
@@ -140,6 +155,7 @@ static void *worker_thread_main(void *arg) {
 
   uint32_t idle_sleep_us = SFU_WORKER_IDLE_SLEEP_MIN_US;
 
+  uint32_t loop_counter = 0;
   while (!sfu_shutdown_requested()) {
     bool did_work = false;
 
@@ -206,6 +222,13 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
+    if (++loop_counter % 100 == 0 && w->sessions && w->sessions->reclaimer) {
+      uint32_t reclaimed = sfu_epoch_reclaimer_sweep(w->sessions->reclaimer);
+      if (reclaimed > 0) {
+        did_work = true;
+      }
+    }
+
     if (!did_work) {
       usleep(idle_sleep_us);
       if (idle_sleep_us < SFU_WORKER_IDLE_SLEEP_MAX_US) {
@@ -221,7 +244,8 @@ static void *worker_thread_main(void *arg) {
     atomic_fetch_add_explicit(&w->generation, 1, memory_order_release);
   }
 
-  for (unsigned idle_passes = 0; idle_passes < 32;) {
+  unsigned shutdown_passes = 0;
+  for (unsigned idle_passes = 0; idle_passes < 32 || (w->send_ring.outstanding_sends > 0 && shutdown_passes < 2500); shutdown_passes++) {
     bool did_work = false;
 
     void *item;
@@ -242,6 +266,10 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
+    if (w->sessions && w->sessions->reclaimer) {
+      (void)sfu_epoch_reclaimer_sweep(w->sessions->reclaimer);
+    }
+
     if (did_work) {
       idle_passes = 0;
     } else {
@@ -252,6 +280,16 @@ static void *worker_thread_main(void *arg) {
     atomic_fetch_add_explicit(&w->generation, 1, memory_order_release);
   }
 
+  if (w->sessions && w->sessions->reclaimer) {
+    (void)sfu_epoch_reclaimer_sweep(w->sessions->reclaimer);
+  }
+
+  SFU_LOG_INFO("worker %u fanout stats: arena_alloc=%" PRIu64 " reserved=%" PRIu64 " fallback=%" PRIu64 " queued=%" PRIu64
+               " recycled=%" PRIu64 " exhausted=%" PRIu64 " high_water=%u copied_bytes=%" PRIu64 " samples=%" PRIu64
+               " copy_cycles=%" PRIu64 " crypto_cycles=%" PRIu64,
+               w->worker_index, w->hot.output_arena_allocated, w->hot.output_reserved, w->hot.output_pool_fallback, w->hot.output_queued,
+               w->output_arena.recycled, w->output_arena.exhausted, w->output_arena.high_water, w->hot.copied_bytes, w->hot.profile_samples,
+               w->hot.copy_cycles, w->hot.crypto_cycles);
   SFU_LOG_INFO("worker %u shutting down", w->worker_index);
   return NULL;
 }
