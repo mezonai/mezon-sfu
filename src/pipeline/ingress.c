@@ -32,6 +32,7 @@
 #include "util/netbytes.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
@@ -739,6 +740,19 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool learned = false;
   if (!send_negotiated) {
     sfu_metric_inc("unnegotiated_rtp_drop");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t unnegotiated_drop_logs;
+    uint32_t n = atomic_fetch_add_explicit(&unnegotiated_drop_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_WARN("ingress: unnegotiated_rtp_drop n=%u peer=%u ufrag=%s source=%d pt=%u ssrc=%" PRIu32
+                   " audio_neg=%d video_neg=%d screen_neg=%d audience=%d",
+                   n + 1, sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, in_pt, m.rtp.ssrc,
+                   atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire) ? 1 : 0,
+                   atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire) ? 1 : 0,
+                   atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) ? 1 : 0,
+                   is_audience ? 1 : 0);
+    }
+#endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     sfu_session_release(sender_session);
@@ -780,10 +794,20 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     pthread_mutex_lock(&sender_session->media.lock);
     if (is_rtx) {
       if (m.rtp.ssrc != 0 && source->rtx_ssrc != m.rtp.ssrc) {
+#ifdef SFU_DIAG_LOG
+        SFU_LOG_INFO("ingress: SSRC learn RTX peer=%u ufrag=%s source=%d old_rtx=%" PRIu32 " new=%" PRIu32 " pt=%u rtx_pt=%u active=%d",
+                     sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->rtx_ssrc, m.rtp.ssrc, in_pt, rtx_pt, active ? 1 : 0);
+#endif
         source->rtx_ssrc = m.rtp.ssrc;
         learned = true;
       }
     } else if (m.rtp.ssrc != 0 && source->ssrc != m.rtp.ssrc) {
+#ifdef SFU_DIAG_LOG
+      SFU_LOG_WARN("ingress: SSRC learn media peer=%u ufrag=%s source=%d old_ssrc=%" PRIu32 " new=%" PRIu32
+                   " pt=%u rtx_pt=%u is_rtx=%d known_ssrc=%" PRIu32 " known_rtx=%" PRIu32 " active=%d",
+                   sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->ssrc, m.rtp.ssrc, in_pt, rtx_pt, is_rtx ? 1 : 0, known_ssrc,
+                   known_rtx_ssrc, active ? 1 : 0);
+#endif
       source->ssrc = m.rtp.ssrc;
       learned = true;
     }
@@ -828,8 +852,16 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint32_t learned_video_ssrc = sender_session->media.uplink_video.ssrc;
     uint32_t learned_screen_ssrc = sender_session->media.screen.ssrc;
     pthread_mutex_unlock(&sender_session->media.lock);
+#ifdef SFU_DIAG_LOG
+    SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP peer=%u ufrag=%s source=%d is_rtx=%d pt=%u rtx_pt=%u"
+                 " (audio=%u camera=%u screen=%u audio_active=%d video_active=%d screen_active=%d); refreshing forwarding",
+                 w->worker_index, sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, is_rtx ? 1 : 0, in_pt, rtx_pt, learned_audio_ssrc,
+                 learned_video_ssrc, learned_screen_ssrc, sender_session->media.uplink_audio.active ? 1 : 0, sender_session->media.uplink_video.active ? 1 : 0,
+                 sender_session->media.screen.active ? 1 : 0);
+#else
     SFU_LOG_INFO("worker %u: learned uplink SSRCs from RTP for ufrag=%s (audio=%u camera=%u screen=%u); refreshing forwarding", w->worker_index,
                  sender_session->cold->ufrag, learned_audio_ssrc, learned_video_ssrc, learned_screen_ssrc);
+#endif
     room_refresh_peer_streams((sfu_room_t *)sender_session->room, sender_session);
     if (m.source == SFU_MEDIA_VIDEO || m.source == SFU_MEDIA_SCREEN) {
       sfu_signaling_notify_media_state(sender_session);

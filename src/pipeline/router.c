@@ -1,5 +1,7 @@
 #include "pipeline/router.h"
 
+#include <inttypes.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "memory/packet_pool.h"
@@ -9,6 +11,7 @@
 #include "pipeline/egress.h"
 #include "runtime/fanout.h"
 #include "runtime/worker.h"
+#include "util/log.h"
 #include "util/metrics.h"
 
 typedef struct {
@@ -126,7 +129,13 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   sfu_fanout_iter_t iter;
   sfu_fanout_iter_init(&iter, bundle, kind);
   const sfu_fanout_route_t *entry;
+#ifdef SFU_DIAG_LOG
+  uint32_t routed = 0;
+#endif
   while ((entry = sfu_fanout_iter_next(&iter, NULL)) != NULL) {
+#ifdef SFU_DIAG_LOG
+    routed++;
+#endif
     if (kind == SFU_MEDIA_AUDIO) {
       route_target(w, sender_session, m, entry->subscriber, 0, 0, entry->remote_slot, entry->assignment_generation, 0, 0, false, builders, &remote_source);
     } else if (kind == SFU_MEDIA_SCREEN) {
@@ -142,6 +151,16 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
       flush_remote_batch(w, sender_session, m, dst, &builders[dst], &remote_source);
     }
   }
+#ifdef SFU_DIAG_LOG
+  if (routed == 0) {
+    static _Atomic uint32_t empty_fanout_logs;
+    uint32_t n = atomic_fetch_add_explicit(&empty_fanout_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      uint32_t stored = bundle ? bundle->count : 0;
+      SFU_LOG_WARN("router: empty fanout n=%u peer=%u kind=%d stored=%u", n + 1, sender_session->peer_id, (int)kind, stored);
+    }
+  }
+#endif
   sfu_fanout_bundle_release(bundle);
   if (remote_source) {
     sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, remote_source);

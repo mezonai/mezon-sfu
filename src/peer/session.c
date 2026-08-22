@@ -916,6 +916,12 @@ bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sf
   for (uint32_t i = 0; i < table->high_water_slots; i++) {
     uint64_t offered = i < manifest->high_water_slots ? manifest->assignment_generations[i] : 0;
     atomic_store_explicit(&table->applied_assignment_generations[i], offered, memory_order_release);
+#ifdef SFU_DIAG_LOG
+    if (offered != 0 || table->slots[i].state != SFU_REMOTE_SLOT_FREE) {
+      SFU_LOG_INFO("session: apply_answer peer=%u slot=%u offered_gen=%" PRIu64 " slot_gen=%" PRIu64 " state=%d offer_gen=%" PRIu64, session->peer_id, i, offered,
+                   table->slots[i].assignment_generation, (int)table->slots[i].state, manifest->offer_generation);
+    }
+#endif
     sfu_remote_slot_t *remote = &table->slots[i];
     if (offered == 0 && (remote->state == SFU_REMOTE_SLOT_RETIRING || remote->state == SFU_REMOTE_SLOT_RETIRING_OFFERED)) {
       memset(remote, 0, sizeof(*remote));
@@ -1798,11 +1804,21 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
     atomic_store_explicit(&session->media.screen_send_negotiated, answer->screen_sends && !answer->is_audience, memory_order_release);
   }
 
+  uint32_t audio_ssrc = 0;
+  uint32_t video_ssrc = 0;
+  uint32_t screen_ssrc = 0;
+  bool audio_active = false;
+  bool current_audience = false;
+  bool ptt_active = false;
+#ifdef SFU_DIAG_LOG
+  bool video_active_after = false;
+#endif
+
   pthread_mutex_lock(&session->media.lock);
-  uint32_t audio_ssrc = answer->audio_section_present ? (answer->audio_sends ? answer->audio_ssrc : 0) : session->media.uplink_audio.ssrc;
-  uint32_t video_ssrc = answer->video_section_present ? (answer->video_sends ? answer->video_ssrc : 0) : session->media.uplink_video.ssrc;
+  audio_ssrc = answer->audio_section_present ? (answer->audio_sends ? answer->audio_ssrc : 0) : session->media.uplink_audio.ssrc;
+  video_ssrc = answer->video_section_present ? (answer->video_sends ? answer->video_ssrc : 0) : session->media.uplink_video.ssrc;
   uint32_t rtx_ssrc = answer->video_section_present ? (answer->video_sends ? answer->rtx_ssrc : 0) : session->media.uplink_video.rtx_ssrc;
-  uint32_t screen_ssrc = answer->screen_section_present ? (answer->screen_sends ? answer->screen_ssrc : 0) : session->media.screen.ssrc;
+  screen_ssrc = answer->screen_section_present ? (answer->screen_sends ? answer->screen_ssrc : 0) : session->media.screen.ssrc;
   uint32_t screen_rtx_ssrc = answer->screen_section_present ? (answer->screen_sends ? answer->screen_rtx_ssrc : 0) : session->media.screen.rtx_ssrc;
   uint8_t video_pt = answer->video_pt != 0 ? answer->video_pt : session->media.uplink_video.payload_type;
   uint8_t rtx_pt = answer->rtx_pt != 0 ? answer->rtx_pt : session->media.uplink_video.rtx_payload_type;
@@ -1810,8 +1826,8 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   uint8_t screen_rtx_pt = answer->screen_rtx_pt != 0 ? answer->screen_rtx_pt : session->media.screen.rtx_payload_type;
   sfu_video_codec_t codec = answer->video_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->video_codec : session->media.uplink_video.codec;
   sfu_video_codec_t screen_codec = answer->screen_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->screen_codec : session->media.screen.codec;
-  bool current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
-  bool ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
+  current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
+  ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
   if (current_audience || (answer->video_section_present && (!answer->video_sends || video_ssrc == 0))) {
     atomic_store_explicit(&session->media.camera_rtp_observed, false, memory_order_release);
   } else if (answer->video_section_present && answer->video_sends && video_ssrc != 0) {
@@ -1822,7 +1838,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   } else if (answer->screen_section_present && answer->screen_sends && screen_ssrc != 0) {
     atomic_store_explicit(&session->media.screen_rtp_observed, true, memory_order_release);
   }
-  bool audio_active = audio_ssrc != 0 && (!current_audience || ptt_active);
+  audio_active = audio_ssrc != 0 && (!current_audience || ptt_active);
   bool old_video_active = session->media.uplink_video.active;
   bool old_screen_active = session->media.screen.active;
 
@@ -1850,6 +1866,9 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   session->media.mid_recv_extmap_id = answer->mid_recv_extmap_id;
   bool activity_changed = sfu_session_recompute_video_activity_locked(session);
   changed = changed || activity_changed || old_video_active != session->media.uplink_video.active || old_screen_active != session->media.screen.active;
+#ifdef SFU_DIAG_LOG
+  video_active_after = session->media.uplink_video.active;
+#endif
   sfu_session_publish_media(session);
   pthread_mutex_unlock(&session->media.lock);
   if (answer->peer_id != 0) {
@@ -1862,6 +1881,16 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   }
   atomic_store_explicit(&session->applied_answer_generation, answer->generation, memory_order_release);
   pthread_mutex_unlock(&session->answer_lock);
+
+#ifdef SFU_DIAG_LOG
+  SFU_LOG_INFO("session: apply_pending_answer peer=%u gen=%u audio_sends=%d audio_ssrc=%" PRIu32 " audio_active=%d"
+               " video_sends=%d video_ssrc=%" PRIu32 " video_active=%d screen_sends=%d screen_ssrc=%" PRIu32
+               " audience=%d ptt=%d audio_neg=%d video_neg=%d",
+               session->peer_id, answer->generation, answer->audio_sends ? 1 : 0, audio_ssrc, audio_active ? 1 : 0, answer->video_sends ? 1 : 0, video_ssrc,
+               video_active_after ? 1 : 0, answer->screen_sends ? 1 : 0, screen_ssrc, current_audience ? 1 : 0, ptt_active ? 1 : 0,
+               atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire) ? 1 : 0,
+               atomic_load_explicit(&session->media.video_send_negotiated, memory_order_acquire) ? 1 : 0);
+#endif
 
   if (role_changed) {
     *role_changed = role_diff;

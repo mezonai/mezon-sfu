@@ -114,6 +114,11 @@ static bool fanout_route_fill_from(sfu_fanout_route_t *route, uint8_t *eligibili
     if (video) *eligibility |= SFU_FANOUT_VIDEO;
     if (screen) *eligibility |= SFU_FANOUT_SCREEN;
   }
+#ifdef SFU_DIAG_LOG
+  SFU_LOG_INFO("fanout: fill pub=%u sub=%u remote_slot=%u gen=%" PRIu64 " elig=0x%x audio=%d video=%d screen=%d audience=%d",
+               publisher->peer_id, subscriber->peer_id, entry->remote_slot, entry->assignment_generation, (unsigned)*eligibility, audio ? 1 : 0, video ? 1 : 0,
+               screen ? 1 : 0, audience ? 1 : 0);
+#endif
   sfu_subscriptions_snapshot_release(acquired); return true;
 }
 static sfu_fanout_bundle_t *fanout_change_from(sfu_peer_session_t *publisher, sfu_peer_session_t *subscriber, bool remove,

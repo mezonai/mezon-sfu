@@ -1289,8 +1289,18 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     pthread_mutex_lock(&session->media.lock);
     uint8_t mid_recv_extmap_id = session->media.mid_recv_extmap_id;
     pthread_mutex_unlock(&session->media.lock);
+#ifdef SFU_DIAG_LOG
+    uint32_t high_water = sfu_session_remote_slot_high_water(session);
+    uint64_t applied0 = high_water > 0 ? atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[0], memory_order_acquire) : 0;
+    uint64_t applied1 = high_water > 1 ? atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[1], memory_order_acquire) : 0;
+    SFU_LOG_INFO("signaling: downlink ready ufrag=%s peer_id=%u audience=%d receivers=%u high_water=%u mid_extmap=%u"
+                 " applied[0]=%" PRIu64 " applied[1]=%" PRIu64 " offer_gen=%" PRIu64,
+                 c->client_ufrag, session->peer_id, atomic_load_explicit(&session->is_audience, memory_order_acquire), receiver_count, high_water,
+                 mid_recv_extmap_id, applied0, applied1, answered_offer_generation);
+#else
     SFU_LOG_INFO("signaling: downlink ready ufrag=%s peer_id=%u audience=%d receivers=%u mid_extmap=%u", c->client_ufrag, session->peer_id,
                  atomic_load_explicit(&session->is_audience, memory_order_acquire), receiver_count, mid_recv_extmap_id);
+#endif
     if (snap) {
       sfu_subscriptions_snapshot_release(snap);
     }

@@ -17,6 +17,7 @@
 #include "util/netbytes.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #if defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
@@ -38,6 +39,20 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   if (!sfu_session_remote_slot_authorized(sub_session, media->remote_slot, media->assignment_generation)) {
     sfu_metric_inc("egress_mid_not_negotiated");
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t unauthorized_logs;
+    uint32_t n = atomic_fetch_add_explicit(&unauthorized_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      uint64_t applied = 0;
+      if (media->remote_slot < SFU_MAX_REMOTE_SLOTS) {
+        applied = atomic_load_explicit(&sub_session->graph.remote_slots.applied_assignment_generations[media->remote_slot], memory_order_acquire);
+      }
+      uint32_t mid = sfu_remote_slot_first_mid(media->remote_slot) + (media->is_audio ? 0u : media->source == SFU_MEDIA_SCREEN ? 2u : 1u);
+      SFU_LOG_WARN("egress: unauthorized n=%u sub_peer=%u pub_peer=%u slot=%u mid=%u audio=%d source=%d route_gen=%" PRIu64 " applied_gen=%" PRIu64,
+                   n + 1, sub_session->peer_id, media->publisher ? media->publisher->peer_id : 0, media->remote_slot, mid, media->is_audio ? 1 : 0,
+                   (int)media->source, media->assignment_generation, applied);
+    }
+#endif
     return false;
   }
 
@@ -87,6 +102,14 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid_text) ||
         !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid_text, &new_len)) {
       sfu_metric_inc("mid_write_fail");
+#ifdef SFU_DIAG_LOG
+      static _Atomic uint32_t mid_write_fail_logs;
+      uint32_t n = atomic_fetch_add_explicit(&mid_write_fail_logs, 1, memory_order_relaxed);
+      if (n == 0 || (n & 127u) == 0) {
+        SFU_LOG_WARN("egress: mid_write_fail n=%u sub_peer=%u slot=%u mid=%u extmap=%u pkt_len=%d cap=%u", n + 1, sub_session->peer_id, media->remote_slot, mid,
+                     mid_send_extmap_id, enc_len, pkt->cap);
+      }
+#endif
       return false;
     }
     enc_len = (int)new_len;
