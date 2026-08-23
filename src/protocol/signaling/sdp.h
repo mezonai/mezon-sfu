@@ -16,6 +16,8 @@ static inline sfu_video_codec_t sfu_video_codec_from_pt(uint8_t pt) {
       return SFU_VIDEO_CODEC_AV1;
     case SFU_PT_VP8:
       return SFU_VIDEO_CODEC_VP8;
+    case SFU_PT_H264:
+      return SFU_VIDEO_CODEC_H264;
     default:
       return SFU_VIDEO_CODEC_NONE;
   }

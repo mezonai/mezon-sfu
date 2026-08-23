@@ -213,7 +213,10 @@ static int append_bundled_video(char *out, size_t out_cap, size_t *offset, uint1
     if (codec == SFU_VIDEO_CODEC_NONE) {
       codec = SFU_VIDEO_CODEC_VP8;
     }
-    const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9) ? "VP9" : (codec == SFU_VIDEO_CODEC_AV1) ? "AV1" : "VP8";
+    const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9)   ? "VP9"
+                             : (codec == SFU_VIDEO_CODEC_AV1)   ? "AV1"
+                             : (codec == SFU_VIDEO_CODEC_H264)  ? "H264"
+                                                               : "VP8";
     char attr[128];
     n = snprintf(attr, sizeof(attr), "a=rtpmap:%u %s/90000", video_pt, codec_name);
     if (n < 0 || (size_t)n >= sizeof(attr) || append_line_n(out, out_cap, offset, attr, (size_t)n) != 0) {
@@ -281,7 +284,10 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
   if (codec == SFU_VIDEO_CODEC_NONE) {
     codec = sfu_video_codec_from_pt(video_pt);
   }
-  const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9) ? "VP9" : (codec == SFU_VIDEO_CODEC_AV1) ? "AV1" : "VP8";
+  const char *codec_name = (codec == SFU_VIDEO_CODEC_VP9)   ? "VP9"
+                             : (codec == SFU_VIDEO_CODEC_AV1)   ? "AV1"
+                             : (codec == SFU_VIDEO_CODEC_H264)  ? "H264"
+                                                               : "VP8";
 
   char line[128];
   int n;
@@ -303,6 +309,12 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
   }
   if (codec == SFU_VIDEO_CODEC_VP9) {
     n = snprintf(line, sizeof(line), "a=fmtp:%u profile-id=0", video_pt);
+    if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
+      return -1;
+    }
+  }
+  if (codec == SFU_VIDEO_CODEC_H264) {
+    n = snprintf(line, sizeof(line), "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f", video_pt);
     if (n < 0 || (size_t)n >= sizeof(line) || append_line_n(out, out_cap, offset, line, (size_t)n) != 0) {
       return -1;
     }
@@ -445,8 +457,8 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
-               SFU_PT_VP8_RTX);
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
+               SFU_PT_VP8_RTX, SFU_PT_H264, SFU_PT_H264_RTX);
 
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     return -1;
@@ -481,9 +493,12 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
   if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP8, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0) {
     return -1;
   }
+  if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_H264, SFU_PT_H264, SFU_PT_H264_RTX) != 0) {
+    return -1;
+  }
 
-  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
-               SFU_PT_VP8_RTX);
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
+               SFU_PT_VP8_RTX, SFU_PT_H264, SFU_PT_H264_RTX);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0 ||
       append_bundled_transport_headers(out, out_cap, &off, host, ufrag, pwd, fingerprint) != 0 ||
       append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0 || append_line(out, out_cap, &off, "a=mid:2") != 0 ||
@@ -491,7 +506,8 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
       append_mid_recv_attribute(out, out_cap, &off) != 0 ||
       append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP9, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0 ||
       append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_AV1, SFU_PT_AV1, SFU_PT_AV1_RTX) != 0 ||
-      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP8, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0) {
+      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP8, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0 ||
+      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_H264, SFU_PT_H264, SFU_PT_H264_RTX) != 0) {
     return -1;
   }
 
