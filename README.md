@@ -14,6 +14,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 * Full SVC temporal/spatial layer support
 * Modern io_uring zero-copy network stack
 * Standards-compliant GCC congestion control
+* **Push To Talk** PTT native support
 
 ## build prerequisites
 
