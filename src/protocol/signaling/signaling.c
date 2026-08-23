@@ -1436,47 +1436,14 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
 
 static void handle_role_change(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
   (void)s;
-  char role_str[16] = {0};
-  if (!c->joined_room || c->client_ufrag[0] == '\0' || sfu_json_extract_string(buf, n, "role", role_str, sizeof(role_str)) < 0 ||
-      (strcmp(role_str, "speaker") != 0 && strcmp(role_str, "audience") != 0)) {
-    static const char invalid_role_change[] = "{\"type\":\"error\",\"message\":\"invalid_role_change\"}";
-    sfu_ws_send_text(c->fd, invalid_role_change, sizeof(invalid_role_change) - 1);
+  (void)buf;
+  (void)n;
+  if (!c->joined_room || c->client_ufrag[0] == '\0') {
     return;
   }
-
-  bool is_audience = strcmp(role_str, "audience") == 0;
-  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
-  bool changed = false;
-  if (session && session->room == c->joined_room) {
-    pthread_mutex_lock(&session->answer_lock);
-    uint32_t invalidated_generation = 0;
-    if (sfu_routing_table_invalidate_pending(c->server->routing_table, c->client_ufrag, c->joined_room, c->fd, &invalidated_generation)) {
-      atomic_store_explicit(&session->applied_answer_generation, invalidated_generation, memory_order_release);
-    }
-    changed = room_update_peer_role(c->joined_room, session, is_audience);
-    pthread_mutex_unlock(&session->answer_lock);
-  }
-  if (!changed) {
-    static const char role_change_rejected[] = "{\"type\":\"error\",\"message\":\"role_change_rejected\"}";
-    sfu_ws_send_text(c->fd, role_change_rejected, sizeof(role_change_rejected) - 1);
-  } else {
-    c->is_audience = is_audience;
-    char response[128];
-    int response_len = snprintf(response, sizeof(response), "{\"type\":\"role_changed\",\"user_id\":\"%" PRIu64 "\",\"role\":\"%s\"}", c->user_id, role_str);
-    if (response_len > 0 && (size_t)response_len < sizeof(response)) {
-      sfu_ws_send_text(c->fd, response, (size_t)response_len);
-    }
-    broadcast_peer_updated(c->joined_room, session);
-    if (is_audience) {
-      sfu_signaling_trigger_peer_renegotiation(session);
-    } else {
-      sfu_signaling_trigger_peer_renegotiation(session);
-    }
-    emit_hook_event(is_audience ? "unpublish" : "publish", c->user_id, c->joined_room_id);
-  }
-  if (session) {
-    sfu_session_release(session);
-  }
+  static const char role_change_disabled[] = "{\"type\":\"error\",\"message\":\"role_change_disabled\"}";
+  sfu_ws_send_text(c->fd, role_change_disabled, sizeof(role_change_disabled) - 1);
+  SFU_LOG_INFO("signaling: role_change rejected (not supported) user_id=%" PRId64 " (fd=%d)", c->user_id, c->fd);
 }
 
 static void handle_camera(sfu_client_conn_t *c, const char *buf, size_t n) {
