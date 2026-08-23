@@ -44,6 +44,8 @@ _Static_assert(SFU_SRTP_KEY_MATERIAL_LEN >= 88, "GCM-256 DTLS-SRTP exporter writ
 #define SFU_PT_AV1_RTX 101
 #define SFU_PT_VP8 96
 #define SFU_PT_VP8_RTX 97
+#define SFU_PT_H264 102
+#define SFU_PT_H264_RTX 103
 
 typedef enum { SFU_MEDIA_AUDIO = 0, SFU_MEDIA_VIDEO, SFU_MEDIA_SCREEN, SFU_MEDIA_DATA } sfu_media_kind_t;
 
@@ -72,6 +74,7 @@ typedef enum {
   SFU_VIDEO_CODEC_VP8,
   SFU_VIDEO_CODEC_VP9,
   SFU_VIDEO_CODEC_AV1,
+  SFU_VIDEO_CODEC_H264,
 } sfu_video_codec_t;
 
 

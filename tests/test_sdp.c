@@ -481,6 +481,43 @@ static void test_answer_media_is_scoped_by_mid_and_direction(void) {
   assert(twcc_recv == 6 && twcc_send == 5);
 }
 
+static void test_h264_offer_and_answer(void) {
+  extern bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc,
+                                          uint8_t *video_pt, uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id,
+                                          uint8_t *twcc_send_extmap_id);
+
+  /* The initial server offer must advertise H264 (PT 102/103) in both video m-lines. */
+  char offer[4096];
+  int len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, offer, sizeof(offer));
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(count_occurrences(offer, "a=rtpmap:102 H264/90000") == 2);
+  assert(count_occurrences(offer, "a=rtpmap:103 rtx/90000") == 2);
+  assert(count_occurrences(offer, "a=fmtp:103 apt=102") == 2);
+  assert(count_occurrences(offer,
+                           "a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f") == 2);
+
+  /* An H264 answer (packetization-mode=1, constrained baseline) must parse to SFU_VIDEO_CODEC_H264. */
+  const char *answer =
+      "m=video 9 UDP/TLS/RTP/SAVPF 102 103\r\n"
+      "a=mid:1\r\n"
+      "a=sendonly\r\n"
+      "a=rtpmap:102 H264/90000\r\n"
+      "a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n"
+      "a=rtpmap:103 rtx/90000\r\n"
+      "a=fmtp:103 apt=102\r\n"
+      "a=ssrc-group:FID 3737458944 3737458945\r\n"
+      "a=ssrc:3737458944 cname:local\r\n"
+      "a=ssrc:3737458945 cname:local\r\n";
+
+  uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
+  uint8_t video_pt = 0, rtx_pt = 0, twcc_recv = 0, twcc_send = 0;
+  sfu_video_codec_t codec = SFU_VIDEO_CODEC_NONE;
+  assert(sfu_test_parse_answer_media(answer, strlen(answer), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec, &twcc_recv, &twcc_send));
+  assert(video_pt == 102 && rtx_pt == 103);
+  assert(codec == SFU_VIDEO_CODEC_H264);
+}
+
 /* ---------------------------------------------------------------------------
  * F-18: concurrent renegotiation (SDP build) vs publisher teardown.
  *
@@ -655,7 +692,10 @@ static void test_299_audio_only_remote_offer(void) {
   assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5"));
   assert(contains(offer, " 897 898 899\r\n"));
   assert(contains(offer, "a=msid:u1000000-p1 audio-u1000000-p1"));
-  assert(count_occurrences(offer, "a=ssrc:") == SFU_MAX_REMOTE_SLOTS);
+  /* Per live audio slot the offer emits three `a=ssrc:` lines: `cname` + `msid`
+   * (from append_remote_audio_msid) and a second `cname` (from
+   * append_remote_ssrc_cname). */
+  assert(count_occurrences(offer, "a=ssrc:") == SFU_MAX_REMOTE_SLOTS * 3);
 
   free(offer);
   cleanup_mock_session(&session, remotes);
@@ -797,6 +837,7 @@ static void *run_sdp_tests(void *unused) {
   test_299_audio_only_remote_offer();
   test_twcc_extmap_extraction();
   test_answer_media_is_scoped_by_mid_and_direction();
+  test_h264_offer_and_answer();
   test_concurrent_build_vs_teardown();
 
   printf("test_sdp: OK\n");

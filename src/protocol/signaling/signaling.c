@@ -696,6 +696,8 @@ static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media
           section.codecs[pt] = SFU_VIDEO_CODEC_AV1;
         } else if (strncasecmp(codec, "VP8", 3) == 0) {
           section.codecs[pt] = SFU_VIDEO_CODEC_VP8;
+        } else if (strncasecmp(codec, "H264", 4) == 0) {
+          section.codecs[pt] = SFU_VIDEO_CODEC_H264;
         } else if (strncasecmp(codec, "rtx", 3) == 0) {
           section.is_rtx[pt] = true;
         }

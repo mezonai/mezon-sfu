@@ -25,6 +25,7 @@ int sfu_svc_parse_descriptor(sfu_video_codec_t codec, const uint8_t *payload, si
       return parse_vp9(payload, payload_len, out);
     case SFU_VIDEO_CODEC_VP8:
     case SFU_VIDEO_CODEC_AV1:
+    case SFU_VIDEO_CODEC_H264:
     case SFU_VIDEO_CODEC_NONE:
     default:
       return -1;
