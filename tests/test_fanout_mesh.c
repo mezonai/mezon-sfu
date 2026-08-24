@@ -22,9 +22,6 @@ static void collect(void *user_data, sfu_fanout_job_t *job) {
       sfu_session_release(job->targets[i].subscriber);
     }
     assert(!sfu_packet_release(job->pkt));
-  } else if (job->kind == SFU_FANOUT_JOB_REMB_FEEDBACK) {
-    assert(job->publisher != NULL && job->feedback_bitrate_bps != 0);
-    sfu_session_release(job->publisher);
   } else {
     c->last_dst = job->dst;
   }
@@ -117,16 +114,6 @@ int main(void) {
   assert(atomic_load(&subscribers[0].refcount) == 2);
   assert(atomic_load(&subscribers[1].refcount) == 2);
   assert(atomic_load(&fake_pkt.refcount) == 1);
-
-  sfu_peer_session_t publisher;
-  memset(&publisher, 0, sizeof(publisher));
-  atomic_store(&publisher.refcount, 2);
-  assert(sfu_fanout_mesh_enqueue_remb_feedback(&mesh, 0, 1, &publisher, 750000));
-  assert(atomic_load(&publisher.refcount) == 3);
-  c.count = 0;
-  drained = sfu_fanout_mesh_drain(&mesh, 1, 16, collect, &c);
-  assert(drained == 1 && c.count == 1);
-  assert(atomic_load(&publisher.refcount) == 2);
 
   sfu_fanout_mesh_destroy(&mesh);
   printf("test_fanout_mesh: OK\n");

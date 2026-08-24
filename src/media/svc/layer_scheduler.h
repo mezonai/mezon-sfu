@@ -17,6 +17,7 @@ typedef struct sfu_layer_scheduler {
   uint32_t temporal_transition_timestamp;
   uint32_t keyframe_timestamp;
   uint32_t pacer_frame_timestamp;
+  uint32_t allocated_bps;
   uint8_t target_sid;
   uint8_t target_tid;
   uint8_t current_sid;

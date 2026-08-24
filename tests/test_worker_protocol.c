@@ -256,6 +256,13 @@ static void test_compound_nack_rtx_dispatch(void) {
   feed_rtcp(&f, nack, nack_len);
 
   assert(f.cache->next_rtx_seq == 1);
+  assert(f.session->egress.diag.nack_requests == 1);
+  assert(f.session->egress.diag.cache_hits == 1);
+  assert(f.session->egress.diag.cache_misses == 0);
+  assert(f.session->egress.diag.rtx_sent == 1);
+  assert(sfu_metric_get("congestion_nack_requested") == 1);
+  assert(sfu_metric_get("congestion_rtx_cache_hit") == 1);
+  assert(sfu_metric_get("congestion_rtx_sent") == 1);
   assert(sfu_metric_get("rtcp_compound_malformed") == 0);
   assert(sfu_metric_get("rtcp_nack_bad") == 0);
   fixture_destroy(&f);
@@ -620,39 +627,65 @@ static void test_pli_unknown_ssrc_falls_back(void) {
   kf_fixture_destroy(&f);
 }
 
-/* GCC output must move the scheduler fields the forwarding hot path reads
- * (CC-02): a high estimate raises the subscriber scheduler's targets. */
+/* GCC output keeps the aggregate pacer on the full estimate while allocating
+ * only the safe video pool across active subscribed streams. */
 static void test_gcc_estimate_reaches_scheduler(void) {
   fixture_t f;
   fixture_init(&f);
 
-  /* A scheduler slot is created lazily for the publisher this subscriber is
-   * receiving. Exercise the exact TWCC-result path in the worker. */
-  sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for(f.session, 1);
-  assert(sched != NULL);
-  /* L1T3 has one spatial layer and starts at the full temporal target. */
-  assert(sched->target_sid == 0);
-  assert(sched->target_tid == 2);
+  sfu_receiver_snapshot_t *snapshot = sfu_receiver_snapshot_alloc();
+  assert(snapshot != NULL);
+  sfu_receiver_entry_t first = {
+      .subscriber = f.session,
+      .publisher_peer_id = 101,
+      .remote_slot = 0,
+      .assignment_generation = 11,
+      .has_video = true,
+      .has_screen = true,
+      .video_active = true,
+      .screen_active = true,
+  };
+  sfu_receiver_entry_t second = {
+      .subscriber = f.session,
+      .publisher_peer_id = 202,
+      .remote_slot = 1,
+      .assignment_generation = 12,
+      .has_video = true,
+      .video_active = true,
+  };
+  assert(sfu_receiver_snapshot_set(snapshot, 0, &first));
+  assert(sfu_receiver_snapshot_set(snapshot, 1, &second));
+  sfu_session_publish_receivers(f.session, snapshot);
 
-  /* Drop then climb so last_target_change_us is armed on the top rung. */
-  sched->target_sid = 0;
-  sched->target_tid = 0;
   sfu_svc_update_layers(f.session, 2000000);
-  assert(sched->target_sid == 0);
-  assert(sched->target_tid == 2);
-  assert(sched->last_target_change_us != 0);
+  sfu_layer_scheduler_t *camera1 = sfu_layer_scheduler_for_stream(f.session, 101, SFU_MEDIA_VIDEO);
+  sfu_layer_scheduler_t *screen1 = sfu_layer_scheduler_for_stream(f.session, 101, SFU_MEDIA_SCREEN);
+  sfu_layer_scheduler_t *camera2 = sfu_layer_scheduler_for_stream(f.session, 202, SFU_MEDIA_VIDEO);
+  assert(camera1 && screen1 && camera2);
+  uint64_t allocated = (uint64_t)camera1->allocated_bps + screen1->allocated_bps + camera2->allocated_bps;
+  assert(allocated <= 1700000); /* 85% safe video pool */
+  assert(camera1->allocated_bps < 2000000);
+  assert(screen1->allocated_bps < 2000000);
+  assert(camera2->allocated_bps < 2000000);
+  assert(f.session->egress.pacer.pacing_bps == 5000000); /* full GCC estimate, paced at 2.5x */
+  uint32_t contribution = 0;
+  uint64_t now_us = sfu_now_us();
+  assert(sfu_session_read_remb_contribution(f.session, 0, 11, now_us, 2000000, &contribution));
+  assert(contribution == camera1->allocated_bps + screen1->allocated_bps);
+  assert(sfu_session_read_remb_contribution(f.session, 1, 12, now_us, 2000000, &contribution));
+  assert(contribution == camera2->allocated_bps);
+  assert(!sfu_session_read_remb_contribution(f.session, 0, 10, now_us, 2000000, &contribution)); /* stale slot generation */
+  assert(!sfu_session_read_remb_contribution(f.session, 0, 11, now_us + 2000001, 2000000, &contribution)); /* stale sample */
 
-  /* Below the rung's down threshold but within the dwell window: the target
-   * must hold (hysteresis, #83). */
+  sfu_receiver_snapshot_t *inactive = sfu_receiver_snapshot_alloc();
+  assert(inactive != NULL);
+  first.screen_active = false;
+  assert(sfu_receiver_snapshot_set(inactive, 0, &first));
+  sfu_session_publish_receivers(f.session, inactive);
   sfu_svc_update_layers(f.session, 100000);
-  assert(sched->target_sid == 0);
-  assert(sched->target_tid == 2);
-
-  /* After the dwell window, the downshift commits. */
-  sched->last_target_change_us -= 600000;
-  sfu_svc_update_layers(f.session, 100000);
-  assert(sched->target_sid == 0);
-  assert(sched->target_tid == 0);
+  assert(screen1->allocated_bps == 0); /* inactive stream budget is cleared */
+  assert((uint64_t)camera1->allocated_bps + camera2->allocated_bps <= 85000);
+  assert(f.session->egress.pacer.pacing_bps == 250000);
 
   fixture_destroy(&f);
 }
@@ -661,6 +694,69 @@ static void test_gcc_estimate_reaches_scheduler(void) {
  * writes the per-subscriber TWCC sequence into the packet's RTP extension and
  * records the same value in send history; a subscriber without negotiation
  * gets neither. */
+static void test_publisher_remb_aggregates_fresh_minimum_and_throttles(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  struct sockaddr_in addr = {0};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(7000);
+  addr.sin_addr.s_addr = htonl(0x7f000003u);
+  sfu_peer_session_t *second =
+      sfu_session_table_get_or_create(&f.base.sessions, (const struct sockaddr_storage *)&addr, sizeof(addr));
+  assert(second != NULL);
+  second->state = SFU_SESSION_ESTABLISHED;
+  sfu_session_set_owner_worker(second, 1);
+
+  sfu_fanout_bundle_t *old = sfu_session_fanout_acquire(f.publisher);
+  assert(old != NULL);
+  const sfu_fanout_route_t *existing = sfu_fanout_bundle_find_peer(old, f.base.session, NULL);
+  assert(existing != NULL);
+  sfu_fanout_route_t first_route = *existing;
+  sfu_fanout_route_t second_route = first_route;
+  second_route.subscriber = second;
+  second_route.remote_slot = 3;
+  second_route.assignment_generation = 33;
+  sfu_fanout_bundle_t *bundle = sfu_fanout_bundle_alloc();
+  assert(bundle != NULL);
+  assert(sfu_fanout_bundle_set(bundle, 0, &first_route, SFU_FANOUT_VIDEO));
+  assert(sfu_fanout_bundle_set(bundle, 1, &second_route, SFU_FANOUT_VIDEO));
+  sfu_fanout_bundle_release(old);
+  sfu_session_publish_fanout(f.publisher, bundle);
+
+  uint64_t now_us = sfu_now_us();
+  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 900000, now_us);
+  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation, 600000, now_us);
+  uint32_t free_before = pool_free_count(&f.base.pp);
+  sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)now_us);
+  assert(f.publisher->egress.last_remb_bps == 600000); /* fresh minimum wins */
+  assert(f.publisher->egress.last_remb_time_us == (int64_t)now_us);
+  assert(pool_free_count(&f.base.pp) == free_before - 1);
+
+  /* A normal change inside 500 ms is throttled. */
+  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation, 700000, now_us + 50000);
+  sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 50000));
+  assert(f.publisher->egress.last_remb_bps == 600000);
+  assert(pool_free_count(&f.base.pp) == free_before - 1);
+
+  /* Generation mismatch and stale data are ignored, leaving the valid route. */
+  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation + 1, 100000, now_us + 600000);
+  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 800000,
+                                      now_us - 2000001);
+  sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 600000));
+  assert(f.publisher->egress.last_remb_bps == 600000); /* no fresh matching contribution */
+  assert(pool_free_count(&f.base.pp) == free_before - 1);
+
+  /* A 20% decrease may bypass the normal interval after 100 ms. */
+  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 400000, now_us + 700000);
+  sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 700000));
+  assert(f.publisher->egress.last_remb_bps == 400000);
+  assert(pool_free_count(&f.base.pp) == free_before - 2);
+
+  sfu_session_release(second);
+  kf_fixture_destroy(&f);
+}
+
 static void test_egress_writes_twcc_extension(void) {
   kf_fixture_t f;
   kf_fixture_init(&f);
@@ -1487,6 +1583,24 @@ static void test_kf_enqueue_ring_full_drops_ref(void) {
   kf_fixture_destroy(&f);
 }
 
+#ifdef SFU_DIAG_LOG
+static void test_congestion_diag_staggered_due_windows(void) {
+  fixture_t f;
+  fixture_init(&f);
+  f.session->egress.diag.allocation_streams = 1;
+
+  uint64_t phase = ((uint64_t)f.session->peer_id * 2654435761ULL) % 2000000ULL;
+  uint64_t first_us = 10000000ULL + phase;
+  assert(!sfu_session_congestion_diag_due(f.session, first_us - 1));
+  assert(sfu_session_congestion_diag_due(f.session, first_us));
+  f.session->egress.diag.last_log_us = first_us;
+  assert(!sfu_session_congestion_diag_due(f.session, first_us + 100000ULL));
+  assert(sfu_session_congestion_diag_due(f.session, first_us + 2000000ULL));
+
+  fixture_destroy(&f);
+}
+#endif
+
 int main(void) {
   sfu_signaling_server_t signaling;
   sfu_signaling_membership_test_server_init(&signaling);
@@ -1505,6 +1619,7 @@ int main(void) {
   test_nack_miss_routes_to_source_publisher();
   test_pli_unknown_ssrc_falls_back();
   test_gcc_estimate_reaches_scheduler();
+  test_publisher_remb_aggregates_fresh_minimum_and_throttles();
   test_egress_writes_twcc_extension();
   test_egress_rejects_new_generation_before_answer();
   test_egress_rejects_old_assignment_generation();
@@ -1521,6 +1636,9 @@ int main(void) {
   test_source_switch_colliding_seq_delayed_nack();
   test_kf_request_cross_worker_no_packet_leak();
   test_kf_enqueue_ring_full_drops_ref();
+#ifdef SFU_DIAG_LOG
+  test_congestion_diag_staggered_due_windows();
+#endif
   sfu_signaling_membership_test_server_stop(&signaling);
   printf("test_worker_protocol: OK\n");
   return 0;
