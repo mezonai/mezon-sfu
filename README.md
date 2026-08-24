@@ -156,7 +156,7 @@ If you use the **Zed** editor, you can run and debug your builds directly with C
 
 ### benchmark
 
-Run from a clean release build with `./build/benchmark/bench_sfu_core` (1,000,000 iterations, 1,200-byte synthetic RTP packets, 4 workers, fan-out 3). Machines and clock sources vary, so treat these as order-of-magnitude references, not hard limits.
+Run from a clean release build with `./build/benchmark/bench_sfu_core` (1,000,000 iterations, 1,200-byte synthetic RTP packets, 4 workers, fan-out 3). Machines i5-10400, 12 logical cores.
 
 | Benchmark | What it measures | Wall time | Throughput |
 | --- | --- | --- | --- |

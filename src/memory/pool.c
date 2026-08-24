@@ -15,7 +15,7 @@ int sfu_pool_init(sfu_pool_t *pool, uint32_t capacity, uint32_t slot_size) {
     return -1;
   }
 
-  pool->next = SFU_MALLOC(sizeof(uint32_t) * capacity);
+  pool->next = SFU_MALLOC(sizeof(*pool->next) * capacity);
   if (!pool->next) {
     SFU_FREE(pool->slab);
     pool->slab = NULL;
@@ -29,7 +29,7 @@ int sfu_pool_init(sfu_pool_t *pool, uint32_t capacity, uint32_t slot_size) {
   atomic_init(&pool->alloc_failures, 0);
 
   for (uint32_t i = 0; i < capacity; i++) {
-    pool->next[i] = (i + 1 < capacity) ? (i + 1) : SFU_POOL_EMPTY_INDEX;
+    atomic_init(&pool->next[i], (i + 1 < capacity) ? (i + 1) : SFU_POOL_EMPTY_INDEX);
   }
   atomic_init(&pool->head, pack(0, 0));
 
@@ -53,7 +53,7 @@ void *sfu_pool_alloc(sfu_pool_t *pool, uint32_t *out_index) {
       return NULL; /* pool exhausted */
     }
 
-    uint32_t next_idx = pool->next[idx];
+    uint32_t next_idx = atomic_load_explicit(&pool->next[idx], memory_order_relaxed);
     uint32_t tag = unpack_tag(old_head);
     uint64_t new_head = pack(tag + 1, next_idx);
 
@@ -77,10 +77,11 @@ void sfu_pool_free(sfu_pool_t *pool, uint32_t index) {
     uint32_t old_idx = unpack_index(old_head);
     uint32_t tag = unpack_tag(old_head);
 
+    atomic_store_explicit(&pool->next[index], old_idx, memory_order_relaxed);
+
     uint64_t new_head = pack(tag + 1, index);
 
-    if (atomic_compare_exchange_weak_explicit(&pool->head, &old_head, new_head, memory_order_acq_rel, memory_order_acquire)) {
-      pool->next[index] = old_idx;
+    if (atomic_compare_exchange_weak_explicit(&pool->head, &old_head, new_head, memory_order_release, memory_order_relaxed)) {
       atomic_fetch_sub_explicit(&pool->in_use, 1, memory_order_relaxed);
       return;
     }

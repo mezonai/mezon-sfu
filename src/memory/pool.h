@@ -9,7 +9,7 @@
 
 typedef struct sfu_pool {
   uint8_t *slab;
-  uint32_t *next;
+  _Atomic uint32_t *next;
   _Atomic uint64_t head;
 
   uint32_t slot_size;

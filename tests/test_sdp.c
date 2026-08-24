@@ -191,12 +191,12 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
 static void test_screen_answer_parsing(void) {
   extern bool sfu_test_parse_answer_screen(const char *, size_t, uint32_t *, uint32_t *, uint8_t *, uint8_t *, sfu_video_codec_t *, uint8_t *);
   const char *answer =
-      "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n"
+      "m=video 9 UDP/TLS/RTP/SAVPF 98 99\r\n"
       "a=mid:2\r\n"
       "a=sendonly\r\n"
-      "a=rtpmap:96 VP8/90000\r\n"
-      "a=rtpmap:97 rtx/90000\r\n"
-      "a=fmtp:97 apt=96\r\n"
+      "a=rtpmap:98 VP9/90000\r\n"
+      "a=rtpmap:99 rtx/90000\r\n"
+      "a=fmtp:99 apt=98\r\n"
       "a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
       "a=ssrc-group:FID 4444 5555\r\n";
   uint32_t ssrc = 0, rtx = 0;
@@ -204,7 +204,7 @@ static void test_screen_answer_parsing(void) {
   sfu_video_codec_t codec = SFU_VIDEO_CODEC_NONE;
   assert(sfu_test_parse_answer_screen(answer, strlen(answer), &ssrc, &rtx, &pt, &rtx_pt, &codec, &mid_id));
   assert(ssrc == 4444 && rtx == 5555);
-  assert(pt == 96 && rtx_pt == 97 && codec == SFU_VIDEO_CODEC_VP8);
+  assert(pt == 98 && rtx_pt == 99 && codec == SFU_VIDEO_CODEC_VP9);
   assert(mid_id == 7);
 }
 
@@ -240,6 +240,10 @@ static void test_renegotiation_offer_role_directions(void) {
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=recvonly") == 3);
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99\r\n"));
+  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 1);
+  assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
 
   atomic_store(&session.is_audience, true);
   len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
@@ -446,13 +450,13 @@ static void test_answer_media_is_scoped_by_mid_and_direction(void) {
       "a=mid:0\r\n"
       "a=sendonly\r\n"
       "a=ssrc:1273418643 cname:local\r\n"
-      "m=video 7000 UDP/TLS/RTP/SAVPF 98 97\r\n"
+      "m=video 7000 UDP/TLS/RTP/SAVPF 96 97\r\n"
       "a=mid:1\r\n"
       "a=sendonly\r\n"
       "a=extmap:6 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n"
-      "a=rtpmap:98 VP9/90000\r\n"
+      "a=rtpmap:96 VP8/90000\r\n"
       "a=rtpmap:97 rtx/90000\r\n"
-      "a=fmtp:97 apt=98\r\n"
+      "a=fmtp:97 apt=96\r\n"
       "a=ssrc-group:FID 3737458944 3737458945\r\n"
       "a=ssrc:3737458944 cname:local\r\n"
       "a=ssrc:3737458945 cname:local\r\n"
@@ -476,46 +480,140 @@ static void test_answer_media_is_scoped_by_mid_and_direction(void) {
   assert(audio_ssrc == 1273418643u);
   assert(video_ssrc == 3737458944u);
   assert(rtx_ssrc == 3737458945u);
-  assert(video_pt == 98 && rtx_pt == 97);
-  assert(codec == SFU_VIDEO_CODEC_VP9);
+  assert(video_pt == 96 && rtx_pt == 97);
+  assert(codec == SFU_VIDEO_CODEC_VP8);
   assert(twcc_recv == 6 && twcc_send == 5);
 }
 
-static void test_h264_offer_and_answer(void) {
+static void test_local_codec_offer_and_answer_contracts(void) {
   extern bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc,
                                           uint8_t *video_pt, uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id,
                                           uint8_t *twcc_send_extmap_id);
 
-  /* The initial server offer must advertise H264 (PT 102/103) in both video m-lines. */
   char offer[4096];
   int len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
-  assert(count_occurrences(offer, "a=rtpmap:102 H264/90000") == 2);
-  assert(count_occurrences(offer, "a=rtpmap:103 rtx/90000") == 2);
-  assert(count_occurrences(offer, "a=fmtp:103 apt=102") == 2);
-  assert(count_occurrences(offer,
-                           "a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f") == 2);
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99\r\n"));
+  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 1);
+  assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 1);
+  assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
+  assert(count_occurrences(offer, "a=fmtp:99 apt=98") == 1);
+  assert(!contains(offer, "H264/90000"));
+  assert(!contains(offer, "AV1/90000"));
 
-  /* An H264 answer (packetization-mode=1, constrained baseline) must parse to SFU_VIDEO_CODEC_H264. */
-  const char *answer =
+  const char *bad_camera =
       "m=video 9 UDP/TLS/RTP/SAVPF 102 103\r\n"
       "a=mid:1\r\n"
       "a=sendonly\r\n"
       "a=rtpmap:102 H264/90000\r\n"
-      "a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n"
       "a=rtpmap:103 rtx/90000\r\n"
-      "a=fmtp:103 apt=102\r\n"
-      "a=ssrc-group:FID 3737458944 3737458945\r\n"
-      "a=ssrc:3737458944 cname:local\r\n"
-      "a=ssrc:3737458945 cname:local\r\n";
-
+      "a=fmtp:103 apt=102\r\n";
   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
   uint8_t video_pt = 0, rtx_pt = 0, twcc_recv = 0, twcc_send = 0;
   sfu_video_codec_t codec = SFU_VIDEO_CODEC_NONE;
-  assert(sfu_test_parse_answer_media(answer, strlen(answer), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec, &twcc_recv, &twcc_send));
-  assert(video_pt == 102 && rtx_pt == 103);
-  assert(codec == SFU_VIDEO_CODEC_H264);
+  assert(!sfu_test_parse_answer_media(bad_camera, strlen(bad_camera), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec, &twcc_recv,
+                                      &twcc_send));
+
+  const char *camera_without_rtx =
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+      "a=mid:1\r\n"
+      "a=sendonly\r\n"
+      "a=rtpmap:96 VP8/90000\r\n";
+  assert(sfu_test_parse_answer_media(camera_without_rtx, strlen(camera_without_rtx), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec,
+                                     &twcc_recv, &twcc_send));
+  assert(video_pt == 96 && rtx_pt == 0 && codec == SFU_VIDEO_CODEC_VP8);
+
+  const char *rtx_not_in_mline =
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+      "a=mid:1\r\n"
+      "a=sendonly\r\n"
+      "a=rtpmap:96 VP8/90000\r\n"
+      "a=rtpmap:97 rtx/90000\r\n"
+      "a=fmtp:97 apt=96\r\n";
+  rtx_pt = 77;
+  assert(sfu_test_parse_answer_media(rtx_not_in_mline, strlen(rtx_not_in_mline), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec,
+                                     &twcc_recv, &twcc_send));
+  assert(video_pt == 96 && rtx_pt == 0);
+}
+
+static void test_answer_mline_shape_validation(void) {
+  extern bool sfu_test_validate_answer_mline_shape(const char *, size_t, uint32_t);
+  const char *valid =
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\n"
+      "m=video 0 UDP/TLS/RTP/SAVPF 98\r\na=mid:2\r\na=inactive\r\n"
+      "m=audio 0 UDP/TLS/RTP/SAVPF 111\r\na=mid:3\r\na=inactive\r\n"
+      "m=video 0 UDP/TLS/RTP/SAVPF 96\r\na=mid:4\r\na=inactive\r\n"
+      "m=video 0 UDP/TLS/RTP/SAVPF 98\r\na=mid:5\r\na=inactive\r\n";
+  assert(sfu_test_validate_answer_mline_shape(valid, strlen(valid), 1));
+
+  const char *truncated =
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\n";
+  assert(!sfu_test_validate_answer_mline_shape(truncated, strlen(truncated), 0));
+
+  const char *reordered =
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\n"
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+      "m=video 0 UDP/TLS/RTP/SAVPF 98\r\na=mid:2\r\n";
+  assert(!sfu_test_validate_answer_mline_shape(reordered, strlen(reordered), 0));
+
+  const char *duplicate_mid =
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\n"
+      "m=video 0 UDP/TLS/RTP/SAVPF 98\r\na=mid:1\r\n";
+  assert(!sfu_test_validate_answer_mline_shape(duplicate_mid, strlen(duplicate_mid), 0));
+
+  const char *wrong_kind =
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+      "m=audio 0 UDP/TLS/RTP/SAVPF 111\r\na=mid:1\r\n"
+      "m=video 0 UDP/TLS/RTP/SAVPF 98\r\na=mid:2\r\n";
+  assert(!sfu_test_validate_answer_mline_shape(wrong_kind, strlen(wrong_kind), 0));
+}
+
+static void test_offered_mline_floor_survives_retirement_and_reuse(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  assert(pthread_mutex_init(&session.graph.lock, NULL) == 0);
+  assert(pthread_mutex_init(&session.media.lock, NULL) == 0);
+
+  uint32_t slot0 = UINT32_MAX, slot1 = UINT32_MAX;
+  uint64_t gen0 = 0, gen1 = 0;
+  assert(sfu_session_remote_slot_reserve(&session, 10, 1, &slot0, &gen0));
+  assert(sfu_session_remote_slot_reserve(&session, 20, 2, &slot1, &gen1));
+  assert(slot0 == 0 && slot1 == 1);
+
+  sfu_remote_offer_manifest_t *manifest = sfu_session_remote_offer_capture(&session);
+  assert(manifest && manifest->high_water_slots == 2);
+  assert(sfu_session_remote_offer_install(&session, manifest));
+  assert(sfu_session_remote_offer_apply_answer(&session, manifest));
+  sfu_remote_offer_manifest_release(manifest);
+
+  assert(sfu_session_remote_slot_retire(&session, slot1, gen1));
+  manifest = sfu_session_remote_offer_capture(&session);
+  assert(manifest && manifest->high_water_slots == 2 && manifest->assignment_generations[1] == 0);
+  assert(sfu_session_remote_offer_install(&session, manifest));
+  assert(sfu_session_remote_offer_apply_answer(&session, manifest));
+  sfu_remote_offer_manifest_release(manifest);
+  assert(sfu_session_remote_slot_high_water(&session) == 2);
+
+  uint32_t reused = UINT32_MAX;
+  uint64_t reused_gen = 0;
+  assert(sfu_session_remote_slot_reserve(&session, 30, 3, &reused, &reused_gen));
+  assert(reused == slot1 && reused_gen != gen1);
+
+  char offer[8192];
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "u", "passwordpasswordpassword", "AA:BB", offer, sizeof(offer), NULL);
+  assert(len > 0);
+  offer[len] = '\0';
+  assert(contains(offer, "a=group:BUNDLE 0 1 2 3 4 5 6 7 8\r\n"));
+  assert(contains(offer, "a=mid:6\r\n") && contains(offer, "a=mid:7\r\n") && contains(offer, "a=mid:8\r\n"));
+
+  sfu_session_remote_slots_teardown(&session);
+  pthread_mutex_destroy(&session.graph.lock);
+  pthread_mutex_destroy(&session.media.lock);
 }
 
 /* ---------------------------------------------------------------------------
@@ -837,7 +935,9 @@ static void *run_sdp_tests(void *unused) {
   test_299_audio_only_remote_offer();
   test_twcc_extmap_extraction();
   test_answer_media_is_scoped_by_mid_and_direction();
-  test_h264_offer_and_answer();
+  test_local_codec_offer_and_answer_contracts();
+  test_answer_mline_shape_validation();
+  test_offered_mline_floor_survives_retirement_and_reuse();
   test_concurrent_build_vs_teardown();
 
   printf("test_sdp: OK\n");
