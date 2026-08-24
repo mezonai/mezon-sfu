@@ -376,7 +376,7 @@
         <div id="joinScreen">
             <div id="joinCard">
                 <h1>Mezon SFU</h1>
-                <p class="sub">H264 camera + VP9 L1T3 screen (1080p)</p>
+                <p class="sub">VP8 camera + VP9 L1T3 screen (1080p)</p>
                 <div class="form-group">
                     <label for="wsUrl">Signaling WebSocket URL</label>
                     <input
@@ -1291,7 +1291,7 @@
                     params.degradationPreference = "maintain-resolution";
                     const enc = params.encodings[0];
                     enc.scalabilityMode = SCREEN_SVC_MODE;
-                    enc.maxFramerate = 30;
+                    enc.maxFramerate = 15;
                     enc.maxBitrate = 8_000_000;
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
@@ -1319,7 +1319,7 @@
                             cursor: "always",
                             width: { ideal: 1920 },
                             height: { ideal: 1080 },
-                            frameRate: { ideal: 30, max: 60 },
+                            frameRate: { ideal: 15, max: 20 },
                         },
                         audio: false,
                     });
