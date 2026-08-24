@@ -285,6 +285,39 @@ static void test_temporal_transition_commits_on_end(void) {
   assert(sched.current_tid == 1 && !sched.temporal_transition_active);
 }
 
+static void test_enhancement_frame_admission_latches_until_end(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.current_tid = 1;
+  sched.target_tid = 1;
+
+  sfu_layer_scheduler_decision_t decision;
+  sfu_svc_descriptor_t start = make_desc(900, 0, 1, 1, 0, 0, 1, 0);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &start, false, &decision));
+  assert(decision.pacer_frame_start && !decision.pacer_frame_end);
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(sched.pacer_frame_active);
+
+  sfu_svc_descriptor_t middle = make_desc(900, 0, 1, 1, 0, 0, 0, 0);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &middle, false, &decision));
+  assert(decision.pacer_frame_continuation);
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+
+  sfu_svc_descriptor_t end = make_desc(900, 0, 1, 1, 0, 0, 0, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &end, false, &decision));
+  assert(decision.pacer_frame_continuation && decision.pacer_frame_end);
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.pacer_frame_active);
+
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.current_tid = 1;
+  sched.target_tid = 1;
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &middle, false, &decision));
+  assert(decision.pacer_frame_continuation);
+}
+
 int main(void) {
   test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
@@ -298,6 +331,7 @@ int main(void) {
   test_multi_packet_keyframe_transaction();
   test_keyframe_reject_keeps_gate_armed();
   test_temporal_transition_commits_on_end();
+  test_enhancement_frame_admission_latches_until_end();
   printf("test_layer_selector: OK\n");
   return 0;
 }

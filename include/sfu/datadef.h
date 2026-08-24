@@ -382,6 +382,12 @@ typedef struct {
   int64_t last_screen_pli_time;
   int64_t last_fir_time;
   int64_t twcc_last_feedback_ref_us;
+  int64_t last_remb_time_us;
+  uint64_t pending_remb_snapshot_generation;
+  uint32_t last_remb_bps;
+  uint32_t pending_remb_bps;
+  uint32_t remb_route_cursor;
+  bool pending_remb_delivered;
   _Atomic uint32_t generation;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;
