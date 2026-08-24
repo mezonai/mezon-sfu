@@ -41,6 +41,7 @@ static inline bool sfu_session_video_runtime_ready(const sfu_peer_session_t *ses
 void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir, sfu_media_kind_t source);
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir);
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher);
+bool sfu_session_send_remb(sfu_worker_t *w, sfu_peer_session_t *publisher, uint32_t bitrate_bps);
 typedef struct sfu_receiver_snapshot_iter {
   const sfu_receiver_snapshot_t *snapshot;
   uint32_t chunk_index;

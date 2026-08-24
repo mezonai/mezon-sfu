@@ -8,6 +8,15 @@
 void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
 
+  if (job->kind == SFU_FANOUT_JOB_REMB_FEEDBACK) {
+    if (job->publisher) {
+      (void)sfu_session_send_remb(w, job->publisher, job->feedback_bitrate_bps);
+      sfu_session_release(job->publisher);
+    }
+    sfu_fanout_mesh_free_job(w->mesh, job);
+    return;
+  }
+
   if (job->kind == SFU_FANOUT_JOB_BATCH) {
     for (uint8_t i = 0; i < job->target_count; i++) {
       w->reserved_outputs[i] = NULL;

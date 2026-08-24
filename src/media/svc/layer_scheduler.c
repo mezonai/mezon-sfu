@@ -61,6 +61,7 @@ static void layer_scheduler_begin_picture(sfu_layer_scheduler_t *sched, uint32_t
   sched->transition_failed = false;
   sched->temporal_transition_active = false;
   sched->temporal_transition_failed = false;
+  sched->pacer_frame_active = false;
 
   sched->picture_valid = true;
   sched->picture_timestamp = rtp_timestamp;
@@ -94,6 +95,7 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
   decision->b_bit = desc->b_bit;
   decision->e_bit = desc->e_bit;
   decision->pacer_class = sfu_layer_scheduler_classify_frame(sched, desc);
+  decision->pacer_frame_continuation = decision->pacer_class == SFU_PACER_CLASS_VIDEO_ENH && desc->b_bit == 0;
 
   if (desc->sid >= 8) {
     return false;
@@ -173,8 +175,27 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
   if (sched->target_sid > sched->current_sid && desc->p_bit == 0) {
     decision->transition_packet = true;
   }
-  if (decision->transition_packet) {
+  bool admitted_enh_continuation = desc->b_bit == 0 && sched->pacer_frame_active && sched->pacer_frame_timestamp == desc->rtp_timestamp &&
+                                       sched->pacer_frame_sid == desc->sid && sched->pacer_frame_tid == desc->tid;
+  if (decision->transition_packet && !admitted_enh_continuation) {
     decision->pacer_class = SFU_PACER_CLASS_VIDEO_TRANSITION;
+    decision->pacer_frame_continuation = false;
+  }
+
+  if (decision->pacer_class == SFU_PACER_CLASS_VIDEO_ENH) {
+    decision->pacer_frame_start = desc->b_bit != 0;
+    decision->pacer_frame_end = desc->e_bit != 0;
+    if (decision->pacer_frame_start) {
+      if (sched->pacer_frame_active) {
+        return false;
+      }
+    } else {
+      decision->pacer_frame_continuation = true;
+      if (!sched->pacer_frame_active || sched->pacer_frame_timestamp != desc->rtp_timestamp || sched->pacer_frame_sid != desc->sid ||
+          sched->pacer_frame_tid != desc->tid) {
+        return false;
+      }
+    }
   }
 
   if (desc->l_bit == 0) {
@@ -222,6 +243,16 @@ void sfu_layer_scheduler_commit_packet(sfu_layer_scheduler_t *sched, const sfu_l
     sched->temporal_transition_timestamp = decision->rtp_timestamp;
   }
 
+  if (decision->pacer_frame_start && !decision->pacer_frame_end) {
+    sched->pacer_frame_active = true;
+    sched->pacer_frame_timestamp = decision->rtp_timestamp;
+    sched->pacer_frame_sid = decision->sid;
+    sched->pacer_frame_tid = decision->tid;
+  } else if (decision->pacer_frame_end && sched->pacer_frame_active && sched->pacer_frame_timestamp == decision->rtp_timestamp &&
+             sched->pacer_frame_sid == decision->sid && sched->pacer_frame_tid == decision->tid) {
+    sched->pacer_frame_active = false;
+  }
+
   if (decision->e_bit != 0 && (sched->failed_sid_mask & sid_mask) == 0) {
     sched->completed_sid_mask |= sid_mask;
   }
@@ -258,6 +289,10 @@ void sfu_layer_scheduler_reject_packet(sfu_layer_scheduler_t *sched, const sfu_l
   }
 
   sched->failed_sid_mask |= (uint8_t)(1u << decision->sid);
+  if (sched->pacer_frame_active && sched->pacer_frame_timestamp == decision->rtp_timestamp && sched->pacer_frame_sid == decision->sid &&
+      sched->pacer_frame_tid == decision->tid) {
+    sched->pacer_frame_active = false;
+  }
   if (decision->keyframe_packet || (sched->keyframe_active && sched->keyframe_timestamp == decision->rtp_timestamp && decision->sid == 0)) {
     sched->needs_keyframe = true;
     sched->keyframe_active = false;
@@ -353,6 +388,7 @@ void sfu_layer_scheduler_switch_source(sfu_peer_session_t *session, uint32_t new
   sched->temporal_transition_failed = false;
   sched->keyframe_active = false;
   sched->keyframe_failed = false;
+  sched->pacer_frame_active = false;
 
   atomic_fetch_add_explicit(&session->egress.generation, 1, memory_order_acq_rel);
 }

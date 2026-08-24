@@ -1078,15 +1078,15 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
   int64_t now = (int64_t)sfu_now_us();
   uint64_t sent_before = sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE];
   for (int i = 0; i < 3; i++) {
-    (void)sfu_pacer_should_send(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, 8000, &now);
+    (void)sfu_pacer_should_send(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, 8000, false, &now);
   }
   assert(sub->egress.pacer.balance_bytes < 0);
 
   /* Enhancement video beyond the debt window drops; audio does not. */
-  bool enh = sfu_pacer_should_send(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_ENH, 8000, &now);
+  bool enh = sfu_pacer_should_send(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_ENH, 8000, true, &now);
   assert(!enh);
   assert(sfu_metric_get("pacer_dropped_enh") == 0); /* metric only from egress path */
-  bool audio = sfu_pacer_should_send(&sub->egress.pacer, SFU_PACER_CLASS_AUDIO, 300, &now);
+  bool audio = sfu_pacer_should_send(&sub->egress.pacer, SFU_PACER_CLASS_AUDIO, 300, false, &now);
   assert(audio);
   assert(sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE] == sent_before + 3);
 

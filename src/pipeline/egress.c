@@ -66,8 +66,10 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   int64_t send_time_us = (int64_t)sfu_now_us();
   sfu_pacer_class_t cls = media->is_audio ? SFU_PACER_CLASS_AUDIO : (media->has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
-  if (!sfu_pacer_should_send(&sub_session->egress.pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, &send_time_us)) {
+  bool allow_congestion_drop = decision && decision->pacer_frame_start;
+  if (!sfu_pacer_should_send(&sub_session->egress.pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, allow_congestion_drop, &send_time_us)) {
     sfu_metric_inc("pacer_dropped_enh");
+    sfu_metric_inc("pacer_dropped_enh_frames");
     return false;
   }
 
@@ -210,6 +212,9 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
       }
       if (!sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+        if (decision.pacer_frame_continuation) {
+          sfu_metric_inc("vp9_enh_orphan_continuation");
+        }
         sfu_layer_scheduler_reject_packet(sched, &decision);
         if (reserved_output) {
           sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
@@ -218,20 +223,6 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         return false;
       }
       video_class = decision.pacer_class;
-    }
-  }
-
-  if (video_class == SFU_PACER_CLASS_VIDEO_ENH) {
-    int64_t now_us = (int64_t)sfu_now_us();
-    if (sfu_pacer_debt_after(&sub_session->egress.pacer, plain->len + 10, now_us) > sub_session->egress.pacer.bucket_cap_bytes) {
-      if (has_decision) {
-        sfu_layer_scheduler_reject_packet(sched, &decision);
-      }
-      if (reserved_output) {
-        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
-      }
-      sfu_metric_inc("egress_admission_drop");
-      return false;
     }
   }
 
@@ -326,6 +317,9 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
         sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
       }
       if (!sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+        if (decision.pacer_frame_continuation) {
+          sfu_metric_inc("vp9_enh_orphan_continuation");
+        }
         sfu_layer_scheduler_reject_packet(sched, &decision);
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return false;

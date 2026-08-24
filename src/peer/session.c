@@ -20,6 +20,7 @@
 #include "transport/srtp/srtp.h"
 #include "util/alloc.h"
 #include "util/log.h"
+#include "util/metrics.h"
 
 #define SFU_SESSION_KF_THROTTLE_MS 1000
 #define SFU_SNAPSHOT_HAZARD_SLOTS 256
@@ -2049,6 +2050,55 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
   sfu_session_request_keyframe_for_source(w, publisher, use_fir, SFU_MEDIA_VIDEO);
+}
+
+bool sfu_session_send_remb(sfu_worker_t *w, sfu_peer_session_t *publisher, uint32_t bitrate_bps) {
+  if (!w || !publisher || bitrate_bps == 0 || publisher->state != SFU_SESSION_ESTABLISHED || !sfu_session_accepts_work(publisher) ||
+      sfu_session_owner_worker(publisher) != w->worker_index) {
+    sfu_metric_inc("remb_send_rejected");
+    return false;
+  }
+
+  sfu_media_snapshot_t media = sfu_session_load_media(publisher);
+  uint32_t media_ssrcs[2];
+  uint8_t media_ssrc_count = 0;
+  if (media.video_ssrc != 0) {
+    media_ssrcs[media_ssrc_count++] = media.video_ssrc;
+  }
+  if (media.screen_ssrc != 0 && (media_ssrc_count == 0 || media_ssrcs[0] != media.screen_ssrc)) {
+    media_ssrcs[media_ssrc_count++] = media.screen_ssrc;
+  }
+  if (media_ssrc_count == 0) {
+    sfu_metric_inc("remb_no_media_ssrc");
+    return false;
+  }
+
+  sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
+  if (!rtcp_pkt) {
+    return false;
+  }
+
+  int rtcp_len = sfu_rtcp_build_remb(1, bitrate_bps, media_ssrcs, media_ssrc_count, rtcp_pkt->data, rtcp_pkt->cap);
+  bool sent = false;
+  if (rtcp_len > 0) {
+    pthread_mutex_lock(&publisher->crypto_lock);
+    bool protected = sfu_srtp_protect_rtcp(&publisher->srtp, rtcp_pkt->data, &rtcp_len, rtcp_pkt->cap);
+    pthread_mutex_unlock(&publisher->crypto_lock);
+    if (protected) {
+      rtcp_pkt->len = (uint32_t)rtcp_len;
+      if (sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len) == 0) {
+        sfu_metric_inc("remb_sent");
+        sent = true;
+      } else {
+        sfu_metric_inc("remb_send_rejected");
+      }
+    } else {
+      sfu_metric_inc("remb_protect_fail");
+    }
+  }
+
+  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+  return sent;
 }
 
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher) {

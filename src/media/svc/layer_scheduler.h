@@ -16,6 +16,7 @@ typedef struct sfu_layer_scheduler {
   uint32_t transition_timestamp;
   uint32_t temporal_transition_timestamp;
   uint32_t keyframe_timestamp;
+  uint32_t pacer_frame_timestamp;
   uint8_t target_sid;
   uint8_t target_tid;
   uint8_t current_sid;
@@ -25,6 +26,8 @@ typedef struct sfu_layer_scheduler {
   uint8_t failed_sid_mask;
   uint8_t transition_sid;
   uint8_t temporal_transition_tid;
+  uint8_t pacer_frame_sid;
+  uint8_t pacer_frame_tid;
   bool needs_keyframe;
   bool is_pinned;
   bool picture_valid;
@@ -34,6 +37,7 @@ typedef struct sfu_layer_scheduler {
   bool temporal_transition_failed;
   bool keyframe_active;
   bool keyframe_failed;
+  bool pacer_frame_active;
 } sfu_layer_scheduler_t;
 
 typedef struct sfu_layer_scheduler_decision {
@@ -50,6 +54,9 @@ typedef struct sfu_layer_scheduler_decision {
   bool transition_packet;
   bool start_temporal_transition;
   bool temporal_transition_packet;
+  bool pacer_frame_start;
+  bool pacer_frame_continuation;
+  bool pacer_frame_end;
   sfu_pacer_class_t pacer_class;
 } sfu_layer_scheduler_decision_t;
 
