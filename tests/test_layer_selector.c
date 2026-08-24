@@ -12,7 +12,7 @@
 
 #define DWELL_EXPIRE(s_) ((s_).last_target_change_us -= 600000)
 
-static void test_up_needs_headroom(void) {
+static void test_l1t3_bitrate_ladder_stays_on_spatial_zero(void) {
   sfu_layer_scheduler_t s;
   sfu_layer_scheduler_init(&s, 1);
 
@@ -20,10 +20,10 @@ static void test_up_needs_headroom(void) {
   s.target_tid = 0;
 
   sfu_layer_scheduler_set_bitrate(&s, 1200000);
-  assert(s.target_sid != 2);
+  assert(s.target_sid == 0 && s.target_tid != 2);
   DWELL_EXPIRE(s);
   sfu_layer_scheduler_set_bitrate(&s, 1440000);
-  assert(s.target_sid == 2 && s.target_tid == 2);
+  assert(s.target_sid == 0 && s.target_tid == 2);
 }
 
 static void test_down_holds_at_rung_rate(void) {
@@ -33,17 +33,17 @@ static void test_down_holds_at_rung_rate(void) {
   s.target_sid = 0;
   s.target_tid = 0;
   sfu_layer_scheduler_set_bitrate(&s, 2000000);
-  assert(s.target_sid == 2);
+  assert(s.target_sid == 0 && s.target_tid == 2);
 
   /* Falling between rung rate and up threshold holds the rung. */
   s.last_target_change_us -= 600000;
   sfu_layer_scheduler_set_bitrate(&s, 1300000);
-  assert(s.target_sid == 2);
+  assert(s.target_sid == 0 && s.target_tid == 2);
 
   /* Breaking the down threshold drops — but only after dwell. */
   s.last_target_change_us -= 600000;
   sfu_layer_scheduler_set_bitrate(&s, 1100000);
-  assert(s.target_sid == 1 && s.target_tid == 2);
+  assert(s.target_sid == 0 && s.target_tid == 1);
 }
 
 static void test_dwell_blocks_fast_flap(void) {
@@ -53,11 +53,11 @@ static void test_dwell_blocks_fast_flap(void) {
   s.target_sid = 0;
   s.target_tid = 0;
   sfu_layer_scheduler_set_bitrate(&s, 2000000);
-  assert(s.target_sid == 2);
+  assert(s.target_sid == 0 && s.target_tid == 2);
   assert(s.last_target_change_us != 0);
 
   sfu_layer_scheduler_set_bitrate(&s, 100000);
-  assert(s.target_sid == 2);
+  assert(s.target_sid == 0 && s.target_tid == 2);
 }
 
 static void test_switch_source_transaction(void) {
@@ -286,7 +286,7 @@ static void test_temporal_transition_commits_on_end(void) {
 }
 
 int main(void) {
-  test_up_needs_headroom();
+  test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
   test_dwell_blocks_fast_flap();
   test_switch_source_transaction();

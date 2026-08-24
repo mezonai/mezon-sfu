@@ -457,8 +457,7 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
-               SFU_PT_VP8_RTX, SFU_PT_H264, SFU_PT_H264_RTX);
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, SFU_PT_VP8, SFU_PT_VP8_RTX);
 
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0) {
     return -1;
@@ -484,30 +483,17 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP9, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0) {
-    return -1;
-  }
-  if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_AV1, SFU_PT_AV1, SFU_PT_AV1_RTX) != 0) {
-    return -1;
-  }
   if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP8, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0) {
     return -1;
   }
-  if (append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_H264, SFU_PT_H264, SFU_PT_H264_RTX) != 0) {
-    return -1;
-  }
 
-  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u %u %u %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX, SFU_PT_AV1, SFU_PT_AV1_RTX, SFU_PT_VP8,
-               SFU_PT_VP8_RTX, SFU_PT_H264, SFU_PT_H264_RTX);
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0 ||
       append_bundled_transport_headers(out, out_cap, &off, host, ufrag, pwd, fingerprint) != 0 ||
       append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0 || append_line(out, out_cap, &off, "a=mid:2") != 0 ||
       append_line(out, out_cap, &off, "a=rtcp-mux") != 0 || append_twcc_recv_attribute(out, out_cap, &off) != 0 ||
       append_mid_recv_attribute(out, out_cap, &off) != 0 ||
-      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP9, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0 ||
-      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_AV1, SFU_PT_AV1, SFU_PT_AV1_RTX) != 0 ||
-      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP8, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0 ||
-      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_H264, SFU_PT_H264, SFU_PT_H264_RTX) != 0) {
+      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP9, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0) {
     return -1;
   }
 
@@ -787,20 +773,12 @@ int sfu_sdp_build_offer_manifest(sfu_peer_session_t *session, const sfu_remote_o
     mid_index[slot] = (int16_t)remote_slot;
   }
   bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
-  uint8_t local_video_pt = 0;
-  uint8_t local_rtx_pt = 0;
-  uint8_t local_screen_pt = 0;
-  uint8_t local_screen_rtx_pt = 0;
-  sfu_video_codec_t local_video_codec = SFU_VIDEO_CODEC_NONE;
-  sfu_video_codec_t local_screen_codec = SFU_VIDEO_CODEC_NONE;
-  pthread_mutex_lock(&session->media.lock);
-  local_video_pt = session->media.uplink_video.payload_type ? session->media.uplink_video.payload_type : SFU_PT_VP8;
-  local_rtx_pt = session->media.uplink_video.rtx_payload_type ? session->media.uplink_video.rtx_payload_type : SFU_PT_VP8_RTX;
-  local_video_codec = session->media.uplink_video.codec;
-  local_screen_pt = session->media.screen.payload_type ? session->media.screen.payload_type : local_video_pt;
-  local_screen_rtx_pt = session->media.screen.rtx_payload_type ? session->media.screen.rtx_payload_type : local_rtx_pt;
-  local_screen_codec = session->media.screen.codec != SFU_VIDEO_CODEC_NONE ? session->media.screen.codec : local_video_codec;
-  pthread_mutex_unlock(&session->media.lock);
+  const uint8_t local_video_pt = SFU_PT_VP8;
+  const uint8_t local_rtx_pt = SFU_PT_VP8_RTX;
+  const uint8_t local_screen_pt = SFU_PT_VP9;
+  const uint8_t local_screen_rtx_pt = SFU_PT_VP9_RTX;
+  const sfu_video_codec_t local_video_codec = SFU_VIDEO_CODEC_VP8;
+  const sfu_video_codec_t local_screen_codec = SFU_VIDEO_CODEC_VP9;
 
   if (append_line(out, out_cap, &off, "v=0") != 0) {
     goto fail;

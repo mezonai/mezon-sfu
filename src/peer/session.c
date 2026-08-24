@@ -847,7 +847,7 @@ sfu_remote_offer_manifest_t *sfu_session_remote_offer_capture(sfu_peer_session_t
   pthread_mutex_lock(&session->graph.lock);
   sfu_remote_slot_table_t *table = &session->graph.remote_slots;
   manifest->offer_generation = remote_slot_next_nonzero(&table->next_offer_generation);
-  manifest->high_water_slots = table->high_water_slots;
+  manifest->high_water_slots = table->high_water_slots > table->offered_slot_floor ? table->high_water_slots : table->offered_slot_floor;
   manifest->receiver_root = atomic_load_explicit(&session->graph.receivers, memory_order_acquire);
   if (manifest->receiver_root) {
     atomic_fetch_add_explicit(&manifest->receiver_root->refcount, 1, memory_order_relaxed);
@@ -878,6 +878,9 @@ bool sfu_session_remote_offer_install(sfu_peer_session_t *session, sfu_remote_of
   }
   sfu_remote_offer_manifest_t *old = table->offered_manifest;
   table->offered_manifest = manifest;
+  if (manifest->high_water_slots > table->offered_slot_floor) {
+    table->offered_slot_floor = manifest->high_water_slots;
+  }
   sfu_remote_offer_manifest_retain(manifest);
   pthread_mutex_unlock(&session->graph.lock);
   sfu_remote_offer_manifest_release(old);
@@ -918,8 +921,8 @@ bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sf
     atomic_store_explicit(&table->applied_assignment_generations[i], offered, memory_order_release);
 #ifdef SFU_DIAG_LOG
     if (offered != 0 || table->slots[i].state != SFU_REMOTE_SLOT_FREE) {
-      SFU_LOG_INFO("session: apply_answer peer=%u slot=%u offered_gen=%" PRIu64 " slot_gen=%" PRIu64 " state=%d offer_gen=%" PRIu64, session->peer_id, i, offered,
-                   table->slots[i].assignment_generation, (int)table->slots[i].state, manifest->offer_generation);
+      SFU_LOG_INFO("session: apply_answer peer=%u slot=%u offered_gen=%" PRIu64 " slot_gen=%" PRIu64 " state=%d offer_gen=%" PRIu64, session->peer_id, i,
+                   offered, table->slots[i].assignment_generation, (int)table->slots[i].state, manifest->offer_generation);
     }
 #endif
     sfu_remote_slot_t *remote = &table->slots[i];
@@ -950,12 +953,43 @@ bool sfu_session_remote_slot_authorized(const sfu_peer_session_t *session, uint3
          atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[slot], memory_order_acquire) == assignment_generation;
 }
 
+bool sfu_session_remote_slots_pending(const sfu_peer_session_t *session, uint32_t *active_unapplied, uint32_t *obsolete_applied) {
+  uint32_t active_count = 0;
+  uint32_t obsolete_count = 0;
+  if (session) {
+    pthread_mutex_lock((pthread_mutex_t *)&session->graph.lock);
+    const sfu_remote_slot_table_t *table = &session->graph.remote_slots;
+    for (uint32_t i = 0; i < table->high_water_slots; i++) {
+      const sfu_remote_slot_t *slot = &table->slots[i];
+      uint64_t applied = atomic_load_explicit(&table->applied_assignment_generations[i], memory_order_acquire);
+      if (slot->state == SFU_REMOTE_SLOT_ACTIVE) {
+        if (applied != slot->assignment_generation) {
+          active_count++;
+        }
+      } else if (applied != 0) {
+        obsolete_count++;
+      }
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&session->graph.lock);
+  }
+  if (active_unapplied) {
+    *active_unapplied = active_count;
+  }
+  if (obsolete_applied) {
+    *obsolete_applied = obsolete_count;
+  }
+  return active_count != 0 || obsolete_count != 0;
+}
+
 uint32_t sfu_session_remote_slot_high_water(const sfu_peer_session_t *session) {
   if (!session) {
     return 0;
   }
   pthread_mutex_lock((pthread_mutex_t *)&session->graph.lock);
   uint32_t high_water = session->graph.remote_slots.high_water_slots;
+  if (session->graph.remote_slots.offered_slot_floor > high_water) {
+    high_water = session->graph.remote_slots.offered_slot_floor;
+  }
   pthread_mutex_unlock((pthread_mutex_t *)&session->graph.lock);
   return high_water;
 }
@@ -972,6 +1006,7 @@ void sfu_session_remote_slots_teardown(sfu_peer_session_t *session) {
     atomic_store_explicit(&session->graph.remote_slots.applied_assignment_generations[i], 0, memory_order_release);
   }
   session->graph.remote_slots.high_water_slots = 0;
+  session->graph.remote_slots.offered_slot_floor = 0;
   pthread_mutex_unlock(&session->graph.lock);
   sfu_remote_offer_manifest_release(manifest);
 }
@@ -1832,7 +1867,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   uint32_t screen_rtx_ssrc = session->media.screen.rtx_ssrc;
   if (answer->video_section_present) {
     if (answer->video_sends) {
-      rtx_ssrc = answer->rtx_ssrc != 0 ? answer->rtx_ssrc : session->media.uplink_video.rtx_ssrc;
+      rtx_ssrc = answer->rtx_ssrc;
       video_ssrc = sfu_resolve_media_ssrc(session->media.uplink_video.ssrc, session->media.uplink_video.rtx_ssrc, answer->video_ssrc, rtx_ssrc);
     } else {
       video_ssrc = 0;
@@ -1843,7 +1878,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   }
   if (answer->screen_section_present) {
     if (answer->screen_sends) {
-      screen_rtx_ssrc = answer->screen_rtx_ssrc != 0 ? answer->screen_rtx_ssrc : session->media.screen.rtx_ssrc;
+      screen_rtx_ssrc = answer->screen_rtx_ssrc;
       screen_ssrc = sfu_resolve_media_ssrc(session->media.screen.ssrc, session->media.screen.rtx_ssrc, answer->screen_ssrc, screen_rtx_ssrc);
     } else {
       screen_ssrc = 0;
@@ -1853,9 +1888,9 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
     screen_ssrc = session->media.screen.ssrc;
   }
   uint8_t video_pt = answer->video_pt != 0 ? answer->video_pt : session->media.uplink_video.payload_type;
-  uint8_t rtx_pt = answer->rtx_pt != 0 ? answer->rtx_pt : session->media.uplink_video.rtx_payload_type;
+  uint8_t rtx_pt = answer->video_section_present ? (answer->video_sends ? answer->rtx_pt : 0) : session->media.uplink_video.rtx_payload_type;
   uint8_t screen_pt = answer->screen_pt != 0 ? answer->screen_pt : session->media.screen.payload_type;
-  uint8_t screen_rtx_pt = answer->screen_rtx_pt != 0 ? answer->screen_rtx_pt : session->media.screen.rtx_payload_type;
+  uint8_t screen_rtx_pt = answer->screen_section_present ? (answer->screen_sends ? answer->screen_rtx_pt : 0) : session->media.screen.rtx_payload_type;
   sfu_video_codec_t codec = answer->video_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->video_codec : session->media.uplink_video.codec;
   sfu_video_codec_t screen_codec = answer->screen_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->screen_codec : session->media.screen.codec;
   current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
@@ -1915,9 +1950,9 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   pthread_mutex_unlock(&session->answer_lock);
 
 #ifdef SFU_DIAG_LOG
-  SFU_LOG_INFO("session: apply_pending_answer peer=%u gen=%u audio_sends=%d audio_ssrc=%" PRIu32 " audio_active=%d"
-               " video_sends=%d video_ssrc=%" PRIu32 " video_active=%d screen_sends=%d screen_ssrc=%" PRIu32
-               " audience=%d ptt=%d audio_neg=%d video_neg=%d",
+  SFU_LOG_INFO("session: apply_pending_answer peer=%u gen=%u audio_sends=%d audio_ssrc=%" PRIu32
+               " audio_active=%d"
+               " video_sends=%d video_ssrc=%" PRIu32 " video_active=%d screen_sends=%d screen_ssrc=%" PRIu32 " audience=%d ptt=%d audio_neg=%d video_neg=%d",
                session->peer_id, answer->generation, answer->audio_sends ? 1 : 0, audio_ssrc, audio_active ? 1 : 0, answer->video_sends ? 1 : 0, video_ssrc,
                video_active_after ? 1 : 0, answer->screen_sends ? 1 : 0, screen_ssrc, current_audience ? 1 : 0, ptt_active ? 1 : 0,
                atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire) ? 1 : 0,

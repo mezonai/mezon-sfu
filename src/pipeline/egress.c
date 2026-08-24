@@ -199,10 +199,18 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
       has_decision = false;
     } else {
       sched = sfu_layer_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
-      if (!sched || !sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
-        if (sched) {
-          sfu_layer_scheduler_reject_packet(sched, &decision);
+      if (!sched) {
+        if (reserved_output) {
+          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
         }
+        sfu_metric_inc("egress_admission_drop");
+        return false;
+      }
+      if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
+        sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
+      }
+      if (!sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+        sfu_layer_scheduler_reject_packet(sched, &decision);
         if (reserved_output) {
           sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
         }
@@ -210,9 +218,6 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         return false;
       }
       video_class = decision.pacer_class;
-      if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
-        sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
-      }
     }
   }
 

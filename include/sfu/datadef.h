@@ -290,6 +290,7 @@ typedef struct {
 typedef struct {
   pthread_mutex_t lock;
   bool negotiation_needed;
+  bool renegotiation_queued;
   bool offer_outstanding;
   bool renegotiation_pending;
   uint64_t offer_generation;
@@ -333,6 +334,7 @@ typedef struct {
   uint64_t next_assignment_generation;
   uint64_t next_offer_generation;
   uint32_t high_water_slots;
+  uint32_t offered_slot_floor;
 } sfu_remote_slot_table_t;
 
 typedef struct {

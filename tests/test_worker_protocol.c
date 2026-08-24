@@ -630,22 +630,22 @@ static void test_gcc_estimate_reaches_scheduler(void) {
    * receiving. Exercise the exact TWCC-result path in the worker. */
   sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for(f.session, 1);
   assert(sched != NULL);
-  /* Optimistic full-stack default until BWE constrains. */
-  assert(sched->target_sid == 2);
+  /* L1T3 has one spatial layer and starts at the full temporal target. */
+  assert(sched->target_sid == 0);
   assert(sched->target_tid == 2);
 
   /* Drop then climb so last_target_change_us is armed on the top rung. */
   sched->target_sid = 0;
   sched->target_tid = 0;
   sfu_svc_update_layers(f.session, 2000000);
-  assert(sched->target_sid == 2);
+  assert(sched->target_sid == 0);
   assert(sched->target_tid == 2);
   assert(sched->last_target_change_us != 0);
 
   /* Below the rung's down threshold but within the dwell window: the target
    * must hold (hysteresis, #83). */
   sfu_svc_update_layers(f.session, 100000);
-  assert(sched->target_sid == 2);
+  assert(sched->target_sid == 0);
   assert(sched->target_tid == 2);
 
   /* After the dwell window, the downshift commits. */
@@ -865,6 +865,7 @@ static void test_egress_rejects_old_assignment_generation(void) {
   feed_plain_video(&f, 1100);
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[remote_slot], old_generation, memory_order_release);
 
   kf_fixture_destroy(&f);
 }
