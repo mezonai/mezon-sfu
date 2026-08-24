@@ -1120,13 +1120,8 @@
                     }
 
                     const answer = await pc.createAnswer();
-                    /* Camera (mid:1) is H264, screen share (mid:2) is VP9 L1T3. SVC only applies to the screen track. */
-                    const mungedSdp = mungeVideoBitrate(
-                        answer.sdp,
-                        1000,
-                        1500,
-                        8000
-                    );
+                    /* Camera (mid:1) is VP8, screen share (mid:2) is VP9 L1T3. */
+                    const mungedSdp = mungeVideoBitrates(answer.sdp);
                     await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
 
                     if (currentJoinMode === "speaker" && localTracksAdded) {
@@ -1312,7 +1307,7 @@
                     const enc = params.encodings[0];
                     enc.scalabilityMode = SCREEN_SVC_MODE;
                     enc.maxFramerate = 15;
-                    enc.maxBitrate = 8_000_000;
+                    enc.maxBitrate = SCREEN_MAX_BITRATE_BPS;
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
                     enc.networkPriority = "high";
@@ -1572,14 +1567,12 @@
              * minBitrate is often ignored (getParameters shows minBitrate=?), while
              * x-google-*-bitrate on the chosen video PT reliably lifts libvpx off
              * the ~150 kbps L3T3 floor. */
-            function mungeVideoBitrate(sdp, minKbps, startKbps, maxKbps) {
-                if (!sdp) return sdp;
+            function mungeVideoSectionBitrate(section, minKbps, startKbps, maxKbps) {
                 const pts = new Set();
-                for (const m of sdp.matchAll(/^a=rtpmap:(\d+) (VP9|VP8|AV1)\//gim)) {
+                for (const m of section.matchAll(/^a=rtpmap:(\d+) (VP9|VP8|AV1)\//gim)) {
                     pts.add(m[1]);
                 }
-                if (pts.size === 0) return sdp;
-                let out = sdp;
+                let out = section;
                 for (const pt of pts) {
                     const fmtpRe = new RegExp(`^a=fmtp:${pt} (.*)$`, "m");
                     const extras = `x-google-min-bitrate=${minKbps};x-google-start-bitrate=${startKbps};x-google-max-bitrate=${maxKbps}`;
@@ -1602,6 +1595,33 @@
                 return out;
             }
 
+            function mungeVideoBitrates(sdp) {
+                if (!sdp) return sdp;
+                return sdp
+                    .split(/(?=^m=)/gm)
+                    .map((section) => {
+                        const mid = section.match(/^a=mid:(\S+)/m)?.[1];
+                        if (mid === "1") {
+                            return mungeVideoSectionBitrate(
+                                section,
+                                CAMERA_MIN_BITRATE_KBPS,
+                                CAMERA_START_BITRATE_KBPS,
+                                CAMERA_MAX_BITRATE_KBPS
+                            );
+                        }
+                        if (mid === "2") {
+                            return mungeVideoSectionBitrate(
+                                section,
+                                SCREEN_MIN_BITRATE_KBPS,
+                                SCREEN_START_BITRATE_KBPS,
+                                SCREEN_MAX_BITRATE_KBPS
+                            );
+                        }
+                        return section;
+                    })
+                    .join("");
+            }
+
 /* Codec configuration is fixed:
  *   - Camera (mid:1): VP8, single encoding, 320x480.
  *   - Screen  (mid:2): VP9, scalabilityMode=L1T3, 1920x1080.
@@ -1612,6 +1632,14 @@ const SCREEN_CODEC = "VP9";
 const SCREEN_SVC_MODE = "L1T3";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
 const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
+const CAMERA_MAX_BITRATE_BPS = 1_000_000;
+const SCREEN_MAX_BITRATE_BPS = 2_500_000;
+const CAMERA_MIN_BITRATE_KBPS = 250;
+const CAMERA_START_BITRATE_KBPS = 500;
+const CAMERA_MAX_BITRATE_KBPS = 1000;
+const SCREEN_MIN_BITRATE_KBPS = 400;
+const SCREEN_START_BITRATE_KBPS = 1000;
+const SCREEN_MAX_BITRATE_KBPS = 2500;
 
 async function applyVideoEncodingParams(pc) {
                 const uplink =
@@ -1629,7 +1657,7 @@ async function applyVideoEncodingParams(pc) {
                     if ("scalabilityMode" in params.encodings[0]) {
                         delete params.encodings[0].scalabilityMode;
                     }
-                    params.encodings[0].maxBitrate = 4_000_000;
+                    params.encodings[0].maxBitrate = CAMERA_MAX_BITRATE_BPS;
                     params.encodings[0].maxFramerate = 30;
                     params.encodings[0].scaleResolutionDownBy = 1;
                     params.encodings[0].priority = "high";

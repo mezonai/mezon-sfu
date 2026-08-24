@@ -1,4 +1,6 @@
 #include "rtcp/rtcp_fb.h"
+#include "rtcp/rtcp_kf.h"
+#include "util/netbytes.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -75,11 +77,32 @@ static void test_multiple_and_unaligned(void) {
   assert(entry.target_ssrc == 3 && entry.sequence_number == 10);
 }
 
+static void test_remb_builder(void) {
+  uint8_t packet[32];
+  uint32_t ssrcs[] = {0x11223344u, 0xaabbccddu};
+  int len = sfu_rtcp_build_remb(1, 2500000, ssrcs, 2, packet, sizeof(packet));
+  assert(len == 28);
+  assert(packet[0] == 0x8f && packet[1] == 206);
+  assert(sfu_read_be16(packet + 2) == 6);
+  assert(sfu_read_be32(packet + 4) == 1 && sfu_read_be32(packet + 8) == 0);
+  assert(memcmp(packet + 12, "REMB", 4) == 0 && packet[16] == 2);
+  uint32_t encoded = ((uint32_t)packet[17] << 16) | ((uint32_t)packet[18] << 8) | packet[19];
+  uint8_t exponent = (uint8_t)(encoded >> 18);
+  uint32_t mantissa = encoded & 0x3ffffu;
+  assert(((uint64_t)mantissa << exponent) <= 2500000);
+  assert(2500000 - ((uint64_t)mantissa << exponent) < (1ull << exponent));
+  assert(sfu_read_be32(packet + 20) == ssrcs[0]);
+  assert(sfu_read_be32(packet + 24) == ssrcs[1]);
+  assert(sfu_rtcp_build_remb(1, 1000, ssrcs, 1, packet, 23) < 0);
+  assert(sfu_rtcp_build_remb(1, 1000, ssrcs, 0, packet, sizeof(packet)) < 0);
+}
+
 int main(void) {
   test_pli();
   test_padding_logical_pli();
   test_fir();
   test_multiple_and_unaligned();
+  test_remb_builder();
   puts("rtcp fb tests passed");
   return 0;
 }

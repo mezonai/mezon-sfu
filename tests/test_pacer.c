@@ -13,7 +13,7 @@ static void test_inactive_admits_everything(void) {
   int64_t now = 1000000;
   /* No set_rate call: transport-cc not negotiated -> unpaced. */
   for (int i = 0; i < 1000; i++) {
-    assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 1200, &now));
+    assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 1200, true, &now));
   }
   assert(p.dropped_enh == 0);
   /* Inactive pacer never rewrites the caller's timestamp. */
@@ -28,7 +28,7 @@ static void test_zero_rate_disables(void) {
   sfu_pacer_set_rate(&p, 0, 2000000);
   assert(!p.active);
   int64_t now = 2000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 1200, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 1200, true, &now));
 }
 
 static void test_burst_then_throttle(void) {
@@ -42,14 +42,29 @@ static void test_burst_then_throttle(void) {
 
   /* A fresh bucket admits a 12 KB I-frame at once... */
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
   /* ...but the next base-layer packet borrows almost the whole window... */
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
   assert(p.balance_bytes < 0);
   /* ...and an enhancement packet that would exceed a full burst window of
    * debt is dropped instead of queued. */
   assert(p.balance_bytes == 12500 - 24000);
-  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, &now));
+  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, true, &now));
+  assert(p.dropped_enh == 1);
+}
+
+static void test_admitted_enhancement_continuation_is_not_dropped(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
+  int64_t now = 1000000;
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  int64_t before = p.balance_bytes;
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, false, &now));
+  assert(p.balance_bytes == before - 12000);
+  assert(p.dropped_enh == 0);
+  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, true, &now));
   assert(p.dropped_enh == 1);
 }
 
@@ -60,18 +75,18 @@ static void test_audio_never_dropped_under_debt(void) {
   int64_t now = 1000000;
 
   /* Drive deep into debt with video. */
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
   assert(p.balance_bytes < 0);
 
   /* Audio bypasses the video token bucket; RTX still borrows through it. */
   int64_t video_debt = p.balance_bytes;
   for (int i = 0; i < 10; i++) {
-    assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_AUDIO, 200, &now));
+    assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_AUDIO, 200, false, &now));
   }
   assert(p.balance_bytes == video_debt);
   for (int i = 0; i < 10; i++) {
-    assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_RTX, 1000, &now));
+    assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_RTX, 1000, false, &now));
   }
   assert(p.sent[SFU_PACER_CLASS_AUDIO] == 10);
   assert(p.sent[SFU_PACER_CLASS_RTX] == 10);
@@ -83,10 +98,10 @@ static void test_transition_video_never_dropped_under_debt(void) {
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
 
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
-  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_TRANSITION, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, true, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_TRANSITION, 12000, false, &now));
   assert(p.sent[SFU_PACER_CLASS_VIDEO_TRANSITION] == 1);
 }
 
@@ -95,8 +110,8 @@ static void test_refill_restores_budget(void) {
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
 
   /* 40 ms later the bucket has refilled exactly one burst window: pacing
    * 2.5 Mbps = 312500 B/s, over 40 ms = 12500 bytes, clamped at the cap.
@@ -106,7 +121,7 @@ static void test_refill_restores_budget(void) {
   assert(sfu_pacer_debt_after(&p, 2000, now) == 1000);
 
   /* Enhancement fits again inside the window. */
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 1000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 1000, true, &now));
 }
 
 static void test_retune_preserves_debt(void) {
@@ -114,8 +129,8 @@ static void test_retune_preserves_debt(void) {
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
   int64_t debt = p.balance_bytes;
   assert(debt < 0);
 
@@ -131,7 +146,7 @@ static void test_admission_timestamp_is_send_time(void) {
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 1000 * KB, 123456789);
   int64_t now = 123456789 + 5000; /* clock advanced since arming */
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 100, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 100, false, &now));
   /* CC-14: the caller records exactly this value as the TWCC send time. */
   assert(now == 123456789 + 5000);
 }
@@ -180,6 +195,7 @@ int main(void) {
   test_inactive_admits_everything();
   test_zero_rate_disables();
   test_burst_then_throttle();
+  test_admitted_enhancement_continuation_is_not_dropped();
   test_audio_never_dropped_under_debt();
   test_transition_video_never_dropped_under_debt();
   test_refill_restores_budget();

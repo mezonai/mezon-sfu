@@ -24,6 +24,7 @@
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
 #include "rtp/rtx_build.h"
+#include "runtime/fanout.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/srtp/srtp.h"
@@ -36,6 +37,10 @@
 
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
+#define SFU_REMB_NORMAL_INTERVAL_US 500000LL
+#define SFU_REMB_DECREASE_INTERVAL_US 100000LL
+#define SFU_REMB_REFRESH_INTERVAL_US 2000000LL
+#define SFU_REMB_ROUTES_PER_UPDATE 8u
 
 void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   sfu_pacer_set_rate(&session->egress.pacer, bitrate_bps, (int64_t)sfu_now_us());
@@ -48,6 +53,157 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
       sfu_layer_scheduler_set_bitrate(&slot->sched, bitrate_bps);
     }
   }
+}
+
+static sfu_peer_session_t *find_room_peer_by_id(sfu_room_t *room, uint32_t peer_id) {
+  if (!room || peer_id == 0) {
+    return NULL;
+  }
+  sfu_peer_session_t *publisher = NULL;
+  pthread_mutex_lock(&room->lock);
+  for (uint32_t i = 0; i < room->peer_capacity; i++) {
+    sfu_peer_session_t *candidate = room->peers[i];
+    if (candidate && candidate->peer_id == peer_id && sfu_session_accepts_work(candidate)) {
+      atomic_fetch_add_explicit(&candidate->refcount, 1, memory_order_relaxed);
+      publisher = candidate;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&room->lock);
+  return publisher;
+}
+
+static bool remb_update_due(const sfu_session_egress_t *egress, uint32_t bitrate_bps, int64_t now_us) {
+  if (egress->last_remb_time_us == 0 || egress->last_remb_bps == 0) {
+    return true;
+  }
+  int64_t elapsed = now_us - egress->last_remb_time_us;
+  uint32_t previous = egress->last_remb_bps;
+  uint32_t delta = bitrate_bps > previous ? bitrate_bps - previous : previous - bitrate_bps;
+  bool decreased_20_percent = bitrate_bps < previous && (uint64_t)bitrate_bps * 5u <= (uint64_t)previous * 4u;
+  bool changed_10_percent = (uint64_t)delta * 10u >= previous;
+  return (decreased_20_percent && elapsed >= SFU_REMB_DECREASE_INTERVAL_US) ||
+         (changed_10_percent && elapsed >= SFU_REMB_NORMAL_INTERVAL_US) || elapsed >= SFU_REMB_REFRESH_INTERVAL_US;
+}
+
+static void maybe_send_remb_from_gcc(sfu_worker_t *w, sfu_peer_session_t *subscriber, uint32_t bitrate_bps) {
+  if (!w || !subscriber || bitrate_bps == 0) {
+    return;
+  }
+  pthread_mutex_lock(&subscriber->membership_lock);
+  sfu_room_t *room = subscriber->room;
+  if (!room) {
+    pthread_mutex_unlock(&subscriber->membership_lock);
+    return;
+  }
+  int64_t now_us = (int64_t)sfu_now_us();
+  if (subscriber->egress.pending_remb_bps == 0) {
+    if (!remb_update_due(&subscriber->egress, bitrate_bps, now_us)) {
+      pthread_mutex_unlock(&subscriber->membership_lock);
+      return;
+    }
+    subscriber->egress.pending_remb_bps = bitrate_bps;
+    subscriber->egress.remb_route_cursor = 0;
+    subscriber->egress.pending_remb_delivered = false;
+  } else if (bitrate_bps < subscriber->egress.pending_remb_bps &&
+             (uint64_t)bitrate_bps * 5u <= (uint64_t)subscriber->egress.pending_remb_bps * 4u) {
+    subscriber->egress.pending_remb_bps = bitrate_bps;
+    subscriber->egress.remb_route_cursor = 0;
+    subscriber->egress.pending_remb_delivered = false;
+  }
+
+  uint32_t publisher_ids[SFU_MAX_REMOTE_SLOTS];
+  uint32_t publisher_count = 0;
+  sfu_receiver_snapshot_t *snapshot = sfu_session_subscriptions_acquire(subscriber);
+  if (!snapshot) {
+    pthread_mutex_unlock(&subscriber->membership_lock);
+    return;
+  }
+  uint64_t snapshot_generation = snapshot->generation;
+  if (subscriber->egress.pending_remb_snapshot_generation != 0 &&
+      subscriber->egress.pending_remb_snapshot_generation != snapshot_generation) {
+    subscriber->egress.remb_route_cursor = 0;
+    subscriber->egress.pending_remb_delivered = false;
+  }
+  subscriber->egress.pending_remb_snapshot_generation = snapshot_generation;
+  sfu_receiver_snapshot_iter_t iter;
+  sfu_receiver_snapshot_iter_init(&iter, snapshot);
+  const sfu_receiver_entry_t *entry;
+  while ((entry = sfu_receiver_snapshot_iter_next(&iter, NULL)) != NULL) {
+    uint32_t peer_id = entry->publisher_peer_id;
+    bool has_active_video = (entry->has_video && entry->video_active) || (entry->has_screen && entry->screen_active);
+    if (peer_id == 0 || !has_active_video) {
+      continue;
+    }
+    bool duplicate = false;
+    for (uint32_t i = 0; i < publisher_count; i++) {
+      if (publisher_ids[i] == peer_id) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate && publisher_count < SFU_MAX_REMOTE_SLOTS) {
+      publisher_ids[publisher_count++] = peer_id;
+    }
+  }
+  sfu_subscriptions_snapshot_release(snapshot);
+  if (publisher_count == 0) {
+    subscriber->egress.pending_remb_bps = 0;
+    subscriber->egress.remb_route_cursor = 0;
+    subscriber->egress.pending_remb_delivered = false;
+    subscriber->egress.pending_remb_snapshot_generation = 0;
+    pthread_mutex_unlock(&subscriber->membership_lock);
+    return;
+  }
+
+  uint32_t aggregate_bps = subscriber->egress.pending_remb_bps;
+  uint32_t publisher_bps = aggregate_bps / publisher_count;
+  if (publisher_bps == 0) {
+    publisher_bps = 1;
+  }
+  uint32_t start = subscriber->egress.remb_route_cursor;
+  if (start >= publisher_count) {
+    start = 0;
+  }
+  uint32_t remaining = publisher_count - start;
+  uint32_t batch_count = remaining < SFU_REMB_ROUTES_PER_UPDATE ? remaining : SFU_REMB_ROUTES_PER_UPDATE;
+  for (uint32_t offset = 0; offset < batch_count; offset++) {
+    uint32_t index = start + offset;
+    sfu_peer_session_t *publisher = find_room_peer_by_id(room, publisher_ids[index]);
+    if (!publisher) {
+      continue;
+    }
+    if (publisher == subscriber) {
+      sfu_session_release(publisher);
+      continue;
+    }
+    bool delivered = false;
+    uint16_t owner = sfu_session_owner_worker(publisher);
+    if (owner == w->worker_index) {
+      delivered = sfu_session_send_remb(w, publisher, publisher_bps);
+    } else if (owner != SFU_SESSION_OWNER_NONE && w->mesh &&
+               sfu_fanout_mesh_enqueue_remb_feedback(w->mesh, w->worker_index, owner, publisher, publisher_bps)) {
+      sfu_metric_inc("remb_queued_remote");
+      delivered = true;
+    }
+    subscriber->egress.pending_remb_delivered |= delivered;
+    sfu_session_release(publisher);
+  }
+
+  uint32_t next = start + batch_count;
+  bool cycle_complete = next >= publisher_count;
+  subscriber->egress.remb_route_cursor = cycle_complete ? 0 : next;
+  if (cycle_complete) {
+    if (subscriber->egress.pending_remb_delivered) {
+      subscriber->egress.last_remb_bps = aggregate_bps;
+      subscriber->egress.last_remb_time_us = now_us;
+    }
+    subscriber->egress.pending_remb_bps = 0;
+    subscriber->egress.remb_route_cursor = 0;
+    subscriber->egress.pending_remb_delivered = false;
+    subscriber->egress.pending_remb_snapshot_generation = 0;
+  }
+  pthread_mutex_unlock(&subscriber->membership_lock);
 }
 
 static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subscriber, uint32_t media_ssrc, sfu_media_kind_t *out_source) {
@@ -170,8 +326,8 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 
   if (estimated_bps > 0) {
     sfu_svc_update_layers(sender_session, estimated_bps);
+    maybe_send_remb_from_gcc(w, sender_session, estimated_bps);
   }
-  (void)w;
 }
 
 static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
