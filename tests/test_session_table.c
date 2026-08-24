@@ -11,8 +11,8 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
-#include <stdbool.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,7 +77,8 @@ static void test_basic_lifecycle(void) {
   atomic_store(&s1->media.camera_rtp_observed, false);
   atomic_store(&s1->media.camera_enabled, true);
   pthread_mutex_unlock(&s1->media.lock);
-  assert(s1->egress.gcc_ctx == NULL && s1->egress.twcc_history == NULL && s1->egress.twcc_recv == NULL && s1->egress.schedulers == NULL && s1->egress.rtx_cache == NULL);
+  assert(s1->egress.gcc_ctx == NULL && s1->egress.twcc_history == NULL && s1->egress.twcc_recv == NULL && s1->egress.schedulers == NULL &&
+         s1->egress.rtx_cache == NULL);
   assert(sfu_session_ensure_video_runtime(s1));
   assert(sfu_session_video_runtime_ready(s1));
   assert(s1->egress.gcc_ctx && s1->egress.twcc_history && s1->egress.twcc_recv && s1->egress.schedulers && s1->egress.rtx_cache);
@@ -491,7 +492,9 @@ static void test_concurrent_same_ufrag_creation(void) {
   }
   uint32_t members = 0;
   for (uint32_t i = 0; i < table.count; i++) {
-    if (table.sessions[i]) members++;
+    if (table.sessions[i]) {
+      members++;
+    }
   }
   assert(members == 1);
 
@@ -676,10 +679,14 @@ static void test_begin_close_serializes_room_admission(void) {
   close_add_race_ctx_t close_ctx = {.table = &table, .session = session};
   pthread_t close_tid;
   assert(pthread_create(&close_tid, NULL, begin_close_thread, &close_ctx) == 0);
-  while (!atomic_load_explicit(&close_ctx.started, memory_order_acquire)) sched_yield();
+  while (!atomic_load_explicit(&close_ctx.started, memory_order_acquire)) {
+    sched_yield();
+  }
   for (;;) {
     int rc = pthread_mutex_trylock(&session->membership_lock);
-    if (rc == EBUSY) break;
+    if (rc == EBUSY) {
+      break;
+    }
     assert(rc == 0);
     pthread_mutex_unlock(&session->membership_lock);
     sched_yield();
@@ -734,6 +741,61 @@ static void test_destroy_cleans_room_memberships(void) {
   sfu_session_release(b);
   sfu_room_destroy(&room);
   sfu_dtls_ctx_destroy(&dtls_ctx);
+}
+
+static void test_remote_slot_convergence(void) {
+  sfu_peer_session_t session = {0};
+  assert(pthread_mutex_init(&session.graph.lock, NULL) == 0);
+
+  uint32_t slot0, slot1;
+  uint64_t generation0, generation1;
+  uint32_t active_unapplied = 0;
+  uint32_t obsolete_applied = 0;
+  assert(sfu_session_remote_slot_reserve(&session, 3001, 31, &slot0, &generation0));
+  assert(sfu_session_remote_slots_pending(&session, &active_unapplied, &obsolete_applied));
+  assert(active_unapplied == 1 && obsolete_applied == 0);
+
+  sfu_remote_offer_manifest_t *first = sfu_session_remote_offer_capture(&session);
+  assert(first && sfu_session_remote_offer_install(&session, first));
+  assert(sfu_session_remote_slot_reserve(&session, 3002, 32, &slot1, &generation1));
+  assert(sfu_session_remote_offer_apply_answer(&session, first));
+  sfu_remote_offer_manifest_release(first);
+  assert(sfu_session_remote_slots_pending(&session, &active_unapplied, &obsolete_applied));
+  assert(active_unapplied == 1 && obsolete_applied == 0);
+  assert(sfu_session_remote_slot_authorized(&session, slot0, generation0));
+  assert(!sfu_session_remote_slot_authorized(&session, slot1, generation1));
+
+  sfu_remote_offer_manifest_t *second = sfu_session_remote_offer_capture(&session);
+  assert(second && sfu_session_remote_offer_install(&session, second));
+  assert(sfu_session_remote_slot_retire(&session, slot1, generation1));
+  assert(sfu_session_remote_offer_apply_answer(&session, second));
+  sfu_remote_offer_manifest_release(second);
+  assert(sfu_session_remote_slots_pending(&session, &active_unapplied, &obsolete_applied));
+  assert(active_unapplied == 0 && obsolete_applied == 1);
+
+  sfu_remote_offer_manifest_t *omission = sfu_session_remote_offer_capture(&session);
+  assert(omission && omission->assignment_generations[slot1] == 0);
+  assert(sfu_session_remote_offer_install(&session, omission));
+  assert(sfu_session_remote_offer_apply_answer(&session, omission));
+  sfu_remote_offer_manifest_release(omission);
+  assert(!sfu_session_remote_slots_pending(&session, &active_unapplied, &obsolete_applied));
+  assert(active_unapplied == 0 && obsolete_applied == 0);
+
+  uint32_t reused;
+  uint64_t reused_generation;
+  assert(sfu_session_remote_slot_reserve(&session, 3003, 33, &reused, &reused_generation));
+  assert(reused == slot1 && reused_generation != generation1);
+  assert(!sfu_session_remote_slot_authorized(&session, reused, reused_generation));
+  assert(sfu_session_remote_slots_pending(&session, &active_unapplied, &obsolete_applied));
+  sfu_remote_offer_manifest_t *reuse = sfu_session_remote_offer_capture(&session);
+  assert(reuse && sfu_session_remote_offer_install(&session, reuse));
+  assert(sfu_session_remote_offer_apply_answer(&session, reuse));
+  sfu_remote_offer_manifest_release(reuse);
+  assert(sfu_session_remote_slot_authorized(&session, reused, reused_generation));
+  assert(!sfu_session_remote_slots_pending(&session, NULL, NULL));
+
+  sfu_session_remote_slots_teardown(&session);
+  pthread_mutex_destroy(&session.graph.lock);
 }
 
 static void test_remote_slot_lifecycle(void) {
@@ -831,6 +893,7 @@ int main(void) {
   sfu_signaling_membership_test_server_init(&signaling);
   signaling.test_auto_drain = true;
   test_basic_lifecycle();
+  test_remote_slot_convergence();
   test_remote_slot_lifecycle();
   test_failed_construction();
   test_concurrent_find_vs_close();

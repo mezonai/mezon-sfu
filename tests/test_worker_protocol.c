@@ -865,6 +865,7 @@ static void test_egress_rejects_old_assignment_generation(void) {
   feed_plain_video(&f, 1100);
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[remote_slot], old_generation, memory_order_release);
 
   kf_fixture_destroy(&f);
 }

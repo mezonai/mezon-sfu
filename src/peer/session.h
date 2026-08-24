@@ -91,13 +91,12 @@ void sfu_remote_offer_manifest_retain(sfu_remote_offer_manifest_t *manifest);
 void sfu_remote_offer_manifest_release(sfu_remote_offer_manifest_t *manifest);
 bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sfu_remote_offer_manifest_t *manifest);
 bool sfu_session_remote_slot_authorized(const sfu_peer_session_t *session, uint32_t slot, uint64_t assignment_generation);
+bool sfu_session_remote_slots_pending(const sfu_peer_session_t *session, uint32_t *active_unapplied, uint32_t *obsolete_applied);
 uint32_t sfu_session_remote_slot_high_water(const sfu_peer_session_t *session);
 void sfu_session_remote_slots_teardown(sfu_peer_session_t *session);
 void sfu_session_graph_assert_invariants(const sfu_peer_session_t *session);
 
-static inline uint32_t sfu_remote_slot_first_mid(uint32_t slot) {
-  return SFU_REMOTE_MID_BASE + slot * SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
-}
+static inline uint32_t sfu_remote_slot_first_mid(uint32_t slot) { return SFU_REMOTE_MID_BASE + slot * SFU_REMOTE_TRANSCEIVERS_PER_SLOT; }
 
 static inline bool sfu_session_accepts_work(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->accepts_work, memory_order_acquire); }
 

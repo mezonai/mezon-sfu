@@ -205,6 +205,7 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
     room_refresh_peer_streams((sfu_room_t *)session->room, session);
   }
 
+  sfu_signaling_reconcile_remote_slots(session);
   sfu_session_release(session);
 }
 

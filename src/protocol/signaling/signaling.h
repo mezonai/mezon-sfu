@@ -12,7 +12,7 @@
 
 #define SFU_SIGNALING_PING_INTERVAL_MS 10000u
 #define SFU_SIGNALING_IDLE_TIMEOUT_MS 20000u
-#define SFU_RENEGOTIATION_QUEUE_CAP 2048u
+#define SFU_RENEGOTIATION_QUEUE_CAP SFU_SESSION_TABLE_MAX
 #define SFU_RENEGOTIATION_DEBOUNCE_MS 15u
 #define SFU_RENEGOTIATION_MAX_DELAY_MS 50u
 #define SFU_RENEGOTIATION_RETRY_MAX_MS 500u
@@ -99,13 +99,25 @@ typedef enum sfu_disconnect_reason {
   SFU_DISCONNECT_TRANSPORT_ERROR = 4010, /* UV_DISCONNECT / poll error */
 } sfu_disconnect_reason_t;
 
+typedef struct sfu_renegotiation_fallback_node {
+  sfu_peer_session_t *session;
+  struct sfu_renegotiation_fallback_node *next;
+} sfu_renegotiation_fallback_node_t;
+
 typedef struct sfu_renegotiation_queue {
   sfu_peer_session_t *items[SFU_RENEGOTIATION_QUEUE_CAP];
   uint32_t head;
   uint32_t tail;
   uint32_t count;
+  uint32_t fallback_count;
+  sfu_renegotiation_fallback_node_t *fallback_head;
+  sfu_renegotiation_fallback_node_t *fallback_tail;
+  sfu_renegotiation_fallback_node_t emergency_fallback;
+  bool emergency_fallback_used;
   pthread_mutex_t lock;
 } sfu_renegotiation_queue_t;
+
+_Static_assert(SFU_RENEGOTIATION_QUEUE_CAP >= SFU_SESSION_TABLE_MAX, "renegotiation queue must hold one pending reference per session");
 
 typedef struct sfu_membership_queue {
   sfu_membership_event_t *items[SFU_MEMBERSHIP_QUEUE_CAP];
@@ -183,6 +195,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
 void sfu_signaling_server_stop(sfu_signaling_server_t *s);
 void sfu_signaling_trigger_peer_renegotiation(sfu_peer_session_t *session);
 void sfu_signaling_schedule_pending_peer(sfu_peer_session_t *session);
+bool sfu_signaling_reconcile_remote_slots(sfu_peer_session_t *session);
 bool sfu_signaling_queue_membership_event(sfu_membership_event_t *event);
 bool sfu_signaling_reserve_membership_event(sfu_membership_reservation_t *reservation);
 void sfu_signaling_commit_membership_event(sfu_membership_reservation_t *reservation, sfu_membership_event_t *event);
@@ -193,6 +206,10 @@ void sfu_membership_event_test_fail_allocations(uint32_t count);
 void sfu_signaling_membership_test_server_init(sfu_signaling_server_t *s);
 void sfu_signaling_membership_test_server_stop(sfu_signaling_server_t *s);
 sfu_membership_event_t *sfu_signaling_membership_test_pop(sfu_signaling_server_t *s);
+void sfu_signaling_renegotiation_test_server_init(sfu_signaling_server_t *s);
+void sfu_signaling_renegotiation_test_server_stop(sfu_signaling_server_t *s);
+sfu_peer_session_t *sfu_signaling_renegotiation_test_pop(sfu_signaling_server_t *s);
+uint32_t sfu_signaling_renegotiation_test_count(sfu_signaling_server_t *s);
 void sfu_signaling_notify_media_state(sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);
