@@ -46,6 +46,10 @@ typedef struct sfu_worker {
   pthread_t thread;
   _Atomic uint64_t generation;
   int64_t last_twcc_flush_us;
+  int64_t last_remb_scan_us;
+#ifdef SFU_DIAG_LOG
+  int64_t last_diag_scan_us;
+#endif
   uint32_t worker_index;
   int core_id;
   int fd;

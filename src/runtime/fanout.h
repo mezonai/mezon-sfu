@@ -32,7 +32,6 @@ typedef enum sfu_fanout_job_kind {
   SFU_FANOUT_JOB_FORWARD = 1,
   SFU_FANOUT_JOB_KEYFRAME_REQUEST = 2,
   SFU_FANOUT_JOB_BATCH = 3,
-  SFU_FANOUT_JOB_REMB_FEEDBACK = 4,
 } sfu_fanout_job_kind_t;
 
 typedef struct sfu_fanout_job {
@@ -48,7 +47,6 @@ typedef struct sfu_fanout_job {
   uint32_t remote_slot;
   uint32_t pool_index;
   uint32_t pool_dst;
-  uint32_t feedback_bitrate_bps;
   uint8_t video_pt;
   uint8_t video_rtx_pt;
   uint8_t source;
@@ -81,8 +79,6 @@ bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src
 bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker,
                                                          sfu_peer_session_t *publisher, sfu_media_kind_t source);
 bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher);
-bool sfu_fanout_mesh_enqueue_remb_feedback(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher,
-                                           uint32_t bitrate_bps);
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data);
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job);
 

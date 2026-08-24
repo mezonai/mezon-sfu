@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <string.h>
 
+#include "congestion/bandwidth_allocator.h"
 #include "congestion/gcc.h"
 #include "congestion/pacer.h"
 #include "congestion/twcc_feedback.h"
@@ -37,173 +38,100 @@
 
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
-#define SFU_REMB_NORMAL_INTERVAL_US 500000LL
-#define SFU_REMB_DECREASE_INTERVAL_US 100000LL
-#define SFU_REMB_REFRESH_INTERVAL_US 2000000LL
-#define SFU_REMB_ROUTES_PER_UPDATE 8u
+
+static uint32_t allocation_for_publisher(const sfu_bandwidth_allocation_t *allocation, uint32_t publisher_peer_id) {
+  for (size_t i = 0; i < allocation->publisher_count; i++) {
+    if (allocation->publishers[i].publisher_peer_id == publisher_peer_id) {
+      return allocation->publishers[i].allocated_bps;
+    }
+  }
+  return 0;
+}
+
+static bool allocation_contains_stream(const sfu_bandwidth_allocation_t *allocation, uint64_t stream_key) {
+  for (size_t i = 0; i < allocation->stream_count; i++) {
+    uint8_t source = allocation->streams[i].kind == SFU_BANDWIDTH_STREAM_SCREEN ? SFU_MEDIA_SCREEN : SFU_MEDIA_VIDEO;
+    uint64_t allocated_key = ((uint64_t)allocation->streams[i].publisher_peer_id << 8) | source;
+    if (allocated_key == stream_key) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
+  if (!session) {
+    return;
+  }
   sfu_pacer_set_rate(&session->egress.pacer, bitrate_bps, (int64_t)sfu_now_us());
-  if (!session->egress.schedulers) {
-    return;
-  }
-  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
-    sfu_layer_scheduler_slot_t *slot = &session->egress.schedulers[i];
-    if (slot->publisher_id != 0) {
-      sfu_layer_scheduler_set_bitrate(&slot->sched, bitrate_bps);
-    }
-  }
-}
 
-static sfu_peer_session_t *find_room_peer_by_id(sfu_room_t *room, uint32_t peer_id) {
-  if (!room || peer_id == 0) {
-    return NULL;
-  }
-  sfu_peer_session_t *publisher = NULL;
-  pthread_mutex_lock(&room->lock);
-  for (uint32_t i = 0; i < room->peer_capacity; i++) {
-    sfu_peer_session_t *candidate = room->peers[i];
-    if (candidate && candidate->peer_id == peer_id && sfu_session_accepts_work(candidate)) {
-      atomic_fetch_add_explicit(&candidate->refcount, 1, memory_order_relaxed);
-      publisher = candidate;
-      break;
-    }
-  }
-  pthread_mutex_unlock(&room->lock);
-  return publisher;
-}
-
-static bool remb_update_due(const sfu_session_egress_t *egress, uint32_t bitrate_bps, int64_t now_us) {
-  if (egress->last_remb_time_us == 0 || egress->last_remb_bps == 0) {
-    return true;
-  }
-  int64_t elapsed = now_us - egress->last_remb_time_us;
-  uint32_t previous = egress->last_remb_bps;
-  uint32_t delta = bitrate_bps > previous ? bitrate_bps - previous : previous - bitrate_bps;
-  bool decreased_20_percent = bitrate_bps < previous && (uint64_t)bitrate_bps * 5u <= (uint64_t)previous * 4u;
-  bool changed_10_percent = (uint64_t)delta * 10u >= previous;
-  return (decreased_20_percent && elapsed >= SFU_REMB_DECREASE_INTERVAL_US) ||
-         (changed_10_percent && elapsed >= SFU_REMB_NORMAL_INTERVAL_US) || elapsed >= SFU_REMB_REFRESH_INTERVAL_US;
-}
-
-static void maybe_send_remb_from_gcc(sfu_worker_t *w, sfu_peer_session_t *subscriber, uint32_t bitrate_bps) {
-  if (!w || !subscriber || bitrate_bps == 0) {
-    return;
-  }
-  pthread_mutex_lock(&subscriber->membership_lock);
-  sfu_room_t *room = subscriber->room;
-  if (!room) {
-    pthread_mutex_unlock(&subscriber->membership_lock);
-    return;
-  }
-  int64_t now_us = (int64_t)sfu_now_us();
-  if (subscriber->egress.pending_remb_bps == 0) {
-    if (!remb_update_due(&subscriber->egress, bitrate_bps, now_us)) {
-      pthread_mutex_unlock(&subscriber->membership_lock);
-      return;
-    }
-    subscriber->egress.pending_remb_bps = bitrate_bps;
-    subscriber->egress.remb_route_cursor = 0;
-    subscriber->egress.pending_remb_delivered = false;
-  } else if (bitrate_bps < subscriber->egress.pending_remb_bps &&
-             (uint64_t)bitrate_bps * 5u <= (uint64_t)subscriber->egress.pending_remb_bps * 4u) {
-    subscriber->egress.pending_remb_bps = bitrate_bps;
-    subscriber->egress.remb_route_cursor = 0;
-    subscriber->egress.pending_remb_delivered = false;
-  }
-
-  uint32_t publisher_ids[SFU_MAX_REMOTE_SLOTS];
-  uint32_t publisher_count = 0;
-  sfu_receiver_snapshot_t *snapshot = sfu_session_subscriptions_acquire(subscriber);
-  if (!snapshot) {
-    pthread_mutex_unlock(&subscriber->membership_lock);
-    return;
-  }
-  uint64_t snapshot_generation = snapshot->generation;
-  if (subscriber->egress.pending_remb_snapshot_generation != 0 &&
-      subscriber->egress.pending_remb_snapshot_generation != snapshot_generation) {
-    subscriber->egress.remb_route_cursor = 0;
-    subscriber->egress.pending_remb_delivered = false;
-  }
-  subscriber->egress.pending_remb_snapshot_generation = snapshot_generation;
-  sfu_receiver_snapshot_iter_t iter;
-  sfu_receiver_snapshot_iter_init(&iter, snapshot);
-  const sfu_receiver_entry_t *entry;
-  while ((entry = sfu_receiver_snapshot_iter_next(&iter, NULL)) != NULL) {
-    uint32_t peer_id = entry->publisher_peer_id;
-    bool has_active_video = (entry->has_video && entry->video_active) || (entry->has_screen && entry->screen_active);
-    if (peer_id == 0 || !has_active_video) {
-      continue;
-    }
-    bool duplicate = false;
-    for (uint32_t i = 0; i < publisher_count; i++) {
-      if (publisher_ids[i] == peer_id) {
-        duplicate = true;
-        break;
+  sfu_bandwidth_stream_input_t inputs[SFU_BANDWIDTH_ALLOCATOR_MAX_STREAMS];
+  size_t input_count = 0;
+  sfu_receiver_snapshot_t *snapshot = sfu_session_subscriptions_acquire(session);
+  if (snapshot) {
+    sfu_receiver_snapshot_iter_t iter;
+    sfu_receiver_snapshot_iter_init(&iter, snapshot);
+    uint32_t remote_slot = 0;
+    const sfu_receiver_entry_t *entry;
+    while (input_count < SFU_BANDWIDTH_ALLOCATOR_MAX_STREAMS &&
+           (entry = sfu_receiver_snapshot_iter_next(&iter, &remote_slot)) != NULL) {
+      if (entry->publisher_peer_id == 0) {
+        continue;
+      }
+      if (entry->has_screen && entry->screen_active && input_count < SFU_BANDWIDTH_ALLOCATOR_MAX_STREAMS) {
+        inputs[input_count++] = (sfu_bandwidth_stream_input_t){
+            .publisher_peer_id = entry->publisher_peer_id,
+            .remote_slot = remote_slot,
+            .assignment_generation = entry->assignment_generation,
+            .kind = SFU_BANDWIDTH_STREAM_SCREEN,
+            .active = true,
+        };
+      }
+      if (entry->has_video && entry->video_active && input_count < SFU_BANDWIDTH_ALLOCATOR_MAX_STREAMS) {
+        inputs[input_count++] = (sfu_bandwidth_stream_input_t){
+            .publisher_peer_id = entry->publisher_peer_id,
+            .remote_slot = remote_slot,
+            .assignment_generation = entry->assignment_generation,
+            .kind = SFU_BANDWIDTH_STREAM_CAMERA,
+            .active = true,
+        };
       }
     }
-    if (!duplicate && publisher_count < SFU_MAX_REMOTE_SLOTS) {
-      publisher_ids[publisher_count++] = peer_id;
+  }
+
+  sfu_bandwidth_allocation_t allocation;
+  sfu_bandwidth_allocate(inputs, input_count, bitrate_bps, &allocation);
+  uint64_t now_us = sfu_now_us();
+  session->egress.diag.last_allocation_us = now_us;
+  session->egress.diag.allocation_streams = (uint32_t)allocation.stream_count;
+  session->egress.diag.allocation_allocated_bps = allocation.allocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.allocated_bps;
+  session->egress.diag.allocation_unallocated_bps = allocation.unallocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.unallocated_bps;
+  session->egress.diag.remb_contribution_bps = session->egress.diag.allocation_allocated_bps;
+  if (snapshot) {
+    sfu_receiver_snapshot_iter_t contribution_iter;
+    sfu_receiver_snapshot_iter_init(&contribution_iter, snapshot);
+    uint32_t remote_slot = 0;
+    const sfu_receiver_entry_t *entry;
+    while ((entry = sfu_receiver_snapshot_iter_next(&contribution_iter, &remote_slot)) != NULL) {
+      sfu_session_write_remb_contribution(session, remote_slot, entry->assignment_generation,
+                                          allocation_for_publisher(&allocation, entry->publisher_peer_id), now_us);
+    }
+  }
+  if (session->egress.schedulers) {
+    for (size_t i = 0; i < allocation.stream_count; i++) {
+      const sfu_bandwidth_stream_allocation_t *stream = &allocation.streams[i];
+      sfu_media_kind_t source = stream->kind == SFU_BANDWIDTH_STREAM_SCREEN ? SFU_MEDIA_SCREEN : SFU_MEDIA_VIDEO;
+      sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for_stream(session, stream->publisher_peer_id, source);
+      sfu_layer_scheduler_set_bitrate(sched, stream->allocated_bps);
+    }
+    for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+      sfu_layer_scheduler_slot_t *slot = &session->egress.schedulers[i];
+      if (slot->publisher_id != 0 && !allocation_contains_stream(&allocation, slot->publisher_id)) {
+        sfu_layer_scheduler_set_bitrate(&slot->sched, 0);
+      }
     }
   }
   sfu_subscriptions_snapshot_release(snapshot);
-  if (publisher_count == 0) {
-    subscriber->egress.pending_remb_bps = 0;
-    subscriber->egress.remb_route_cursor = 0;
-    subscriber->egress.pending_remb_delivered = false;
-    subscriber->egress.pending_remb_snapshot_generation = 0;
-    pthread_mutex_unlock(&subscriber->membership_lock);
-    return;
-  }
-
-  uint32_t aggregate_bps = subscriber->egress.pending_remb_bps;
-  uint32_t publisher_bps = aggregate_bps / publisher_count;
-  if (publisher_bps == 0) {
-    publisher_bps = 1;
-  }
-  uint32_t start = subscriber->egress.remb_route_cursor;
-  if (start >= publisher_count) {
-    start = 0;
-  }
-  uint32_t remaining = publisher_count - start;
-  uint32_t batch_count = remaining < SFU_REMB_ROUTES_PER_UPDATE ? remaining : SFU_REMB_ROUTES_PER_UPDATE;
-  for (uint32_t offset = 0; offset < batch_count; offset++) {
-    uint32_t index = start + offset;
-    sfu_peer_session_t *publisher = find_room_peer_by_id(room, publisher_ids[index]);
-    if (!publisher) {
-      continue;
-    }
-    if (publisher == subscriber) {
-      sfu_session_release(publisher);
-      continue;
-    }
-    bool delivered = false;
-    uint16_t owner = sfu_session_owner_worker(publisher);
-    if (owner == w->worker_index) {
-      delivered = sfu_session_send_remb(w, publisher, publisher_bps);
-    } else if (owner != SFU_SESSION_OWNER_NONE && w->mesh &&
-               sfu_fanout_mesh_enqueue_remb_feedback(w->mesh, w->worker_index, owner, publisher, publisher_bps)) {
-      sfu_metric_inc("remb_queued_remote");
-      delivered = true;
-    }
-    subscriber->egress.pending_remb_delivered |= delivered;
-    sfu_session_release(publisher);
-  }
-
-  uint32_t next = start + batch_count;
-  bool cycle_complete = next >= publisher_count;
-  subscriber->egress.remb_route_cursor = cycle_complete ? 0 : next;
-  if (cycle_complete) {
-    if (subscriber->egress.pending_remb_delivered) {
-      subscriber->egress.last_remb_bps = aggregate_bps;
-      subscriber->egress.last_remb_time_us = now_us;
-    }
-    subscriber->egress.pending_remb_bps = 0;
-    subscriber->egress.remb_route_cursor = 0;
-    subscriber->egress.pending_remb_delivered = false;
-    subscriber->egress.pending_remb_snapshot_generation = 0;
-  }
-  pthread_mutex_unlock(&subscriber->membership_lock);
 }
 
 static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subscriber, uint32_t media_ssrc, sfu_media_kind_t *out_source) {
@@ -324,9 +252,19 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     estimated_bps = sender_session->egress.gcc_ctx->aimd.current_bitrate_bps;
   }
 
+  sender_session->egress.diag.last_twcc_us = sfu_now_us();
+  sender_session->egress.diag.latest_twcc_lost = fresh_lost;
+  sender_session->egress.diag.latest_twcc_total = fresh_total;
+  if (sender_session->egress.gcc_ctx) {
+    sender_session->egress.diag.latest_gcc_bps = sender_session->egress.gcc_ctx->aimd.current_bitrate_bps;
+    sender_session->egress.diag.latest_ack_bps = sender_session->egress.gcc_ctx->aimd.ack_bitrate_bps;
+    sender_session->egress.diag.latest_overuse = (uint8_t)sender_session->egress.gcc_ctx->trendline.usage_state;
+  }
+  sfu_metric_inc("congestion_twcc_feedback");
+  sfu_metric_add("congestion_twcc_lost", fresh_lost);
+
   if (estimated_bps > 0) {
     sfu_svc_update_layers(sender_session, estimated_bps);
-    maybe_send_remb_from_gcc(w, sender_session, estimated_bps);
   }
 }
 
@@ -366,6 +304,8 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       break;
     }
     requested[requested_count++] = lost_seq;
+    sender_session->egress.diag.nack_requests++;
+    sfu_metric_inc("congestion_nack_requested");
 
     uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
     uint32_t orig_len = 0;
@@ -373,9 +313,13 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     uint8_t rtx_pt = 0;
 
     if (!sfu_rtx_cache_get_stream(sender_session->egress.rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
+      sender_session->egress.diag.cache_misses++;
+      sfu_metric_inc("congestion_rtx_cache_miss");
       unrecoverable_loss = true;
       continue;
     }
+    sender_session->egress.diag.cache_hits++;
+    sfu_metric_inc("congestion_rtx_cache_hit");
 
     if (!sfu_pacer_rtx_allow(&sender_session->egress.pacer, orig_len + 2, (int64_t)sfu_now_us())) {
       sfu_metric_inc("rtx_dropped_budget");
@@ -424,7 +368,10 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     pthread_mutex_unlock(&sender_session->crypto_lock);
     if (protect_status == srtp_err_status_ok) {
       rtx_enc->len = (uint32_t)rtx_enc_len;
-      sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len);
+      if (sfu_ring_queue_send_zc(&w->send_ring, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len) == 0) {
+        sender_session->egress.diag.rtx_sent++;
+        sfu_metric_inc("congestion_rtx_sent");
+      }
     } else {
       if (protect_status == srtp_err_status_replay_old) {
         sfu_metric_inc("rtx_protect_replay_old");

@@ -123,6 +123,10 @@ add_executable(test_pacer test_pacer.c)
 target_link_libraries(test_pacer PRIVATE sfu_core)
 add_test(NAME pacer COMMAND test_pacer)
 
+add_executable(test_bandwidth_allocator test_bandwidth_allocator.c)
+target_link_libraries(test_bandwidth_allocator PRIVATE sfu_core)
+add_test(NAME bandwidth_allocator COMMAND test_bandwidth_allocator)
+
 add_executable(test_gcc test_gcc.c)
 target_link_libraries(test_gcc PRIVATE sfu_core)
 add_test(NAME gcc COMMAND test_gcc)

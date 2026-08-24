@@ -338,10 +338,18 @@ typedef struct {
 } sfu_remote_slot_table_t;
 
 typedef struct {
+  _Atomic uint32_t sequence;
+  _Atomic uint64_t assignment_generation;
+  _Atomic uint64_t updated_at_us;
+  _Atomic uint32_t bitrate_bps;
+} sfu_remb_contribution_t;
+
+typedef struct {
   pthread_mutex_t lock;
   _Atomic(sfu_receiver_snapshot_t *) receivers;
   _Atomic(sfu_fanout_bundle_t *) fanout_bundle;
   sfu_remote_slot_table_t remote_slots;
+  sfu_remb_contribution_t remb_contributions[SFU_MAX_REMOTE_SLOTS];
 } sfu_session_graph_t;
 
 typedef struct {
@@ -371,6 +379,33 @@ typedef struct {
   _Atomic bool uplink_ssrc_dirty;
 } sfu_session_media_t;
 
+typedef struct sfu_congestion_diag {
+  uint64_t last_log_us;
+  uint64_t last_twcc_us;
+  uint64_t last_allocation_us;
+  uint64_t nack_requests;
+  uint64_t cache_hits;
+  uint64_t cache_misses;
+  uint64_t rtx_sent;
+  uint64_t pli_sent;
+  uint64_t pli_coalesced;
+  uint64_t last_logged_pacer_drops;
+  uint64_t last_logged_rtx_budget_drops;
+  uint32_t latest_gcc_bps;
+  uint32_t latest_ack_bps;
+  uint32_t latest_twcc_lost;
+  uint32_t latest_twcc_total;
+  uint32_t allocation_streams;
+  uint32_t allocation_allocated_bps;
+  uint32_t allocation_unallocated_bps;
+  uint32_t remb_contribution_bps;
+  uint32_t remb_target_bps;
+  uint32_t remb_fresh;
+  uint32_t remb_stale;
+  uint8_t latest_overuse;
+  bool remb_sent;
+} sfu_congestion_diag_t;
+
 typedef struct {
   gcc_bwe_context_t *gcc_ctx;
   sfu_twcc_history_t *twcc_history;
@@ -378,16 +413,13 @@ typedef struct {
   sfu_layer_scheduler_slot_t *schedulers;
   sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
+  sfu_congestion_diag_t diag;
   int64_t last_pli_time;
   int64_t last_screen_pli_time;
   int64_t last_fir_time;
   int64_t twcc_last_feedback_ref_us;
   int64_t last_remb_time_us;
-  uint64_t pending_remb_snapshot_generation;
   uint32_t last_remb_bps;
-  uint32_t pending_remb_bps;
-  uint32_t remb_route_cursor;
-  bool pending_remb_delivered;
   _Atomic uint32_t generation;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;
