@@ -88,6 +88,13 @@ static void test_snapshot_format(void) {
   EXPECT(strstr(buf, "dtls_restart_detected 0\n") != NULL);
   EXPECT(strstr(buf, "ingress_unprotect_auth_fail 0\n") != NULL);
   EXPECT(strstr(buf, "ingress_unprotect_previous_generation 0\n") != NULL);
+  EXPECT(strstr(buf, "bandwidth_allocator_runs 0\n") != NULL);
+  EXPECT(strstr(buf, "bandwidth_allocator_active_streams 0\n") != NULL);
+  EXPECT(strstr(buf, "bandwidth_allocator_unallocated_bps 0\n") != NULL);
+  EXPECT(strstr(buf, "remb_contribution_stale 0\n") != NULL);
+  EXPECT(strstr(buf, "remb_aggregate_no_fresh 0\n") != NULL);
+  EXPECT(strstr(buf, "remb_aggregate_target_changed 0\n") != NULL);
+  EXPECT(strstr(buf, "congestion_pli_received 0\n") != NULL);
 
   /* Truncation: tiny buffer still NUL-terminated; return is full length. */
   char tiny[8];

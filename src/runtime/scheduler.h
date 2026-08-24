@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "memory/packet_pool.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "runtime/routing_context.h"
 #include "transport/stun/stun.h"
 

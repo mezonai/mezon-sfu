@@ -128,11 +128,13 @@ static void *scheduler_thread_main(void *arg) {
     unsigned reaped = sfu_ring_reap(&s->recv_ring, SFU_DISPATCH_REAP_BATCH, s->pp, NULL, on_recv, NULL, &ctx);
 
     unsigned returned = 0;
+    unsigned backend_work = 0;
     for (uint32_t i = 0; i < s->worker_count; i++) {
       returned += sfu_ring_drain_kernel_buffer_returns(&s->recv_ring, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
+      backend_work += sfu_ring_backend_service(&s->recv_ring, &s->workers[i].send_ring, 1, SFU_DISPATCH_REAP_BATCH);
     }
 
-    if (reaped == 0 && returned == 0) {
+    if (reaped == 0 && returned == 0 && backend_work == 0) {
       usleep(idle_sleep_us);
       if (idle_sleep_us < SFU_DISPATCH_IDLE_SLEEP_MAX_US) {
         idle_sleep_us = idle_sleep_us * 2;
@@ -142,6 +144,22 @@ static void *scheduler_thread_main(void *arg) {
       }
     } else {
       idle_sleep_us = SFU_DISPATCH_IDLE_SLEEP_MIN_US;
+    }
+  }
+
+  for (unsigned pass = 0; pass < 2500; pass++) {
+    bool pending = false;
+    unsigned work = 0;
+    for (uint32_t i = 0; i < s->worker_count; i++) {
+      pending |= sfu_ring_outstanding_sends(&s->workers[i].send_ring) > 0;
+      work += sfu_ring_drain_kernel_buffer_returns(&s->recv_ring, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
+      work += sfu_ring_backend_service(&s->recv_ring, &s->workers[i].send_ring, 1, SFU_DISPATCH_REAP_BATCH);
+    }
+    if (!pending) {
+      break;
+    }
+    if (!work) {
+      usleep(SFU_DISPATCH_IDLE_SLEEP_MIN_US);
     }
   }
 

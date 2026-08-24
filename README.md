@@ -12,7 +12,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 * **Simple, Standalone Setup:** No external dependencies required to get running.
 * Lock-free fanout with hazard pointers
 * Full SVC temporal/spatial layer support
-* Modern io_uring zero-copy network stack
+* Modern io_uring zero-copy network stack, with an optional AF_XDP backend
 * Standards-compliant GCC congestion control
 * **Push To Talk** PTT native support
 
@@ -48,6 +48,36 @@ cd liburing
 make -j$(nproc)
 sudo make install
 ```
+
+The default build uses io_uring:
+
+```sh
+cmake -S . -B build
+cmake --build build -j$(nproc)
+```
+
+## optional AF_XDP backend
+
+AF_XDP replaces io_uring when the project is configured with `USE_AF_XDP=ON`. Install clang, libxdp, libbpf, and the matching Linux headers, then build with:
+
+```sh
+sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
+cmake -S . -B build-af-xdp -DUSE_AF_XDP=ON
+cmake --build build-af-xdp -j$(nproc)
+```
+
+Configure the interface and hardware queue in `config.ini`:
+
+```ini
+[af_xdp]
+interface = eth0
+queue_id = 0
+frame_count = 16384
+frame_size = 4096
+mode = native  # native, skb, or auto
+```
+
+The AF_XDP binary requires permission to load BPF programs and administer the selected interface (normally root or appropriate `CAP_BPF`/`CAP_NET_ADMIN` capabilities). It currently supports IPv4 UDP, does not reassemble fragments, and sends frames only when the destination or gateway already has a reachable neighbor entry. Configure RSS/flow steering so the media UDP port reaches the selected queue. The loader refuses to replace an existing XDP program.
 
 ## build boringSSL
 ```

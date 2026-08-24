@@ -387,8 +387,16 @@ typedef struct sfu_congestion_diag {
   uint64_t cache_hits;
   uint64_t cache_misses;
   uint64_t rtx_sent;
+  uint64_t pli_received;
   uint64_t pli_sent;
   uint64_t pli_coalesced;
+  uint64_t last_logged_nack_requests;
+  uint64_t last_logged_cache_hits;
+  uint64_t last_logged_cache_misses;
+  uint64_t last_logged_rtx_sent;
+  uint64_t last_logged_pli_received;
+  uint64_t last_logged_pli_sent;
+  uint64_t last_logged_pli_coalesced;
   uint64_t last_logged_pacer_drops;
   uint64_t last_logged_rtx_budget_drops;
   uint32_t latest_gcc_bps;
@@ -396,6 +404,8 @@ typedef struct sfu_congestion_diag {
   uint32_t latest_twcc_lost;
   uint32_t latest_twcc_total;
   uint32_t allocation_streams;
+  uint32_t allocation_pool_bps;
+  uint32_t allocation_reserve_bps;
   uint32_t allocation_allocated_bps;
   uint32_t allocation_unallocated_bps;
   uint32_t remb_contribution_bps;

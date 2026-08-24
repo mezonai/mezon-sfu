@@ -277,7 +277,7 @@ static void *worker_thread_main(void *arg) {
   }
 
   unsigned shutdown_passes = 0;
-  for (unsigned idle_passes = 0; idle_passes < 32 || (w->send_ring.outstanding_sends > 0 && shutdown_passes < 2500); shutdown_passes++) {
+  for (unsigned idle_passes = 0; idle_passes < 32 || (sfu_ring_outstanding_sends(&w->send_ring) > 0 && shutdown_passes < 2500); shutdown_passes++) {
     bool did_work = false;
 
     void *item;

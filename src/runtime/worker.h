@@ -6,7 +6,7 @@
 
 #include "memory/packet_pool.h"
 #include "memory/worker_packet_arena.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "room/room_registry.h"
 #include "runtime/fanout.h"
 #include "runtime/routing_context.h"

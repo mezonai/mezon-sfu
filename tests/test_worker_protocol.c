@@ -9,7 +9,7 @@
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
 #include "memory/packet_pool.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "pipeline/router.h"
@@ -676,6 +676,7 @@ static void test_gcc_estimate_reaches_scheduler(void) {
   assert(contribution == camera2->allocated_bps);
   assert(!sfu_session_read_remb_contribution(f.session, 0, 10, now_us, 2000000, &contribution)); /* stale slot generation */
   assert(!sfu_session_read_remb_contribution(f.session, 0, 11, now_us + 2000001, 2000000, &contribution)); /* stale sample */
+  assert(sfu_metric_get("remb_contribution_stale") == 1);
 
   sfu_receiver_snapshot_t *inactive = sfu_receiver_snapshot_alloc();
   assert(inactive != NULL);
@@ -752,6 +753,10 @@ static void test_publisher_remb_aggregates_fresh_minimum_and_throttles(void) {
   sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 700000));
   assert(f.publisher->egress.last_remb_bps == 400000);
   assert(pool_free_count(&f.base.pp) == free_before - 2);
+  assert(sfu_metric_get("remb_contribution_written") == 6);
+  assert(sfu_metric_get("remb_contribution_stale") >= 1);
+  assert(sfu_metric_get("remb_aggregate_no_fresh") == 1);
+  assert(sfu_metric_get("remb_aggregate_target_changed") >= 3);
 
   sfu_session_release(second);
   kf_fixture_destroy(&f);
@@ -1596,6 +1601,36 @@ static void test_congestion_diag_staggered_due_windows(void) {
   f.session->egress.diag.last_log_us = first_us;
   assert(!sfu_session_congestion_diag_due(f.session, first_us + 100000ULL));
   assert(sfu_session_congestion_diag_due(f.session, first_us + 2000000ULL));
+
+  f.session->egress.diag.nack_requests = 7;
+  f.session->egress.diag.cache_hits = 5;
+  f.session->egress.diag.cache_misses = 2;
+  f.session->egress.diag.rtx_sent = 4;
+  f.session->egress.diag.pli_received = 3;
+  f.session->egress.diag.pli_sent = 2;
+  f.session->egress.diag.pli_coalesced = 1;
+  f.session->egress.pacer.dropped_enh = 6;
+  f.session->egress.pacer.rtx_dropped_budget = 8;
+  sfu_session_log_congestion_diag(&f.w, f.session, first_us + 2000000ULL);
+  assert(f.session->egress.diag.last_logged_nack_requests == 7);
+  assert(f.session->egress.diag.last_logged_cache_hits == 5);
+  assert(f.session->egress.diag.last_logged_cache_misses == 2);
+  assert(f.session->egress.diag.last_logged_rtx_sent == 4);
+  assert(f.session->egress.diag.last_logged_pli_received == 3);
+  assert(f.session->egress.diag.last_logged_pli_sent == 2);
+  assert(f.session->egress.diag.last_logged_pli_coalesced == 1);
+  assert(f.session->egress.diag.last_logged_pacer_drops == 6);
+  assert(f.session->egress.diag.last_logged_rtx_budget_drops == 8);
+  assert(sfu_metric_get("congestion_diag_log") == 1);
+
+  f.session->egress.diag.nack_requests += 2;
+  f.session->egress.diag.rtx_sent += 1;
+  f.session->egress.pacer.dropped_enh += 3;
+  sfu_session_log_congestion_diag(&f.w, f.session, first_us + 4000000ULL);
+  assert(f.session->egress.diag.last_logged_nack_requests == 9);
+  assert(f.session->egress.diag.last_logged_rtx_sent == 5);
+  assert(f.session->egress.diag.last_logged_pacer_drops == 9);
+  assert(sfu_metric_get("congestion_diag_log") == 2);
 
   fixture_destroy(&f);
 }

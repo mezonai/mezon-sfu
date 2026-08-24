@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "congestion/bandwidth_allocator.h"
+#include "util/metrics.h"
 
 static uint64_t estimate_for_pool(uint64_t pool) {
   uint64_t estimate = pool * 100u / SFU_BANDWIDTH_VIDEO_POOL_PERCENT;
@@ -146,12 +147,31 @@ static void test_caps_safe_pool_and_overflow(void) {
   assert(publisher_sum == a.allocated_bps);
 }
 
+static void test_low_cardinality_metrics(void) {
+  sfu_metrics_init();
+  sfu_bandwidth_allocation_t a;
+  sfu_bandwidth_stream_input_t streams[] = {
+      input(1, 0, 1, SFU_BANDWIDTH_STREAM_CAMERA),
+      input(2, 1, 1, SFU_BANDWIDTH_STREAM_SCREEN),
+  };
+  sfu_bandwidth_allocate(streams, 2, 1000000, &a);
+  assert(sfu_metric_get("bandwidth_allocator_runs") == 1);
+  assert(sfu_metric_get("bandwidth_allocator_active_streams") == 2);
+  assert(sfu_metric_get("bandwidth_allocator_unallocated_bps") == a.unallocated_bps);
+
+  sfu_bandwidth_allocate(NULL, 0, 1000000, &a);
+  assert(sfu_metric_get("bandwidth_allocator_runs") == 2);
+  assert(sfu_metric_get("bandwidth_allocator_active_streams") == 2);
+  assert(sfu_metric_get("bandwidth_allocator_unallocated_bps") >= a.unallocated_bps);
+}
+
 int main(void) {
   test_empty_and_inactive();
   test_threshold_boundaries_and_screen_priority();
   test_equal_sharing_remainder_and_stable_order();
   test_publisher_aggregation_duplicates_and_generation();
   test_caps_safe_pool_and_overflow();
+  test_low_cardinality_metrics();
   printf("test_bandwidth_allocator: OK\n");
   return 0;
 }

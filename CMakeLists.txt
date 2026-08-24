@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(SFU_ENABLE_ASAN "Build with AddressSanitizer" OFF)
 option(SFU_ENABLE_TSAN "Build with ThreadSanitizer" OFF)
 option(SFU_DIAG_LOG "Compile in diagnostic logging for the SRTP key-desync investigation (ON = verbose drops/dumps, OFF = silent)" ON)
+option(USE_AF_XDP "Use AF_XDP instead of io_uring for media I/O" OFF)
 
 if(SFU_DIAG_LOG)
   add_compile_definitions(SFU_DIAG_LOG=1)
@@ -38,8 +39,37 @@ endif()
 
 find_package(mimalloc REQUIRED)
 
-find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
-find_library(URING_LIB uring REQUIRED)
+set(SFU_NET_SOURCES)
+set(SFU_NET_INCLUDE_DIRS)
+set(SFU_NET_LIBRARIES)
+
+if(USE_AF_XDP)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBXDP REQUIRED IMPORTED_TARGET libxdp)
+  pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf)
+  find_program(CLANG_EXECUTABLE NAMES clang REQUIRED)
+
+  set(SFU_XDP_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/sfu_xdp_kern.o")
+  add_custom_command(
+    OUTPUT "${SFU_XDP_OBJECT}"
+    COMMAND "${CLANG_EXECUTABLE}" -O2 -g -target bpf -D__TARGET_ARCH_x86
+            -I/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/src/net/xdp/sfu_xdp_kern.c"
+            -o "${SFU_XDP_OBJECT}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/net/xdp/sfu_xdp_kern.c"
+    VERBATIM
+  )
+  add_custom_target(sfu_xdp_program DEPENDS "${SFU_XDP_OBJECT}")
+  add_compile_definitions(USE_AF_XDP=1 SFU_XDP_OBJECT_PATH="${SFU_XDP_OBJECT}")
+  list(APPEND SFU_NET_SOURCES src/net/af_xdp.c)
+  list(APPEND SFU_NET_LIBRARIES PkgConfig::LIBXDP PkgConfig::LIBBPF)
+else()
+  find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
+  find_library(URING_LIB uring REQUIRED)
+  list(APPEND SFU_NET_SOURCES src/net/io_uring.c src/net/batch.c)
+  list(APPEND SFU_NET_INCLUDE_DIRS ${URING_INCLUDE_DIR})
+  list(APPEND SFU_NET_LIBRARIES ${URING_LIB})
+endif()
 
 # Explicitly target the paths provided to avoid picking up system OpenSSL
 set(BORINGSSL_INCLUDE_DIR "/usr/local/include/boringssl")
@@ -75,8 +105,7 @@ add_library(sfu_core STATIC
   src/util/metrics.c
   src/api/hook/producer.c
   src/net/socket.c
-  src/net/io_uring.c
-  src/net/batch.c
+  ${SFU_NET_SOURCES}
   src/net/zerocopy.c
   src/transport/stun/stun.c
   src/transport/dtls/dtls.c
@@ -123,7 +152,7 @@ add_library(sfu_core STATIC
 target_include_directories(sfu_core PUBLIC
   include
   src
-  ${URING_INCLUDE_DIR}
+  ${SFU_NET_INCLUDE_DIRS}
   ${BORINGSSL_INCLUDE_DIR}
   ${SRTP_INCLUDE_DIR}
   ${LIBUV_INCLUDE_DIR}
@@ -132,7 +161,7 @@ target_include_directories(sfu_core PUBLIC
 
 # Link directly using resolved absolute library paths
 target_link_libraries(sfu_core PUBLIC
-  ${URING_LIB}
+  ${SFU_NET_LIBRARIES}
   ${BORINGSSL_SSL_LIB}
   ${BORINGSSL_CRYPTO_LIB}
   ${SRTP2_LIBRARY}
@@ -144,6 +173,9 @@ target_link_libraries(sfu_core PUBLIC
   stdc++
 )
 set_target_properties(sfu_core PROPERTIES LINKER_LANGUAGE CXX)
+if(USE_AF_XDP)
+  add_dependencies(sfu_core sfu_xdp_program)
+endif()
 
 add_executable(mezon-sfu src/runtime/main.c)
 target_link_libraries(mezon-sfu PRIVATE sfu_core mimalloc)

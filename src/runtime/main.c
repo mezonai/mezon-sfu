@@ -9,7 +9,7 @@
 #include "api/hook/producer.h"
 #include "config/config.h"
 #include "memory/packet_pool.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "net/socket.h"
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
   bool packet_pool_initialized = false, routing_initialized = false;
   bool room_registry_initialized = false, mesh_initialized = false;
   bool sessions_initialized = false, scheduler_initialized = false;
-  bool scheduler_started = false, signaling_started = false, nats_producer_started = false;
+  bool scheduler_started = false, signaling_started = false, nats_producer_started = false, net_backend_initialized = false;
   sfu_worker_t *workers = NULL;
   sfu_scheduler_t *scheduler = NULL;
   sfu_room_registry_t *room_registry = SFU_CALLOC(1, sizeof(*room_registry));
@@ -153,7 +153,11 @@ int main(int argc, char **argv) {
   SFU_LOG_INFO("detected %d online cpus: 1 dispatcher + %u workers", online, worker_count);
 
   uint64_t packet_pool_bytes = (uint64_t)g_sfu_config.packet_pool_capacity * ((uint64_t)sizeof(sfu_packet_t) + g_sfu_config.packet_buf_size);
+#ifdef USE_AF_XDP
+  uint64_t provided_buffer_bytes = (uint64_t)g_sfu_config.af_xdp_frame_count * g_sfu_config.af_xdp_frame_size;
+#else
   uint64_t provided_buffer_bytes = (uint64_t)g_sfu_config.provided_buf_count * sfu_ring_recv_slot_size(g_sfu_config.packet_buf_size);
+#endif
   uint64_t queue_slot_bytes =
       (uint64_t)worker_count *
       ((uint64_t)g_sfu_config.worker_queue_capacity + g_sfu_config.release_queue_capacity + (uint64_t)worker_count * g_sfu_config.fanout_ring_capacity) *
@@ -167,6 +171,13 @@ int main(int argc, char **argv) {
     SFU_LOG_ERROR("failed to allocate runtime threads");
     goto cleanup;
   }
+
+  if (sfu_ring_backend_init(fd, g_sfu_config.af_xdp_interface, g_sfu_config.af_xdp_queue_id, port, g_sfu_config.af_xdp_frame_count,
+                            g_sfu_config.af_xdp_frame_size, g_sfu_config.af_xdp_mode) != 0) {
+    SFU_LOG_ERROR("failed to initialize media I/O backend");
+    goto cleanup;
+  }
+  net_backend_initialized = true;
 
   if (sfu_routing_table_init(routing_table) != 0) {
     goto cleanup;
@@ -255,6 +266,9 @@ cleanup:
                  sfu_spsc_ring_high_water(&workers[i].inbox), workers[i].inbox.capacity, sfu_spsc_ring_push_failures(&workers[i].inbox),
                  sfu_spsc_ring_high_water(&workers[i].release_to_dispatcher), workers[i].release_to_dispatcher.capacity);
     sfu_worker_destroy(&workers[i]);
+  }
+  if (net_backend_initialized) {
+    sfu_ring_backend_destroy();
   }
   if (sessions_initialized) {
     sfu_session_table_destroy(sessions);

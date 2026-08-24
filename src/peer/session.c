@@ -2149,7 +2149,11 @@ bool sfu_session_read_remb_contribution(const sfu_peer_session_t *subscriber, ui
     if (sequence0 != sequence1) {
       continue;
     }
-    if (generation != assignment_generation || bitrate == 0 || updated_at_us == 0 || now_us < updated_at_us || now_us - updated_at_us > max_age_us) {
+    if (generation != assignment_generation || bitrate == 0 || updated_at_us == 0 || now_us < updated_at_us) {
+      return false;
+    }
+    if (now_us - updated_at_us > max_age_us) {
+      sfu_metric_inc("remb_contribution_stale");
       return false;
     }
     *bitrate_bps = bitrate;
@@ -2203,12 +2207,17 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
     }
   }
   sfu_fanout_bundle_release(bundle);
+  uint32_t previous_target_bps = publisher->egress.diag.remb_target_bps;
   publisher->egress.diag.remb_fresh = fresh;
   publisher->egress.diag.remb_stale = stale;
   publisher->egress.diag.remb_target_bps = found ? minimum_bps : 0;
   publisher->egress.diag.remb_sent = false;
+  if (publisher->egress.diag.remb_target_bps != previous_target_bps) {
+    sfu_metric_inc("remb_aggregate_target_changed");
+  }
 
   if (!found) {
+    sfu_metric_inc("remb_aggregate_no_fresh");
     if (saw_route) {
       sfu_metric_inc("remb_aggregate_empty");
     }
@@ -2263,6 +2272,10 @@ static size_t diag_append(char *buf, size_t cap, size_t used, const char *fmt, .
   return added >= cap - used ? cap - 1 : used + added;
 }
 
+static uint64_t diag_counter_delta(uint64_t current, uint64_t previous) {
+  return current >= previous ? current - previous : current;
+}
+
 void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *session, uint64_t now_us) {
   if (!w || !session || sfu_session_owner_worker(session) != w->worker_index || !sfu_session_congestion_diag_due(session, now_us)) {
     return;
@@ -2286,24 +2299,44 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       listed++;
     }
   }
-  if (diag->allocation_streams > listed) {
-    (void)diag_append(allocations, sizeof(allocations), allocation_used, ",+%u", diag->allocation_streams - listed);
+  bool allocations_truncated = diag->allocation_streams > listed;
+  if (allocations_truncated) {
+    allocation_used = diag_append(allocations, sizeof(allocations), allocation_used, "%s+%u", listed ? "," : "", diag->allocation_streams - listed);
+  }
+  if (allocation_used >= sizeof(allocations) - 1) {
+    allocations_truncated = true;
   }
 
   uint64_t pacer_drops = session->egress.pacer.dropped_enh;
   uint64_t rtx_budget_drops = session->egress.pacer.rtx_dropped_budget;
-  uint64_t pacer_delta = pacer_drops - diag->last_logged_pacer_drops;
-  uint64_t rtx_drop_delta = rtx_budget_drops - diag->last_logged_rtx_budget_drops;
+  uint64_t pacer_delta = diag_counter_delta(pacer_drops, diag->last_logged_pacer_drops);
+  uint64_t rtx_drop_delta = diag_counter_delta(rtx_budget_drops, diag->last_logged_rtx_budget_drops);
+  uint64_t nack_delta = diag_counter_delta(diag->nack_requests, diag->last_logged_nack_requests);
+  uint64_t cache_hit_delta = diag_counter_delta(diag->cache_hits, diag->last_logged_cache_hits);
+  uint64_t cache_miss_delta = diag_counter_delta(diag->cache_misses, diag->last_logged_cache_misses);
+  uint64_t rtx_delta = diag_counter_delta(diag->rtx_sent, diag->last_logged_rtx_sent);
+  uint64_t pli_received_delta = diag_counter_delta(diag->pli_received, diag->last_logged_pli_received);
+  uint64_t pli_sent_delta = diag_counter_delta(diag->pli_sent, diag->last_logged_pli_sent);
+  uint64_t pli_coalesced_delta = diag_counter_delta(diag->pli_coalesced, diag->last_logged_pli_coalesced);
   int64_t debt = session->egress.pacer.balance_bytes < 0 ? -session->egress.pacer.balance_bytes : 0;
-  SFU_LOG_INFO("congestion session=%u worker=%u gcc=%u ack=%u overuse=%u twcc_loss=%u/%u alloc=%u/%u unalloc=%u streams=[%s] "
-               "pacer_bps=%u debt=%" PRId64 " drop_delta=%" PRIu64 " rtx_drop_delta=%" PRIu64 " nack=%" PRIu64
-               " cache=%" PRIu64 "/%" PRIu64 " rtx=%" PRIu64 " pli=%" PRIu64 "/%" PRIu64
-               " remb=contrib:%u,target:%u,sent:%u,fresh:%u,stale:%u",
+  SFU_LOG_INFO("congestion session=%u worker=%u gcc=%u ack=%u overuse=%u twcc_loss=%u/%u pool=%u reserve=%u "
+               "alloc=%u unalloc=%u streams=[%s] alloc_truncated=%u pacer_bps=%u debt=%" PRId64
+               " drop_delta=%" PRIu64 " rtx_drop_delta=%" PRIu64 " nack_delta=%" PRIu64
+               " cache_delta=%" PRIu64 "/%" PRIu64 " rtx_delta=%" PRIu64 " pli_delta=%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 " remb=contrib:%u,target:%u,last_sent:%u,sent:%u,fresh:%u,stale:%u",
                session->peer_id, w->worker_index, diag->latest_gcc_bps, diag->latest_ack_bps, diag->latest_overuse,
-               diag->latest_twcc_lost, diag->latest_twcc_total, diag->allocation_allocated_bps, diag->allocation_streams,
-               diag->allocation_unallocated_bps, allocations, session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta,
-               diag->nack_requests, diag->cache_hits, diag->cache_misses, diag->rtx_sent, diag->pli_sent, diag->pli_coalesced,
-               diag->remb_contribution_bps, diag->remb_target_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale);
+               diag->latest_twcc_lost, diag->latest_twcc_total, diag->allocation_pool_bps, diag->allocation_reserve_bps,
+               diag->allocation_allocated_bps, diag->allocation_unallocated_bps, allocations, allocations_truncated ? 1u : 0u,
+               session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta, nack_delta, cache_hit_delta, cache_miss_delta,
+               rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, diag->remb_contribution_bps,
+               diag->remb_target_bps, session->egress.last_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale);
+  diag->last_logged_nack_requests = diag->nack_requests;
+  diag->last_logged_cache_hits = diag->cache_hits;
+  diag->last_logged_cache_misses = diag->cache_misses;
+  diag->last_logged_rtx_sent = diag->rtx_sent;
+  diag->last_logged_pli_received = diag->pli_received;
+  diag->last_logged_pli_sent = diag->pli_sent;
+  diag->last_logged_pli_coalesced = diag->pli_coalesced;
   diag->last_logged_pacer_drops = pacer_drops;
   diag->last_logged_rtx_budget_drops = rtx_budget_drops;
   diag->last_log_us = now_us;

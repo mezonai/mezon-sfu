@@ -14,7 +14,7 @@
 #include "media/svc/layer_scheduler.h"
 #include "media/svc/svc_descriptor.h"
 #include "memory/packet_pool.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
 #include "protocol/signaling/signaling.h"
@@ -104,6 +104,8 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   uint64_t now_us = sfu_now_us();
   session->egress.diag.last_allocation_us = now_us;
   session->egress.diag.allocation_streams = (uint32_t)allocation.stream_count;
+  session->egress.diag.allocation_pool_bps = allocation.video_pool_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.video_pool_bps;
+  session->egress.diag.allocation_reserve_bps = allocation.reserve_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.reserve_bps;
   session->egress.diag.allocation_allocated_bps = allocation.allocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.allocated_bps;
   session->egress.diag.allocation_unallocated_bps = allocation.unallocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.unallocated_bps;
   session->egress.diag.remb_contribution_bps = session->egress.diag.allocation_allocated_bps;
@@ -400,6 +402,8 @@ static void handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessio
     return;
   }
 
+  sender_session->egress.diag.pli_received++;
+  sfu_metric_inc("congestion_pli_received");
   request_source_keyframe(w, sender_session, pli.media_ssrc);
 }
 
