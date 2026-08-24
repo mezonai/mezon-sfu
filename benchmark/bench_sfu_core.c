@@ -5,6 +5,7 @@
 #include "rtp/rtp_packet.h"
 #include "runtime/fanout.h"
 #include "runtime/worker.h"
+#include "transport/srtp/srtp.h"
 #include "util/alloc.h"
 #include "util/log.h"
 
@@ -35,6 +36,8 @@ typedef enum bench_kind {
   BENCH_PACKET_POOL,
   BENCH_FANOUT_MESH,
   BENCH_MEDIA_FANOUT,
+  BENCH_SRTP_DECRYPT,
+  BENCH_SRTP_ENCRYPT,
 } bench_kind_t;
 
 typedef struct bench_config {
@@ -104,7 +107,7 @@ static bool parse_u32(const char *s, uint32_t *out) {
 
 static void usage(const char *prog) {
   fprintf(stderr,
-          "usage: %s [all|rtp_parse|packet_pool|fanout_mesh|media_fanout] [options]\n"
+          "usage: %s [all|rtp_parse|packet_pool|fanout_mesh|media_fanout|srtp_decrypt|srtp_encrypt] [options]\n"
           "\n"
           "options:\n"
           "  --iterations N   timed iterations, default %llu\n"
@@ -131,6 +134,10 @@ static bool parse_kind(const char *s, bench_kind_t *kind) {
     *kind = BENCH_FANOUT_MESH;
   } else if (strcmp(s, "media_fanout") == 0) {
     *kind = BENCH_MEDIA_FANOUT;
+  } else if (strcmp(s, "srtp_decrypt") == 0) {
+    *kind = BENCH_SRTP_DECRYPT;
+  } else if (strcmp(s, "srtp_encrypt") == 0) {
+    *kind = BENCH_SRTP_ENCRYPT;
   } else {
     return false;
   }
@@ -639,6 +646,175 @@ static bench_result_t bench_media_fanout(const bench_config_t *cfg) {
                           .packet_size = cfg->packet_size};
 }
 
+#define SRTP_BENCH_CHUNK 4096u
+#define SRTP_BENCH_SLOT_PAD 32u
+
+/* Rebuild a synthetic RTP packet and stamp a monotonically increasing transport sequence so libsrtp
+ * advances ROC/replay state the same way real media does. SSRC stays fixed (one stream). */
+static void srtp_fill_rtp(uint8_t *buf, uint32_t packet_size, uint16_t seq) {
+  make_rtp_packet(buf, packet_size);
+  buf[2] = (uint8_t)(seq >> 8);
+  buf[3] = (uint8_t)(seq & 0xFF);
+}
+
+/* Generate `count` ciphertexts into `arena`, recording each resulting (packet + auth tag) length. */
+static void srtp_make_ciphertext(sfu_srtp_ctx_t *ectx, uint8_t *arena, uint32_t *lens, uint32_t slot, uint32_t packet_size, uint16_t *seq, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    uint8_t *buf = arena + (size_t)i * slot;
+    srtp_fill_rtp(buf, packet_size, *seq);
+    int len = (int)packet_size;
+    if (!sfu_srtp_protect_rtp(ectx, buf, &len, slot)) {
+      fprintf(stderr, "srtp protect failed\n");
+      exit(1);
+    }
+    lens[i] = (uint32_t)len;
+    (*seq)++;
+  }
+}
+
+/* Decrypt `count` ciphertexts in place using the recorded lengths. */
+static void srtp_consume_ciphertext(sfu_srtp_ctx_t *dctx, uint8_t *arena, const uint32_t *lens, uint32_t slot, uint32_t count) {
+  (void)slot;
+  for (uint32_t i = 0; i < count; i++) {
+    uint8_t *buf = arena + (size_t)i * slot;
+    int len = (int)lens[i];
+    if (!sfu_srtp_unprotect_rtp(dctx, buf, &len)) {
+      fprintf(stderr, "srtp unprotect failed\n");
+      exit(1);
+    }
+  }
+}
+
+static bench_result_t bench_srtp_decrypt(const bench_config_t *cfg) {
+  const uint32_t slot = cfg->packet_size + SRTP_MAX_TRAILER_LEN + SRTP_BENCH_SLOT_PAD;
+  uint8_t keymat[64];
+  for (size_t i = 0; i < sizeof(keymat); i++) {
+    keymat[i] = (uint8_t)i;
+  }
+
+  /* Server = encrypting side (outbound uses server_master); client = decrypting side (inbound uses server_master). */
+  sfu_srtp_ctx_t ectx, dctx;
+  if (sfu_srtp_ctx_init_from_dtls(&ectx, keymat, 0x0007, true) != 0 || sfu_srtp_ctx_init_from_dtls(&dctx, keymat, 0x0007, false) != 0) {
+    fprintf(stderr, "srtp ctx init failed\n");
+    exit(1);
+  }
+
+  uint32_t chunk = SRTP_BENCH_CHUNK;
+  if ((uint64_t)chunk > cfg->iterations + cfg->warmup) {
+    chunk = (uint32_t)(cfg->iterations + cfg->warmup);
+    if (chunk == 0) {
+      chunk = 1;
+    }
+  }
+  uint8_t *arena = malloc((size_t)chunk * slot);
+  uint32_t *lens = malloc((size_t)chunk * sizeof(*lens));
+  if (!arena || !lens) {
+    perror("malloc");
+    exit(1);
+  }
+
+  uint16_t seq = 0;
+  for (uint64_t i = 0; i < cfg->warmup; i++) {
+    srtp_make_ciphertext(&ectx, arena, lens, slot, cfg->packet_size, &seq, 1);
+    srtp_consume_ciphertext(&dctx, arena, lens, slot, 1);
+  }
+
+  uint64_t total = 0;
+  uint64_t done = 0;
+  while (done < cfg->iterations) {
+    uint32_t c = chunk;
+    if ((uint64_t)c > cfg->iterations - done) {
+      c = (uint32_t)(cfg->iterations - done);
+    }
+    srtp_make_ciphertext(&ectx, arena, lens, slot, cfg->packet_size, &seq, c);
+    uint64_t start = now_ns();
+    for (uint32_t i = 0; i < c; i++) {
+      uint8_t *buf = arena + (size_t)i * slot;
+      int len = (int)lens[i];
+      if (!sfu_srtp_unprotect_rtp(&dctx, buf, &len)) {
+        fprintf(stderr, "srtp unprotect failed\n");
+        exit(1);
+      }
+      g_sink += buf[0] + (uint64_t)len;
+    }
+    total += now_ns() - start;
+    done += c;
+  }
+
+  free(lens);
+  free(arena);
+  sfu_srtp_ctx_destroy(&dctx);
+  sfu_srtp_ctx_destroy(&ectx);
+
+  return (bench_result_t){.name = "srtp_decrypt", .iterations = cfg->iterations, .jobs = cfg->iterations, .total_ns = total, .packet_size = cfg->packet_size};
+}
+
+static bench_result_t bench_srtp_encrypt(const bench_config_t *cfg) {
+  const uint32_t slot = cfg->packet_size + SRTP_MAX_TRAILER_LEN + SRTP_BENCH_SLOT_PAD;
+  uint8_t keymat[64];
+  for (size_t i = 0; i < sizeof(keymat); i++) {
+    keymat[i] = (uint8_t)i;
+  }
+
+  sfu_srtp_ctx_t ectx;
+  if (sfu_srtp_ctx_init_from_dtls(&ectx, keymat, 0x0007, true) != 0) {
+    fprintf(stderr, "srtp ctx init failed\n");
+    exit(1);
+  }
+
+  uint32_t chunk = SRTP_BENCH_CHUNK;
+  if ((uint64_t)chunk > cfg->iterations + cfg->warmup) {
+    chunk = (uint32_t)(cfg->iterations + cfg->warmup);
+    if (chunk == 0) {
+      chunk = 1;
+    }
+  }
+  uint8_t *arena = malloc((size_t)chunk * slot);
+  if (!arena) {
+    perror("malloc");
+    exit(1);
+  }
+
+  uint16_t seq = 0;
+  for (uint64_t i = 0; i < cfg->warmup; i++) {
+    srtp_fill_rtp(arena, cfg->packet_size, seq++);
+    int len = (int)cfg->packet_size;
+    if (!sfu_srtp_protect_rtp(&ectx, arena, &len, slot)) {
+      fprintf(stderr, "srtp protect failed\n");
+      exit(1);
+    }
+  }
+
+  uint64_t total = 0;
+  uint64_t done = 0;
+  while (done < cfg->iterations) {
+    uint32_t c = chunk;
+    if ((uint64_t)c > cfg->iterations - done) {
+      c = (uint32_t)(cfg->iterations - done);
+    }
+    for (uint32_t i = 0; i < c; i++) {
+      srtp_fill_rtp(arena + (size_t)i * slot, cfg->packet_size, seq++);
+    }
+    uint64_t start = now_ns();
+    for (uint32_t i = 0; i < c; i++) {
+      uint8_t *buf = arena + (size_t)i * slot;
+      int len = (int)cfg->packet_size;
+      if (!sfu_srtp_protect_rtp(&ectx, buf, &len, slot)) {
+        fprintf(stderr, "srtp protect failed\n");
+        exit(1);
+      }
+      g_sink += buf[0] + (uint64_t)len;
+    }
+    total += now_ns() - start;
+    done += c;
+  }
+
+  free(arena);
+  sfu_srtp_ctx_destroy(&ectx);
+
+  return (bench_result_t){.name = "srtp_encrypt", .iterations = cfg->iterations, .jobs = cfg->iterations, .total_ns = total, .packet_size = cfg->packet_size};
+}
+
 static void run_one(bench_kind_t kind, const bench_config_t *cfg) {
   bench_result_t result;
   switch (kind) {
@@ -653,6 +829,12 @@ static void run_one(bench_kind_t kind, const bench_config_t *cfg) {
       break;
     case BENCH_MEDIA_FANOUT:
       result = bench_media_fanout(cfg);
+      break;
+    case BENCH_SRTP_DECRYPT:
+      result = bench_srtp_decrypt(cfg);
+      break;
+    case BENCH_SRTP_ENCRYPT:
+      result = bench_srtp_encrypt(cfg);
       break;
     case BENCH_ALL:
     default:
@@ -670,6 +852,12 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  bool srtp_needed = cfg.kind == BENCH_SRTP_DECRYPT || cfg.kind == BENCH_SRTP_ENCRYPT || cfg.kind == BENCH_ALL;
+  if (srtp_needed && sfu_srtp_global_init() != 0) {
+    fprintf(stderr, "srtp global init failed\n");
+    return 2;
+  }
+
   if (cfg.csv) {
     print_csv_header();
   }
@@ -679,6 +867,8 @@ int main(int argc, char **argv) {
     run_one(BENCH_PACKET_POOL, &cfg);
     run_one(BENCH_FANOUT_MESH, &cfg);
     run_one(BENCH_MEDIA_FANOUT, &cfg);
+    run_one(BENCH_SRTP_DECRYPT, &cfg);
+    run_one(BENCH_SRTP_ENCRYPT, &cfg);
   } else {
     run_one(cfg.kind, &cfg);
   }
