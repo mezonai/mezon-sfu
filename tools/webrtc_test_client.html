@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Mezon SFU — VP9 SVC Test Client</title>
+        <title>Mezon SFU — H264 + VP9 L1T3 Test Client</title>
         <style>
             :root {
                 --bg: #11111b;
@@ -376,7 +376,7 @@
         <div id="joinScreen">
             <div id="joinCard">
                 <h1>Mezon SFU</h1>
-                <p class="sub">VP9 / SVC Test Client</p>
+                <p class="sub">H264 camera + VP9 L1T3 screen (1080p)</p>
                 <div class="form-group">
                     <label for="wsUrl">Signaling WebSocket URL</label>
                     <input
@@ -409,28 +409,6 @@
                 <div class="form-group">
                     <label for="displayName">Your name</label>
                     <input type="text" id="displayName" value="Guest" />
-                </div>
-                <div class="form-group">
-                    <label for="videoCodec">Video Codec</label>
-                    <select id="videoCodec">
-                        <option value="VP8" selected>VP8 (no SVC)</option>
-                        <option value="VP9">VP9 (SVC capable)</option>
-                        <option value="H264">H264 (no SVC)</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="svcMode">SVC Scalability Mode</label>
-                    <select id="svcMode">
-                        <option value="none" selected>Disabled (single stream)</option>
-                        <option value="L3T3">L3T3 (3 Spatial, 3 Temporal)</option>
-                        <option value="L3T3_KEY">L3T3_KEY (3 Spatial, Keyframe-based)</option>
-                        <option value="L2T2">L2T2 (2 Spatial, 2 Temporal)</option>
-                        <option value="L1T3">L1T3 (1 Spatial, 3 Temporal)</option>
-                        <option value="L1T2">L1T2 (1 Spatial, 2 Temporal)</option>
-                    </select>
-                    <small style="color: var(--muted); display:block; margin-top:4px;">
-                        SVC modes only apply to VP9. VP8 and H264 always use a single stream.
-                    </small>
                 </div>
 
                 <div class="join-btn-group">
@@ -594,7 +572,7 @@
             window.addEventListener("DOMContentLoaded", async () => {
                 try {
                     localStream = await navigator.mediaDevices.getUserMedia({
-                        video: { width: { ideal: 320 }, height: { ideal: 480 } },
+                        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
                         audio: true,
                     });
                 } catch (e) {
@@ -1122,13 +1100,11 @@
                     }
 
                     const answer = await pc.createAnswer();
-                    const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
-                    const selectedMode = (document.getElementById("svcMode") || {}).value || "none";
-                    const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
+                    /* Camera (mid:1) is H264, screen share (mid:2) is VP9 L1T3. SVC only applies to the screen track. */
                     const mungedSdp = mungeVideoBitrate(
                         answer.sdp,
-                        wantSvc ? 1000 : 600,
-                        wantSvc ? 1500 : 1000,
+                        1000,
+                        1500,
                         8000
                     );
                     await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
@@ -1304,6 +1280,7 @@
                 }
             }
 
+            /* Screen share: VP9, scalabilityMode=L1T3, preserve native 1080x1920 resolution. */
             async function applyScreenEncodingParams(sender) {
                 if (!sender || typeof sender.getParameters !== "function") return;
                 try {
@@ -1311,13 +1288,10 @@
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    // Screen content: preserve native resolution and spend bitrate on text clarity.
-                    const enc = params.encodings[0];
-                    if ("scalabilityMode" in enc) {
-                        delete enc.scalabilityMode;
-                    }
                     params.degradationPreference = "maintain-resolution";
-                    enc.maxFramerate = 10;
+                    const enc = params.encodings[0];
+                    enc.scalabilityMode = SCREEN_SVC_MODE;
+                    enc.maxFramerate = 30;
                     enc.maxBitrate = 8_000_000;
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
@@ -1345,7 +1319,7 @@
                             cursor: "always",
                             width: { ideal: 1920 },
                             height: { ideal: 1080 },
-                            frameRate: { ideal: 10, max: 15 },
+                            frameRate: { ideal: 30, max: 60 },
                         },
                         audio: false,
                     });
@@ -1594,10 +1568,18 @@
                 return out;
             }
 
-            async function applyVideoEncodingParams(pc) {
-                const selectedMode = document.getElementById("svcMode").value;
-                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
-                const wantSvc = selectedCodec === "VP9" && selectedMode !== "none";
+            /* Codec configuration is now fixed:
+ *   - Camera (mid:1): H264, 1080x1920, single encoding.
+ *   - Screen  (mid:2): VP9, scalabilityMode=L1T3, 1080x1920.
+ * There are no UI controls for either codec or SVC mode.
+ */
+const CAMERA_CODEC = "H264";
+const SCREEN_CODEC = "VP9";
+const SCREEN_SVC_MODE = "L1T3";
+const CAMERA_RESOLUTION = { width: 1920, height: 1080 };
+const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
+
+async function applyVideoEncodingParams(pc) {
                 const uplink =
                     pc.getTransceivers().find((t) => t.mid === "1") ||
                     pc.getTransceivers().find((t) => t.sender && t.sender.track && t.sender.track.kind === "video");
@@ -1608,30 +1590,20 @@
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    // Chrome requires degradationPreference on the root params object
-                    // for some versions when changing encoding rates.
-                    params.degradationPreference = "maintain-framerate";
-                    if (wantSvc) {
-                        params.encodings[0].scalabilityMode = selectedMode;
-                        params.encodings[0].maxBitrate = 2_500_000;
-                        params.encodings[0].maxFramerate = 30;
-                        params.encodings[0].scaleResolutionDownBy = 1;
-                        params.encodings[0].priority = "high";
-                        params.encodings[0].networkPriority = "high";
-                    } else {
-                        if ("scalabilityMode" in params.encodings[0]) {
-                            delete params.encodings[0].scalabilityMode;
-                        }
-                        params.encodings[0].maxBitrate = 1_500_000;
-                        params.encodings[0].maxFramerate = 30;
-                        params.encodings[0].scaleResolutionDownBy = 1;
-                        params.encodings[0].priority = "high";
-                        params.encodings[0].networkPriority = "high";
+                    // Camera: H264 single encoding, no SVC.
+                    params.degradationPreference = "maintain-resolution";
+                    if ("scalabilityMode" in params.encodings[0]) {
+                        delete params.encodings[0].scalabilityMode;
                     }
+                    params.encodings[0].maxBitrate = 4_000_000;
+                    params.encodings[0].maxFramerate = 30;
+                    params.encodings[0].scaleResolutionDownBy = 1;
+                    params.encodings[0].priority = "high";
+                    params.encodings[0].networkPriority = "high";
                     await uplink.sender.setParameters(params);
                     const enc0 = (uplink.sender.getParameters().encodings || [{}])[0];
                     console.log(
-                        `Encoding params applied: mode=${enc0.scalabilityMode || "none"} ` +
+                        `Camera encoding params applied: codec=${CAMERA_CODEC} mode=${enc0.scalabilityMode || "none"} ` +
                             `min=${enc0.minBitrate || "?"} max=${enc0.maxBitrate || "?"} ` +
                             `priority=${enc0.priority || "?"} net=${enc0.networkPriority || "?"}`
                     );
@@ -1640,11 +1612,8 @@
                 }
             }
 
-            /* Configure video transceiver: codec preference + optional VP9 SVC mode */
+            /* Configure video transceiver: H264 codec preference for camera, VP9 + L1T3 for screen share. */
             async function enableSvcForVideoSender(pc, videoTrack) {
-                const selectedMode = document.getElementById("svcMode").value;
-                const selectedCodec = (document.getElementById("videoCodec") || {}).value || "VP8";
-
                 const transceiver =
                     pc.getTransceivers().find(
                         (t) =>
@@ -1655,7 +1624,7 @@
                     );
 
                 if (!transceiver) {
-                    console.warn("No video transceiver found to attach track/SVC to -- falling back to plain addTrack");
+                    console.warn("No video transceiver found to attach track -- falling back to plain addTrack");
                     pc.addTrack(videoTrack, localStream);
                     return;
                 }
@@ -1664,10 +1633,10 @@
                 const uplink =
                     pc.getTransceivers().find((t) => t.mid === "1") || transceiver;
 
-                forceVideoCodec(uplink, selectedCodec);
+                forceVideoCodec(uplink, CAMERA_CODEC);
                 const screenTc = pc.getTransceivers().find((t) => t.mid === "2");
                 if (screenTc) {
-                    forceVideoCodec(screenTc, selectedCodec);
+                    forceVideoCodec(screenTc, SCREEN_CODEC);
                 }
 
                 if (videoTrack && "contentHint" in videoTrack) {
