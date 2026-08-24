@@ -58,6 +58,31 @@ static void test_dwell_blocks_fast_flap(void) {
 
   sfu_layer_scheduler_set_bitrate(&s, 100000);
   assert(s.target_sid == 0 && s.target_tid == 2);
+  assert(s.allocated_bps == 100000);
+}
+
+static void test_camera_and_screen_allocations_are_independent(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  sfu_layer_scheduler_slot_t slots[SFU_LAYER_SCHEDULER_CAP] = {0};
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+
+  sfu_layer_scheduler_t *camera = sfu_layer_scheduler_for_stream(&session, 77, SFU_MEDIA_VIDEO);
+  sfu_layer_scheduler_t *screen = sfu_layer_scheduler_for_stream(&session, 77, SFU_MEDIA_SCREEN);
+  assert(camera != NULL && screen != NULL && camera != screen);
+  camera->target_tid = 0;
+  screen->target_tid = 0;
+
+  sfu_layer_scheduler_set_bitrate(camera, 240000);
+  sfu_layer_scheduler_set_bitrate(screen, 1440000);
+  assert(camera->allocated_bps == 240000 && camera->target_tid == 0);
+  assert(screen->allocated_bps == 1440000 && screen->target_tid == 2);
+
+  sfu_layer_scheduler_set_bitrate(screen, 100000);
+  assert(screen->allocated_bps == 100000);
+  assert(screen->target_tid == 2); /* dwell delays only the target transition */
+  assert(camera->allocated_bps == 240000 && camera->target_tid == 0);
 }
 
 static void test_switch_source_transaction(void) {
@@ -322,6 +347,7 @@ int main(void) {
   test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
   test_dwell_blocks_fast_flap();
+  test_camera_and_screen_allocations_are_independent();
   test_switch_source_transaction();
   test_pacer_classification();
   test_spatial_dependency_requires_completed_lower_layer();

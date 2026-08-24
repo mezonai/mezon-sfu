@@ -104,6 +104,7 @@ add_library(sfu_core STATIC
   src/runtime/scheduler.c
   src/runtime/signal.c
   src/runtime/routing_context.c
+  src/congestion/bandwidth_allocator.c
   src/congestion/gcc.c
   src/congestion/pacer.c
   src/congestion/twcc_feedback.c

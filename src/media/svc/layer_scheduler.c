@@ -325,6 +325,10 @@ static const sfu_layer_rung_t k_layer_ladder[] = {
 #define SFU_LAYER_DWELL_US 500000LL
 
 void sfu_layer_scheduler_set_bitrate(sfu_layer_scheduler_t *sched, uint32_t bitrate_bps) {
+  if (!sched) {
+    return;
+  }
+  sched->allocated_bps = bitrate_bps;
   uint8_t target_sid = 0, target_tid = 0;
   int chosen = -1;
 

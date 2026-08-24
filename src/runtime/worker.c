@@ -20,6 +20,10 @@
 #define SFU_WORKER_IDLE_SLEEP_MIN_US 200
 #define SFU_WORKER_IDLE_SLEEP_MAX_US 5000
 #define SFU_WORKER_TWCC_FLUSH_INTERVAL_US 15000LL
+#define SFU_WORKER_REMB_SCAN_INTERVAL_US 50000LL
+#ifdef SFU_DIAG_LOG
+#define SFU_WORKER_DIAG_SCAN_INTERVAL_US 100000LL
+#endif
 
 bool sfu_worker_register_session(sfu_worker_t *w, sfu_peer_session_t *s) {
   if (!w || !s) {
@@ -174,8 +178,26 @@ static void *worker_thread_main(void *arg) {
 
     int64_t now_us = (int64_t)sfu_now_us();
     bool flushed_twcc = false;
-    if (now_us - w->last_twcc_flush_us >= SFU_WORKER_TWCC_FLUSH_INTERVAL_US) {
-      w->last_twcc_flush_us = now_us;
+    bool scanned_remb = false;
+    bool twcc_due = now_us - w->last_twcc_flush_us >= SFU_WORKER_TWCC_FLUSH_INTERVAL_US;
+    bool remb_due = now_us - w->last_remb_scan_us >= SFU_WORKER_REMB_SCAN_INTERVAL_US;
+#ifdef SFU_DIAG_LOG
+    bool diag_due = now_us - w->last_diag_scan_us >= SFU_WORKER_DIAG_SCAN_INTERVAL_US;
+#else
+    bool diag_due = false;
+#endif
+    if (twcc_due || remb_due || diag_due) {
+      if (twcc_due) {
+        w->last_twcc_flush_us = now_us;
+      }
+      if (remb_due) {
+        w->last_remb_scan_us = now_us;
+      }
+#ifdef SFU_DIAG_LOG
+      if (diag_due) {
+        w->last_diag_scan_us = now_us;
+      }
+#endif
       uint32_t twcc_count = 0;
       pthread_mutex_lock(&w->local_sessions_lock);
       if (w->twcc_scratch_capacity < w->local_session_count) {
@@ -206,14 +228,24 @@ static void *worker_thread_main(void *arg) {
       for (uint32_t li = 0; li < twcc_count; li++) {
         sfu_peer_session_t *ls = w->twcc_scratch[li];
         if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
-          sfu_session_maybe_send_twcc_feedback(w, ls);
-          flushed_twcc = true;
+          if (twcc_due) {
+            sfu_session_maybe_send_twcc_feedback(w, ls);
+            flushed_twcc = true;
+          }
+          if (remb_due && sfu_session_maybe_send_publisher_remb(w, ls, now_us)) {
+            scanned_remb = true;
+          }
+#ifdef SFU_DIAG_LOG
+          if (diag_due) {
+            sfu_session_log_congestion_diag(w, ls, (uint64_t)now_us);
+          }
+#endif
         }
         sfu_session_release(ls);
       }
     }
 
-    if (drained > 0 || fanned > 0 || flushed_twcc) {
+    if (drained > 0 || fanned > 0 || flushed_twcc || scanned_remb) {
       sfu_ring_submit(&w->send_ring);
     }
 
