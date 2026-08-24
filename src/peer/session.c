@@ -847,7 +847,7 @@ sfu_remote_offer_manifest_t *sfu_session_remote_offer_capture(sfu_peer_session_t
   pthread_mutex_lock(&session->graph.lock);
   sfu_remote_slot_table_t *table = &session->graph.remote_slots;
   manifest->offer_generation = remote_slot_next_nonzero(&table->next_offer_generation);
-  manifest->high_water_slots = table->high_water_slots;
+  manifest->high_water_slots = table->high_water_slots > table->offered_slot_floor ? table->high_water_slots : table->offered_slot_floor;
   manifest->receiver_root = atomic_load_explicit(&session->graph.receivers, memory_order_acquire);
   if (manifest->receiver_root) {
     atomic_fetch_add_explicit(&manifest->receiver_root->refcount, 1, memory_order_relaxed);
@@ -878,6 +878,9 @@ bool sfu_session_remote_offer_install(sfu_peer_session_t *session, sfu_remote_of
   }
   sfu_remote_offer_manifest_t *old = table->offered_manifest;
   table->offered_manifest = manifest;
+  if (manifest->high_water_slots > table->offered_slot_floor) {
+    table->offered_slot_floor = manifest->high_water_slots;
+  }
   sfu_remote_offer_manifest_retain(manifest);
   pthread_mutex_unlock(&session->graph.lock);
   sfu_remote_offer_manifest_release(old);
@@ -984,6 +987,9 @@ uint32_t sfu_session_remote_slot_high_water(const sfu_peer_session_t *session) {
   }
   pthread_mutex_lock((pthread_mutex_t *)&session->graph.lock);
   uint32_t high_water = session->graph.remote_slots.high_water_slots;
+  if (session->graph.remote_slots.offered_slot_floor > high_water) {
+    high_water = session->graph.remote_slots.offered_slot_floor;
+  }
   pthread_mutex_unlock((pthread_mutex_t *)&session->graph.lock);
   return high_water;
 }
@@ -1000,6 +1006,7 @@ void sfu_session_remote_slots_teardown(sfu_peer_session_t *session) {
     atomic_store_explicit(&session->graph.remote_slots.applied_assignment_generations[i], 0, memory_order_release);
   }
   session->graph.remote_slots.high_water_slots = 0;
+  session->graph.remote_slots.offered_slot_floor = 0;
   pthread_mutex_unlock(&session->graph.lock);
   sfu_remote_offer_manifest_release(manifest);
 }
@@ -1860,7 +1867,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   uint32_t screen_rtx_ssrc = session->media.screen.rtx_ssrc;
   if (answer->video_section_present) {
     if (answer->video_sends) {
-      rtx_ssrc = answer->rtx_ssrc != 0 ? answer->rtx_ssrc : session->media.uplink_video.rtx_ssrc;
+      rtx_ssrc = answer->rtx_ssrc;
       video_ssrc = sfu_resolve_media_ssrc(session->media.uplink_video.ssrc, session->media.uplink_video.rtx_ssrc, answer->video_ssrc, rtx_ssrc);
     } else {
       video_ssrc = 0;
@@ -1871,7 +1878,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   }
   if (answer->screen_section_present) {
     if (answer->screen_sends) {
-      screen_rtx_ssrc = answer->screen_rtx_ssrc != 0 ? answer->screen_rtx_ssrc : session->media.screen.rtx_ssrc;
+      screen_rtx_ssrc = answer->screen_rtx_ssrc;
       screen_ssrc = sfu_resolve_media_ssrc(session->media.screen.ssrc, session->media.screen.rtx_ssrc, answer->screen_ssrc, screen_rtx_ssrc);
     } else {
       screen_ssrc = 0;
@@ -1881,9 +1888,9 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
     screen_ssrc = session->media.screen.ssrc;
   }
   uint8_t video_pt = answer->video_pt != 0 ? answer->video_pt : session->media.uplink_video.payload_type;
-  uint8_t rtx_pt = answer->rtx_pt != 0 ? answer->rtx_pt : session->media.uplink_video.rtx_payload_type;
+  uint8_t rtx_pt = answer->video_section_present ? (answer->video_sends ? answer->rtx_pt : 0) : session->media.uplink_video.rtx_payload_type;
   uint8_t screen_pt = answer->screen_pt != 0 ? answer->screen_pt : session->media.screen.payload_type;
-  uint8_t screen_rtx_pt = answer->screen_rtx_pt != 0 ? answer->screen_rtx_pt : session->media.screen.rtx_payload_type;
+  uint8_t screen_rtx_pt = answer->screen_section_present ? (answer->screen_sends ? answer->screen_rtx_pt : 0) : session->media.screen.rtx_payload_type;
   sfu_video_codec_t codec = answer->video_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->video_codec : session->media.uplink_video.codec;
   sfu_video_codec_t screen_codec = answer->screen_codec != SFU_VIDEO_CODEC_NONE ? (sfu_video_codec_t)answer->screen_codec : session->media.screen.codec;
   current_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);

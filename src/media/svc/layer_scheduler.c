@@ -11,7 +11,7 @@ void sfu_layer_scheduler_init(sfu_layer_scheduler_t *sched, uint32_t initial_pub
   memset(sched, 0, sizeof(*sched));
   sched->active_publisher_id = initial_publisher;
   sched->needs_keyframe = true;
-  sched->target_sid = 2;
+  sched->target_sid = 0;
   sched->target_tid = 2;
 }
 
@@ -280,9 +280,9 @@ typedef struct sfu_layer_rung {
 } sfu_layer_rung_t;
 
 static const sfu_layer_rung_t k_layer_ladder[] = {
-    {200000, 0, 1},  /* base spatial, half temporal */
-    {600000, 1, 2},  /* mid spatial, full temporal */
-    {1200000, 2, 2}, /* top spatial, full temporal */
+    {200000, 0, 0},  /* L1T3 base temporal layer */
+    {600000, 0, 1},  /* L1T3 middle temporal layer */
+    {1200000, 0, 2}, /* L1T3 full temporal stream */
 };
 #define SFU_LAYER_LADDER_LEN (sizeof(k_layer_ladder) / sizeof(k_layer_ladder[0]))
 #define SFU_LAYER_UP_HEADROOM_NUM 6 /* up threshold = rate * 1.2 */

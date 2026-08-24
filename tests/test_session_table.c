@@ -848,13 +848,14 @@ static void test_remote_slot_lifecycle(void) {
   sfu_remote_offer_manifest_release(stale);
   sfu_remote_offer_manifest_release(current);
 
-  /* Trailing FREE slots trim high-water after the inactive offer is answered. */
+  /* The live-slot high-water may trim internally, but the public offered bound
+   * remains at the largest m-line array already exposed to the browser. */
   assert(sfu_session_remote_slot_retire(&session, no_slot, no_generation));
   sfu_remote_offer_manifest_t *trim = sfu_session_remote_offer_capture(&session);
   assert(sfu_session_remote_offer_install(&session, trim));
   assert(sfu_session_remote_offer_apply_answer(&session, trim));
   sfu_remote_offer_manifest_release(trim);
-  assert(sfu_session_remote_slot_high_water(&session) <= 2);
+  assert(sfu_session_remote_slot_high_water(&session) == 3);
 
   assert(sfu_session_remote_slot_retire(&session, slot1, generation1));
   sfu_remote_offer_manifest_t *trim_slot1 = sfu_session_remote_offer_capture(&session);

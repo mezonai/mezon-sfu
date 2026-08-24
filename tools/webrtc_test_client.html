@@ -1517,13 +1517,27 @@
                 const preferred = caps.codecs.filter(
                     (c) => c.mimeType.toLowerCase() === "video/" + wanted
                 );
-                const rtx = caps.codecs.filter(
-                    (c) => c.mimeType.toLowerCase() === "video/rtx"
+                const preferredPayloadTypes = new Set(
+                    preferred.map((c) => c.preferredPayloadType).filter(Number.isInteger)
                 );
+                const havePreferredPayloadTypes = preferredPayloadTypes.size > 0;
+                const rtx = caps.codecs.filter((c) => {
+                    if (c.mimeType.toLowerCase() !== "video/rtx") return false;
+                    if (!havePreferredPayloadTypes) {
+                        // Some browsers omit preferredPayloadType from capabilities.
+                        // Keep their RTX capabilities rather than silently disabling RTX;
+                        // setCodecPreferences will preserve the browser's own associations.
+                        return true;
+                    }
+                    const match = /(?:^|;)\s*apt=(\d+)/i.exec(c.sdpFmtpLine || "");
+                    return match && preferredPayloadTypes.has(Number(match[1]));
+                });
 
                 if (preferred.length > 0) {
                     try {
-                        // Prefer selected codec first; keep RTX so NACK recovery works.
+                        // Keep only the selected codec and its associated RTX entries.
+                        // Appending every RTX capability can leave apt references to codecs
+                        // omitted from the preference list and is rejected by some browsers.
                         transceiver.setCodecPreferences([...preferred, ...rtx]);
                         console.log("Forced video codec preference:", wanted, preferred);
                     } catch (e) {
@@ -1568,12 +1582,12 @@
                 return out;
             }
 
-/* Codec configuration is now fixed:
- *   - Camera (mid:1): H264, 1080x1920, single encoding.
+/* Codec configuration is fixed:
+ *   - Camera (mid:1): VP8, single encoding.
  *   - Screen  (mid:2): VP9, scalabilityMode=L1T3, 1080x1920.
  * There are no UI controls for either codec or SVC mode.
  */
-const CAMERA_CODEC = "H264";
+const CAMERA_CODEC = "VP8";
 const SCREEN_CODEC = "VP9";
 const SCREEN_SVC_MODE = "L1T3";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
@@ -1590,7 +1604,7 @@ async function applyVideoEncodingParams(pc) {
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    // Camera: H264 single encoding, no SVC.
+                    // Camera: VP8 single encoding, no SVC.
                     params.degradationPreference = "maintain-resolution";
                     if ("scalabilityMode" in params.encodings[0]) {
                         delete params.encodings[0].scalabilityMode;
@@ -1612,7 +1626,7 @@ async function applyVideoEncodingParams(pc) {
                 }
             }
 
-            /* Configure video transceiver: H264 codec preference for camera, VP9 + L1T3 for screen share. */
+            /* Configure video transceivers: VP8 for camera, VP9 + L1T3 for screen share. */
             async function enableSvcForVideoSender(pc, videoTrack) {
                 const transceiver =
                     pc.getTransceivers().find(

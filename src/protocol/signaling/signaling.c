@@ -561,7 +561,8 @@ static void answer_section_video_fields(const sfu_answer_section_t *section, uin
     }
   }
   if (*video_pt != 0) {
-    for (uint8_t pt = 0; pt < 128; pt++) {
+    for (uint8_t i = 0; i < section->payload_count; i++) {
+      uint8_t pt = section->payloads[i];
       if (section->is_rtx[pt] && section->rtx_apt[pt] == *video_pt) {
         *rtx_pt = pt;
         break;
@@ -623,6 +624,58 @@ static void answer_section_finalize(const sfu_answer_section_t *section, sfu_ans
       media->twcc_send_extmap_id == 0) {
     media->twcc_send_extmap_id = section->twcc_extmap_id;
   }
+}
+
+static bool validate_answer_mline_shape(const char *sdp, size_t sdp_len, uint32_t remote_slots) {
+  if (!sdp || remote_slots > SFU_MAX_REMOTE_SLOTS) {
+    return false;
+  }
+  const uint32_t expected_sections = SFU_REMOTE_MID_BASE + remote_slots * SFU_REMOTE_TRANSCEIVERS_PER_SLOT;
+  uint32_t section_index = 0;
+  int current_kind = 0;
+  bool current_has_mid = false;
+
+  size_t pos = 0;
+  while (pos < sdp_len) {
+    size_t start = pos;
+    while (pos < sdp_len && sdp[pos] != '\n') pos++;
+    size_t end = pos;
+    if (end > start && sdp[end - 1] == '\r') end--;
+    if (pos < sdp_len) pos++;
+    size_t len = end - start;
+
+    if (len >= 2 && memcmp(sdp + start, "m=", 2) == 0) {
+      if (section_index > 0 && !current_has_mid) return false;
+      if (section_index >= expected_sections) return false;
+      bool audio_kind = len > 7 && memcmp(sdp + start, "m=audio", 7) == 0 && (sdp[start + 7] == ' ' || sdp[start + 7] == '\t');
+      bool video_kind = len > 7 && memcmp(sdp + start, "m=video", 7) == 0 && (sdp[start + 7] == ' ' || sdp[start + 7] == '\t');
+      current_kind = audio_kind ? 1 : video_kind ? 2 : 0;
+      int expected_kind = section_index == SFU_LOCAL_AUDIO_MID ||
+                                  (section_index >= SFU_REMOTE_MID_BASE &&
+                                   ((section_index - SFU_REMOTE_MID_BASE) % SFU_REMOTE_TRANSCEIVERS_PER_SLOT) == 0)
+                              ? 1
+                              : 2;
+      if (current_kind != expected_kind) return false;
+      current_has_mid = false;
+      section_index++;
+    } else if (len >= 6 && memcmp(sdp + start, "a=mid:", 6) == 0) {
+      if (section_index == 0 || current_has_mid) return false;
+      char mid_buf[24];
+      size_t mid_len = len - 6;
+      if (mid_len == 0 || mid_len >= sizeof(mid_buf)) return false;
+      memcpy(mid_buf, sdp + start + 6, mid_len);
+      mid_buf[mid_len] = '\0';
+      char *endptr = NULL;
+      unsigned long mid = strtoul(mid_buf, &endptr, 10);
+      if (!endptr || *endptr != '\0' || mid != section_index - 1) return false;
+      current_has_mid = true;
+    }
+  }
+  return section_index == expected_sections && section_index > 0 && current_has_mid;
+}
+
+bool sfu_test_validate_answer_mline_shape(const char *sdp, size_t sdp_len, uint32_t remote_slots) {
+  return validate_answer_mline_shape(sdp, sdp_len, remote_slots);
 }
 
 static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media_t *media) {
@@ -771,6 +824,17 @@ static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media
 
   if (have_section) {
     answer_section_finalize(&section, media);
+  }
+
+  if (media->video_sends &&
+      (media->video_codec != SFU_VIDEO_CODEC_VP8 || media->video_pt != SFU_PT_VP8 ||
+       (media->rtx_pt != 0 && media->rtx_pt != SFU_PT_VP8_RTX))) {
+    return false;
+  }
+  if (media->screen_sends &&
+      (media->screen_codec != SFU_VIDEO_CODEC_VP9 || media->screen_pt != SFU_PT_VP9 ||
+       (media->screen_rtx_pt != 0 && media->screen_rtx_pt != SFU_PT_VP9_RTX))) {
+    return false;
   }
   return media->audio_section_present || media->video_section_present || media->screen_section_present;
 }
@@ -1176,6 +1240,15 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     if (response_len > 0 && (size_t)response_len < sizeof(response)) {
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
+    return;
+  }
+
+  uint32_t expected_remote_slots = answered_manifest ? answered_manifest->high_water_slots : 0;
+  if (!validate_answer_mline_shape(sdp, (size_t)sdp_len, expected_remote_slots)) {
+    static const char invalid_answer[] = "{\"type\":\"error\",\"message\":\"invalid_answer_sdp\"}";
+    sfu_ws_send_text(c->fd, invalid_answer, sizeof(invalid_answer) - 1);
+    sfu_remote_offer_manifest_release(answered_manifest);
+    if (session) sfu_session_release(session);
     return;
   }
 
