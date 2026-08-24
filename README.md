@@ -167,8 +167,8 @@ Run from a clean release build with `./build/benchmark/bench_sfu_core` (1,000,00
 | `packet_pool` | Packet-pool alloc/retain/release cycle (media-path prerequisite) | ~273 ns/op | **~3.7 M ops/s** |
 | `fanout_mesh` | SPSC worker-mesh enqueue + drain (job = 1 packet × 3 targets) | ~122 ns/job | **~8.2 M jobs/s** |
 | `media_fanout` | End-to-end fanout | ~853 ns/target | **~1.17 M targets/s** |
-| `srtp_decrypt` | Step **4** — SRTP unprotect (AES-128-GCM) on a 1200-byte packet | ~440 ns/packet | **~2.3 M packets/s** |
-| `srtp_encrypt` | Step **10** — SRTP protect (AES-128-GCM) on a 1200-byte packet | ~420 ns/packet | **~2.4 M packets/s** |
+| `srtp_decrypt` | SRTP unprotect (AES-128-GCM) on a 1200-byte packet | ~440 ns/packet | **~2.3 M packets/s** |
+| `srtp_encrypt` | SRTP protect (AES-128-GCM) on a 1200-byte packet | ~420 ns/packet | **~2.4 M packets/s** |
 
 SRTP is measured on a single stream with monotonically increasing transport sequence (so replay/ROC state advances like real media). The remaining pipeline stages (UDP ingress, STUN, DTLS, SVC parse, congestion control, layer scheduler) still have no dedicated harness.
 
