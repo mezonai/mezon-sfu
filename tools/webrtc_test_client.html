@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Mezon SFU — VP8 + VP8 L1T1 Test Client</title>
+        <title>Mezon SFU — VP8 + VP9 L1T3 Test Client</title>
         <style>
             :root {
                 --bg: #11111b;
@@ -376,7 +376,7 @@
         <div id="joinScreen">
             <div id="joinCard">
                 <h1>Mezon SFU</h1>
-                <p class="sub">VP8 camera + VP8 L1T1 screen (1080p)</p>
+                <p class="sub">VP8 camera + VP9 L1T3 screen (1080p)</p>
                 <div class="form-group">
                     <label for="wsUrl">Signaling WebSocket URL</label>
                     <input
@@ -1120,7 +1120,7 @@
                     }
 
                     const answer = await pc.createAnswer();
-                    /* Camera (mid:1) is VP8, screen share (mid:2) is VP8 L1T1. */
+                    /* Camera (mid:1) is VP8, screen share (mid:2) is VP9 L1T3. */
                     const mungedSdp = mungeVideoBitrates(answer.sdp);
                     await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
 
@@ -1295,7 +1295,7 @@
                 }
             }
 
-            /* Screen share: VP8, scalabilityMode=L1T1, preserve native 1080x1920 resolution. */
+            /* Screen share: VP9, scalabilityMode=L1T3, preserve native 1080x1920 resolution. */
             async function applyScreenEncodingParams(sender) {
                 if (!sender || typeof sender.getParameters !== "function") return;
                 try {
@@ -1624,12 +1624,12 @@
 
 /* Codec configuration is fixed:
  *   - Camera (mid:1): VP8, single encoding, 320x480.
- *   - Screen  (mid:2): VP8, scalabilityMode=L1T1, 1920x1080.
+ *   - Screen  (mid:2): VP9, scalabilityMode=L1T3, 1920x1080.
  * There are no UI controls for either codec or SVC mode.
  */
 const CAMERA_CODEC = "VP8";
-const SCREEN_CODEC = "VP8";
-const SCREEN_SVC_MODE = "L1T1";
+const SCREEN_CODEC = "VP9";
+const SCREEN_SVC_MODE = "L1T3";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
 const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
 const CAMERA_MAX_BITRATE_BPS = 1_000_000;
@@ -1674,7 +1674,7 @@ async function applyVideoEncodingParams(pc) {
                 }
             }
 
-            /* Configure video transceivers: VP8 for camera, VP8 + L1T1 for screen share. */
+            /* Configure video transceivers: VP8 for camera, VP9 + L1T3 for screen share. */
             async function enableSvcForVideoSender(pc, videoTrack) {
                 const transceiver =
                     pc.getTransceivers().find(
