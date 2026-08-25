@@ -1,4 +1,4 @@
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "memory/refcount.h"
 #include "memory/worker_packet_arena.h"
 #include "net/batch.h"
@@ -383,3 +383,33 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
 
   return n;
 }
+
+int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id, uint16_t media_port, uint32_t frame_count, uint32_t frame_size,
+                          const char *xdp_mode) {
+  (void)fd;
+  (void)interface_name;
+  (void)queue_id;
+  (void)media_port;
+  (void)frame_count;
+  (void)frame_size;
+  (void)xdp_mode;
+  return 0;
+}
+
+void sfu_ring_backend_destroy(void) {}
+
+unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_rings, uint32_t send_ring_count, unsigned max_count) {
+  (void)recv_ring;
+  (void)send_rings;
+  (void)send_ring_count;
+  (void)max_count;
+  return 0;
+}
+
+unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_count) {
+  (void)send_rings;
+  (void)send_ring_count;
+  return 0;
+}
+
+uint32_t sfu_ring_outstanding_sends(const sfu_ring_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }

@@ -41,11 +41,12 @@ static inline bool sfu_session_video_runtime_ready(const sfu_peer_session_t *ses
 void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir, sfu_media_kind_t source);
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir);
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher);
-bool sfu_session_send_remb(sfu_worker_t *w, sfu_peer_session_t *publisher, uint32_t bitrate_bps);
+bool sfu_session_send_remb_for_source(sfu_worker_t *w, sfu_peer_session_t *publisher, sfu_media_kind_t source, uint32_t bitrate_bps);
 void sfu_session_write_remb_contribution(sfu_peer_session_t *subscriber, uint32_t remote_slot, uint64_t assignment_generation,
-                                         uint32_t bitrate_bps, uint64_t now_us);
+                                         uint32_t camera_bitrate_bps, uint32_t screen_bitrate_bps, uint64_t now_us);
 bool sfu_session_read_remb_contribution(const sfu_peer_session_t *subscriber, uint32_t remote_slot, uint64_t assignment_generation,
-                                        uint64_t now_us, uint64_t max_age_us, uint32_t *bitrate_bps);
+                                        uint64_t now_us, uint64_t max_age_us, uint32_t *camera_bitrate_bps,
+                                        uint32_t *screen_bitrate_bps);
 bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *publisher, int64_t now_us);
 #ifdef SFU_DIAG_LOG
 bool sfu_session_congestion_diag_due(const sfu_peer_session_t *session, uint64_t now_us);

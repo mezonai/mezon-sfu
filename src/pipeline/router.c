@@ -6,7 +6,7 @@
 
 #include "memory/packet_pool.h"
 #include "memory/refcount.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "peer/session.h"
 #include "pipeline/egress.h"
 #include "runtime/fanout.h"

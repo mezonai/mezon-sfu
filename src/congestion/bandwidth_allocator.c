@@ -1,5 +1,7 @@
 #include "congestion/bandwidth_allocator.h"
 
+#include "util/metrics.h"
+
 #include <limits.h>
 #include <string.h>
 
@@ -44,23 +46,10 @@ static void fill_class(sfu_bandwidth_allocation_t *allocation, sfu_bandwidth_str
   }
 }
 
-static void fill_all(sfu_bandwidth_allocation_t *allocation, uint32_t target_bps, uint64_t *remaining_bps) {
-  size_t eligible[SFU_BANDWIDTH_ALLOCATOR_MAX_STREAMS];
-  size_t eligible_count = 0;
-  for (size_t i = 0; i < allocation->stream_count; i++) {
-    if (allocation->streams[i].allocated_bps < target_bps) eligible[eligible_count++] = i;
-  }
-  if (eligible_count == 0 || *remaining_bps == 0) return;
-
-  uint64_t share = *remaining_bps / eligible_count;
-  uint64_t remainder = *remaining_bps % eligible_count;
-  for (size_t i = 0; i < eligible_count; i++) {
-    uint64_t increment = share + (i < remainder ? 1u : 0u);
-    uint64_t deficit = target_bps - allocation->streams[eligible[i]].allocated_bps;
-    if (increment > deficit) increment = deficit;
-    allocation->streams[eligible[i]].allocated_bps += (uint32_t)increment;
-    *remaining_bps -= increment;
-  }
+static void record_allocation_metrics(const sfu_bandwidth_allocation_t *allocation) {
+  sfu_metric_inc("bandwidth_allocator_runs");
+  sfu_metric_add("bandwidth_allocator_active_streams", allocation->stream_count);
+  sfu_metric_add("bandwidth_allocator_unallocated_bps", allocation->unallocated_bps);
 }
 
 void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t input_count, uint64_t estimated_bps,
@@ -72,7 +61,10 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
                                estimated_bps % 100u * SFU_BANDWIDTH_VIDEO_POOL_PERCENT / 100u;
   allocation->reserve_bps = estimated_bps - allocation->video_pool_bps;
   allocation->unallocated_bps = allocation->video_pool_bps;
-  if (!inputs || input_count == 0 || allocation->video_pool_bps == 0) return;
+  if (!inputs || input_count == 0 || allocation->video_pool_bps == 0) {
+    record_allocation_metrics(allocation);
+    return;
+  }
 
   size_t order[SFU_BANDWIDTH_ALLOCATOR_MAX_STREAMS];
   size_t order_count = 0;
@@ -113,12 +105,15 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
   }
 
   uint64_t remaining = allocation->video_pool_bps;
-  static const uint32_t thresholds[] = {240000u, 720000u, 1440000u};
+  static const uint32_t thresholds[] = {SFU_BANDWIDTH_SOURCE_ADMISSION_BPS, 720000u, 1440000u};
   for (size_t i = 0; i < sizeof(thresholds) / sizeof(thresholds[0]) && remaining > 0; i++) {
-    fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, thresholds[i], &remaining);
-    fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, thresholds[i], &remaining);
+    uint32_t screen_target = thresholds[i] < SFU_BANDWIDTH_SCREEN_CAP_BPS ? thresholds[i] : SFU_BANDWIDTH_SCREEN_CAP_BPS;
+    uint32_t camera_target = thresholds[i] < SFU_BANDWIDTH_CAMERA_CAP_BPS ? thresholds[i] : SFU_BANDWIDTH_CAMERA_CAP_BPS;
+    fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_target, &remaining);
+    fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_target, &remaining);
   }
-  fill_all(allocation, SFU_BANDWIDTH_STREAM_CAP_BPS, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, SFU_BANDWIDTH_SCREEN_CAP_BPS, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, SFU_BANDWIDTH_CAMERA_CAP_BPS, &remaining);
 
   for (size_t i = 0; i < allocation->stream_count; i++) {
     const sfu_bandwidth_stream_allocation_t *stream = &allocation->streams[i];
@@ -136,4 +131,5 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
     allocation->publishers[publisher_index].allocated_bps = publisher_total > UINT32_MAX ? UINT32_MAX : (uint32_t)publisher_total;
   }
   allocation->unallocated_bps = allocation->video_pool_bps - allocation->allocated_bps;
+  record_allocation_metrics(allocation);
 }

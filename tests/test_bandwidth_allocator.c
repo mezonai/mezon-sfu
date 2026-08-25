@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "congestion/bandwidth_allocator.h"
+#include "util/metrics.h"
 
 static uint64_t estimate_for_pool(uint64_t pool) {
   uint64_t estimate = pool * 100u / SFU_BANDWIDTH_VIDEO_POOL_PERCENT;
@@ -81,8 +82,8 @@ static void test_threshold_boundaries_and_screen_priority(void) {
   assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 720000);
 
   sfu_bandwidth_allocate(streams, 2, estimate_for_pool(2880000), &a);
-  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == 1440000);
-  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 1440000);
+  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == 1880000);
+  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_CAMERA_CAP_BPS);
 }
 
 static void test_equal_sharing_remainder_and_stable_order(void) {
@@ -135,9 +136,11 @@ static void test_caps_safe_pool_and_overflow(void) {
   sfu_bandwidth_allocate(streams, 3, UINT64_MAX, &a);
   assert(a.video_pool_bps <= UINT64_MAX - a.reserve_bps);
   assert(a.allocated_bps <= a.video_pool_bps);
-  assert(a.allocated_bps == 3u * SFU_BANDWIDTH_STREAM_CAP_BPS);
+  assert(a.allocated_bps == 2u * SFU_BANDWIDTH_CAMERA_CAP_BPS + SFU_BANDWIDTH_SCREEN_CAP_BPS);
   assert(a.unallocated_bps == a.video_pool_bps - a.allocated_bps);
-  for (size_t i = 0; i < a.stream_count; i++) assert(a.streams[i].allocated_bps <= SFU_BANDWIDTH_STREAM_CAP_BPS);
+  assert(find_stream(&a, 1, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_CAMERA_CAP_BPS);
+  assert(find_stream(&a, 2, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_CAMERA_CAP_BPS);
+  assert(find_stream(&a, 1, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_CAP_BPS);
 
   sfu_bandwidth_allocate(streams, 3, UINT32_MAX, &a);
   assert(a.allocated_bps <= a.video_pool_bps);
@@ -146,12 +149,31 @@ static void test_caps_safe_pool_and_overflow(void) {
   assert(publisher_sum == a.allocated_bps);
 }
 
+static void test_low_cardinality_metrics(void) {
+  sfu_metrics_init();
+  sfu_bandwidth_allocation_t a;
+  sfu_bandwidth_stream_input_t streams[] = {
+      input(1, 0, 1, SFU_BANDWIDTH_STREAM_CAMERA),
+      input(2, 1, 1, SFU_BANDWIDTH_STREAM_SCREEN),
+  };
+  sfu_bandwidth_allocate(streams, 2, 1000000, &a);
+  assert(sfu_metric_get("bandwidth_allocator_runs") == 1);
+  assert(sfu_metric_get("bandwidth_allocator_active_streams") == 2);
+  assert(sfu_metric_get("bandwidth_allocator_unallocated_bps") == a.unallocated_bps);
+
+  sfu_bandwidth_allocate(NULL, 0, 1000000, &a);
+  assert(sfu_metric_get("bandwidth_allocator_runs") == 2);
+  assert(sfu_metric_get("bandwidth_allocator_active_streams") == 2);
+  assert(sfu_metric_get("bandwidth_allocator_unallocated_bps") >= a.unallocated_bps);
+}
+
 int main(void) {
   test_empty_and_inactive();
   test_threshold_boundaries_and_screen_priority();
   test_equal_sharing_remainder_and_stable_order();
   test_publisher_aggregation_duplicates_and_generation();
   test_caps_safe_pool_and_overflow();
+  test_low_cardinality_metrics();
   printf("test_bandwidth_allocator: OK\n");
   return 0;
 }

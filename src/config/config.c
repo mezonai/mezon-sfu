@@ -45,6 +45,12 @@ void sfu_config_set_defaults(void) {
   g_sfu_config.fanout_ring_capacity = 4096;
   g_sfu_config.fanout_job_pool_capacity = 16384;
   g_sfu_config.release_queue_capacity = 8192;
+
+  snprintf(g_sfu_config.af_xdp_interface, sizeof(g_sfu_config.af_xdp_interface), "eth0");
+  g_sfu_config.af_xdp_queue_id = 0;
+  g_sfu_config.af_xdp_frame_count = 16384;
+  g_sfu_config.af_xdp_frame_size = 4096;
+  snprintf(g_sfu_config.af_xdp_mode, sizeof(g_sfu_config.af_xdp_mode), "native");
 }
 
 int sfu_config_validate(const sfu_config_t *config) {
@@ -77,6 +83,26 @@ int sfu_config_validate(const sfu_config_t *config) {
     SFU_LOG_ERROR("packet_pool_capacity (%u) exceeds maximum 16777216 (16M slots)", config->packet_pool_capacity);
     return -1;
   }
+#ifdef USE_AF_XDP
+  if (config->af_xdp_interface[0] == '\0') {
+    SFU_LOG_ERROR("af_xdp_interface must not be empty in an AF_XDP build");
+    return -1;
+  }
+  if (config->af_xdp_frame_count < 8 || (config->af_xdp_frame_count & (config->af_xdp_frame_count - 1)) != 0) {
+    SFU_LOG_ERROR("af_xdp_frame_count must be a power of two >= 8 (got %u)", config->af_xdp_frame_count);
+    return -1;
+  }
+  if (config->af_xdp_frame_size < config->packet_buf_size + 64u ||
+      (config->af_xdp_frame_size != 2048u && config->af_xdp_frame_size != 4096u)) {
+    SFU_LOG_ERROR("af_xdp_frame_size must be 2048 or 4096 and fit packet_buf_size plus headers (frame=%u packet=%u)", config->af_xdp_frame_size,
+                  config->packet_buf_size);
+    return -1;
+  }
+  if (strcmp(config->af_xdp_mode, "native") != 0 && strcmp(config->af_xdp_mode, "skb") != 0 && strcmp(config->af_xdp_mode, "auto") != 0) {
+    SFU_LOG_ERROR("af_xdp_mode must be native, skb, or auto (got '%s')", config->af_xdp_mode);
+    return -1;
+  }
+#endif
 #undef REQUIRE_POWER_OF_TWO
   return 0;
 }
@@ -153,6 +179,16 @@ int sfu_config_load_ini(const char *filepath) {
       g_sfu_config.fanout_job_pool_capacity = (uint32_t)atoi(val);
     } else if (strcmp(key, "release_queue_capacity") == 0) {
       g_sfu_config.release_queue_capacity = (uint32_t)atoi(val);
+    } else if (strcmp(key, "interface") == 0 && strcmp(section, "af_xdp") == 0) {
+      snprintf(g_sfu_config.af_xdp_interface, sizeof(g_sfu_config.af_xdp_interface), "%s", val);
+    } else if (strcmp(key, "queue_id") == 0 && strcmp(section, "af_xdp") == 0) {
+      g_sfu_config.af_xdp_queue_id = (uint32_t)atoi(val);
+    } else if (strcmp(key, "frame_count") == 0 && strcmp(section, "af_xdp") == 0) {
+      g_sfu_config.af_xdp_frame_count = (uint32_t)atoi(val);
+    } else if (strcmp(key, "frame_size") == 0 && strcmp(section, "af_xdp") == 0) {
+      g_sfu_config.af_xdp_frame_size = (uint32_t)atoi(val);
+    } else if (strcmp(key, "mode") == 0 && strcmp(section, "af_xdp") == 0) {
+      snprintf(g_sfu_config.af_xdp_mode, sizeof(g_sfu_config.af_xdp_mode), "%s", val);
     }
   }
 

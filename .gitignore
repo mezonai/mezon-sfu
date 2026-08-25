@@ -20,3 +20,6 @@ build-check/
 build-diag-off/
 build-diag-off-check/
 build-fixes/
+build-af-xdp/
+build-af-xdp-recheck/
+Testing/Temporary/CTestCostData.txt

@@ -276,8 +276,7 @@ static void *worker_thread_main(void *arg) {
     atomic_fetch_add_explicit(&w->generation, 1, memory_order_release);
   }
 
-  unsigned shutdown_passes = 0;
-  for (unsigned idle_passes = 0; idle_passes < 32 || (w->send_ring.outstanding_sends > 0 && shutdown_passes < 2500); shutdown_passes++) {
+  for (unsigned idle_passes = 0; idle_passes < 32 || sfu_ring_outstanding_sends(&w->send_ring) > 0;) {
     bool did_work = false;
 
     void *item;
@@ -316,6 +315,7 @@ static void *worker_thread_main(void *arg) {
     (void)sfu_epoch_reclaimer_sweep(w->sessions->reclaimer);
   }
 
+  atomic_store_explicit(&w->drain_finished, true, memory_order_release);
   SFU_LOG_INFO("worker %u fanout stats: arena_alloc=%" PRIu64 " reserved=%" PRIu64 " fallback=%" PRIu64 " queued=%" PRIu64
                " recycled=%" PRIu64 " exhausted=%" PRIu64 " high_water=%u copied_bytes=%" PRIu64 " samples=%" PRIu64
                " copy_cycles=%" PRIu64 " crypto_cycles=%" PRIu64,
@@ -336,3 +336,7 @@ int sfu_worker_start(sfu_worker_t *w) {
 }
 
 void sfu_worker_join(sfu_worker_t *w) { pthread_join(w->thread, NULL); }
+
+bool sfu_worker_drain_finished(const sfu_worker_t *w) {
+  return w && atomic_load_explicit(&w->drain_finished, memory_order_acquire);
+}
