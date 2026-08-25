@@ -53,8 +53,22 @@ typedef void (*sfu_on_send_complete_fn)(void *user_data, sfu_packet_t *pkt);
 uint32_t sfu_ring_recv_overhead(void);
 uint32_t sfu_ring_recv_slot_size(uint32_t payload_cap);
 
-int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id, uint16_t media_port, uint32_t frame_count, uint32_t frame_size,
-                          const char *xdp_mode);
+uint32_t sfu_af_xdp_frames_per_queue(uint32_t total_frames, uint32_t queue_count);
+bool sfu_af_xdp_encode_rx_return(uint32_t queue_slot, uint32_t frame, uintptr_t *token);
+bool sfu_af_xdp_decode_rx_return(uintptr_t token, uint32_t *queue_slot, uint32_t *frame);
+
+typedef struct sfu_ring_backend_options {
+  const char *interface_name;
+  const char *queue_spec;
+  uint32_t queue_id;
+  bool queue_id_set;
+  uint16_t media_port;
+  uint32_t frame_count;
+  uint32_t frame_size;
+  const char *xdp_mode;
+} sfu_ring_backend_options_t;
+
+int sfu_ring_backend_init(int fd, const sfu_ring_backend_options_t *options);
 void sfu_ring_backend_destroy(void);
 unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_rings, uint32_t send_ring_count, unsigned max_count);
 unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_count);

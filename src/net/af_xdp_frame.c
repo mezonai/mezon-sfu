@@ -78,8 +78,7 @@ bool sfu_af_xdp_partition_frames(uint32_t total, uint32_t *rx, uint32_t *tx) {
   return true;
 }
 
-bool sfu_af_xdp_parse_frame(uint8_t *frame, uint32_t frame_len, uint32_t frame_capacity, uint16_t media_port,
-                            sfu_af_xdp_parse_result_t *result) {
+bool sfu_af_xdp_parse_frame(uint8_t *frame, uint32_t frame_len, uint32_t frame_capacity, uint16_t media_port, sfu_af_xdp_parse_result_t *result) {
   if (!frame || !result || frame_len > frame_capacity || frame_len < sizeof(struct ethhdr)) {
     return false;
   }
@@ -109,9 +108,8 @@ bool sfu_af_xdp_parse_frame(uint8_t *frame, uint32_t frame_len, uint32_t frame_c
   memcpy(&ip, frame + offset, sizeof(ip));
   uint32_t ihl = (uint32_t)ip.ihl * 4u;
   uint32_t ip_total_len = ntohs(ip.tot_len);
-  if (ip.version != 4 || ihl < sizeof(ip) || ip_total_len < ihl + sizeof(struct udphdr) || frame_len < offset + ihl ||
-      ip_total_len > frame_len - offset || ip.protocol != IPPROTO_UDP || (ntohs(ip.frag_off) & SFU_AF_XDP_IPV4_FRAGMENT_MASK) ||
-      sfu_af_xdp_checksum(frame + offset, ihl) != 0) {
+  if (ip.version != 4 || ihl < sizeof(ip) || ip_total_len < ihl + sizeof(struct udphdr) || frame_len < offset + ihl || ip_total_len > frame_len - offset ||
+      ip.protocol != IPPROTO_UDP || (ntohs(ip.frag_off) & SFU_AF_XDP_IPV4_FRAGMENT_MASK) || sfu_af_xdp_checksum(frame + offset, ihl) != 0) {
     return false;
   }
 
@@ -137,8 +135,8 @@ bool sfu_af_xdp_build_frame(uint8_t *frame, uint32_t frame_capacity, const sfu_a
   if (!frame || !params || !out_len || (!params->payload && params->payload_len != 0)) {
     return false;
   }
-  if (params->payload_len == 0 || params->payload_len > UINT16_MAX - sizeof(struct iphdr) - sizeof(struct udphdr) ||
-      params->payload_len > frame_capacity || SFU_AF_XDP_FRAME_HEADER_SIZE > frame_capacity - params->payload_len) {
+  if (params->payload_len == 0 || params->payload_len > UINT16_MAX - sizeof(struct iphdr) - sizeof(struct udphdr) || params->payload_len > frame_capacity ||
+      SFU_AF_XDP_FRAME_HEADER_SIZE > frame_capacity - params->payload_len) {
     return false;
   }
 

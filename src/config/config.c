@@ -47,7 +47,10 @@ void sfu_config_set_defaults(void) {
   g_sfu_config.release_queue_capacity = 8192;
 
   snprintf(g_sfu_config.af_xdp_interface, sizeof(g_sfu_config.af_xdp_interface), "eth0");
+  snprintf(g_sfu_config.af_xdp_queues, sizeof(g_sfu_config.af_xdp_queues), "auto");
   g_sfu_config.af_xdp_queue_id = 0;
+  g_sfu_config.af_xdp_queue_id_set = false;
+  g_sfu_config.af_xdp_queues_set = false;
   g_sfu_config.af_xdp_frame_count = 16384;
   g_sfu_config.af_xdp_frame_size = 4096;
   snprintf(g_sfu_config.af_xdp_mode, sizeof(g_sfu_config.af_xdp_mode), "native");
@@ -86,6 +89,14 @@ int sfu_config_validate(const sfu_config_t *config) {
 #ifdef USE_AF_XDP
   if (config->af_xdp_interface[0] == '\0') {
     SFU_LOG_ERROR("af_xdp_interface must not be empty in an AF_XDP build");
+    return -1;
+  }
+  if (config->af_xdp_queues_set && config->af_xdp_queue_id_set) {
+    SFU_LOG_ERROR("af_xdp queues and queue_id cannot both be specified");
+    return -1;
+  }
+  if (config->af_xdp_queues[0] == '\0') {
+    SFU_LOG_ERROR("af_xdp queues must not be empty");
     return -1;
   }
   if (config->af_xdp_frame_count < 8 || (config->af_xdp_frame_count & (config->af_xdp_frame_count - 1)) != 0) {
@@ -181,8 +192,12 @@ int sfu_config_load_ini(const char *filepath) {
       g_sfu_config.release_queue_capacity = (uint32_t)atoi(val);
     } else if (strcmp(key, "interface") == 0 && strcmp(section, "af_xdp") == 0) {
       snprintf(g_sfu_config.af_xdp_interface, sizeof(g_sfu_config.af_xdp_interface), "%s", val);
+    } else if (strcmp(key, "queues") == 0 && strcmp(section, "af_xdp") == 0) {
+      snprintf(g_sfu_config.af_xdp_queues, sizeof(g_sfu_config.af_xdp_queues), "%s", val);
+      g_sfu_config.af_xdp_queues_set = true;
     } else if (strcmp(key, "queue_id") == 0 && strcmp(section, "af_xdp") == 0) {
       g_sfu_config.af_xdp_queue_id = (uint32_t)atoi(val);
+      g_sfu_config.af_xdp_queue_id_set = true;
     } else if (strcmp(key, "frame_count") == 0 && strcmp(section, "af_xdp") == 0) {
       g_sfu_config.af_xdp_frame_count = (uint32_t)atoi(val);
     } else if (strcmp(key, "frame_size") == 0 && strcmp(section, "af_xdp") == 0) {

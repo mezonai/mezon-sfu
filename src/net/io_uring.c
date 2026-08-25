@@ -384,15 +384,9 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
   return n;
 }
 
-int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id, uint16_t media_port, uint32_t frame_count, uint32_t frame_size,
-                          const char *xdp_mode) {
+int sfu_ring_backend_init(int fd, const sfu_ring_backend_options_t *options) {
   (void)fd;
-  (void)interface_name;
-  (void)queue_id;
-  (void)media_port;
-  (void)frame_count;
-  (void)frame_size;
-  (void)xdp_mode;
+  (void)options;
   return 0;
 }
 

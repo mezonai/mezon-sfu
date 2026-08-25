@@ -21,8 +21,8 @@ struct {
 
 struct sfu_xdp_config {
   __u16 media_port;
-  __u16 reserved;
-  __u32 queue_id;
+  __u16 enabled;
+  __u32 reserved;
 };
 
 struct {
@@ -40,41 +40,47 @@ int sfu_xdp_redirect(struct xdp_md *ctx) {
   __u16 protocol;
   __u64 offset = sizeof(*eth);
 
-  if ((void *)(eth + 1) > data_end)
+  if ((void *)(eth + 1) > data_end) {
     return XDP_PASS;
+  }
   protocol = eth->h_proto;
 
   if (protocol == bpf_htons(ETH_P_8021Q) || protocol == bpf_htons(ETH_P_8021AD)) {
     struct sfu_vlan_hdr *vlan = data + offset;
-    if ((void *)(vlan + 1) > data_end)
+    if ((void *)(vlan + 1) > data_end) {
       return XDP_PASS;
+    }
     protocol = vlan->encapsulated_proto;
     offset += sizeof(*vlan);
   }
 
-  if (protocol != bpf_htons(ETH_P_IP))
+  if (protocol != bpf_htons(ETH_P_IP)) {
     return XDP_PASS;
+  }
 
   struct iphdr *ip = data + offset;
-  if ((void *)(ip + 1) > data_end || ip->version != 4 || ip->ihl < 5)
+  if ((void *)(ip + 1) > data_end || ip->version != 4 || ip->ihl < 5) {
     return XDP_PASS;
-  if ((void *)ip + ip->ihl * 4 > data_end || ip->protocol != IPPROTO_UDP)
+  }
+  if ((void *)ip + ip->ihl * 4 > data_end || ip->protocol != IPPROTO_UDP) {
     return XDP_PASS;
-  if (ip->frag_off & bpf_htons(0x3fff))
+  }
+  if (ip->frag_off & bpf_htons(0x3fff)) {
     return XDP_PASS;
+  }
 
   struct udphdr *udp = (void *)ip + ip->ihl * 4;
-  if ((void *)(udp + 1) > data_end)
+  if ((void *)(udp + 1) > data_end) {
     return XDP_PASS;
+  }
 
   __u32 zero = 0;
   struct sfu_xdp_config *config = bpf_map_lookup_elem(&config_map, &zero);
-  if (!config || udp->dest != config->media_port)
+  if (!config || !config->enabled || udp->dest != config->media_port) {
     return XDP_PASS;
-  if (ctx->rx_queue_index != config->queue_id)
-    return XDP_DROP;
+  }
 
-  return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_DROP);
+  return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS);
 }
 
 char LICENSE[] SEC("license") = "GPL";

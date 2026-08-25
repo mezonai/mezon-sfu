@@ -81,9 +81,40 @@ static void test_enqueue_and_queue_full(void) {
   sfu_ring_destroy(&ring);
 }
 
+static void test_multi_queue_helpers(void) {
+  assert(sfu_af_xdp_frames_per_queue(16384, 8) == 2048);
+  assert(sfu_af_xdp_frames_per_queue(16384, 3) == 4096);
+  assert(sfu_af_xdp_frames_per_queue(32, 8) == 0);
+  assert(sfu_af_xdp_frames_per_queue(16384, 0) == 0);
+
+  uintptr_t token = 0;
+  uint32_t queue_slot = UINT32_MAX;
+  uint32_t frame = UINT32_MAX;
+  assert(sfu_af_xdp_encode_rx_return(2, 17, &token));
+  assert(token != 0);
+  assert(sfu_af_xdp_decode_rx_return(token, &queue_slot, &frame));
+  assert(queue_slot == 2);
+  assert(frame == 17);
+
+  uintptr_t other = 0;
+  assert(sfu_af_xdp_encode_rx_return(5, 17, &other));
+  assert(other != token);
+  assert(sfu_af_xdp_decode_rx_return(other, &queue_slot, &frame));
+  assert(queue_slot == 5);
+  assert(frame == 17);
+
+  assert(!sfu_af_xdp_encode_rx_return(UINT32_MAX, 0, &token));
+  assert(!sfu_af_xdp_encode_rx_return(0, UINT32_MAX, &token));
+  assert(!sfu_af_xdp_encode_rx_return(0, 0, NULL));
+  assert(!sfu_af_xdp_decode_rx_return(0, &queue_slot, &frame));
+  assert(!sfu_af_xdp_decode_rx_return(token, NULL, &frame));
+  assert(!sfu_af_xdp_decode_rx_return(token, &queue_slot, NULL));
+}
+
 int main(void) {
   test_init_and_validation();
   test_enqueue_and_queue_full();
+  test_multi_queue_helpers();
   printf("test_af_xdp_ring: OK\n");
   return 0;
 }
