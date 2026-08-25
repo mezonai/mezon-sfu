@@ -332,6 +332,13 @@ static int append_video_codec_attributes(char *out, size_t out_cap, size_t *offs
   return 0;
 }
 
+static int append_local_screen_codec_attributes(char *out, size_t out_cap, size_t *offset) {
+  if (append_video_codec_attributes(out, out_cap, offset, SFU_VIDEO_CODEC_VP8, SFU_PT_VP8, SFU_PT_VP8_RTX) != 0) {
+    return -1;
+  }
+  return append_video_codec_attributes(out, out_cap, offset, SFU_VIDEO_CODEC_VP9, SFU_PT_VP9, SFU_PT_VP9_RTX);
+}
+
 static int append_remote_audio_msid(char *out, size_t out_cap, size_t *offset, int64_t user_id, uint32_t peer_id, uint32_t audio_ssrc) {
   char line[160];
   char stream_id[64];
@@ -487,13 +494,12 @@ int sfu_sdp_build_initial_offer(const char *host, uint16_t port, const char *ufr
     return -1;
   }
 
-  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, SFU_PT_VP9, SFU_PT_VP9_RTX);
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u", port, SFU_PT_VP8, SFU_PT_VP8_RTX, SFU_PT_VP9, SFU_PT_VP9_RTX);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0 ||
       append_bundled_transport_headers(out, out_cap, &off, host, ufrag, pwd, fingerprint) != 0 ||
       append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0 || append_line(out, out_cap, &off, "a=mid:2") != 0 ||
       append_line(out, out_cap, &off, "a=rtcp-mux") != 0 || append_twcc_recv_attribute(out, out_cap, &off) != 0 ||
-      append_mid_recv_attribute(out, out_cap, &off) != 0 ||
-      append_video_codec_attributes(out, out_cap, &off, SFU_VIDEO_CODEC_VP9, SFU_PT_VP9, SFU_PT_VP9_RTX) != 0) {
+      append_mid_recv_attribute(out, out_cap, &off) != 0 || append_local_screen_codec_attributes(out, out_cap, &off) != 0) {
     return -1;
   }
 
@@ -775,10 +781,9 @@ int sfu_sdp_build_offer_manifest(sfu_peer_session_t *session, const sfu_remote_o
   bool is_audience = atomic_load_explicit(&session->is_audience, memory_order_acquire);
   const uint8_t local_video_pt = SFU_PT_VP8;
   const uint8_t local_rtx_pt = SFU_PT_VP8_RTX;
-  const uint8_t local_screen_pt = SFU_PT_VP9;
-  const uint8_t local_screen_rtx_pt = SFU_PT_VP9_RTX;
+  const uint8_t local_screen_pt = SFU_PT_VP8;
+  const uint8_t local_screen_rtx_pt = SFU_PT_VP8_RTX;
   const sfu_video_codec_t local_video_codec = SFU_VIDEO_CODEC_VP8;
-  const sfu_video_codec_t local_screen_codec = SFU_VIDEO_CODEC_VP9;
 
   if (append_line(out, out_cap, &off, "v=0") != 0) {
     goto fail;
@@ -853,17 +858,12 @@ int sfu_sdp_build_offer_manifest(sfu_peer_session_t *session, const sfu_remote_o
     goto fail;
   }
 
-  if (local_screen_rtx_pt != 0) {
-    n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u", port, local_screen_pt, local_screen_rtx_pt);
-  } else {
-    n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u", port, local_screen_pt);
-  }
+  n = snprintf(buf, sizeof(buf), "m=video %u UDP/TLS/RTP/SAVPF %u %u %u %u", port, SFU_PT_VP8, SFU_PT_VP8_RTX, SFU_PT_VP9, SFU_PT_VP9_RTX);
   if (n < 0 || (size_t)n >= sizeof(buf) || append_line_n(out, out_cap, &off, buf, (size_t)n) != 0 ||
       append_fragment(out, out_cap, &off, bundled_transport, bundled_transport_len) != 0 ||
       append_line(out, out_cap, &off, is_audience ? "a=inactive" : "a=recvonly") != 0 || append_line(out, out_cap, &off, "a=mid:2") != 0 ||
       append_line(out, out_cap, &off, "a=rtcp-mux") != 0 || append_twcc_recv_attribute(out, out_cap, &off) != 0 ||
-      append_mid_recv_attribute(out, out_cap, &off) != 0 ||
-      append_video_codec_attributes(out, out_cap, &off, local_screen_codec, local_screen_pt, local_screen_rtx_pt) != 0) {
+      append_mid_recv_attribute(out, out_cap, &off) != 0 || append_local_screen_codec_attributes(out, out_cap, &off) != 0) {
     goto fail;
   }
 

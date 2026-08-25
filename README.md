@@ -71,7 +71,7 @@ Configure the interface and hardware queue in `config.ini`:
 ```ini
 [af_xdp]
 interface = eth0
-queue_id = 0
+queues = auto
 frame_count = 16384
 frame_size = 4096
 mode = native  # native, skb, or auto
