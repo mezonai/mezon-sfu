@@ -72,7 +72,7 @@ release_queue_capacity = 1024
 
 [af_xdp]
 interface = sfu-xdp-host
-queue_id = 0
+queues = auto
 frame_count = 1024
 frame_size = 4096
 mode = skb

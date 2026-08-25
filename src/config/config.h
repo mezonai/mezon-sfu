@@ -28,7 +28,10 @@ typedef struct {
   uint32_t release_queue_capacity;
 
   char af_xdp_interface[64];
+  char af_xdp_queues[256];
   uint32_t af_xdp_queue_id;
+  bool af_xdp_queue_id_set;
+  bool af_xdp_queues_set;
   uint32_t af_xdp_frame_count;
   uint32_t af_xdp_frame_size;
   char af_xdp_mode[16];

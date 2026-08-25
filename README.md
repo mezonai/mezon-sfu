@@ -109,10 +109,10 @@ Example results for a 1200-byte payload (`--quick`, 1,000 measured iterations):
 
 | Benchmark | Time per operation | Operations per second |
 |---|---:|---:|
-| IPv4/UDP frame parsing | 39.39 ns | 25.39 million |
-| VLAN IPv4/UDP frame parsing | 39.12 ns | 25.56 million |
-| IPv4/UDP frame construction | 179.17 ns | 5.58 million |
-| IPv4 header checksum | 34.90 ns | 28.65 million |
+| IPv4/UDP frame parsing | 39.39 ns | 25.39 M |
+| VLAN IPv4/UDP frame parsing | 39.12 ns | 25.56 M |
+| IPv4/UDP frame construction | 179.17 ns | 5.58 M |
+| IPv4 header checksum | 34.90 ns | 28.65 M |
 
 These are smoke-run results from one development machine, not guaranteed performance targets. Use a non-quick run with CPU affinity and frequency scaling controlled for comparative measurements.
 
