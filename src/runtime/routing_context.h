@@ -27,6 +27,7 @@ typedef struct sfu_pending_answer {
   uint8_t screen_pt;
   uint8_t screen_rtx_pt;
   uint8_t screen_codec;
+  uint8_t screen_codec_preference;
   uint8_t twcc_recv_extmap_id;
   uint8_t twcc_send_extmap_id;
   uint8_t mid_recv_extmap_id;

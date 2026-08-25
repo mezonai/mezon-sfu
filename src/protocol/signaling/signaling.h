@@ -183,6 +183,7 @@ typedef struct sfu_client_conn {
   sfu_ws_read_state_t ws_read;
   bool handshake_done;
   bool is_audience;
+  uint8_t screen_codec_preference;
   bool disconnecting;
   bool keepalive_inited;
   bool in_registry;
@@ -213,6 +214,7 @@ uint32_t sfu_signaling_renegotiation_test_count(sfu_signaling_server_t *s);
 void sfu_signaling_notify_media_state(sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);
+sfu_video_codec_t sfu_signaling_parse_screen_codec_preference(const char *json, size_t json_len);
 uint32_t generate_unique_id(void);
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */

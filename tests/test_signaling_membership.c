@@ -7,6 +7,17 @@
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
 
+static void test_screen_codec_preference_parsing(void) {
+  const char *vp9 = "{\"type\":\"join\",\"screen_codec\":\"vp9\"}";
+  const char *vp8 = "{\"screen_codec\":\"VP8\"}";
+  const char *legacy = "{\"type\":\"join\"}";
+  const char *invalid = "{\"screen_codec\":\"h264\"}";
+  assert(sfu_signaling_parse_screen_codec_preference(vp9, strlen(vp9)) == SFU_VIDEO_CODEC_VP9);
+  assert(sfu_signaling_parse_screen_codec_preference(vp8, strlen(vp8)) == SFU_VIDEO_CODEC_VP8);
+  assert(sfu_signaling_parse_screen_codec_preference(legacy, strlen(legacy)) == SFU_VIDEO_CODEC_NONE);
+  assert(sfu_signaling_parse_screen_codec_preference(invalid, strlen(invalid)) == SFU_VIDEO_CODEC_NONE);
+}
+
 static void test_join_capture_failure_is_reported(void) {
   sfu_membership_event_test_fail_allocations(1);
   assert(sfu_membership_event_alloc() == NULL);
@@ -269,6 +280,7 @@ static void test_concurrent_schedule_and_pop_preserves_single_identity(void) {
 }
 
 int main(void) {
+  test_screen_codec_preference_parsing();
   test_join_capture_failure_is_reported();
   test_queue_releases_when_signaling_is_stopped();
   test_preallocated_leave_event_released_on_stopped_queue();

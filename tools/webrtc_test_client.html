@@ -1313,7 +1313,11 @@
                     }
                     params.degradationPreference = "maintain-resolution";
                     const enc = params.encodings[0];
-                    enc.scalabilityMode = SCREEN_SVC_MODE;
+                    if (SCREEN_CODEC.toUpperCase() === "VP9") {
+                        enc.scalabilityMode = SCREEN_SVC_MODE;
+                    } else if ("scalabilityMode" in enc) {
+                        delete enc.scalabilityMode;
+                    }
                     enc.maxFramerate = 15;
                     enc.maxBitrate = SCREEN_MAX_BITRATE_BPS;
                     enc.scaleResolutionDownBy = 1;
@@ -1620,7 +1624,7 @@
  * There are no UI controls for either codec or SVC mode.
  */
 const CAMERA_CODEC = "VP8";
-const SCREEN_CODEC = "VP9";
+const SCREEN_CODEC = "VP8";
 const SCREEN_SVC_MODE = "L1T3";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
 const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
@@ -2080,6 +2084,7 @@ async function applyVideoEncodingParams(pc) {
                         const joinMsg = {
                             type: "join",
                             role: currentJoinMode,
+                            screen_codec: SCREEN_CODEC.toLowerCase(),
                         };
                         if (jwtToken) {
                             joinMsg.token = jwtToken;
