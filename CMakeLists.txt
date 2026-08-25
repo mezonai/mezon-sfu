@@ -46,6 +46,9 @@ set(SFU_NET_LIBRARIES)
 
 if(USE_AF_XDP)
   find_package(PkgConfig REQUIRED)
+
+  set(ENV{PKG_CONFIG_PATH} "/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+
   pkg_check_modules(LIBXDP REQUIRED IMPORTED_TARGET libxdp)
   pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf)
   find_program(CLANG_EXECUTABLE NAMES clang REQUIRED)
