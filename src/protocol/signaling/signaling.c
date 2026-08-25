@@ -1693,6 +1693,9 @@ static void handle_visibility(sfu_client_conn_t *c, const char *buf, size_t n) {
     sfu_ws_send_text(c->fd, invalid_visibility, sizeof(invalid_visibility) - 1);
     return;
   }
+  /* TEMPORARY: keep media forwarding enabled while validating whether the
+   * visibility gate causes VP9 screen-share cessation. */
+  visible = true;
 
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
   if (!session || session->room != c->joined_room) {

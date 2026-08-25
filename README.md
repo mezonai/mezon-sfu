@@ -16,54 +16,6 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 * Standards-compliant GCC congestion control
 * **Push To Talk** PTT native support
 
-## build prerequisites
-
-Before building, ensure you have the following installed on your system:
-
-* **CMake** (3.15 or higher)
-* **C Compiler** (GCC or Clang)
-* **BoringSSL & libsrtp2** development libraries
-
-To compile the C backend binary, run the following commands from the root directory:
-
-## install libuv
-`sudo apt install libuv1-dev`
-
-## build mimalloc
-```
-git clone https://github.com/microsoft/mimalloc.git
-cd mimalloc
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
-sudo make install
-```
-
-## default AF_XDP build
-
-The default build uses AF_XDP (`USE_AF_XDP=ON`). Install clang, libxdp, libbpf, and matching Linux headers:
-
-```sh
-sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
-cmake -S . -B build
-cmake --build build -j$(nproc)
-```
-
-## io_uring fallback
-
-To build with io_uring instead, install liburing and disable AF_XDP explicitly:
-
-```sh
-git clone https://github.com/axboe/liburing.git
-cd liburing
-./configure
-make -j$(nproc)
-sudo make install
-cd -
-cmake -S . -B build-uring -DUSE_AF_XDP=OFF
-cmake --build build-uring -j$(nproc)
-```
-
 ## AF_XDP runtime configuration
 
 Configure the interface and hardware queue in `config.ini`:
@@ -113,6 +65,54 @@ Example results for a 1200-byte payload (`--quick`, 1,000 measured iterations):
 | IPv4 header checksum | 34.90 ns | 28.65 M |
 
 These are smoke-run results from one development machine, not guaranteed performance targets. Use a non-quick run with CPU affinity and frequency scaling controlled for comparative measurements.
+
+## build prerequisites
+
+Before building, ensure you have the following installed on your system:
+
+* **CMake** (3.15 or higher)
+* **C Compiler** (GCC or Clang)
+* **BoringSSL & libsrtp2** development libraries
+
+To compile the C backend binary, run the following commands from the root directory:
+
+## install libuv
+`sudo apt install libuv1-dev`
+
+## build mimalloc
+```
+git clone https://github.com/microsoft/mimalloc.git
+cd mimalloc
+mkdir -p build && cd build
+cmake ..
+make -j$(nproc)
+sudo make install
+```
+
+## default AF_XDP build
+
+The default build uses AF_XDP (`USE_AF_XDP=ON`). Install clang, libxdp, libbpf, and matching Linux headers:
+
+```sh
+sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
+cmake -S . -B build
+cmake --build build -j$(nproc)
+```
+
+## io_uring fallback
+
+To build with io_uring instead, install liburing and disable AF_XDP explicitly:
+
+```sh
+git clone https://github.com/axboe/liburing.git
+cd liburing
+./configure
+make -j$(nproc)
+sudo make install
+cd -
+cmake -S . -B build-uring -DUSE_AF_XDP=OFF
+cmake --build build-uring -j$(nproc)
+```
 
 ## build boringSSL
 ```
