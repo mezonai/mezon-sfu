@@ -482,6 +482,21 @@ static unsigned reap_rx(unsigned max_count, sfu_packet_pool_t *pp, sfu_on_recv_f
     pkt->buf_source = SFU_BUF_SOURCE_AF_XDP;
     pkt->buf_owner = &g_xdp;
     g_xdp.frames[frame_id].state = SFU_XDP_FRAME_RX_APP;
+#ifdef SFU_DIAG_LOG
+    if (pkt->len >= 20 && (pkt->data[0] & 0xc0) == 0 && pkt->data[4] == 0x21 && pkt->data[5] == 0x12 && pkt->data[6] == 0xa4 &&
+        pkt->data[7] == 0x42) {
+      const struct sockaddr_in *peer = (const struct sockaddr_in *)&pkt->peer_addr;
+      char ip[INET_ADDRSTRLEN] = "?";
+      char transaction_id[25];
+      (void)inet_ntop(AF_INET, &peer->sin_addr, ip, sizeof(ip));
+      for (size_t j = 0; j < 12; j++) {
+        snprintf(transaction_id + j * 2, 3, "%02x", (unsigned)pkt->data[8 + j]);
+      }
+      uint16_t message_type = (uint16_t)(((uint16_t)pkt->data[0] << 8) | pkt->data[1]);
+      SFU_LOG_INFO("AF_XDP RX STUN queue=%u frame=%u src=%s:%u len=%u type=0x%04x transaction_id=%s", g_xdp.queue_id, frame_id, ip,
+                   (unsigned)ntohs(peer->sin_port), pkt->len, (unsigned)message_type, transaction_id);
+    }
+#endif
     on_recv(user_data, pkt);
   }
   if (count) {

@@ -80,7 +80,7 @@ int sfu_xdp_redirect(struct xdp_md *ctx) {
     return XDP_PASS;
   }
   if (ctx->rx_queue_index != config->queue_id) {
-    return XDP_PASS;
+    return XDP_DROP;
   }
 
   return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_DROP);
