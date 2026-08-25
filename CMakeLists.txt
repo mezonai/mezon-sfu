@@ -58,6 +58,7 @@ if(USE_AF_XDP)
     OUTPUT "${SFU_XDP_OBJECT}"
     COMMAND "${CLANG_EXECUTABLE}" -O2 -g -target bpf -D__TARGET_ARCH_x86
             -I/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}
+            -I/usr/local/include
             -c "${CMAKE_CURRENT_SOURCE_DIR}/src/net/xdp/sfu_xdp_kern.c"
             -o "${SFU_XDP_OBJECT}"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/net/xdp/sfu_xdp_kern.c"
