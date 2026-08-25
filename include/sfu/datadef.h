@@ -341,7 +341,8 @@ typedef struct {
   _Atomic uint32_t sequence;
   _Atomic uint64_t assignment_generation;
   _Atomic uint64_t updated_at_us;
-  _Atomic uint32_t bitrate_bps;
+  _Atomic uint32_t camera_bitrate_bps;
+  _Atomic uint32_t screen_bitrate_bps;
 } sfu_remb_contribution_t;
 
 typedef struct {
@@ -428,8 +429,10 @@ typedef struct {
   int64_t last_screen_pli_time;
   int64_t last_fir_time;
   int64_t twcc_last_feedback_ref_us;
-  int64_t last_remb_time_us;
-  uint32_t last_remb_bps;
+  int64_t last_camera_remb_time_us;
+  int64_t last_screen_remb_time_us;
+  uint32_t last_camera_remb_bps;
+  uint32_t last_screen_remb_bps;
   _Atomic uint32_t generation;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;

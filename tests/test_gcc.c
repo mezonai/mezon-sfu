@@ -313,6 +313,32 @@ static void test_normal_ack_cap_does_not_decrease(void) {
   assert(ctx.aimd.current_bitrate_bps == 1000000);
 }
 
+static void test_recovery_probe_escapes_ack_rate_lock(void) {
+  gcc_bwe_context_t ctx;
+  gcc_bwe_init(&ctx, START, MINB, MAXB);
+
+  uint16_t seq = 0;
+  int64_t send_us = 1000000, recv_us = 1000000;
+  feed_group(&ctx, &seq, &send_us, &recv_us, 1, 0, 100000, 100000);
+  ctx.aimd.current_bitrate_bps = 300000;
+  ctx.aimd.ack_bitrate_bps = 100000;
+  ctx.aimd.have_ack_bitrate = true;
+  ctx.aimd.state = GCC_RATE_CTRL_INCREASE;
+  ctx.aimd.last_increase_us = recv_us - 200000;
+
+  for (int i = 0; i < 25; i++) {
+    feed_group(&ctx, &seq, &send_us, &recv_us, 1, 0, 100000, 100000);
+  }
+  assert(ctx.trendline.usage_state == GCC_BWE_NORMAL);
+  assert(ctx.aimd.current_bitrate_bps > 300000);
+  assert(ctx.aimd.current_bitrate_bps <= 350000); /* ack * 1.5 + bounded 200 kbps recovery headroom */
+
+  assert(ctx.aimd.last_recovery_probe_us != 0);
+  gcc_bwe_report_loss(&ctx, 5, 100);
+  assert(ctx.aimd.last_recovery_probe_us == 0);
+  assert(ctx.aimd.state == GCC_RATE_CTRL_HOLD);
+}
+
 int main(void) {
   test_steadily_growing_queue_detected();
   test_constant_delay_is_normal();
@@ -325,6 +351,7 @@ int main(void) {
   test_loss_has_control_effect();
   test_ack_bitrate_uses_aggregate_window();
   test_normal_ack_cap_does_not_decrease();
+  test_recovery_probe_escapes_ack_rate_lock();
   printf("test_gcc: OK\n");
   return 0;
 }
