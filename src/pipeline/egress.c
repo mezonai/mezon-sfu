@@ -32,6 +32,53 @@ static inline uint64_t sfu_egress_profile_cycles(void) {
 #endif
 }
 
+#ifdef SFU_DIAG_LOG
+static const char *sfu_vp9_reject_reason_name(sfu_layer_reject_reason_t reason) {
+  switch (reason) {
+    case SFU_LAYER_REJECT_INVALID_SID: return "invalid_sid";
+    case SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED: return "over_target_or_failed";
+    case SFU_LAYER_REJECT_MISSING_FRAME_START: return "missing_frame_start";
+    case SFU_LAYER_REJECT_KEYFRAME_REQUIRED: return "keyframe_required";
+    case SFU_LAYER_REJECT_KEYFRAME_MISMATCH: return "keyframe_mismatch";
+    case SFU_LAYER_REJECT_SPATIAL_TARGET: return "spatial_target";
+    case SFU_LAYER_REJECT_SPATIAL_TRANSITION: return "spatial_transition";
+    case SFU_LAYER_REJECT_SPATIAL_START: return "spatial_start";
+    case SFU_LAYER_REJECT_SPATIAL_DEPENDENCY: return "spatial_dependency";
+    case SFU_LAYER_REJECT_TEMPORAL_TRANSITION: return "temporal_transition";
+    case SFU_LAYER_REJECT_TEMPORAL_SWITCH: return "temporal_switch";
+    case SFU_LAYER_REJECT_PACER_OVERLAP: return "pacer_overlap";
+    case SFU_LAYER_REJECT_PACER_ORPHAN: return "pacer_orphan";
+    default: return "none";
+  }
+}
+
+static void sfu_log_vp9_scheduler_drop(const sfu_peer_session_t *sub_session, const sfu_egress_media_t *media, const sfu_layer_scheduler_t *sched,
+                                       const sfu_layer_scheduler_decision_t *decision) {
+  static _Atomic uint32_t drop_logs;
+  uint32_t n = atomic_fetch_add_explicit(&drop_logs, 1, memory_order_relaxed);
+  if (n != 0 && (n & 127u) != 0) return;
+  SFU_LOG_WARN("[VP9-DBG] drop n=%u reason=%s sub=%u pub=%u source=%u ts=%u sid=%u tid=%u b=%u e=%u p=%u u=%u d=%u kf=%u "
+               "target=%u/%u current=%u/%u need_kf=%u kf_active=%u kf_failed=%u spatial=%u/%u temporal=%u/%u pacer=%u pacer_ts=%u "
+               "masks=%02x/%02x/%02x",
+               n + 1, sfu_vp9_reject_reason_name(decision->reject_reason), sub_session->peer_id,
+               media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source, decision->rtp_timestamp, decision->sid, decision->tid,
+               decision->b_bit, decision->e_bit, media->svc.p_bit, media->svc.u_bit, media->svc.d_bit, media->is_keyframe, sched->target_sid,
+               sched->target_tid, sched->current_sid, sched->current_tid, sched->needs_keyframe, sched->keyframe_active, sched->keyframe_failed,
+               sched->transition_active, sched->transition_failed, sched->temporal_transition_active, sched->temporal_transition_failed,
+               sched->pacer_frame_active, sched->pacer_frame_timestamp, sched->started_sid_mask, sched->completed_sid_mask, sched->failed_sid_mask);
+}
+
+static void sfu_log_vp9_keyframe_intent(const sfu_peer_session_t *sub_session, const sfu_egress_media_t *media, const sfu_layer_scheduler_t *sched) {
+  static _Atomic uint32_t keyframe_logs;
+  uint32_t n = atomic_fetch_add_explicit(&keyframe_logs, 1, memory_order_relaxed);
+  if (n != 0 && (n & 127u) != 0) return;
+  SFU_LOG_WARN("[VP9-DBG] keyframe-intent n=%u sub=%u pub=%u source=%u ts=%u target=%u/%u current=%u/%u need_kf=%u spatial=%u/%u",
+               n + 1, sub_session->peer_id, media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source, media->svc.rtp_timestamp,
+               sched->target_sid, sched->target_tid, sched->current_sid, sched->current_tid, sched->needs_keyframe, sched->transition_active,
+               sched->transition_failed);
+}
+#endif
+
 static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                                      const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_layer_scheduler_t *sched,
                                      const sfu_layer_scheduler_decision_t *decision, bool profile) {
@@ -209,9 +256,15 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         return false;
       }
       if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
+#ifdef SFU_DIAG_LOG
+        sfu_log_vp9_keyframe_intent(sub_session, media, sched);
+#endif
         sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
       }
       if (!sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+#ifdef SFU_DIAG_LOG
+        sfu_log_vp9_scheduler_drop(sub_session, media, sched, &decision);
+#endif
         if (decision.pacer_frame_continuation) {
           sfu_metric_inc("vp9_enh_orphan_continuation");
         }
@@ -314,9 +367,15 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
         return false;
       }
       if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
+#ifdef SFU_DIAG_LOG
+        sfu_log_vp9_keyframe_intent(sub_session, media, sched);
+#endif
         sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
       }
       if (!sfu_layer_scheduler_prepare_packet(sched, &media->svc, media->is_keyframe, &decision)) {
+#ifdef SFU_DIAG_LOG
+        sfu_log_vp9_scheduler_drop(sub_session, media, sched, &decision);
+#endif
         if (decision.pacer_frame_continuation) {
           sfu_metric_inc("vp9_enh_orphan_continuation");
         }

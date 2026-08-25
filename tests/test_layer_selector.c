@@ -163,10 +163,12 @@ static void test_spatial_dependency_requires_completed_lower_layer(void) {
   sfu_layer_scheduler_decision_t decision;
   sfu_svc_descriptor_t upper = make_desc(100, 1, 0, 0, 0, 1, 1, 1);
   assert(!sfu_layer_scheduler_prepare_packet(&sched, &upper, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_SPATIAL_DEPENDENCY);
   assert(sched.current_sid == 0);
 
   sfu_svc_descriptor_t lower = make_desc(100, 0, 0, 0, 0, 0, 1, 1);
   assert(sfu_layer_scheduler_prepare_packet(&sched, &lower, true, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_NONE);
   assert(decision.pacer_class == SFU_PACER_CLASS_VIDEO_TRANSITION);
   sfu_layer_scheduler_commit_packet(&sched, &decision);
 
@@ -199,6 +201,7 @@ static void test_spatial_transition_reject_prevents_promotion(void) {
 
   sfu_svc_descriptor_t end = make_desc(200, 1, 0, 0, 0, 1, 0, 1);
   assert(!sfu_layer_scheduler_prepare_packet(&sched, &end, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED);
   assert(sched.current_sid == 0);
 }
 
