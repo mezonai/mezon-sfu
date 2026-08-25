@@ -77,6 +77,29 @@ static void sfu_log_vp9_keyframe_intent(const sfu_peer_session_t *sub_session, c
                sched->target_sid, sched->target_tid, sched->current_sid, sched->current_tid, sched->needs_keyframe, sched->transition_active,
                sched->transition_failed);
 }
+
+static bool sfu_is_vp9_screen_media(const sfu_egress_media_t *media) {
+  return media && media->source == SFU_MEDIA_SCREEN && media->has_svc && media->has_video && !media->is_audio;
+}
+
+static void sfu_log_vp9_egress_event(const char *event, const char *path, const char *reason, const sfu_worker_t *w,
+                                     const sfu_peer_session_t *sub_session, const sfu_packet_t *pkt, const sfu_egress_media_t *media) {
+  if (!sfu_is_vp9_screen_media(media)) return;
+  static _Atomic uint32_t entry_logs;
+  static _Atomic uint32_t reject_logs;
+  _Atomic uint32_t *counter = reason ? &reject_logs : &entry_logs;
+  uint32_t n = atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
+  if (n != 0 && (n & 127u) != 0) return;
+  uint16_t seq = pkt && pkt->len >= 4 ? sfu_read_be16(pkt->data + 2) : 0;
+  uint32_t input_ssrc = pkt && pkt->len >= 12 ? sfu_read_be32(pkt->data + 8) : 0;
+  uint16_t owner = sub_session ? sfu_session_owner_worker(sub_session) : SFU_SESSION_OWNER_NONE;
+  SFU_LOG_WARN("[VP9-DBG] %s n=%u path=%s reason=%s worker=%u owner=%u sub=%u pub=%u source=%u input_ssrc=%" PRIu32
+               " output_ssrc=%" PRIu32 " seq=%u ts=%u sid=%u tid=%u b=%u kf=%u slot=%u gen=%" PRIu64,
+               event, n + 1, path, reason ? reason : "none", w ? w->worker_index : UINT32_MAX, owner,
+               sub_session ? sub_session->peer_id : 0, media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source,
+               input_ssrc, media->video_ssrc, seq, media->svc.rtp_timestamp, media->svc.sid, media->svc.tid, media->svc.b_bit,
+               media->is_keyframe, media->remote_slot, media->assignment_generation);
+}
 #endif
 
 static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
@@ -233,11 +256,19 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_session_t *sub_session, const sfu_packet_t *plain, sfu_packet_t *reserved_output,
                                                 const struct sockaddr_storage *dst, socklen_t dst_len, const sfu_egress_media_t *media) {
   if (!w || !sub_session || !plain || !dst || !media || sfu_session_owner_worker(sub_session) != w->worker_index || !sfu_session_accepts_work(sub_session)) {
+#ifdef SFU_DIAG_LOG
+    const char *reason = !w ? "null_worker" : !sub_session ? "null_subscriber" : !plain ? "null_packet" : !dst ? "null_destination" : !media ? "null_media" :
+                         sfu_session_owner_worker(sub_session) != w->worker_index ? "owner_mismatch" : "session_not_accepting";
+    sfu_log_vp9_egress_event("egress-reject", reserved_output ? "reserved" : "plaintext", reason, w, sub_session, plain, media);
+#endif
     if (w && reserved_output) {
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
     }
     return false;
   }
+#ifdef SFU_DIAG_LOG
+  sfu_log_vp9_egress_event("egress-entry", reserved_output ? "reserved" : "plaintext", NULL, w, sub_session, plain, media);
+#endif
 
   sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
   sfu_layer_scheduler_t *sched = NULL;
@@ -245,10 +276,16 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
   bool has_decision = media->has_svc && media->has_video && !media->is_audio;
   if (has_decision) {
     if (!media->publisher || media->publisher->peer_id == 0) {
+#ifdef SFU_DIAG_LOG
+      sfu_log_vp9_egress_event("egress-reject", reserved_output ? "reserved" : "plaintext", "missing_publisher_filter_bypass", w, sub_session, plain, media);
+#endif
       has_decision = false;
     } else {
       sched = sfu_layer_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
       if (!sched) {
+#ifdef SFU_DIAG_LOG
+        sfu_log_vp9_egress_event("egress-reject", reserved_output ? "reserved" : "plaintext", "missing_scheduler", w, sub_session, plain, media);
+#endif
         if (reserved_output) {
           sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
         }
@@ -345,11 +382,18 @@ bool sfu_egress_process_plaintext_reserved(sfu_worker_t *w, sfu_peer_session_t *
 bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                         const sfu_egress_media_t *media) {
   if (!w || !sub_session || !pkt || !dst || !media || sfu_session_owner_worker(sub_session) != w->worker_index) {
+#ifdef SFU_DIAG_LOG
+    const char *reason = !w ? "null_worker" : !sub_session ? "null_subscriber" : !pkt ? "null_packet" : !dst ? "null_destination" : !media ? "null_media" : "owner_mismatch";
+    sfu_log_vp9_egress_event("egress-reject", "owned", reason, w, sub_session, pkt, media);
+#endif
     if (w && pkt) {
       sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     }
     return false;
   }
+#ifdef SFU_DIAG_LOG
+  sfu_log_vp9_egress_event("egress-entry", "owned", NULL, w, sub_session, pkt, media);
+#endif
 
   sfu_pacer_class_t video_class = SFU_PACER_CLASS_VIDEO_BASE;
   sfu_layer_scheduler_t *sched = NULL;
@@ -358,11 +402,17 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
 
   if (has_decision) {
     if (!media->publisher || media->publisher->peer_id == 0) {
+#ifdef SFU_DIAG_LOG
+      sfu_log_vp9_egress_event("egress-reject", "owned", "missing_publisher_filter_bypass", w, sub_session, pkt, media);
+#endif
       SFU_LOG_WARN("worker %u: [EGRESS] VP9 without publisher peer_id; forwarding without layer filter", w->worker_index);
       has_decision = false;
     } else {
       sched = sfu_layer_scheduler_for_stream(sub_session, media->publisher->peer_id, media->source);
       if (!sched) {
+#ifdef SFU_DIAG_LOG
+        sfu_log_vp9_egress_event("egress-reject", "owned", "missing_scheduler", w, sub_session, pkt, media);
+#endif
         sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return false;
       }
