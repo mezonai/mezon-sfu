@@ -18,6 +18,9 @@
 #define GCC_AIMD_ADDITIVE_BPS_PER_S 400000.0
 #define GCC_AIMD_PROBE_HEADROOM_NUM 3
 #define GCC_AIMD_PROBE_HEADROOM_DEN 2
+#define GCC_RECOVERY_PROBE_STEP_BPS 50000u
+#define GCC_RECOVERY_PROBE_MAX_BPS 200000u
+#define GCC_RECOVERY_PROBE_INTERVAL_US 1000000LL
 #define GCC_AIMD_DECREASE_FACTOR_NUM 85
 #define GCC_AIMD_DECREASE_FACTOR_DEN 100
 #define GCC_ACK_WINDOW_US 150000LL
@@ -153,6 +156,7 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
       uint64_t next = basis * GCC_AIMD_DECREASE_FACTOR_NUM / GCC_AIMD_DECREASE_FACTOR_DEN;
       aimd->current_bitrate_bps = (uint32_t)(next > UINT32_MAX ? UINT32_MAX : next);
       aimd->state = GCC_RATE_CTRL_DECREASE;
+      aimd->last_recovery_probe_us = 0;
       break;
     }
     case GCC_BWE_UNDERUSE:
@@ -180,6 +184,24 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
             next = cap;
           }
           aimd->current_bitrate_bps = (uint32_t)(next > UINT32_MAX ? UINT32_MAX : next);
+          aimd->last_recovery_probe_us = 0;
+        } else if (aimd->have_ack_bitrate) {
+          uint64_t recovery_cap = cap + GCC_RECOVERY_PROBE_MAX_BPS;
+          if (recovery_cap > aimd->max_bitrate_bps) {
+            recovery_cap = aimd->max_bitrate_bps;
+          }
+          if (aimd->current_bitrate_bps < recovery_cap) {
+            if (aimd->last_recovery_probe_us == 0) {
+              aimd->last_recovery_probe_us = now_us;
+            } else if (now_us - aimd->last_recovery_probe_us >= GCC_RECOVERY_PROBE_INTERVAL_US) {
+              uint64_t next = (uint64_t)aimd->current_bitrate_bps + GCC_RECOVERY_PROBE_STEP_BPS;
+              if (next > recovery_cap) {
+                next = recovery_cap;
+              }
+              aimd->current_bitrate_bps = (uint32_t)next;
+              aimd->last_recovery_probe_us = now_us;
+            }
+          }
         }
         aimd->last_increase_us = now_us;
       }
@@ -254,8 +276,10 @@ void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) 
       }
     }
     aimd->state = GCC_RATE_CTRL_HOLD;
+    aimd->last_recovery_probe_us = 0;
   } else if (lost * 100 > total * 2) {
     aimd->state = GCC_RATE_CTRL_HOLD;
+    aimd->last_recovery_probe_us = 0;
   }
 }
 

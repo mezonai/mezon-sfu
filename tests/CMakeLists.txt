@@ -1,6 +1,6 @@
 add_compile_options(
-  $<$<AND:$<CONFIG:Release>,$<COMPILE_LANG_AND_ID:C,GNU,Clang>>:-UNDEBUG>
-  $<$<AND:$<CONFIG:Release>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>:-UNDEBUG>
+  $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-UNDEBUG>
+  $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-UNDEBUG>
 )
 
 add_executable(test_memory_pool test_memory_pool.c)
@@ -146,3 +146,20 @@ add_test(NAME vp9_parser COMMAND test_vp9_parser)
 add_executable(test_parser_fuzz test_parser_fuzz.c)
 target_link_libraries(test_parser_fuzz PRIVATE sfu_core)
 add_test(NAME parser_fuzz COMMAND test_parser_fuzz)
+
+if(USE_AF_XDP)
+  add_executable(test_af_xdp_frame test_af_xdp_frame.c)
+  target_link_libraries(test_af_xdp_frame PRIVATE sfu_core)
+  add_test(NAME af_xdp_frame COMMAND test_af_xdp_frame)
+
+  add_executable(test_af_xdp_ring test_af_xdp_ring.c)
+  target_link_libraries(test_af_xdp_ring PRIVATE sfu_core)
+  add_test(NAME af_xdp_ring COMMAND test_af_xdp_ring)
+
+  if(SFU_ENABLE_PRIVILEGED_TESTS)
+    add_test(
+      NAME af_xdp_veth_integration
+      COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_af_xdp_veth_netns.sh $<TARGET_FILE:mezon-sfu>)
+    set_tests_properties(af_xdp_veth_integration PROPERTIES LABELS "integration;privileged;af_xdp" RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+  endif()
+endif()

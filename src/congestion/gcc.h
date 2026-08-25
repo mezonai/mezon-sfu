@@ -58,6 +58,7 @@ typedef struct gcc_aimd_controller {
   gcc_rate_ctrl_state_t state;
 
   int64_t last_increase_us;
+  int64_t last_recovery_probe_us;
   uint32_t ack_bitrate_bps;
   uint64_t ack_window_bytes;
   int64_t ack_window_min_recv_us;

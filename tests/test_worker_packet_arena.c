@@ -4,7 +4,7 @@
 
 #include "memory/refcount.h"
 #include "memory/worker_packet_arena.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 
 static void test_fixed_capacity_and_recycling(void) {
   sfu_worker_packet_arena_t arena;

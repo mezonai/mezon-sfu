@@ -3,7 +3,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include "memory/packet_pool.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "protocol/signaling/signaling.h"

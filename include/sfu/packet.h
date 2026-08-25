@@ -10,6 +10,7 @@ typedef enum sfu_buf_source {
   SFU_BUF_SOURCE_POOL = 0,
   SFU_BUF_SOURCE_KERNEL = 1,
   SFU_BUF_SOURCE_WORKER_ARENA = 2,
+  SFU_BUF_SOURCE_AF_XDP = 3,
 } sfu_buf_source_t;
 
 typedef struct sfu_packet {

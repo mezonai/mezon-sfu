@@ -9,7 +9,7 @@
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
 #include "memory/packet_pool.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "pipeline/router.h"
@@ -668,14 +668,20 @@ static void test_gcc_estimate_reaches_scheduler(void) {
   assert(screen1->allocated_bps < 2000000);
   assert(camera2->allocated_bps < 2000000);
   assert(f.session->egress.pacer.pacing_bps == 5000000); /* full GCC estimate, paced at 2.5x */
-  uint32_t contribution = 0;
+  uint32_t camera_contribution = 0;
+  uint32_t screen_contribution = 0;
   uint64_t now_us = sfu_now_us();
-  assert(sfu_session_read_remb_contribution(f.session, 0, 11, now_us, 2000000, &contribution));
-  assert(contribution == camera1->allocated_bps + screen1->allocated_bps);
-  assert(sfu_session_read_remb_contribution(f.session, 1, 12, now_us, 2000000, &contribution));
-  assert(contribution == camera2->allocated_bps);
-  assert(!sfu_session_read_remb_contribution(f.session, 0, 10, now_us, 2000000, &contribution)); /* stale slot generation */
-  assert(!sfu_session_read_remb_contribution(f.session, 0, 11, now_us + 2000001, 2000000, &contribution)); /* stale sample */
+  assert(sfu_session_read_remb_contribution(f.session, 0, 11, now_us, 2000000, &camera_contribution, &screen_contribution));
+  assert(camera_contribution == camera1->allocated_bps);
+  assert(screen_contribution == screen1->allocated_bps);
+  assert(sfu_session_read_remb_contribution(f.session, 1, 12, now_us, 2000000, &camera_contribution, &screen_contribution));
+  assert(camera_contribution == camera2->allocated_bps);
+  assert(screen_contribution == 0);
+  assert(!sfu_session_read_remb_contribution(f.session, 0, 10, now_us, 2000000, &camera_contribution,
+                                             &screen_contribution)); /* stale slot generation */
+  assert(!sfu_session_read_remb_contribution(f.session, 0, 11, now_us + 2000001, 2000000, &camera_contribution,
+                                             &screen_contribution)); /* stale sample */
+  assert(sfu_metric_get("remb_contribution_stale") == 1);
 
   sfu_receiver_snapshot_t *inactive = sfu_receiver_snapshot_alloc();
   assert(inactive != NULL);
@@ -694,7 +700,7 @@ static void test_gcc_estimate_reaches_scheduler(void) {
  * writes the per-subscriber TWCC sequence into the packet's RTP extension and
  * records the same value in send history; a subscriber without negotiation
  * gets neither. */
-static void test_publisher_remb_aggregates_fresh_minimum_and_throttles(void) {
+static void test_publisher_remb_aggregates_fresh_maximum_and_throttles(void) {
   kf_fixture_t f;
   kf_fixture_init(&f);
 
@@ -708,6 +714,10 @@ static void test_publisher_remb_aggregates_fresh_minimum_and_throttles(void) {
   second->state = SFU_SESSION_ESTABLISHED;
   sfu_session_set_owner_worker(second, 1);
 
+  f.publisher->media.screen.ssrc = 0x55667788u;
+  f.publisher->media.screen.active = true;
+  sfu_session_publish_media(f.publisher);
+
   sfu_fanout_bundle_t *old = sfu_session_fanout_acquire(f.publisher);
   assert(old != NULL);
   const sfu_fanout_route_t *existing = sfu_fanout_bundle_find_peer(old, f.base.session, NULL);
@@ -719,39 +729,52 @@ static void test_publisher_remb_aggregates_fresh_minimum_and_throttles(void) {
   second_route.assignment_generation = 33;
   sfu_fanout_bundle_t *bundle = sfu_fanout_bundle_alloc();
   assert(bundle != NULL);
-  assert(sfu_fanout_bundle_set(bundle, 0, &first_route, SFU_FANOUT_VIDEO));
-  assert(sfu_fanout_bundle_set(bundle, 1, &second_route, SFU_FANOUT_VIDEO));
+  assert(sfu_fanout_bundle_set(bundle, 0, &first_route, SFU_FANOUT_VIDEO | SFU_FANOUT_SCREEN));
+  assert(sfu_fanout_bundle_set(bundle, 1, &second_route, SFU_FANOUT_VIDEO | SFU_FANOUT_SCREEN));
   sfu_fanout_bundle_release(old);
   sfu_session_publish_fanout(f.publisher, bundle);
 
   uint64_t now_us = sfu_now_us();
-  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 900000, now_us);
-  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation, 600000, now_us);
+  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 900000, 1200000,
+                                      now_us);
+  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation, 600000, 800000, now_us);
   uint32_t free_before = pool_free_count(&f.base.pp);
   sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)now_us);
-  assert(f.publisher->egress.last_remb_bps == 600000); /* fresh minimum wins */
-  assert(f.publisher->egress.last_remb_time_us == (int64_t)now_us);
-  assert(pool_free_count(&f.base.pp) == free_before - 1);
+  assert(f.publisher->egress.last_camera_remb_bps == 900000); /* strongest admitted demand wins */
+  assert(f.publisher->egress.last_screen_remb_bps == 1200000);
+  assert(f.publisher->egress.last_camera_remb_time_us == (int64_t)now_us);
+  assert(f.publisher->egress.last_screen_remb_time_us == (int64_t)now_us);
+  assert(pool_free_count(&f.base.pp) == free_before - 2);
 
-  /* A normal change inside 500 ms is throttled. */
-  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation, 700000, now_us + 50000);
+  /* A lower contribution does not reduce the strongest target. */
+  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation, 700000, 1400000,
+                                      now_us + 50000);
   sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 50000));
-  assert(f.publisher->egress.last_remb_bps == 600000);
-  assert(pool_free_count(&f.base.pp) == free_before - 1);
+  assert(f.publisher->egress.last_camera_remb_bps == 900000);
+  assert(f.publisher->egress.last_screen_remb_bps == 1200000);
+  assert(pool_free_count(&f.base.pp) == free_before - 2);
 
-  /* Generation mismatch and stale data are ignored, leaving the valid route. */
-  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation + 1, 100000, now_us + 600000);
-  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 800000,
+  /* Generation mismatch and stale data are ignored. */
+  sfu_session_write_remb_contribution(second, second_route.remote_slot, second_route.assignment_generation + 1, 100000, 0,
+                                      now_us + 600000);
+  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 800000, 0,
                                       now_us - 2000001);
   sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 600000));
-  assert(f.publisher->egress.last_remb_bps == 600000); /* no fresh matching contribution */
-  assert(pool_free_count(&f.base.pp) == free_before - 1);
-
-  /* A 20% decrease may bypass the normal interval after 100 ms. */
-  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 400000, now_us + 700000);
-  sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 700000));
-  assert(f.publisher->egress.last_remb_bps == 400000);
+  assert(f.publisher->egress.last_camera_remb_bps == 900000); /* no fresh matching contribution */
+  assert(f.publisher->egress.last_screen_remb_bps == 1200000);
   assert(pool_free_count(&f.base.pp) == free_before - 2);
+
+  /* Fresh lower maxima send independently after the fast-decrease interval. */
+  sfu_session_write_remb_contribution(f.base.session, first_route.remote_slot, first_route.assignment_generation, 400000, 600000,
+                                      now_us + 700000);
+  sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 700000));
+  assert(f.publisher->egress.last_camera_remb_bps == 400000);
+  assert(f.publisher->egress.last_screen_remb_bps == 600000);
+  assert(pool_free_count(&f.base.pp) == free_before - 4);
+  assert(sfu_metric_get("remb_contribution_written") == 6);
+  assert(sfu_metric_get("remb_contribution_stale") >= 1);
+  assert(sfu_metric_get("remb_aggregate_no_fresh") == 1);
+  assert(sfu_metric_get("remb_aggregate_target_changed") >= 3);
 
   sfu_session_release(second);
   kf_fixture_destroy(&f);
@@ -1597,6 +1620,36 @@ static void test_congestion_diag_staggered_due_windows(void) {
   assert(!sfu_session_congestion_diag_due(f.session, first_us + 100000ULL));
   assert(sfu_session_congestion_diag_due(f.session, first_us + 2000000ULL));
 
+  f.session->egress.diag.nack_requests = 7;
+  f.session->egress.diag.cache_hits = 5;
+  f.session->egress.diag.cache_misses = 2;
+  f.session->egress.diag.rtx_sent = 4;
+  f.session->egress.diag.pli_received = 3;
+  f.session->egress.diag.pli_sent = 2;
+  f.session->egress.diag.pli_coalesced = 1;
+  f.session->egress.pacer.dropped_enh = 6;
+  f.session->egress.pacer.rtx_dropped_budget = 8;
+  sfu_session_log_congestion_diag(&f.w, f.session, first_us + 2000000ULL);
+  assert(f.session->egress.diag.last_logged_nack_requests == 7);
+  assert(f.session->egress.diag.last_logged_cache_hits == 5);
+  assert(f.session->egress.diag.last_logged_cache_misses == 2);
+  assert(f.session->egress.diag.last_logged_rtx_sent == 4);
+  assert(f.session->egress.diag.last_logged_pli_received == 3);
+  assert(f.session->egress.diag.last_logged_pli_sent == 2);
+  assert(f.session->egress.diag.last_logged_pli_coalesced == 1);
+  assert(f.session->egress.diag.last_logged_pacer_drops == 6);
+  assert(f.session->egress.diag.last_logged_rtx_budget_drops == 8);
+  assert(sfu_metric_get("congestion_diag_log") == 1);
+
+  f.session->egress.diag.nack_requests += 2;
+  f.session->egress.diag.rtx_sent += 1;
+  f.session->egress.pacer.dropped_enh += 3;
+  sfu_session_log_congestion_diag(&f.w, f.session, first_us + 4000000ULL);
+  assert(f.session->egress.diag.last_logged_nack_requests == 9);
+  assert(f.session->egress.diag.last_logged_rtx_sent == 5);
+  assert(f.session->egress.diag.last_logged_pacer_drops == 9);
+  assert(sfu_metric_get("congestion_diag_log") == 2);
+
   fixture_destroy(&f);
 }
 #endif
@@ -1619,7 +1672,7 @@ int main(void) {
   test_nack_miss_routes_to_source_publisher();
   test_pli_unknown_ssrc_falls_back();
   test_gcc_estimate_reaches_scheduler();
-  test_publisher_remb_aggregates_fresh_minimum_and_throttles();
+  test_publisher_remb_aggregates_fresh_maximum_and_throttles();
   test_egress_writes_twcc_extension();
   test_egress_rejects_new_generation_before_answer();
   test_egress_rejects_old_assignment_generation();

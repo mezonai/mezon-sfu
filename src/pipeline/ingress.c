@@ -14,7 +14,7 @@
 #include "media/svc/layer_scheduler.h"
 #include "media/svc/svc_descriptor.h"
 #include "memory/packet_pool.h"
-#include "net/io_uring.h"
+#include "net/io_backend.h"
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
 #include "protocol/signaling/signaling.h"
@@ -39,13 +39,18 @@
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
 
-static uint32_t allocation_for_publisher(const sfu_bandwidth_allocation_t *allocation, uint32_t publisher_peer_id) {
-  for (size_t i = 0; i < allocation->publisher_count; i++) {
-    if (allocation->publishers[i].publisher_peer_id == publisher_peer_id) {
-      return allocation->publishers[i].allocated_bps;
+static uint32_t allocation_for_stream(const sfu_bandwidth_allocation_t *allocation, uint32_t publisher_peer_id,
+                                      sfu_bandwidth_stream_kind_t kind) {
+  for (size_t i = 0; i < allocation->stream_count; i++) {
+    if (allocation->streams[i].publisher_peer_id == publisher_peer_id && allocation->streams[i].kind == kind) {
+      return allocation->streams[i].allocated_bps;
     }
   }
   return 0;
+}
+
+static uint32_t source_demand_bps(uint32_t allocation_bps) {
+  return allocation_bps >= SFU_BANDWIDTH_SOURCE_ADMISSION_BPS ? allocation_bps : 0;
 }
 
 static bool allocation_contains_stream(const sfu_bandwidth_allocation_t *allocation, uint64_t stream_key) {
@@ -104,6 +109,8 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   uint64_t now_us = sfu_now_us();
   session->egress.diag.last_allocation_us = now_us;
   session->egress.diag.allocation_streams = (uint32_t)allocation.stream_count;
+  session->egress.diag.allocation_pool_bps = allocation.video_pool_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.video_pool_bps;
+  session->egress.diag.allocation_reserve_bps = allocation.reserve_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.reserve_bps;
   session->egress.diag.allocation_allocated_bps = allocation.allocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.allocated_bps;
   session->egress.diag.allocation_unallocated_bps = allocation.unallocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.unallocated_bps;
   session->egress.diag.remb_contribution_bps = session->egress.diag.allocation_allocated_bps;
@@ -113,8 +120,10 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
     uint32_t remote_slot = 0;
     const sfu_receiver_entry_t *entry;
     while ((entry = sfu_receiver_snapshot_iter_next(&contribution_iter, &remote_slot)) != NULL) {
-      sfu_session_write_remb_contribution(session, remote_slot, entry->assignment_generation,
-                                          allocation_for_publisher(&allocation, entry->publisher_peer_id), now_us);
+      uint32_t camera_bps = allocation_for_stream(&allocation, entry->publisher_peer_id, SFU_BANDWIDTH_STREAM_CAMERA);
+      uint32_t screen_bps = allocation_for_stream(&allocation, entry->publisher_peer_id, SFU_BANDWIDTH_STREAM_SCREEN);
+      sfu_session_write_remb_contribution(session, remote_slot, entry->assignment_generation, source_demand_bps(camera_bps),
+                                          source_demand_bps(screen_bps), now_us);
     }
   }
   if (session->egress.schedulers) {
@@ -400,6 +409,8 @@ static void handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessio
     return;
   }
 
+  sender_session->egress.diag.pli_received++;
+  sfu_metric_inc("congestion_pli_received");
   request_source_keyframe(w, sender_session, pli.media_ssrc);
 }
 

@@ -341,7 +341,8 @@ typedef struct {
   _Atomic uint32_t sequence;
   _Atomic uint64_t assignment_generation;
   _Atomic uint64_t updated_at_us;
-  _Atomic uint32_t bitrate_bps;
+  _Atomic uint32_t camera_bitrate_bps;
+  _Atomic uint32_t screen_bitrate_bps;
 } sfu_remb_contribution_t;
 
 typedef struct {
@@ -387,8 +388,16 @@ typedef struct sfu_congestion_diag {
   uint64_t cache_hits;
   uint64_t cache_misses;
   uint64_t rtx_sent;
+  uint64_t pli_received;
   uint64_t pli_sent;
   uint64_t pli_coalesced;
+  uint64_t last_logged_nack_requests;
+  uint64_t last_logged_cache_hits;
+  uint64_t last_logged_cache_misses;
+  uint64_t last_logged_rtx_sent;
+  uint64_t last_logged_pli_received;
+  uint64_t last_logged_pli_sent;
+  uint64_t last_logged_pli_coalesced;
   uint64_t last_logged_pacer_drops;
   uint64_t last_logged_rtx_budget_drops;
   uint32_t latest_gcc_bps;
@@ -396,6 +405,8 @@ typedef struct sfu_congestion_diag {
   uint32_t latest_twcc_lost;
   uint32_t latest_twcc_total;
   uint32_t allocation_streams;
+  uint32_t allocation_pool_bps;
+  uint32_t allocation_reserve_bps;
   uint32_t allocation_allocated_bps;
   uint32_t allocation_unallocated_bps;
   uint32_t remb_contribution_bps;
@@ -418,8 +429,10 @@ typedef struct {
   int64_t last_screen_pli_time;
   int64_t last_fir_time;
   int64_t twcc_last_feedback_ref_us;
-  int64_t last_remb_time_us;
-  uint32_t last_remb_bps;
+  int64_t last_camera_remb_time_us;
+  int64_t last_screen_remb_time_us;
+  uint32_t last_camera_remb_bps;
+  uint32_t last_screen_remb_bps;
   _Atomic uint32_t generation;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;

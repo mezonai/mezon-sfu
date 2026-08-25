@@ -12,7 +12,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 * **Simple, Standalone Setup:** No external dependencies required to get running.
 * Lock-free fanout with hazard pointers
 * Full SVC temporal/spatial layer support
-* Modern io_uring zero-copy network stack
+* Modern io_uring zero-copy network stack, with an optional AF_XDP backend
 * Standards-compliant GCC congestion control
 * **Push To Talk** PTT native support
 
@@ -39,15 +39,82 @@ make -j$(nproc)
 sudo make install
 ```
 
-## build liburing
+## default AF_XDP build
+
+The default build uses AF_XDP (`USE_AF_XDP=ON`). Install clang, libxdp, libbpf, and matching Linux headers:
+
+```sh
+sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
+cmake -S . -B build
+cmake --build build -j$(nproc)
 ```
+
+## io_uring fallback
+
+To build with io_uring instead, install liburing and disable AF_XDP explicitly:
+
+```sh
 git clone https://github.com/axboe/liburing.git
 cd liburing
-
 ./configure
 make -j$(nproc)
 sudo make install
+cd -
+cmake -S . -B build-uring -DUSE_AF_XDP=OFF
+cmake --build build-uring -j$(nproc)
 ```
+
+## AF_XDP runtime configuration
+
+Configure the interface and hardware queue in `config.ini`:
+
+```ini
+[af_xdp]
+interface = eth0
+queue_id = 0
+frame_count = 16384
+frame_size = 4096
+mode = native  # native, skb, or auto
+```
+
+The AF_XDP binary requires permission to load BPF programs and administer the selected interface (normally root or appropriate `CAP_BPF`/`CAP_NET_ADMIN` capabilities). It supports IPv4 UDP and does not reassemble fragments. The configured frame pool is split evenly into power-of-two RX and TX rings. Configure RSS/flow steering so the media UDP port reaches the selected queue; matching media packets on another queue are dropped rather than passed to an undrained UDP socket. On a cold neighbour entry, TX temporarily falls back to the bound nonblocking UDP socket so the kernel can resolve ARP, then direct AF_XDP transmission resumes. The loader refuses to replace an existing XDP program and cleanup detaches only the program attached by this process.
+
+For a two-tab Chrome test, do not advertise `127.0.0.1` while AF_XDP is attached to `eth0`: loopback traffic never reaches that XDP hook. Set `public_host` to the selected interface address, use a non-loopback interface, and verify the media port is steered to `queue_id`. A single-queue veth pair with `mode = skb` is the safest first integration environment.
+
+The AF_XDP frame and software-ring unit tests are CPU-only and do not require root or a network interface:
+
+```sh
+ctest --test-dir build --output-on-failure -R 'af_xdp_(frame|ring)'
+```
+
+A privileged veth/network-namespace smoke test is available but is not registered by default:
+
+```sh
+cmake -S . -B build-af-xdp-integration -DSFU_ENABLE_PRIVILEGED_TESTS=ON
+cmake --build build-af-xdp-integration -j$(nproc)
+sudo ctest --test-dir build-af-xdp-integration --output-on-failure -R af_xdp_veth_integration
+```
+
+The script uses a temporary single-queue veth pair in `skb` mode and cleans up its namespace, links, process, and XDP attachment on exit.
+
+Run the focused frame parser/builder benchmark with:
+
+```sh
+build-af-xdp/benchmark/bench_af_xdp_frame all --quick
+build-af-xdp/benchmark/bench_af_xdp_frame parse_ipv4_udp --packet-size 1200
+build-af-xdp/benchmark/bench_af_xdp_frame build_ipv4_udp --packet-size 1200
+```
+
+Example results for a 1200-byte payload (`--quick`, 1,000 measured iterations):
+
+| Benchmark | Time per operation | Operations per second |
+|---|---:|---:|
+| IPv4/UDP frame parsing | 39.39 ns | 25.39 million |
+| VLAN IPv4/UDP frame parsing | 39.12 ns | 25.56 million |
+| IPv4/UDP frame construction | 179.17 ns | 5.58 million |
+| IPv4 header checksum | 34.90 ns | 28.65 million |
+
+These are smoke-run results from one development machine, not guaranteed performance targets. Use a non-quick run with CPU affinity and frequency scaling controlled for comparative measurements.
 
 ## build boringSSL
 ```
@@ -91,10 +158,45 @@ sudo make install
 sudo ldconfig
 ```
 
+## build libxdp-dev
+```
+git clone --recurse-submodules https://github.com/xdp-project/xdp-tools.git
+cd xdp-tools
+
+# Fetch all tags and update submodules
+git fetch --tags
+git submodule update --init --recursive
+
+# Find the latest release tag
+git tag -l "v*" | tail -n 5
+
+# Checkout the latest stable release (e.g., v1.4.2)
+git checkout v1.4.2
+
+# Ensure submodules match the selected release tag
+git submodule update --init --recursive
+
+# Clean previous build artifacts
+make clean
+
+# Run configure script to generate build configuration
+./configure
+
+# Build and install
+make
+sudo make install
+
+# libbpf first (libxdp depends on it)
+sudo make -C lib/libbpf/src install PREFIX=/usr/local LIBDIR=/usr/local/lib
+
+# then libxdp
+sudo make -C lib/libxdp install PREFIX=/usr/local LIBDIR=/usr/local/lib
+```
+
 ## build mezon sfu
 ```
 mkdir build && cd build
-cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Release -DSFU_DIAG_LOG=ON
+cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSFU_DIAG_LOG=ON
 make -j$(nproc)
 ctest --output-on-failure
 ```
@@ -113,7 +215,7 @@ The compiled binary will be generated at `./build/mezon-sfu`.
 * Set publish_host to `127.0.0.1` for local testing.
 * Set this to your server's **external public IP** (e.g., `203.0.113.88`) when deploying to a remote host.
 
-#### running both signaling & media
+#### running sfu
 
 Best for local development or single-server environments.
 
