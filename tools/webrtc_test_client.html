@@ -1119,6 +1119,14 @@
                         }
                     }
 
+                    // Apply codec preferences for every server offer. Screen-share
+                    // renegotiation often occurs after localTracksAdded is already true,
+                    // so enableSvcForVideoSender() is not called again in that path.
+                    const cameraTc = pc.getTransceivers().find((t) => t.mid === "1");
+                    const screenTc = pc.getTransceivers().find((t) => t.mid === "2");
+                    if (cameraTc) forceVideoCodec(cameraTc, CAMERA_CODEC);
+                    if (screenTc) forceVideoCodec(screenTc, SCREEN_CODEC);
+
                     const answer = await pc.createAnswer();
                     /* Camera (mid:1) is VP8, screen share (mid:2) is VP9 L1T3. */
                     const mungedSdp = mungeVideoBitrates(answer.sdp);
