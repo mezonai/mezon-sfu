@@ -14,25 +14,68 @@ typedef struct {
   uint16_t encapsulated_proto;
 } sfu_vlan_header_t;
 
-uint16_t sfu_af_xdp_checksum(const void *data, size_t len) {
-  if (!data && len != 0) {
-    return 0;
-  }
+typedef struct {
+  uint32_t sum;
+  uint8_t high_byte;
+  bool odd;
+} sfu_checksum_state_t;
 
+static void checksum_add(sfu_checksum_state_t *state, const void *data, size_t len) {
   const uint8_t *bytes = data;
-  uint32_t sum = 0;
+  if (state->odd && len != 0) {
+    state->sum += ((uint32_t)state->high_byte << 8) | *bytes++;
+    len--;
+    state->odd = false;
+  }
   while (len >= 2) {
-    sum += ((uint32_t)bytes[0] << 8) | bytes[1];
+    state->sum += ((uint32_t)bytes[0] << 8) | bytes[1];
     bytes += 2;
     len -= 2;
   }
   if (len != 0) {
-    sum += (uint32_t)bytes[0] << 8;
+    state->high_byte = bytes[0];
+    state->odd = true;
   }
-  while (sum >> 16) {
-    sum = (sum & 0xffffu) + (sum >> 16);
+}
+
+static uint16_t checksum_finish(sfu_checksum_state_t *state) {
+  if (state->odd) {
+    state->sum += (uint32_t)state->high_byte << 8;
   }
-  return htons((uint16_t)~sum);
+  while (state->sum >> 16) {
+    state->sum = (state->sum & 0xffffu) + (state->sum >> 16);
+  }
+  return htons((uint16_t)~state->sum);
+}
+
+static uint16_t udp_checksum(const struct iphdr *ip, const void *udp, uint16_t udp_len) {
+  sfu_checksum_state_t state = {0};
+  uint8_t protocol[2] = {0, IPPROTO_UDP};
+  uint16_t network_len = htons(udp_len);
+  checksum_add(&state, &ip->saddr, sizeof(ip->saddr));
+  checksum_add(&state, &ip->daddr, sizeof(ip->daddr));
+  checksum_add(&state, protocol, sizeof(protocol));
+  checksum_add(&state, &network_len, sizeof(network_len));
+  checksum_add(&state, udp, udp_len);
+  return checksum_finish(&state);
+}
+
+uint16_t sfu_af_xdp_checksum(const void *data, size_t len) {
+  if (!data && len != 0) {
+    return 0;
+  }
+  sfu_checksum_state_t state = {0};
+  checksum_add(&state, data, len);
+  return checksum_finish(&state);
+}
+
+bool sfu_af_xdp_partition_frames(uint32_t total, uint32_t *rx, uint32_t *tx) {
+  if (!rx || !tx || total < 8u || (total & (total - 1u)) != 0) {
+    return false;
+  }
+  *rx = total / 2u;
+  *tx = total / 2u;
+  return true;
 }
 
 bool sfu_af_xdp_parse_frame(uint8_t *frame, uint32_t frame_len, uint32_t frame_capacity, uint16_t media_port,
@@ -67,14 +110,16 @@ bool sfu_af_xdp_parse_frame(uint8_t *frame, uint32_t frame_len, uint32_t frame_c
   uint32_t ihl = (uint32_t)ip.ihl * 4u;
   uint32_t ip_total_len = ntohs(ip.tot_len);
   if (ip.version != 4 || ihl < sizeof(ip) || ip_total_len < ihl + sizeof(struct udphdr) || frame_len < offset + ihl ||
-      ip_total_len > frame_len - offset || ip.protocol != IPPROTO_UDP || (ntohs(ip.frag_off) & SFU_AF_XDP_IPV4_FRAGMENT_MASK)) {
+      ip_total_len > frame_len - offset || ip.protocol != IPPROTO_UDP || (ntohs(ip.frag_off) & SFU_AF_XDP_IPV4_FRAGMENT_MASK) ||
+      sfu_af_xdp_checksum(frame + offset, ihl) != 0) {
     return false;
   }
 
   struct udphdr udp;
   memcpy(&udp, frame + offset + ihl, sizeof(udp));
   uint32_t udp_len = ntohs(udp.len);
-  if (udp_len <= sizeof(udp) || udp_len > ip_total_len - ihl || offset + ihl + udp_len > frame_len || ntohs(udp.dest) != media_port) {
+  if (udp_len <= sizeof(udp) || udp_len > ip_total_len - ihl || offset + ihl + udp_len > frame_len || ntohs(udp.dest) != media_port ||
+      (udp.check != 0 && udp_checksum(&ip, frame + offset + ihl, (uint16_t)udp_len) != 0)) {
     return false;
   }
 
@@ -119,9 +164,15 @@ bool sfu_af_xdp_build_frame(uint8_t *frame, uint32_t frame_capacity, const sfu_a
   memset(&udp, 0, sizeof(udp));
   udp.source = params->source_port;
   udp.dest = params->destination_port;
-  udp.len = htons((uint16_t)(sizeof(udp) + params->payload_len));
+  uint16_t udp_len = (uint16_t)(sizeof(udp) + params->payload_len);
+  udp.len = htons(udp_len);
   memcpy(frame + sizeof(eth) + sizeof(ip), &udp, sizeof(udp));
   memcpy(frame + SFU_AF_XDP_FRAME_HEADER_SIZE, params->payload, params->payload_len);
+  udp.check = udp_checksum(&ip, frame + sizeof(eth) + sizeof(ip), udp_len);
+  if (udp.check == 0) {
+    udp.check = htons(0xffffu);
+  }
+  memcpy(frame + sizeof(eth) + sizeof(ip), &udp, sizeof(udp));
 
   *out_len = SFU_AF_XDP_FRAME_HEADER_SIZE + params->payload_len;
   return true;

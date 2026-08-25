@@ -69,10 +69,12 @@ int sfu_xdp_redirect(struct xdp_md *ctx) {
 
   __u32 zero = 0;
   struct sfu_xdp_config *config = bpf_map_lookup_elem(&config_map, &zero);
-  if (!config || ctx->rx_queue_index != config->queue_id || udp->dest != config->media_port)
+  if (!config || udp->dest != config->media_port)
     return XDP_PASS;
+  if (ctx->rx_queue_index != config->queue_id)
+    return XDP_DROP;
 
-  return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS);
+  return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_DROP);
 }
 
 char LICENSE[] SEC("license") = "GPL";

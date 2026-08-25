@@ -147,16 +147,32 @@ static void *scheduler_thread_main(void *arg) {
     }
   }
 
-  for (unsigned pass = 0; pass < 2500; pass++) {
+  unsigned idle_passes = 0;
+  uint64_t drain_deadline_us = sfu_now_us() + 5000000ULL;
+  bool canceling = false;
+  while (idle_passes < 2) {
+    bool workers_finished = true;
     bool pending = false;
     unsigned work = 0;
     for (uint32_t i = 0; i < s->worker_count; i++) {
+      workers_finished &= sfu_worker_drain_finished(&s->workers[i]);
       pending |= sfu_ring_outstanding_sends(&s->workers[i].send_ring) > 0;
       work += sfu_ring_drain_kernel_buffer_returns(&s->recv_ring, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
       work += sfu_ring_backend_service(&s->recv_ring, &s->workers[i].send_ring, 1, SFU_DISPATCH_REAP_BATCH);
     }
-    if (!pending) {
-      break;
+    if (!canceling && sfu_now_us() >= drain_deadline_us) {
+      canceling = true;
+      SFU_LOG_WARN("scheduler: send drain deadline reached; canceling retained sends");
+    }
+    if (canceling) {
+      for (uint32_t i = 0; i < s->worker_count; i++) {
+        work += sfu_ring_backend_cancel(&s->workers[i].send_ring, 1);
+      }
+    }
+    if (workers_finished && !pending && work == 0) {
+      idle_passes++;
+    } else {
+      idle_passes = 0;
     }
     if (!work) {
       usleep(SFU_DISPATCH_IDLE_SLEEP_MIN_US);

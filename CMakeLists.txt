@@ -9,6 +9,7 @@ option(SFU_ENABLE_ASAN "Build with AddressSanitizer" OFF)
 option(SFU_ENABLE_TSAN "Build with ThreadSanitizer" OFF)
 option(SFU_DIAG_LOG "Compile in diagnostic logging for the SRTP key-desync investigation (ON = verbose drops/dumps, OFF = silent)" ON)
 option(USE_AF_XDP "Use AF_XDP instead of io_uring for media I/O" ON)
+option(SFU_ENABLE_PRIVILEGED_TESTS "Register privileged network integration tests" OFF)
 
 if(SFU_DIAG_LOG)
   add_compile_definitions(SFU_DIAG_LOG=1)

@@ -77,8 +77,11 @@ typedef struct {
   uint32_t frame_count;
   uint32_t frame_size;
   uint32_t rx_frame_count;
+  uint32_t tx_frame_count;
   uint32_t queue_id;
   uint32_t xdp_flags;
+  uint32_t xdp_mode_flags;
+  uint32_t xdp_program_id;
   int socket_fd;
   int ifindex;
   int xsks_map_fd;
@@ -98,6 +101,12 @@ static uint64_t monotonic_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static bool interface_queue_exists(const char *interface_name, uint32_t queue_id) {
+  char path[256];
+  int written = snprintf(path, sizeof(path), "/sys/class/net/%s/queues/rx-%u", interface_name, queue_id);
+  return written > 0 && (size_t)written < sizeof(path) && access(path, F_OK) == 0;
 }
 
 static int read_interface_addresses(sfu_xdp_device_t *d) {
@@ -191,13 +200,21 @@ static int attach_xdp_program(sfu_xdp_device_t *d, const char *mode) {
     return -1;
   }
 
+  int program_fd = bpf_program__fd(program);
+  struct bpf_prog_info program_info;
+  uint32_t program_info_len = sizeof(program_info);
+  memset(&program_info, 0, sizeof(program_info));
+  if (bpf_obj_get_info_by_fd(program_fd, &program_info, &program_info_len) != 0 || program_info.id == 0) {
+    return -1;
+  }
+
   uint32_t flags = XDP_FLAGS_UPDATE_IF_NOEXIST;
   if (strcmp(mode, "skb") == 0) {
     flags |= XDP_FLAGS_SKB_MODE;
   } else {
     flags |= XDP_FLAGS_DRV_MODE;
   }
-  int rc = bpf_xdp_attach(d->ifindex, bpf_program__fd(program), flags, NULL);
+  int rc = bpf_xdp_attach(d->ifindex, program_fd, flags, NULL);
   if (rc != 0 && strcmp(mode, "auto") == 0) {
     flags = XDP_FLAGS_UPDATE_IF_NOEXIST | XDP_FLAGS_SKB_MODE;
     rc = bpf_xdp_attach(d->ifindex, bpf_program__fd(program), flags, NULL);
@@ -206,7 +223,13 @@ static int attach_xdp_program(sfu_xdp_device_t *d, const char *mode) {
     return -1;
   }
   d->xdp_flags = flags;
+  d->xdp_mode_flags = flags & (XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE);
+  d->xdp_program_id = program_info.id;
   d->xdp_attached = true;
+  uint32_t attached_program_id = 0;
+  if (bpf_xdp_query_id(d->ifindex, d->xdp_mode_flags, &attached_program_id) != 0 || attached_program_id != d->xdp_program_id) {
+    return -1;
+  }
   d->xsks_map_fd = bpf_map__fd(xsks);
 
   uint32_t key = 0;
@@ -251,11 +274,14 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
   g_xdp.media_port = media_port;
   g_xdp.frame_count = frame_count;
   g_xdp.frame_size = frame_size;
-  g_xdp.rx_frame_count = frame_count * 3u / 4u;
+  if (!sfu_af_xdp_partition_frames(frame_count, &g_xdp.rx_frame_count, &g_xdp.tx_frame_count)) {
+    SFU_LOG_ERROR("AF_XDP: frame_count must be a power of two >= 8 (got %u)", frame_count);
+    goto fail;
+  }
   snprintf(g_xdp.interface_name, sizeof(g_xdp.interface_name), "%s", interface_name);
   g_xdp.ifindex = if_nametoindex(interface_name);
-  if (!g_xdp.ifindex || read_interface_addresses(&g_xdp) != 0) {
-    SFU_LOG_ERROR("AF_XDP: cannot resolve interface '%s'", interface_name);
+  if (!g_xdp.ifindex || !interface_queue_exists(interface_name, queue_id) || read_interface_addresses(&g_xdp) != 0) {
+    SFU_LOG_ERROR("AF_XDP: cannot resolve interface '%s' queue %u", interface_name, queue_id);
     goto fail;
   }
   read_default_gateway(&g_xdp);
@@ -266,7 +292,7 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
   }
   memset(g_xdp.umem_area, 0, umem_size);
   g_xdp.rx_free = SFU_CALLOC(g_xdp.rx_frame_count, sizeof(*g_xdp.rx_free));
-  g_xdp.tx_free = SFU_CALLOC(frame_count - g_xdp.rx_frame_count, sizeof(*g_xdp.tx_free));
+  g_xdp.tx_free = SFU_CALLOC(g_xdp.tx_frame_count, sizeof(*g_xdp.tx_free));
   g_xdp.frames = SFU_CALLOC(frame_count, sizeof(*g_xdp.frames));
   if (!g_xdp.rx_free || !g_xdp.tx_free || !g_xdp.frames) {
     goto fail;
@@ -274,7 +300,7 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
 
   struct xsk_umem_config umem_config = {
       .fill_size = g_xdp.rx_frame_count,
-      .comp_size = frame_count - g_xdp.rx_frame_count,
+      .comp_size = g_xdp.tx_frame_count,
       .frame_size = frame_size,
       .frame_headroom = 0,
       .flags = 0,
@@ -289,7 +315,7 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
 
   struct xsk_socket_config socket_config = {
       .rx_size = g_xdp.rx_frame_count,
-      .tx_size = frame_count - g_xdp.rx_frame_count,
+      .tx_size = g_xdp.tx_frame_count,
       .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
       .xdp_flags = g_xdp.xdp_flags & (XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE),
       .bind_flags = XDP_USE_NEED_WAKEUP,
@@ -313,7 +339,8 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
   }
   refill_rx();
   g_xdp.initialized = true;
-  SFU_LOG_INFO("AF_XDP initialized on %s queue %u: %u frames x %u bytes", interface_name, queue_id, frame_count, frame_size);
+  SFU_LOG_INFO("AF_XDP initialized on %s queue %u: %u frames x %u bytes (rx=%u tx=%u)", interface_name, queue_id, frame_count, frame_size,
+               g_xdp.rx_frame_count, g_xdp.tx_frame_count);
   return 0;
 
 fail:
@@ -332,7 +359,12 @@ void sfu_ring_backend_destroy(void) {
     xsk_umem__delete(g_xdp.umem);
   }
   if (g_xdp.xdp_attached) {
-    (void)bpf_xdp_detach(g_xdp.ifindex, g_xdp.xdp_flags, NULL);
+    uint32_t current_program_id = 0;
+    if (bpf_xdp_query_id(g_xdp.ifindex, g_xdp.xdp_mode_flags, &current_program_id) == 0 && current_program_id == g_xdp.xdp_program_id) {
+      (void)bpf_xdp_detach(g_xdp.ifindex, g_xdp.xdp_mode_flags, NULL);
+    } else if (current_program_id != 0) {
+      SFU_LOG_WARN("AF_XDP: not detaching XDP program %u; owned program was %u", current_program_id, g_xdp.xdp_program_id);
+    }
   }
   if (g_xdp.bpf_object) {
     bpf_object__close(g_xdp.bpf_object);
@@ -533,12 +565,18 @@ unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *fr
   return count;
 }
 
-static bool build_tx_frame(uint32_t frame_id, sfu_packet_t *pkt, uint32_t *out_length) {
+typedef enum {
+  SFU_AF_XDP_TX_BUILD_ERROR = -1,
+  SFU_AF_XDP_TX_KERNEL_FALLBACK = 0,
+  SFU_AF_XDP_TX_FRAME_READY = 1,
+} sfu_af_xdp_tx_build_result_t;
+
+static sfu_af_xdp_tx_build_result_t build_tx_frame(uint32_t frame_id, sfu_packet_t *pkt, uint32_t *out_length) {
   struct sockaddr_in *destination = (struct sockaddr_in *)&pkt->peer_addr;
   uint8_t destination_mac[ETH_ALEN];
   if (lookup_neighbor(&destination->sin_addr, destination_mac) != 0) {
     sfu_metric_inc("af_xdp_neighbor_miss");
-    return false;
+    return SFU_AF_XDP_TX_KERNEL_FALLBACK;
   }
 
   uint8_t *frame = xsk_umem__get_data(g_xdp.umem_area, (uint64_t)frame_id * g_xdp.frame_size);
@@ -552,7 +590,21 @@ static bool build_tx_frame(uint32_t frame_id, sfu_packet_t *pkt, uint32_t *out_l
   };
   memcpy(params.source_mac, g_xdp.local_mac, sizeof(params.source_mac));
   memcpy(params.destination_mac, destination_mac, sizeof(params.destination_mac));
-  return sfu_af_xdp_build_frame(frame, g_xdp.frame_size, &params, out_length);
+  return sfu_af_xdp_build_frame(frame, g_xdp.frame_size, &params, out_length) ? SFU_AF_XDP_TX_FRAME_READY : SFU_AF_XDP_TX_BUILD_ERROR;
+}
+
+static int kernel_fallback_send(sfu_packet_t *pkt) {
+  ssize_t sent = sendto(g_xdp.socket_fd, pkt->data, pkt->len, MSG_DONTWAIT, (const struct sockaddr *)&pkt->peer_addr, pkt->peer_addr_len);
+  if (sent == (ssize_t)pkt->len) {
+    sfu_metric_inc("af_xdp_tx_kernel_fallback");
+    return 1;
+  }
+  if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOBUFS)) {
+    sfu_metric_inc("af_xdp_tx_kernel_fallback_backpressure");
+    return 0;
+  }
+  sfu_metric_inc("af_xdp_tx_kernel_fallback_error");
+  return -1;
 }
 
 static unsigned complete_waiting_frames(void) {
@@ -601,34 +653,53 @@ unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_ring, 
   for (uint32_t ring_index = 0; ring_index < send_ring_count; ring_index++) {
     sfu_ring_t *ring = &send_ring[ring_index];
     for (unsigned n = 0; n < max_count && g_xdp.tx_free_count > 0; n++) {
-      void *item;
-      if (!sfu_spsc_ring_pop(&ring->tx_pending, &item)) {
-        break;
+      sfu_packet_t *pkt = ring->tx_retry;
+      if (!pkt) {
+        void *item;
+        if (!sfu_spsc_ring_pop(&ring->tx_pending, &item)) {
+          break;
+        }
+        pkt = item;
+        ring->tx_retry = pkt;
       }
-      sfu_packet_t *pkt = item;
+
       uint32_t frame = (uint32_t)g_xdp.tx_free[--g_xdp.tx_free_count];
-      uint32_t length;
-      if (!build_tx_frame(frame, pkt, &length)) {
-        g_xdp.tx_free[g_xdp.tx_free_count++] = frame;
-        if (!sfu_spsc_ring_push(&ring->tx_completed, pkt)) {
+      uint32_t length = 0;
+      bool delivered_by_fallback = false;
+      sfu_af_xdp_tx_build_result_t build_result = build_tx_frame(frame, pkt, &length);
+      if (build_result == SFU_AF_XDP_TX_KERNEL_FALLBACK) {
+        int fallback = kernel_fallback_send(pkt);
+        if (fallback == 0) {
+          g_xdp.tx_free[g_xdp.tx_free_count++] = frame;
+          break;
+        }
+        if (fallback > 0) {
+          delivered_by_fallback = true;
+          sfu_metric_inc("af_xdp_tx_kernel_fallback_completed");
+        }
+        build_result = SFU_AF_XDP_TX_BUILD_ERROR;
+      }
+
+      if (build_result == SFU_AF_XDP_TX_BUILD_ERROR) {
+        if (!delivered_by_fallback) {
+          sfu_metric_inc("af_xdp_tx_permanent_failure");
+        }
+        ring->tx_retry = NULL;
+        if (sfu_spsc_ring_push(&ring->tx_completed, pkt)) {
+          g_xdp.tx_free[g_xdp.tx_free_count++] = frame;
+        } else {
           g_xdp.frames[frame].packet = pkt;
           g_xdp.frames[frame].origin = ring;
           g_xdp.frames[frame].state = SFU_XDP_FRAME_TX_COMPLETE_WAIT;
-          g_xdp.tx_free_count--;
         }
         work++;
         continue;
       }
+
       uint32_t tx_index;
       if (xsk_ring_prod__reserve(&g_xdp.tx, 1, &tx_index) != 1) {
         g_xdp.tx_free[g_xdp.tx_free_count++] = frame;
-        if (!sfu_spsc_ring_push(&ring->tx_completed, pkt)) {
-          g_xdp.frames[frame].packet = pkt;
-          g_xdp.frames[frame].origin = ring;
-          g_xdp.frames[frame].state = SFU_XDP_FRAME_TX_COMPLETE_WAIT;
-          g_xdp.tx_free_count--;
-        }
-        sfu_metric_inc("af_xdp_tx_ring_full");
+        sfu_metric_inc("af_xdp_tx_ring_backpressure");
         break;
       }
       struct xdp_desc *desc = xsk_ring_prod__tx_desc(&g_xdp.tx, tx_index);
@@ -637,12 +708,55 @@ unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_ring, 
       g_xdp.frames[frame].packet = pkt;
       g_xdp.frames[frame].origin = ring;
       g_xdp.frames[frame].state = SFU_XDP_FRAME_TX_KERNEL;
+      ring->tx_retry = NULL;
       xsk_ring_prod__submit(&g_xdp.tx, 1);
       work++;
     }
   }
   if (work && xsk_ring_prod__needs_wakeup(&g_xdp.tx)) {
     (void)sendto(xsk_socket__fd(g_xdp.xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+  }
+  return work;
+}
+
+unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_count) {
+  if (!g_xdp.initialized || !send_rings) {
+    return 0;
+  }
+
+  unsigned work = 0;
+  for (uint32_t ring_index = 0; ring_index < send_ring_count; ring_index++) {
+    sfu_ring_t *ring = &send_rings[ring_index];
+    if (!ring->tx_retry) {
+      void *item = NULL;
+      if (sfu_spsc_ring_pop(&ring->tx_pending, &item)) {
+        ring->tx_retry = item;
+      }
+    }
+    if (ring->tx_retry && sfu_spsc_ring_push(&ring->tx_completed, ring->tx_retry)) {
+      ring->tx_retry = NULL;
+      sfu_metric_inc("af_xdp_tx_canceled_shutdown");
+      work++;
+    }
+  }
+
+  for (uint32_t frame = g_xdp.rx_frame_count; frame < g_xdp.frame_count; frame++) {
+    sfu_xdp_frame_meta_t *meta = &g_xdp.frames[frame];
+    if (!meta->packet || !meta->origin) {
+      continue;
+    }
+    if (!sfu_spsc_ring_push(&meta->origin->tx_completed, meta->packet)) {
+      continue;
+    }
+    bool kernel_owned = meta->state == SFU_XDP_FRAME_TX_KERNEL;
+    meta->packet = NULL;
+    meta->origin = NULL;
+    meta->state = SFU_XDP_FRAME_TX_FREE;
+    if (!kernel_owned) {
+      g_xdp.tx_free[g_xdp.tx_free_count++] = frame;
+    }
+    sfu_metric_inc("af_xdp_tx_canceled_shutdown");
+    work++;
   }
   return work;
 }

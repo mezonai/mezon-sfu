@@ -35,6 +35,20 @@ static uint32_t build_fixture(uint8_t *frame, uint32_t capacity, const uint8_t *
   return frame_len;
 }
 
+static void test_frame_partition(void) {
+  uint32_t rx = 1;
+  uint32_t tx = 2;
+  assert(sfu_af_xdp_partition_frames(8, &rx, &tx));
+  assert(rx == 4 && tx == 4);
+  assert(sfu_af_xdp_partition_frames(16384, &rx, &tx));
+  assert(rx == 8192 && tx == 8192);
+  assert(!sfu_af_xdp_partition_frames(0, &rx, &tx));
+  assert(!sfu_af_xdp_partition_frames(4, &rx, &tx));
+  assert(!sfu_af_xdp_partition_frames(12, &rx, &tx));
+  assert(!sfu_af_xdp_partition_frames(8, NULL, &tx));
+  assert(!sfu_af_xdp_partition_frames(8, &rx, NULL));
+}
+
 static void test_checksum(void) {
   uint8_t odd[] = {0x01, 0x02, 0x03};
   assert(ntohs(sfu_af_xdp_checksum(odd, sizeof(odd))) == 0xfbfd);
@@ -114,6 +128,47 @@ static void test_vlan_and_ip_options(void) {
   assert(parsed.header_len == SFU_AF_XDP_FRAME_HEADER_SIZE + 4);
 }
 
+static void test_udp_checksums(void) {
+  uint8_t storage[FRAME_CAPACITY + 1];
+  uint8_t payload[33];
+  for (uint32_t i = 0; i < sizeof(payload); i++) {
+    payload[i] = (uint8_t)(i * 7u);
+  }
+
+  uint8_t *frame = storage + 1;
+  uint32_t frame_len = build_fixture(frame, FRAME_CAPACITY, payload, sizeof(payload));
+  struct udphdr udp;
+  memcpy(&udp, frame + SFU_AF_XDP_ETH_HEADER_SIZE + SFU_AF_XDP_IPV4_HEADER_SIZE, sizeof(udp));
+  assert(udp.check != 0);
+
+  sfu_af_xdp_parse_result_t parsed;
+  assert(sfu_af_xdp_parse_frame(frame, frame_len, FRAME_CAPACITY, TEST_PORT, &parsed));
+
+  frame[frame_len - 1] ^= 1u;
+  assert(!sfu_af_xdp_parse_frame(frame, frame_len, FRAME_CAPACITY, TEST_PORT, &parsed));
+  frame[frame_len - 1] ^= 1u;
+
+  uint16_t zero = 0;
+  memcpy(frame + SFU_AF_XDP_ETH_HEADER_SIZE + SFU_AF_XDP_IPV4_HEADER_SIZE + 6, &zero, sizeof(zero));
+  frame[frame_len - 1] ^= 1u;
+  assert(sfu_af_xdp_parse_frame(frame, frame_len, FRAME_CAPACITY, TEST_PORT, &parsed));
+
+  uint8_t two_byte_payload[2];
+  bool found_encoded_zero = false;
+  for (uint32_t value = 0; value <= UINT16_MAX; value++) {
+    two_byte_payload[0] = (uint8_t)(value >> 8);
+    two_byte_payload[1] = (uint8_t)value;
+    frame_len = build_fixture(frame, FRAME_CAPACITY, two_byte_payload, sizeof(two_byte_payload));
+    memcpy(&udp, frame + SFU_AF_XDP_ETH_HEADER_SIZE + SFU_AF_XDP_IPV4_HEADER_SIZE, sizeof(udp));
+    if (udp.check == htons(0xffffu)) {
+      found_encoded_zero = true;
+      assert(sfu_af_xdp_parse_frame(frame, frame_len, FRAME_CAPACITY, TEST_PORT, &parsed));
+      break;
+    }
+  }
+  assert(found_encoded_zero);
+}
+
 static void test_rejections(void) {
   uint8_t payload[16];
   uint8_t frame[FRAME_CAPACITY];
@@ -131,6 +186,10 @@ static void test_rejections(void) {
   memcpy(broken, frame, frame_len);
   uint16_t non_ip = htons(ETH_P_ARP);
   memcpy(broken + 12, &non_ip, sizeof(non_ip));
+  assert(!sfu_af_xdp_parse_frame(broken, frame_len, sizeof(broken), TEST_PORT, &parsed));
+
+  memcpy(broken, frame, frame_len);
+  broken[SFU_AF_XDP_ETH_HEADER_SIZE + 8] ^= 1u;
   assert(!sfu_af_xdp_parse_frame(broken, frame_len, sizeof(broken), TEST_PORT, &parsed));
 
   memcpy(broken, frame, frame_len);
@@ -176,9 +235,11 @@ static void test_build_capacity(void) {
 }
 
 int main(void) {
+  test_frame_partition();
   test_checksum();
   test_build_and_parse();
   test_vlan_and_ip_options();
+  test_udp_checksums();
   test_rejections();
   test_build_capacity();
   printf("test_af_xdp_frame: OK\n");

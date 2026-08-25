@@ -406,4 +406,10 @@ unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_rings,
   return 0;
 }
 
+unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_count) {
+  (void)send_rings;
+  (void)send_ring_count;
+  return 0;
+}
+
 uint32_t sfu_ring_outstanding_sends(const sfu_ring_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }

@@ -39,32 +39,32 @@ make -j$(nproc)
 sudo make install
 ```
 
-## build liburing
-```
-git clone https://github.com/axboe/liburing.git
-cd liburing
+## default AF_XDP build
 
-./configure
-make -j$(nproc)
-sudo make install
-```
-
-The default build uses io_uring:
+The default build uses AF_XDP (`USE_AF_XDP=ON`). Install clang, libxdp, libbpf, and matching Linux headers:
 
 ```sh
+sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
 cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-## optional AF_XDP backend
+## io_uring fallback
 
-AF_XDP replaces io_uring when the project is configured with `USE_AF_XDP=ON`. Install clang, libxdp, libbpf, and the matching Linux headers, then build with:
+To build with io_uring instead, install liburing and disable AF_XDP explicitly:
 
 ```sh
-sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
-cmake -S . -B build-af-xdp -DUSE_AF_XDP=ON
-cmake --build build-af-xdp -j$(nproc)
+git clone https://github.com/axboe/liburing.git
+cd liburing
+./configure
+make -j$(nproc)
+sudo make install
+cd -
+cmake -S . -B build-uring -DUSE_AF_XDP=OFF
+cmake --build build-uring -j$(nproc)
 ```
+
+## AF_XDP runtime configuration
 
 Configure the interface and hardware queue in `config.ini`:
 
@@ -77,13 +77,25 @@ frame_size = 4096
 mode = native  # native, skb, or auto
 ```
 
-The AF_XDP binary requires permission to load BPF programs and administer the selected interface (normally root or appropriate `CAP_BPF`/`CAP_NET_ADMIN` capabilities). It currently supports IPv4 UDP, does not reassemble fragments, and sends frames only when the destination or gateway already has a reachable neighbor entry. Configure RSS/flow steering so the media UDP port reaches the selected queue. The loader refuses to replace an existing XDP program.
+The AF_XDP binary requires permission to load BPF programs and administer the selected interface (normally root or appropriate `CAP_BPF`/`CAP_NET_ADMIN` capabilities). It supports IPv4 UDP and does not reassemble fragments. The configured frame pool is split evenly into power-of-two RX and TX rings. Configure RSS/flow steering so the media UDP port reaches the selected queue; matching media packets on another queue are dropped rather than passed to an undrained UDP socket. On a cold neighbour entry, TX temporarily falls back to the bound nonblocking UDP socket so the kernel can resolve ARP, then direct AF_XDP transmission resumes. The loader refuses to replace an existing XDP program and cleanup detaches only the program attached by this process.
+
+For a two-tab Chrome test, do not advertise `127.0.0.1` while AF_XDP is attached to `eth0`: loopback traffic never reaches that XDP hook. Set `public_host` to the selected interface address, use a non-loopback interface, and verify the media port is steered to `queue_id`. A single-queue veth pair with `mode = skb` is the safest first integration environment.
 
 The AF_XDP frame and software-ring unit tests are CPU-only and do not require root or a network interface:
 
 ```sh
-ctest --test-dir build-af-xdp --output-on-failure -R 'af_xdp_(frame|ring)'
+ctest --test-dir build --output-on-failure -R 'af_xdp_(frame|ring)'
 ```
+
+A privileged veth/network-namespace smoke test is available but is not registered by default:
+
+```sh
+cmake -S . -B build-af-xdp-integration -DSFU_ENABLE_PRIVILEGED_TESTS=ON
+cmake --build build-af-xdp-integration -j$(nproc)
+sudo ctest --test-dir build-af-xdp-integration --output-on-failure -R af_xdp_veth_integration
+```
+
+The script uses a temporary single-queue veth pair in `skb` mode and cleans up its namespace, links, process, and XDP attachment on exit.
 
 Run the focused frame parser/builder benchmark with:
 

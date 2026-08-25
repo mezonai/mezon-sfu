@@ -88,8 +88,8 @@ int sfu_config_validate(const sfu_config_t *config) {
     SFU_LOG_ERROR("af_xdp_interface must not be empty in an AF_XDP build");
     return -1;
   }
-  if (config->af_xdp_frame_count == 0 || (config->af_xdp_frame_count & (config->af_xdp_frame_count - 1)) != 0) {
-    SFU_LOG_ERROR("af_xdp_frame_count must be a non-zero power of two (got %u)", config->af_xdp_frame_count);
+  if (config->af_xdp_frame_count < 8 || (config->af_xdp_frame_count & (config->af_xdp_frame_count - 1)) != 0) {
+    SFU_LOG_ERROR("af_xdp_frame_count must be a power of two >= 8 (got %u)", config->af_xdp_frame_count);
     return -1;
   }
   if (config->af_xdp_frame_size < config->packet_buf_size + 64u ||

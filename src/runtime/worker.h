@@ -45,6 +45,7 @@ typedef struct sfu_worker {
   sfu_scheduler_t *scheduler;
   pthread_t thread;
   _Atomic uint64_t generation;
+  _Atomic bool drain_finished;
   int64_t last_twcc_flush_us;
   int64_t last_remb_scan_us;
 #ifdef SFU_DIAG_LOG
@@ -68,6 +69,7 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
 void sfu_worker_destroy(sfu_worker_t *w);
 int sfu_worker_start(sfu_worker_t *w);
 void sfu_worker_join(sfu_worker_t *w);
+bool sfu_worker_drain_finished(const sfu_worker_t *w);
 bool sfu_worker_register_session(sfu_worker_t *w, sfu_peer_session_t *s);
 void sfu_worker_unregister_session(sfu_worker_t *w, sfu_peer_session_t *s);
 

@@ -16,6 +16,7 @@
 typedef struct sfu_ring {
   sfu_spsc_ring_t tx_pending;
   sfu_spsc_ring_t tx_completed;
+  sfu_packet_t *tx_retry;
   _Atomic uint32_t outstanding_sends;
   uint32_t queue_capacity;
   int fd;
@@ -56,6 +57,7 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
                           const char *xdp_mode);
 void sfu_ring_backend_destroy(void);
 unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_rings, uint32_t send_ring_count, unsigned max_count);
+unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_count);
 
 int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entries, uint32_t buf_count, uint32_t buf_size, int bgid, bool with_recv_bufs);
 void sfu_ring_destroy(sfu_ring_t *r);
