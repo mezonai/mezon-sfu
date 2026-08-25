@@ -1,7 +1,7 @@
 # mezon-sfu
 A high-performance optimized for HD meetings and large-scale deployment.
 
-The SFU core is built around a lock-free room execution model. Each room is processed by a dedicated isolated thread, ensuring deterministic packet routing without shared-state contention. Media packets are forwarded through a zero-copy pipeline powered by io_uring, enabling efficient fan-out to thousands of subscribers with minimal CPU overhead.
+The SFU core is built around a lock-free room execution model. Each room is processed by a dedicated isolated thread, ensuring deterministic packet routing without shared-state contention. Media packets are forwarded through a zero-copy pipeline powered AF_XDP (io_uring fallback), enabling efficient fan-out to thousands of subscribers with minimal CPU overhead.
 
 ## features
 
@@ -12,7 +12,7 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 * **Simple, Standalone Setup:** No external dependencies required to get running.
 * Lock-free fanout with hazard pointers
 * Full SVC temporal/spatial layer support
-* Modern io_uring zero-copy network stack, with an optional AF_XDP backend
+* Modern zero-copy network stack with AF_XDP backend and io_uring fallback
 * Standards-compliant GCC congestion control
 * **Push To Talk** PTT native support
 
