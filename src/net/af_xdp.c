@@ -267,6 +267,7 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
   memset(&g_xdp, 0, sizeof(g_xdp));
   g_xdp.xsks_map_fd = -1;
   if (!interface_name || !*interface_name || frame_count < 8 || frame_size < 2048) {
+    SFU_LOG_ERROR("AF_XDP: invalid param interface_name=%s, frame_count=%d, frame_size=%d", interface_name, frame_count, frame_size);
     return -1;
   }
   g_xdp.socket_fd = fd;
@@ -288,6 +289,7 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
 
   size_t umem_size = (size_t)frame_count * frame_size;
   if (posix_memalign(&g_xdp.umem_area, (size_t)getpagesize(), umem_size) != 0) {
+    SFU_LOG_ERROR("AF_XDP: posix_memalign error");
     goto fail;
   }
   memset(g_xdp.umem_area, 0, umem_size);
@@ -295,6 +297,7 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
   g_xdp.tx_free = SFU_CALLOC(g_xdp.tx_frame_count, sizeof(*g_xdp.tx_free));
   g_xdp.frames = SFU_CALLOC(frame_count, sizeof(*g_xdp.frames));
   if (!g_xdp.rx_free || !g_xdp.tx_free || !g_xdp.frames) {
+    SFU_LOG_ERROR("AF_XDP: invalid rx, tx free callback");
     goto fail;
   }
 
@@ -305,7 +308,9 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
       .frame_headroom = 0,
       .flags = 0,
   };
-  if (xsk_umem__create(&g_xdp.umem, g_xdp.umem_area, umem_size, &g_xdp.fill, &g_xdp.completion, &umem_config) != 0) {
+  int rc = xsk_umem__create(&g_xdp.umem, g_xdp.umem_area, umem_size, &g_xdp.fill, &g_xdp.completion, &umem_config);
+  if (rc != 0) {
+    SFU_LOG_ERROR("AF_XDP: xsk_umem__create failed: %s (%d)", strerror(-rc), rc);
     goto fail;
   }
   if (attach_xdp_program(&g_xdp, xdp_mode ? xdp_mode : "native") != 0) {
@@ -320,12 +325,14 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
       .xdp_flags = g_xdp.xdp_flags & (XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE),
       .bind_flags = XDP_USE_NEED_WAKEUP,
   };
-  if (xsk_socket__create(&g_xdp.xsk, interface_name, queue_id, g_xdp.umem, &g_xdp.rx, &g_xdp.tx, &socket_config) != 0) {
-    SFU_LOG_ERROR("AF_XDP: xsk_socket__create failed on %s queue %u: %s", interface_name, queue_id, strerror(errno));
+  int xsk_create_rc = xsk_socket__create(&g_xdp.xsk, interface_name, queue_id, g_xdp.umem, &g_xdp.rx, &g_xdp.tx, &socket_config);
+  if (xsk_create_rc != 0) {
+    SFU_LOG_ERROR("AF_XDP: xsk_socket__create failed on %s queue %u: %s (%d)", interface_name, queue_id, strerror(-xsk_create_rc), xsk_create_rc);
     goto fail;
   }
   int xsk_fd = xsk_socket__fd(g_xdp.xsk);
   if (bpf_map_update_elem(g_xdp.xsks_map_fd, &queue_id, &xsk_fd, BPF_ANY) != 0) {
+    SFU_LOG_ERROR("AF_XDP: can not call xsk_socket__fd");
     goto fail;
   }
 
@@ -339,8 +346,8 @@ int sfu_ring_backend_init(int fd, const char *interface_name, uint32_t queue_id,
   }
   refill_rx();
   g_xdp.initialized = true;
-  SFU_LOG_INFO("AF_XDP initialized on %s queue %u: %u frames x %u bytes (rx=%u tx=%u)", interface_name, queue_id, frame_count, frame_size,
-               g_xdp.rx_frame_count, g_xdp.tx_frame_count);
+  SFU_LOG_INFO("AF_XDP initialized on %s queue %u: %u frames x %u bytes (rx=%u tx=%u)", interface_name, queue_id, frame_count, frame_size, g_xdp.rx_frame_count,
+               g_xdp.tx_frame_count);
   return 0;
 
 fail:

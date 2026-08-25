@@ -158,10 +158,45 @@ sudo make install
 sudo ldconfig
 ```
 
+## build libxdp-dev
+```
+git clone --recurse-submodules https://github.com/xdp-project/xdp-tools.git
+cd xdp-tools
+
+# Fetch all tags and update submodules
+git fetch --tags
+git submodule update --init --recursive
+
+# Find the latest release tag
+git tag -l "v*" | tail -n 5
+
+# Checkout the latest stable release (e.g., v1.4.2)
+git checkout v1.4.2
+
+# Ensure submodules match the selected release tag
+git submodule update --init --recursive
+
+# Clean previous build artifacts
+make clean
+
+# Run configure script to generate build configuration
+./configure
+
+# Build and install
+make
+sudo make install
+
+# libbpf first (libxdp depends on it)
+sudo make -C lib/libbpf/src install PREFIX=/usr/local LIBDIR=/usr/local/lib
+
+# then libxdp
+sudo make -C lib/libxdp install PREFIX=/usr/local LIBDIR=/usr/local/lib
+```
+
 ## build mezon sfu
 ```
 mkdir build && cd build
-cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=Release -DSFU_DIAG_LOG=ON
+cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSFU_DIAG_LOG=ON
 make -j$(nproc)
 ctest --output-on-failure
 ```
@@ -180,7 +215,7 @@ The compiled binary will be generated at `./build/mezon-sfu`.
 * Set publish_host to `127.0.0.1` for local testing.
 * Set this to your server's **external public IP** (e.g., `203.0.113.88`) when deploying to a remote host.
 
-#### running both signaling & media
+#### running sfu
 
 Best for local development or single-server environments.
 
