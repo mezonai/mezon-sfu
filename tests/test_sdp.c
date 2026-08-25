@@ -135,9 +135,7 @@ static void limit_mock_snapshot(sfu_peer_session_t *session, uint32_t count) {
   assert(snap != NULL && count <= SFU_MAX_REMOTE_SLOTS);
   for (uint32_t i = count; i < SFU_MAX_REMOTE_SLOTS; i++) {
     sfu_receiver_chunk_t *chunk = snap->chunks[i >> SFU_RECEIVER_CHUNK_SHIFT];
-    if (chunk) {
-      chunk->occupied &= ~(1u << (i & SFU_RECEIVER_CHUNK_MASK));
-    }
+    if (chunk) chunk->occupied &= ~(1u << (i & SFU_RECEIVER_CHUNK_MASK));
   }
   snap->count = count;
 }
@@ -176,9 +174,7 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
     /* Free the snapshot directly: the mock remotes are stack-allocated, so
      * sfu_subscriptions_snapshot_release (which would sfu_session_release and
      * ultimately free them) cannot be used here. */
-    for (uint32_t i = 0; i < SFU_RECEIVER_CHUNK_COUNT; i++) {
-      free(snap->chunks[i]);
-    }
+    for (uint32_t i = 0; i < SFU_RECEIVER_CHUNK_COUNT; i++) free(snap->chunks[i]);
     free(snap);
   }
   pthread_mutex_destroy(&session->graph.lock);
@@ -246,8 +242,7 @@ static void test_screen_answer_parsing(void) {
 
 static void test_initial_offer_role_directions(void) {
   char offer[4096];
-  int len =
-      sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, SFU_VIDEO_CODEC_NONE, offer, sizeof(offer));
+  int len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=recvonly") == 3);
@@ -256,7 +251,7 @@ static void test_initial_offer_role_directions(void) {
   assert(count_occurrences(offer, "urn:ietf:params:rtp-hdrext:sdes:mid") == 3);
   assert(!contains(offer, "a=inactive"));
 
-  len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", true, SFU_VIDEO_CODEC_NONE, offer, sizeof(offer));
+  len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", true, offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=inactive") == 2);
@@ -278,7 +273,7 @@ static void test_renegotiation_offer_role_directions(void) {
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=recvonly") == 3);
   assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n"));
   assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 2);
   assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
   assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 2);
@@ -373,7 +368,8 @@ static void test_offer_uses_snapshot_remote_mid_bound(void) {
 
   char offer[4096];
   uint32_t exposed_remote_mid = 0;
-  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), &exposed_remote_mid);
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer),
+                                &exposed_remote_mid);
   assert(len > 0);
   offer[len] = '\0';
 
@@ -480,8 +476,9 @@ static void test_twcc_extmap_extraction(void) {
 }
 
 static void test_answer_media_is_scoped_by_mid_and_direction(void) {
-  extern bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc, uint8_t *video_pt,
-                                          uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id, uint8_t *twcc_send_extmap_id);
+  extern bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc,
+                                          uint8_t *video_pt, uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id,
+                                          uint8_t *twcc_send_extmap_id);
   const char *answer =
       "m=audio 7000 UDP/TLS/RTP/SAVPF 111\r\n"
       "a=mid:0\r\n"
@@ -523,16 +520,16 @@ static void test_answer_media_is_scoped_by_mid_and_direction(void) {
 }
 
 static void test_local_codec_offer_and_answer_contracts(void) {
-  extern bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc, uint8_t *video_pt,
-                                          uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id, uint8_t *twcc_send_extmap_id);
+  extern bool sfu_test_parse_answer_media(const char *sdp, size_t sdp_len, uint32_t *audio_ssrc, uint32_t *video_ssrc, uint32_t *rtx_ssrc,
+                                          uint8_t *video_pt, uint8_t *rtx_pt, sfu_video_codec_t *video_codec, uint8_t *twcc_recv_extmap_id,
+                                          uint8_t *twcc_send_extmap_id);
 
   char offer[4096];
-  int len =
-      sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, SFU_VIDEO_CODEC_NONE, offer, sizeof(offer));
+  int len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, offer, sizeof(offer));
   assert(len > 0);
   offer[len] = '\0';
   assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n"));
   assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 2);
   assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 2);
   assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
@@ -550,7 +547,8 @@ static void test_local_codec_offer_and_answer_contracts(void) {
   uint32_t audio_ssrc = 0, video_ssrc = 0, rtx_ssrc = 0;
   uint8_t video_pt = 0, rtx_pt = 0, twcc_recv = 0, twcc_send = 0;
   sfu_video_codec_t codec = SFU_VIDEO_CODEC_NONE;
-  assert(!sfu_test_parse_answer_media(bad_camera, strlen(bad_camera), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec, &twcc_recv, &twcc_send));
+  assert(!sfu_test_parse_answer_media(bad_camera, strlen(bad_camera), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec, &twcc_recv,
+                                      &twcc_send));
 
   const char *camera_without_rtx =
       "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
@@ -569,56 +567,9 @@ static void test_local_codec_offer_and_answer_contracts(void) {
       "a=rtpmap:97 rtx/90000\r\n"
       "a=fmtp:97 apt=96\r\n";
   rtx_pt = 77;
-  assert(sfu_test_parse_answer_media(rtx_not_in_mline, strlen(rtx_not_in_mline), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec, &twcc_recv,
-                                     &twcc_send));
+  assert(sfu_test_parse_answer_media(rtx_not_in_mline, strlen(rtx_not_in_mline), &audio_ssrc, &video_ssrc, &rtx_ssrc, &video_pt, &rtx_pt, &codec,
+                                     &twcc_recv, &twcc_send));
   assert(video_pt == 96 && rtx_pt == 0);
-}
-
-static void test_screen_codec_preference_offers(void) {
-  char offer[4096];
-  int len =
-      sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, SFU_VIDEO_CODEC_VP9, offer, sizeof(offer));
-  assert(len > 0);
-  offer[len] = '\0';
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99\r\n"));
-  assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
-  assert(!contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
-  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 1);
-
-  len = sfu_sdp_build_initial_offer("127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", false, SFU_VIDEO_CODEC_VP8, offer, sizeof(offer));
-  assert(len > 0);
-  offer[len] = '\0';
-  assert(count_occurrences(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n") == 2);
-  assert(!contains(offer, "a=rtpmap:98 VP9/90000"));
-
-  sfu_peer_session_t session;
-  memset(&session, 0, sizeof(session));
-  assert(pthread_mutex_init(&session.media.lock, NULL) == 0);
-  assert(pthread_mutex_init(&session.graph.lock, NULL) == 0);
-
-  atomic_store(&session.screen_codec_preference, SFU_VIDEO_CODEC_VP9);
-  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
-  assert(len > 0);
-  offer[len] = '\0';
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99\r\n"));
-  assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
-  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 1);
-
-  atomic_store(&session.screen_codec_preference, SFU_VIDEO_CODEC_VP8);
-  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
-  assert(len > 0);
-  offer[len] = '\0';
-  assert(count_occurrences(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n") == 2);
-  assert(!contains(offer, "a=rtpmap:98 VP9/90000"));
-
-  atomic_store(&session.screen_codec_preference, SFU_VIDEO_CODEC_NONE);
-  len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
-  assert(len > 0);
-  offer[len] = '\0';
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
-
-  pthread_mutex_destroy(&session.graph.lock);
-  pthread_mutex_destroy(&session.media.lock);
 }
 
 static void test_answer_mline_shape_validation(void) {
@@ -788,9 +739,8 @@ static void *sdp_race_builder(void *arg) {
     /* Builds may legitimately fail when the answer is generated while the
      * snapshot holds many entries (output buffer exhaustion); only memory
      * safety and snapshot coherence are asserted here. */
-    int len =
-        sfu_sdp_build_offer(ctx->subscriber, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
-                            "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out, SFU_SIGNALING_SDP_CAP, NULL);
+    int len = sfu_sdp_build_offer(ctx->subscriber, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
+                                  "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", out, SFU_SIGNALING_SDP_CAP, NULL);
     if (len < 0) {
       atomic_fetch_add(&ctx->build_failures, 1);
     }
@@ -855,9 +805,9 @@ static void test_299_audio_only_remote_offer(void) {
 
   char *offer = malloc(SFU_SIGNALING_SDP_CAP);
   assert(offer != NULL);
-  int len =
-      sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
-                          "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", offer, SFU_SIGNALING_SDP_CAP, NULL);
+  int len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX",
+                                "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", offer,
+                                SFU_SIGNALING_SDP_CAP, NULL);
   assert(len > 0 && (size_t)len < SFU_SIGNALING_SDP_CAP);
   offer[len] = '\0';
 
@@ -990,8 +940,8 @@ static void *run_sdp_tests(void *unused) {
   sync_mock_snapshot(&session2, a2, v2);
   char server_offer[8192];
   len = sfu_sdp_build_offer(&session2, "127.0.0.1", 17030, "XKrsH3xm", "dHkzP4aajGOJsWhquFzy3pxr",
-                            "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", server_offer, sizeof(server_offer),
-                            NULL);
+                            "32:01:9A:1C:1F:71:54:36:78:9C:AD:50:B8:93:2D:A9:B9:FC:A5:C1:94:C0:C6:80:7A:03:87:B5:F5:1F:F3", server_offer,
+                            sizeof(server_offer), NULL);
   assert(len > 0);
   server_offer[len] = '\0';
   assert(contains(server_offer, "a=ssrc:987654321"));
@@ -1020,7 +970,6 @@ static void *run_sdp_tests(void *unused) {
   test_twcc_extmap_extraction();
   test_answer_media_is_scoped_by_mid_and_direction();
   test_local_codec_offer_and_answer_contracts();
-  test_screen_codec_preference_offers();
   test_answer_mline_shape_validation();
   test_offered_mline_floor_survives_retirement_and_reuse();
   test_concurrent_build_vs_teardown();

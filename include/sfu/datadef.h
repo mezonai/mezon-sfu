@@ -464,7 +464,6 @@ typedef struct sfu_peer_session {
   _Atomic uint8_t lifecycle;
   _Atomic bool accepts_work;
   _Atomic bool is_audience;
-  _Atomic uint8_t screen_codec_preference;
   int fd;
   uint8_t state;
   bool active;

@@ -2084,7 +2084,6 @@ async function applyVideoEncodingParams(pc) {
                         const joinMsg = {
                             type: "join",
                             role: currentJoinMode,
-                            screen_codec: SCREEN_CODEC.toLowerCase(),
                         };
                         if (jwtToken) {
                             joinMsg.token = jwtToken;
