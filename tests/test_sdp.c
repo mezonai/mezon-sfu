@@ -273,7 +273,7 @@ static void test_renegotiation_offer_role_directions(void) {
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=recvonly") == 3);
   assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n"));
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
   assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 2);
   assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
   assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 2);
@@ -529,7 +529,7 @@ static void test_local_codec_offer_and_answer_contracts(void) {
   assert(len > 0);
   offer[len] = '\0';
   assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n"));
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
   assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 2);
   assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 2);
   assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
