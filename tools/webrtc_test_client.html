@@ -1532,28 +1532,12 @@
                 const preferred = caps.codecs.filter(
                     (c) => c.mimeType.toLowerCase() === "video/" + wanted
                 );
-                const preferredPayloadTypes = new Set(
-                    preferred.map((c) => c.preferredPayloadType).filter(Number.isInteger)
-                );
-                const havePreferredPayloadTypes = preferredPayloadTypes.size > 0;
-                const rtx = caps.codecs.filter((c) => {
-                    if (c.mimeType.toLowerCase() !== "video/rtx") return false;
-                    if (!havePreferredPayloadTypes) {
-                        // Some browsers omit preferredPayloadType from capabilities.
-                        // Keep their RTX capabilities rather than silently disabling RTX;
-                        // setCodecPreferences will preserve the browser's own associations.
-                        return true;
-                    }
-                    const match = /(?:^|;)\s*apt=(\d+)/i.exec(c.sdpFmtpLine || "");
-                    return match && preferredPayloadTypes.has(Number(match[1]));
-                });
-
                 if (preferred.length > 0) {
                     try {
-                        // Keep only the selected codec and its associated RTX entries.
-                        // Appending every RTX capability can leave apt references to codecs
-                        // omitted from the preference list and is rejected by some browsers.
-                        transceiver.setCodecPreferences([...preferred, ...rtx]);
+                        // Use only the requested media codec. Chrome capability entries often
+                        // omit payload-type/apt metadata, so retaining generic RTX entries can
+                        // make setCodecPreferences fail and silently leave VP8 first.
+                        transceiver.setCodecPreferences(preferred);
                         console.log("Forced video codec preference:", wanted, preferred);
                     } catch (e) {
                         console.warn("setCodecPreferences for " + wanted + " failed:", e);
