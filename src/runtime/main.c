@@ -172,8 +172,17 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
 
-  if (sfu_ring_backend_init(fd, g_sfu_config.af_xdp_interface, g_sfu_config.af_xdp_queue_id, port, g_sfu_config.af_xdp_frame_count,
-                            g_sfu_config.af_xdp_frame_size, g_sfu_config.af_xdp_mode) != 0) {
+  sfu_ring_backend_options_t backend_options = {
+      .interface_name = g_sfu_config.af_xdp_interface,
+      .queue_spec = g_sfu_config.af_xdp_queue_id_set ? NULL : g_sfu_config.af_xdp_queues,
+      .queue_id = g_sfu_config.af_xdp_queue_id,
+      .queue_id_set = g_sfu_config.af_xdp_queue_id_set,
+      .media_port = port,
+      .frame_count = g_sfu_config.af_xdp_frame_count,
+      .frame_size = g_sfu_config.af_xdp_frame_size,
+      .xdp_mode = g_sfu_config.af_xdp_mode,
+  };
+  if (sfu_ring_backend_init(fd, &backend_options) != 0) {
     SFU_LOG_ERROR("failed to initialize media I/O backend");
     goto cleanup;
   }
