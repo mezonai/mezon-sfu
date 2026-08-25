@@ -41,12 +41,30 @@ typedef struct sfu_layer_scheduler {
   bool pacer_frame_active;
 } sfu_layer_scheduler_t;
 
+typedef enum sfu_layer_reject_reason {
+  SFU_LAYER_REJECT_NONE = 0,
+  SFU_LAYER_REJECT_INVALID_SID,
+  SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED,
+  SFU_LAYER_REJECT_MISSING_FRAME_START,
+  SFU_LAYER_REJECT_KEYFRAME_REQUIRED,
+  SFU_LAYER_REJECT_KEYFRAME_MISMATCH,
+  SFU_LAYER_REJECT_SPATIAL_TARGET,
+  SFU_LAYER_REJECT_SPATIAL_TRANSITION,
+  SFU_LAYER_REJECT_SPATIAL_START,
+  SFU_LAYER_REJECT_SPATIAL_DEPENDENCY,
+  SFU_LAYER_REJECT_TEMPORAL_TRANSITION,
+  SFU_LAYER_REJECT_TEMPORAL_SWITCH,
+  SFU_LAYER_REJECT_PACER_OVERLAP,
+  SFU_LAYER_REJECT_PACER_ORPHAN,
+} sfu_layer_reject_reason_t;
+
 typedef struct sfu_layer_scheduler_decision {
   uint32_t rtp_timestamp;
   uint8_t sid;
   uint8_t tid;
   uint8_t b_bit;
   uint8_t e_bit;
+  sfu_layer_reject_reason_t reject_reason;
   bool should_forward;
   bool set_marker;
   bool start_keyframe;

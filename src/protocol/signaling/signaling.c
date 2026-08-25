@@ -678,6 +678,16 @@ bool sfu_test_validate_answer_mline_shape(const char *sdp, size_t sdp_len, uint3
   return validate_answer_mline_shape(sdp, sdp_len, remote_slots);
 }
 
+static bool valid_screen_codec_pair(sfu_video_codec_t codec, uint8_t pt, uint8_t rtx_pt) {
+  if (codec == SFU_VIDEO_CODEC_VP8) {
+    return pt == SFU_PT_VP8 && (rtx_pt == 0 || rtx_pt == SFU_PT_VP8_RTX);
+  }
+  if (codec == SFU_VIDEO_CODEC_VP9) {
+    return pt == SFU_PT_VP9 && (rtx_pt == 0 || rtx_pt == SFU_PT_VP9_RTX);
+  }
+  return false;
+}
+
 static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media_t *media) {
   if (!sdp || !media) {
     return false;
@@ -831,9 +841,7 @@ static bool parse_answer_media(const char *sdp, size_t sdp_len, sfu_answer_media
        (media->rtx_pt != 0 && media->rtx_pt != SFU_PT_VP8_RTX))) {
     return false;
   }
-  if (media->screen_sends &&
-      (media->screen_codec != SFU_VIDEO_CODEC_VP9 || media->screen_pt != SFU_PT_VP9 ||
-       (media->screen_rtx_pt != 0 && media->screen_rtx_pt != SFU_PT_VP9_RTX))) {
+  if (media->screen_sends && !valid_screen_codec_pair(media->screen_codec, media->screen_pt, media->screen_rtx_pt)) {
     return false;
   }
   return media->audio_section_present || media->video_section_present || media->screen_section_present;

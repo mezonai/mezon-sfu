@@ -524,12 +524,31 @@ static sfu_svc_parse_status_t extract_svc_metadata(sfu_peer_session_t *sender_se
   }
 
   if (sfu_svc_parse_descriptor(codec, m->rtp.payload, m->rtp.payload_len, &m->svc) != 0) {
+#ifdef SFU_DIAG_LOG
+    static _Atomic uint32_t malformed_logs;
+    uint32_t n = atomic_fetch_add_explicit(&malformed_logs, 1, memory_order_relaxed);
+    if (n == 0 || (n & 127u) == 0) {
+      SFU_LOG_WARN("[VP9-DBG] malformed n=%u pub=%u source=%u ssrc=%u seq=%u ts=%u pt=%u payload=%zu", n + 1, sender_session->peer_id,
+                   (unsigned)m->source, m->rtp.ssrc, m->rtp.sequence_number, m->rtp.timestamp, m->rtp.payload_type, m->rtp.payload_len);
+    }
+#endif
     return SFU_SVC_PARSE_MALFORMED;
   }
 
   m->svc.rtp_timestamp = m->rtp.timestamp;
   m->has_svc = true;
   m->is_keyframe = sfu_svc_descriptor_is_keyframe(&m->svc);
+#ifdef SFU_DIAG_LOG
+  if (m->source == SFU_MEDIA_SCREEN && m->svc.b_bit != 0) {
+    static _Atomic uint32_t picture_logs;
+    uint32_t n = atomic_fetch_add_explicit(&picture_logs, 1, memory_order_relaxed);
+    if (m->is_keyframe || n == 0 || (n & 127u) == 0) {
+      SFU_LOG_INFO("[VP9-DBG] picture n=%u pub=%u ssrc=%u seq=%u ts=%u payload=%zu sid=%u tid=%u b=%u e=%u p=%u u=%u d=%u kf=%u",
+                   n + 1, sender_session->peer_id, m->rtp.ssrc, m->rtp.sequence_number, m->rtp.timestamp, m->rtp.payload_len, m->svc.sid,
+                   m->svc.tid, m->svc.b_bit, m->svc.e_bit, m->svc.p_bit, m->svc.u_bit, m->svc.d_bit, m->is_keyframe);
+    }
+  }
+#endif
   return SFU_SVC_PARSE_OK;
 }
 

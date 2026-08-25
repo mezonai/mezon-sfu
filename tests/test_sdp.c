@@ -190,7 +190,7 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
  * browsers emit and rejects garbage. */
 static void test_screen_answer_parsing(void) {
   extern bool sfu_test_parse_answer_screen(const char *, size_t, uint32_t *, uint32_t *, uint8_t *, uint8_t *, sfu_video_codec_t *, uint8_t *);
-  const char *answer =
+  const char *vp9_answer =
       "m=video 9 UDP/TLS/RTP/SAVPF 98 99\r\n"
       "a=mid:2\r\n"
       "a=sendonly\r\n"
@@ -202,10 +202,42 @@ static void test_screen_answer_parsing(void) {
   uint32_t ssrc = 0, rtx = 0;
   uint8_t pt = 0, rtx_pt = 0, mid_id = 0;
   sfu_video_codec_t codec = SFU_VIDEO_CODEC_NONE;
-  assert(sfu_test_parse_answer_screen(answer, strlen(answer), &ssrc, &rtx, &pt, &rtx_pt, &codec, &mid_id));
+  assert(sfu_test_parse_answer_screen(vp9_answer, strlen(vp9_answer), &ssrc, &rtx, &pt, &rtx_pt, &codec, &mid_id));
   assert(ssrc == 4444 && rtx == 5555);
-  assert(pt == 98 && rtx_pt == 99 && codec == SFU_VIDEO_CODEC_VP9);
+  assert(pt == SFU_PT_VP9 && rtx_pt == SFU_PT_VP9_RTX && codec == SFU_VIDEO_CODEC_VP9);
   assert(mid_id == 7);
+
+  const char *vp8_answer =
+      "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n"
+      "a=mid:2\r\n"
+      "a=sendonly\r\n"
+      "a=rtpmap:96 VP8/90000\r\n"
+      "a=rtpmap:97 rtx/90000\r\n"
+      "a=fmtp:97 apt=96\r\n"
+      "a=ssrc-group:FID 6666 7777\r\n";
+  assert(sfu_test_parse_answer_screen(vp8_answer, strlen(vp8_answer), &ssrc, &rtx, &pt, &rtx_pt, &codec, &mid_id));
+  assert(ssrc == 6666 && rtx == 7777);
+  assert(pt == SFU_PT_VP8 && rtx_pt == SFU_PT_VP8_RTX && codec == SFU_VIDEO_CODEC_VP8);
+
+  const char *both_answer =
+      "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n"
+      "a=mid:2\r\n"
+      "a=sendonly\r\n"
+      "a=rtpmap:96 VP8/90000\r\n"
+      "a=rtpmap:97 rtx/90000\r\n"
+      "a=fmtp:97 apt=96\r\n"
+      "a=rtpmap:98 VP9/90000\r\n"
+      "a=rtpmap:99 rtx/90000\r\n"
+      "a=fmtp:99 apt=98\r\n";
+  assert(sfu_test_parse_answer_screen(both_answer, strlen(both_answer), &ssrc, &rtx, &pt, &rtx_pt, &codec, &mid_id));
+  assert(pt == SFU_PT_VP8 && rtx_pt == SFU_PT_VP8_RTX && codec == SFU_VIDEO_CODEC_VP8);
+
+  const char *invalid_answer =
+      "m=video 9 UDP/TLS/RTP/SAVPF 98\r\n"
+      "a=mid:2\r\n"
+      "a=sendonly\r\n"
+      "a=rtpmap:98 VP8/90000\r\n";
+  assert(!sfu_test_parse_answer_screen(invalid_answer, strlen(invalid_answer), &ssrc, &rtx, &pt, &rtx_pt, &codec, &mid_id));
 }
 
 static void test_initial_offer_role_directions(void) {
@@ -241,9 +273,11 @@ static void test_renegotiation_offer_role_directions(void) {
   offer[len] = '\0';
   assert(count_occurrences(offer, "a=recvonly") == 3);
   assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99\r\n"));
-  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 1);
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
+  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 2);
   assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
+  assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 2);
+  assert(count_occurrences(offer, "a=fmtp:99 apt=98") == 1);
 
   atomic_store(&session.is_audience, true);
   len = sfu_sdp_build_offer(&session, "127.0.0.1", 17030, "sfuUfrag", "sfuPasswordValueGoesHereXXXX", "AA:BB", offer, sizeof(offer), NULL);
@@ -495,9 +529,9 @@ static void test_local_codec_offer_and_answer_contracts(void) {
   assert(len > 0);
   offer[len] = '\0';
   assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 96 97\r\n"));
-  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99\r\n"));
-  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 1);
-  assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 1);
+  assert(contains(offer, "m=video 17030 UDP/TLS/RTP/SAVPF 98 99 96 97\r\n"));
+  assert(count_occurrences(offer, "a=rtpmap:96 VP8/90000") == 2);
+  assert(count_occurrences(offer, "a=fmtp:97 apt=96") == 2);
   assert(count_occurrences(offer, "a=rtpmap:98 VP9/90000") == 1);
   assert(count_occurrences(offer, "a=fmtp:99 apt=98") == 1);
   assert(!contains(offer, "H264/90000"));

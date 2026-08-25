@@ -71,15 +71,13 @@ Configure the interface and hardware queue in `config.ini`:
 ```ini
 [af_xdp]
 interface = eth0
-queue_id = 0
+queues = auto
 frame_count = 16384
 frame_size = 4096
 mode = native  # native, skb, or auto
 ```
 
 The AF_XDP binary requires permission to load BPF programs and administer the selected interface (normally root or appropriate `CAP_BPF`/`CAP_NET_ADMIN` capabilities). It supports IPv4 UDP and does not reassemble fragments. The configured frame pool is split evenly into power-of-two RX and TX rings. Configure RSS/flow steering so the media UDP port reaches the selected queue; matching media packets on another queue are dropped rather than passed to an undrained UDP socket. On a cold neighbour entry, TX temporarily falls back to the bound nonblocking UDP socket so the kernel can resolve ARP, then direct AF_XDP transmission resumes. The loader refuses to replace an existing XDP program and cleanup detaches only the program attached by this process.
-
-For a two-tab Chrome test, do not advertise `127.0.0.1` while AF_XDP is attached to `eth0`: loopback traffic never reaches that XDP hook. Set `public_host` to the selected interface address, use a non-loopback interface, and verify the media port is steered to `queue_id`. A single-queue veth pair with `mode = skb` is the safest first integration environment.
 
 The AF_XDP frame and software-ring unit tests are CPU-only and do not require root or a network interface:
 
