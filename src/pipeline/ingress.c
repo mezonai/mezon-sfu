@@ -132,12 +132,6 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
       sfu_media_kind_t source = stream->kind == SFU_BANDWIDTH_STREAM_SCREEN ? SFU_MEDIA_SCREEN : SFU_MEDIA_VIDEO;
       sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for_stream(session, stream->publisher_peer_id, source);
       sfu_layer_scheduler_set_bitrate(sched, stream->allocated_bps);
-      /* TEMPORARY: force the complete VP9 L1T3 screen stream to test whether
-       * temporal-layer filtering causes the observed subscriber freezes. */
-      if (sched && source == SFU_MEDIA_SCREEN && stream->allocated_bps > 0) {
-        sched->target_sid = 0;
-        sched->target_tid = 2;
-      }
     }
     for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
       sfu_layer_scheduler_slot_t *slot = &session->egress.schedulers[i];
