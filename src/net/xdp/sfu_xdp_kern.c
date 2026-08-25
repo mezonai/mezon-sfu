@@ -1,11 +1,11 @@
-#include <bpf/bpf_endian.h>
-#include <bpf/bpf_helpers.h>
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
+#include <bpf/bpf_endian.h>
+#include <bpf/bpf_helpers.h>
 
 struct sfu_vlan_hdr {
   __be16 tci;
