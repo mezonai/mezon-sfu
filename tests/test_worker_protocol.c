@@ -665,8 +665,10 @@ static void test_gcc_estimate_reaches_scheduler(void) {
   uint64_t allocated = (uint64_t)camera1->allocated_bps + screen1->allocated_bps + camera2->allocated_bps;
   assert(allocated <= 1700000); /* 85% safe video pool */
   assert(camera1->allocated_bps < 2000000);
-  assert(screen1->allocated_bps < 2000000);
+  assert(screen1->allocated_bps > 0 && screen1->allocated_bps < 1440000);
   assert(camera2->allocated_bps < 2000000);
+  assert(screen1->target_sid == 0 && screen1->target_tid == 2); /* temporary VP9 screen bypass */
+  assert(camera1->target_tid != 2 && camera2->target_tid != 2); /* cameras keep the normal ladder */
   assert(f.session->egress.pacer.pacing_bps == 5000000); /* full GCC estimate, paced at 2.5x */
   uint32_t camera_contribution = 0;
   uint32_t screen_contribution = 0;
