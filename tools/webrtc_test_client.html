@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Mezon SFU — H264 + VP9 L1T3 Test Client</title>
+        <title>Mezon SFU — VP8 + VP9 L1T3 Test Client</title>
         <style>
             :root {
                 --bg: #11111b;
@@ -1119,6 +1119,14 @@
                         }
                     }
 
+                    // Apply codec preferences for every server offer. Screen-share
+                    // renegotiation often occurs after localTracksAdded is already true,
+                    // so enableSvcForVideoSender() is not called again in that path.
+                    const cameraTc = pc.getTransceivers().find((t) => t.mid === "1");
+                    const screenTc = pc.getTransceivers().find((t) => t.mid === "2");
+                    if (cameraTc) forceVideoCodec(cameraTc, CAMERA_CODEC);
+                    if (screenTc) forceVideoCodec(screenTc, SCREEN_CODEC);
+
                     const answer = await pc.createAnswer();
                     /* Camera (mid:1) is VP8, screen share (mid:2) is VP9 L1T3. */
                     const mungedSdp = mungeVideoBitrates(answer.sdp);
@@ -1532,28 +1540,12 @@
                 const preferred = caps.codecs.filter(
                     (c) => c.mimeType.toLowerCase() === "video/" + wanted
                 );
-                const preferredPayloadTypes = new Set(
-                    preferred.map((c) => c.preferredPayloadType).filter(Number.isInteger)
-                );
-                const havePreferredPayloadTypes = preferredPayloadTypes.size > 0;
-                const rtx = caps.codecs.filter((c) => {
-                    if (c.mimeType.toLowerCase() !== "video/rtx") return false;
-                    if (!havePreferredPayloadTypes) {
-                        // Some browsers omit preferredPayloadType from capabilities.
-                        // Keep their RTX capabilities rather than silently disabling RTX;
-                        // setCodecPreferences will preserve the browser's own associations.
-                        return true;
-                    }
-                    const match = /(?:^|;)\s*apt=(\d+)/i.exec(c.sdpFmtpLine || "");
-                    return match && preferredPayloadTypes.has(Number(match[1]));
-                });
-
                 if (preferred.length > 0) {
                     try {
-                        // Keep only the selected codec and its associated RTX entries.
-                        // Appending every RTX capability can leave apt references to codecs
-                        // omitted from the preference list and is rejected by some browsers.
-                        transceiver.setCodecPreferences([...preferred, ...rtx]);
+                        // Use only the requested media codec. Chrome capability entries often
+                        // omit payload-type/apt metadata, so retaining generic RTX entries can
+                        // make setCodecPreferences fail and silently leave VP8 first.
+                        transceiver.setCodecPreferences(preferred);
                         console.log("Forced video codec preference:", wanted, preferred);
                     } catch (e) {
                         console.warn("setCodecPreferences for " + wanted + " failed:", e);

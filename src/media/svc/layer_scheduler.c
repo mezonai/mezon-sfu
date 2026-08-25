@@ -82,6 +82,11 @@ sfu_pacer_class_t sfu_layer_scheduler_classify_frame(const sfu_layer_scheduler_t
   return SFU_PACER_CLASS_VIDEO_BASE;
 }
 
+static bool layer_scheduler_reject(sfu_layer_scheduler_decision_t *decision, sfu_layer_reject_reason_t reason) {
+  decision->reject_reason = reason;
+  return false;
+}
+
 bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_svc_descriptor_t *desc, bool is_keyframe,
                                         sfu_layer_scheduler_decision_t *decision) {
   if (!sched || !desc || !decision) {
@@ -98,7 +103,7 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
   decision->pacer_frame_continuation = decision->pacer_class == SFU_PACER_CLASS_VIDEO_ENH && desc->b_bit == 0;
 
   if (desc->sid >= 8) {
-    return false;
+    return layer_scheduler_reject(decision, SFU_LAYER_REJECT_INVALID_SID);
   }
 
   layer_scheduler_begin_picture(sched, desc->rtp_timestamp);
@@ -112,20 +117,20 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
 
   uint8_t sid_mask = (uint8_t)(1u << desc->sid);
   if ((sched->failed_sid_mask & sid_mask) != 0 || desc->sid > sched->target_sid || desc->tid > sched->target_tid) {
-    return false;
+    return layer_scheduler_reject(decision, SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED);
   }
   if (desc->b_bit == 0 && (sched->started_sid_mask & sid_mask) == 0) {
-    return false;
+    return layer_scheduler_reject(decision, SFU_LAYER_REJECT_MISSING_FRAME_START);
   }
 
   if (sched->needs_keyframe) {
     if (!sched->keyframe_active) {
       if (!is_keyframe || desc->b_bit == 0 || desc->sid != 0) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_KEYFRAME_REQUIRED);
       }
       decision->start_keyframe = true;
     } else if (sched->keyframe_failed || sched->keyframe_timestamp != desc->rtp_timestamp || desc->sid != 0 || desc->p_bit != 0) {
-      return false;
+      return layer_scheduler_reject(decision, SFU_LAYER_REJECT_KEYFRAME_MISMATCH);
     }
     decision->keyframe_packet = true;
     decision->transition_packet = true;
@@ -134,20 +139,20 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
   if (desc->sid > sched->current_sid) {
     uint8_t candidate_sid = (uint8_t)(sched->current_sid + 1);
     if (desc->sid != candidate_sid || candidate_sid > sched->target_sid) {
-      return false;
+      return layer_scheduler_reject(decision, SFU_LAYER_REJECT_SPATIAL_TARGET);
     }
 
     if (sched->transition_active) {
       if (sched->transition_timestamp != desc->rtp_timestamp || sched->transition_sid != desc->sid || sched->transition_failed) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_SPATIAL_TRANSITION);
       }
     } else {
       if (desc->b_bit == 0 || desc->p_bit != 0) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_SPATIAL_START);
       }
       uint8_t lower_mask = (uint8_t)(1u << sched->current_sid);
       if (desc->d_bit != 0 && ((sched->completed_sid_mask & lower_mask) == 0 || (sched->failed_sid_mask & lower_mask) != 0)) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_SPATIAL_DEPENDENCY);
       }
       decision->start_transition = true;
     }
@@ -157,11 +162,11 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
   if (desc->tid > sched->current_tid) {
     if (sched->temporal_transition_active) {
       if (sched->temporal_transition_timestamp != desc->rtp_timestamp || sched->temporal_transition_tid != desc->tid || sched->temporal_transition_failed) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_TEMPORAL_TRANSITION);
       }
     } else {
       if (desc->b_bit == 0 || desc->u_bit == 0) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_TEMPORAL_SWITCH);
       }
       decision->start_temporal_transition = true;
     }
@@ -187,13 +192,13 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
     decision->pacer_frame_end = desc->e_bit != 0;
     if (decision->pacer_frame_start) {
       if (sched->pacer_frame_active) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_PACER_OVERLAP);
       }
     } else {
       decision->pacer_frame_continuation = true;
       if (!sched->pacer_frame_active || sched->pacer_frame_timestamp != desc->rtp_timestamp || sched->pacer_frame_sid != desc->sid ||
           sched->pacer_frame_tid != desc->tid) {
-        return false;
+        return layer_scheduler_reject(decision, SFU_LAYER_REJECT_PACER_ORPHAN);
       }
     }
   }
