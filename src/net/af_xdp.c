@@ -4,6 +4,7 @@
 
 #include "memory/refcount.h"
 #include "memory/worker_packet_arena.h"
+#include "net/af_xdp_frame.h"
 #include "util/alloc.h"
 #include "util/log.h"
 #include "util/metrics.h"
@@ -37,11 +38,6 @@
 
 #define SFU_AF_XDP_TX_QUEUE_CAPACITY 4096u
 #define SFU_AF_XDP_BATCH 256u
-
-typedef struct {
-  uint16_t tci;
-  uint16_t encapsulated_proto;
-} sfu_vlan_hdr_t;
 
 typedef enum {
   SFU_XDP_FRAME_RX_FREE = 0,
@@ -98,22 +94,6 @@ typedef struct {
 
 static sfu_xdp_device_t g_xdp;
 
-static uint16_t checksum16(const void *data, size_t len) {
-  const uint16_t *words = data;
-  uint32_t sum = 0;
-  while (len >= 2) {
-    sum += *words++;
-    len -= 2;
-  }
-  if (len) {
-    sum += *(const uint8_t *)words;
-  }
-  while (sum >> 16) {
-    sum = (sum & 0xffffu) + (sum >> 16);
-  }
-  return (uint16_t)~sum;
-}
-
 static uint64_t monotonic_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -153,7 +133,10 @@ static void read_default_gateway(sfu_xdp_device_t *d) {
     return;
   }
   char line[256];
-  (void)fgets(line, sizeof(line), fp);
+  if (!fgets(line, sizeof(line), fp)) {
+    fclose(fp);
+    return;
+  }
   while (fgets(line, sizeof(line), fp)) {
     char iface[IFNAMSIZ];
     unsigned long destination, gateway;
@@ -419,45 +402,22 @@ int sfu_ring_submit(sfu_ring_t *r) {
 }
 
 static bool parse_rx_packet(uint8_t *frame, uint32_t length, sfu_packet_t *pkt) {
-  uint32_t offset = sizeof(struct ethhdr);
-  if (length < offset) {
+  sfu_af_xdp_parse_result_t parsed;
+  if (!sfu_af_xdp_parse_frame(frame, length, g_xdp.frame_size, g_xdp.media_port, &parsed)) {
     return false;
   }
-  struct ethhdr *eth = (struct ethhdr *)frame;
-  uint16_t protocol = ntohs(eth->h_proto);
-  if (protocol == ETH_P_8021Q || protocol == ETH_P_8021AD) {
-    if (length < offset + sizeof(sfu_vlan_hdr_t)) {
-      return false;
-    }
-    sfu_vlan_hdr_t *vlan = (sfu_vlan_hdr_t *)(frame + offset);
-    protocol = ntohs(vlan->encapsulated_proto);
-    offset += sizeof(*vlan);
-  }
-  if (protocol != ETH_P_IP || length < offset + sizeof(struct iphdr)) {
-    return false;
-  }
-  struct iphdr *ip = (struct iphdr *)(frame + offset);
-  uint32_t ihl = (uint32_t)ip->ihl * 4u;
-  if (ip->version != 4 || ihl < sizeof(*ip) || length < offset + ihl + sizeof(struct udphdr) || ip->protocol != IPPROTO_UDP ||
-      (ntohs(ip->frag_off) & 0x3fffu)) {
-    return false;
-  }
-  struct udphdr *udp = (struct udphdr *)(frame + offset + ihl);
-  uint32_t udp_length = ntohs(udp->len);
-  if (udp_length < sizeof(*udp) || offset + ihl + udp_length > length || ntohs(udp->dest) != g_xdp.media_port) {
-    return false;
-  }
+
   struct sockaddr_in *peer = (struct sockaddr_in *)&pkt->peer_addr;
   memset(peer, 0, sizeof(*peer));
   peer->sin_family = AF_INET;
-  peer->sin_addr.s_addr = ip->saddr;
-  peer->sin_port = udp->source;
+  peer->sin_addr = parsed.source_ip;
+  peer->sin_port = parsed.source_port;
   pkt->peer_addr_len = sizeof(*peer);
-  pkt->data = (uint8_t *)(udp + 1);
-  pkt->len = udp_length - sizeof(*udp);
-  pkt->cap = g_xdp.frame_size - (uint32_t)(pkt->data - frame);
+  pkt->data = parsed.payload;
+  pkt->len = parsed.payload_len;
+  pkt->cap = parsed.payload_cap;
   pkt->recv_ts_ns = monotonic_ns();
-  return pkt->len > 0;
+  return true;
 }
 
 static unsigned reap_rx(unsigned max_count, sfu_packet_pool_t *pp, sfu_on_recv_fn on_recv, void *user_data) {
@@ -580,35 +540,19 @@ static bool build_tx_frame(uint32_t frame_id, sfu_packet_t *pkt, uint32_t *out_l
     sfu_metric_inc("af_xdp_neighbor_miss");
     return false;
   }
-  uint32_t header_length = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr);
-  if (pkt->len + header_length > g_xdp.frame_size) {
-    return false;
-  }
+
   uint8_t *frame = xsk_umem__get_data(g_xdp.umem_area, (uint64_t)frame_id * g_xdp.frame_size);
-  struct ethhdr *eth = (struct ethhdr *)frame;
-  memcpy(eth->h_dest, destination_mac, ETH_ALEN);
-  memcpy(eth->h_source, g_xdp.local_mac, ETH_ALEN);
-  eth->h_proto = htons(ETH_P_IP);
-
-  struct iphdr *ip = (struct iphdr *)(eth + 1);
-  memset(ip, 0, sizeof(*ip));
-  ip->version = 4;
-  ip->ihl = 5;
-  ip->ttl = 64;
-  ip->protocol = IPPROTO_UDP;
-  ip->tot_len = htons((uint16_t)(sizeof(*ip) + sizeof(struct udphdr) + pkt->len));
-  ip->saddr = g_xdp.local_ip.s_addr;
-  ip->daddr = destination->sin_addr.s_addr;
-  ip->check = checksum16(ip, sizeof(*ip));
-
-  struct udphdr *udp = (struct udphdr *)(ip + 1);
-  udp->source = htons(g_xdp.media_port);
-  udp->dest = destination->sin_port;
-  udp->len = htons((uint16_t)(sizeof(*udp) + pkt->len));
-  udp->check = 0;
-  memcpy(udp + 1, pkt->data, pkt->len);
-  *out_length = header_length + pkt->len;
-  return true;
+  sfu_af_xdp_frame_params_t params = {
+      .source_ip = g_xdp.local_ip,
+      .destination_ip = destination->sin_addr,
+      .source_port = htons(g_xdp.media_port),
+      .destination_port = destination->sin_port,
+      .payload = pkt->data,
+      .payload_len = pkt->len,
+  };
+  memcpy(params.source_mac, g_xdp.local_mac, sizeof(params.source_mac));
+  memcpy(params.destination_mac, destination_mac, sizeof(params.destination_mac));
+  return sfu_af_xdp_build_frame(frame, g_xdp.frame_size, &params, out_length);
 }
 
 static unsigned complete_waiting_frames(void) {

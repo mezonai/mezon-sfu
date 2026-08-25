@@ -79,6 +79,31 @@ mode = native  # native, skb, or auto
 
 The AF_XDP binary requires permission to load BPF programs and administer the selected interface (normally root or appropriate `CAP_BPF`/`CAP_NET_ADMIN` capabilities). It currently supports IPv4 UDP, does not reassemble fragments, and sends frames only when the destination or gateway already has a reachable neighbor entry. Configure RSS/flow steering so the media UDP port reaches the selected queue. The loader refuses to replace an existing XDP program.
 
+The AF_XDP frame and software-ring unit tests are CPU-only and do not require root or a network interface:
+
+```sh
+ctest --test-dir build-af-xdp --output-on-failure -R 'af_xdp_(frame|ring)'
+```
+
+Run the focused frame parser/builder benchmark with:
+
+```sh
+build-af-xdp/benchmark/bench_af_xdp_frame all --quick
+build-af-xdp/benchmark/bench_af_xdp_frame parse_ipv4_udp --packet-size 1200
+build-af-xdp/benchmark/bench_af_xdp_frame build_ipv4_udp --packet-size 1200
+```
+
+Example results for a 1200-byte payload (`--quick`, 1,000 measured iterations):
+
+| Benchmark | Time per operation | Operations per second |
+|---|---:|---:|
+| IPv4/UDP frame parsing | 39.39 ns | 25.39 million |
+| VLAN IPv4/UDP frame parsing | 39.12 ns | 25.56 million |
+| IPv4/UDP frame construction | 179.17 ns | 5.58 million |
+| IPv4 header checksum | 34.90 ns | 28.65 million |
+
+These are smoke-run results from one development machine, not guaranteed performance targets. Use a non-quick run with CPU affinity and frequency scaling controlled for comparative measurements.
+
 ## build boringSSL
 ```
 git clone https://boringssl.googlesource.com/boringssl
