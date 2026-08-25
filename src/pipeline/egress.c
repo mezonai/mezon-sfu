@@ -3,7 +3,7 @@
 #include "congestion/pacer.h"
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
 #include "rtp/rtp_ext.h"
@@ -243,7 +243,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 #endif
   pkt->len = (uint32_t)enc_len;
 
-  if (sfu_ring_queue_send_zc(&w->send_ring, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
+  if (sfu_net_send(w->send_net, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
     SFU_LOG_WARN("worker %u: [EGRESS DROP] send SQ full", w->worker_index);
     sfu_metric_inc("egress_send_full");
     sfu_metric_inc("send_sq_full");
@@ -262,7 +262,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
     sfu_log_vp9_egress_event("egress-reject", reserved_output ? "reserved" : "plaintext", reason, w, sub_session, plain, media);
 #endif
     if (w && reserved_output) {
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
+      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
     }
     return false;
   }
@@ -287,7 +287,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         sfu_log_vp9_egress_event("egress-reject", reserved_output ? "reserved" : "plaintext", "missing_scheduler", w, sub_session, plain, media);
 #endif
         if (reserved_output) {
-          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
+          sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
         }
         sfu_metric_inc("egress_admission_drop");
         return false;
@@ -307,7 +307,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         }
         sfu_layer_scheduler_reject_packet(sched, &decision);
         if (reserved_output) {
-          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
+          sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, reserved_output);
         }
         sfu_metric_inc("egress_admission_drop");
         return false;
@@ -329,7 +329,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
     }
   }
   if (output && plain->len > output->cap && output->buf_source == SFU_BUF_SOURCE_WORKER_ARENA) {
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
+    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
     output = sfu_packet_pool_alloc(w->pp);
     if (output) {
       w->hot.output_pool_fallback++;
@@ -337,7 +337,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
   }
   if (!output || plain->len > output->cap) {
     if (output) {
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
+      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
     }
     if (has_decision) {
       sfu_layer_scheduler_reject_packet(sched, &decision);
@@ -365,7 +365,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
       sfu_layer_scheduler_reject_packet(sched, &decision);
     }
   }
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, output);
   return admitted;
 }
 
@@ -387,7 +387,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
     sfu_log_vp9_egress_event("egress-reject", "owned", reason, w, sub_session, pkt, media);
 #endif
     if (w && pkt) {
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     }
     return false;
   }
@@ -413,7 +413,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
 #ifdef SFU_DIAG_LOG
         sfu_log_vp9_egress_event("egress-reject", "owned", "missing_scheduler", w, sub_session, pkt, media);
 #endif
-        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+        sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return false;
       }
       if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
@@ -430,7 +430,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
           sfu_metric_inc("vp9_enh_orphan_continuation");
         }
         sfu_layer_scheduler_reject_packet(sched, &decision);
-        sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+        sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
         return false;
       }
       video_class = decision.pacer_class;
@@ -445,6 +445,6 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
       sfu_layer_scheduler_reject_packet(sched, &decision);
     }
   }
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
   return admitted;
 }

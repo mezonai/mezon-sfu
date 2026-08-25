@@ -1,6 +1,5 @@
-#include "net/io_backend.h"
+#include "net/net.h"
 
-#ifdef USE_AF_XDP
 
 #include "memory/refcount.h"
 #include "memory/worker_packet_arena.h"
@@ -41,6 +40,17 @@
 #define SFU_AF_XDP_BATCH 256u
 #define SFU_AF_XDP_MAX_QUEUES 128u
 
+struct sfu_net {
+  sfu_spsc_ring_t tx_pending;
+  sfu_spsc_ring_t tx_completed;
+  sfu_packet_t *tx_retry;
+  _Atomic uint32_t outstanding_sends;
+  uint32_t queue_capacity;
+  int fd;
+  bool with_recv_bufs;
+  bool queues_initialized;
+};
+
 typedef enum {
   SFU_XDP_FRAME_RX_FREE = 0,
   SFU_XDP_FRAME_RX_FILL,
@@ -53,7 +63,7 @@ typedef enum {
 
 typedef struct {
   sfu_packet_t *packet;
-  sfu_ring_t *origin;
+  sfu_net_t *origin;
   uint8_t state;
 } sfu_xdp_frame_meta_t;
 
@@ -474,11 +484,16 @@ static int init_queue(sfu_xdp_queue_t *q, uint32_t queue_id, uint32_t slot, uint
   return 0;
 }
 
-int sfu_ring_backend_init(int fd, const sfu_ring_backend_options_t *options) {
+int sfu_net_backend_init(int fd, const sfu_net_backend_options_t *options) {
   memset(&g_xdp, 0, sizeof(g_xdp));
   g_xdp.xsks_map_fd = -1;
   g_xdp.config_map_fd = -1;
-  if (!options || !options->interface_name || !*options->interface_name || options->frame_count < 8 || options->frame_size < 2048) {
+  if (!options || !options->interface_name || !*options->interface_name || options->frame_count < 8 ||
+      (options->frame_count & (options->frame_count - 1)) != 0 ||
+      (options->frame_size != 2048u && options->frame_size != 4096u) || options->frame_size < sfu_net_recv_overhead() + 1u ||
+      (options->queue_spec && options->queue_id_set) ||
+      (options->xdp_mode && strcmp(options->xdp_mode, "native") != 0 && strcmp(options->xdp_mode, "skb") != 0 &&
+       strcmp(options->xdp_mode, "auto") != 0)) {
     SFU_LOG_ERROR("AF_XDP: invalid backend options");
     return -1;
   }
@@ -532,11 +547,11 @@ int sfu_ring_backend_init(int fd, const sfu_ring_backend_options_t *options) {
   return 0;
 
 fail:
-  sfu_ring_backend_destroy();
+  sfu_net_backend_destroy();
   return -1;
 }
 
-void sfu_ring_backend_destroy(void) {
+void sfu_net_backend_destroy(void) {
   if (g_xdp.config_map_fd >= 0) {
     (void)set_redirect_enabled(false);
   }
@@ -562,18 +577,25 @@ void sfu_ring_backend_destroy(void) {
   g_xdp.config_map_fd = -1;
 }
 
-uint32_t sfu_ring_recv_overhead(void) { return (uint32_t)(sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr)); }
-uint32_t sfu_ring_recv_slot_size(uint32_t payload_cap) { return g_xdp.frame_size ? g_xdp.frame_size : payload_cap + sfu_ring_recv_overhead(); }
+uint32_t sfu_net_recv_overhead(void) { return (uint32_t)(sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr)); }
+uint32_t sfu_net_recv_slot_size(uint32_t payload_cap) { return g_xdp.frame_size ? g_xdp.frame_size : payload_cap + sfu_net_recv_overhead(); }
+uint64_t sfu_net_recv_capacity_bytes(const sfu_net_backend_options_t *backend_options, uint32_t recv_buffer_count, uint32_t payload_cap) {
+  (void)recv_buffer_count;
+  (void)payload_cap;
+  return backend_options ? (uint64_t)backend_options->frame_count * backend_options->frame_size : 0;
+}
 
-int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entries, uint32_t buf_count, uint32_t buf_size, int bgid, bool with_recv_bufs) {
-  (void)cq_entries;
-  (void)buf_count;
-  (void)buf_size;
-  (void)bgid;
-  if (!r) {
-    return -1;
+sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
+  if (!options) {
+    return NULL;
   }
-  memset(r, 0, sizeof(*r));
+  sfu_net_t *r = SFU_CALLOC(1, sizeof(*r));
+  if (!r) {
+    return NULL;
+  }
+  int fd = options->fd;
+  uint32_t sq_entries = options->send_entries;
+  bool with_recv_bufs = options->receive;
   r->fd = fd;
   r->with_recv_bufs = with_recv_bufs;
   if (!with_recv_bufs) {
@@ -583,25 +605,31 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
     }
     if (sfu_spsc_ring_init(&r->tx_pending, capacity) != 0 || sfu_spsc_ring_init(&r->tx_completed, capacity) != 0) {
       sfu_spsc_ring_destroy(&r->tx_pending);
-      return -1;
+      SFU_FREE(r);
+      return NULL;
     }
     r->queue_capacity = capacity;
     r->queues_initialized = true;
   }
-  return with_recv_bufs ? (g_xdp.initialized ? 0 : -1) : 0;
+  if (with_recv_bufs && !g_xdp.initialized) {
+    SFU_FREE(r);
+    return NULL;
+  }
+  return r;
 }
 
-void sfu_ring_destroy(sfu_ring_t *r) {
+void sfu_net_destroy(sfu_net_t *r) {
   if (r && r->queues_initialized) {
     sfu_spsc_ring_destroy(&r->tx_completed);
     sfu_spsc_ring_destroy(&r->tx_pending);
     r->queues_initialized = false;
   }
+  SFU_FREE(r);
 }
 
-int sfu_ring_arm_recv(sfu_ring_t *r) { return r && r->with_recv_bufs && g_xdp.initialized ? 0 : -1; }
+int sfu_net_recv(sfu_net_t *r) { return r && r->with_recv_bufs && g_xdp.initialized ? 0 : -1; }
 
-int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
+int sfu_net_send(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
   if (!r || !r->queues_initialized || !pkt || !dst || dst->sa_family != AF_INET || dst_len != sizeof(struct sockaddr_in)) {
     return -1;
   }
@@ -616,7 +644,7 @@ int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockad
   return 0;
 }
 
-int sfu_ring_submit(sfu_ring_t *r) {
+int sfu_net_flush(sfu_net_t *r) {
   (void)r;
   return 0;
 }
@@ -639,7 +667,7 @@ static bool parse_rx_packet(sfu_xdp_queue_t *q, uint8_t *frame, uint32_t length,
   return true;
 }
 
-static unsigned reap_rx_queue(sfu_xdp_queue_t *q, unsigned max_count, sfu_packet_pool_t *pp, sfu_on_recv_fn on_recv, void *user_data) {
+static unsigned reap_rx_queue(sfu_xdp_queue_t *q, unsigned max_count, sfu_packet_pool_t *pp, sfu_net_on_recv_fn on_recv, void *user_data) {
   uint32_t index;
   unsigned count = xsk_ring_cons__peek(&q->rx, max_count, &index);
   for (unsigned i = 0; i < count; i++) {
@@ -686,7 +714,7 @@ static unsigned reap_rx_queue(sfu_xdp_queue_t *q, unsigned max_count, sfu_packet
   return count;
 }
 
-static unsigned reap_rx(unsigned max_count, sfu_packet_pool_t *pp, sfu_on_recv_fn on_recv, void *user_data) {
+static unsigned reap_rx(unsigned max_count, sfu_packet_pool_t *pp, sfu_net_on_recv_fn on_recv, void *user_data) {
   unsigned total = 0;
   uint32_t idle = 0;
   while (total < max_count && idle < g_xdp.queue_count) {
@@ -702,8 +730,8 @@ static unsigned reap_rx(unsigned max_count, sfu_packet_pool_t *pp, sfu_on_recv_f
   return total;
 }
 
-static unsigned reap_worker_completions(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher,
-                                        sfu_on_send_complete_fn on_send_complete, void *user_data) {
+static unsigned reap_worker_completions(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher,
+                                        sfu_net_on_send_complete_fn on_send_complete, void *user_data) {
   unsigned count = 0;
   void *item;
   while (count < max_count && sfu_spsc_ring_pop(&r->tx_completed, &item)) {
@@ -715,17 +743,17 @@ static unsigned reap_worker_completions(sfu_ring_t *r, unsigned max_count, sfu_p
       on_send_complete(user_data, pkt);
     }
     if (release_to_dispatcher) {
-      sfu_worker_release_packet(pp, release_to_dispatcher, pkt);
+      sfu_net_worker_release_packet(pp, release_to_dispatcher, pkt);
     } else {
-      sfu_ring_release_packet(r, pp, pkt);
+      sfu_net_release_packet(r, pp, pkt);
     }
     count++;
   }
   return count;
 }
 
-unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher, sfu_on_recv_fn on_recv,
-                       sfu_on_send_complete_fn on_send_complete, void *user_data) {
+unsigned sfu_net_poll(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher, sfu_net_on_recv_fn on_recv,
+                       sfu_net_on_send_complete_fn on_send_complete, void *user_data) {
   if (!r || !g_xdp.initialized) {
     return 0;
   }
@@ -758,7 +786,7 @@ bool sfu_af_xdp_decode_rx_return(uintptr_t token, uint32_t *queue_slot, uint32_t
   return true;
 }
 
-void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
+void sfu_net_release_packet(sfu_net_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
   (void)r;
   if (!sfu_packet_release(pkt)) {
     return;
@@ -776,7 +804,7 @@ void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t 
   }
 }
 
-void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt) {
+void sfu_net_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt) {
   if (!sfu_packet_release(pkt)) {
     return;
   }
@@ -800,7 +828,7 @@ void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispat
   }
 }
 
-unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *from_worker, unsigned max_count) {
+unsigned sfu_net_drain_buffer_returns(sfu_net_t *r, sfu_spsc_ring_t *from_worker, unsigned max_count) {
   (void)r;
   unsigned count = 0;
   void *item;
@@ -909,8 +937,8 @@ static sfu_xdp_queue_t *next_tx_queue(void) {
   return NULL;
 }
 
-unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_ring, uint32_t send_ring_count, unsigned max_count) {
-  (void)recv_ring;
+unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_count) {
+  (void)recv_net;
   if (!g_xdp.initialized) {
     return 0;
   }
@@ -918,8 +946,11 @@ unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_ring, 
   for (uint32_t q = 0; q < g_xdp.queue_count; q++) {
     work += reap_tx_completions(&g_xdp.queues[q]);
   }
-  for (uint32_t ring_index = 0; ring_index < send_ring_count; ring_index++) {
-    sfu_ring_t *ring = &send_ring[ring_index];
+  if (!send_net) {
+    return work;
+  }
+  {
+    sfu_net_t *ring = send_net;
     for (unsigned n = 0; n < max_count; n++) {
       sfu_packet_t *pkt = ring->tx_retry;
       if (!pkt) {
@@ -991,13 +1022,13 @@ unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_ring, 
   return work;
 }
 
-unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_count) {
-  if (!g_xdp.initialized || !send_rings) {
+unsigned sfu_net_cancel(sfu_net_t *send_net) {
+  if (!g_xdp.initialized || !send_net) {
     return 0;
   }
   unsigned work = 0;
-  for (uint32_t ring_index = 0; ring_index < send_ring_count; ring_index++) {
-    sfu_ring_t *ring = &send_rings[ring_index];
+  {
+    sfu_net_t *ring = send_net;
     if (!ring->tx_retry) {
       void *item = NULL;
       if (sfu_spsc_ring_pop(&ring->tx_pending, &item)) {
@@ -1036,6 +1067,4 @@ unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_coun
   return work;
 }
 
-uint32_t sfu_ring_outstanding_sends(const sfu_ring_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }
-
-#endif /* USE_AF_XDP */
+uint32_t sfu_net_outstanding_sends(const sfu_net_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }

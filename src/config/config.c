@@ -86,34 +86,6 @@ int sfu_config_validate(const sfu_config_t *config) {
     SFU_LOG_ERROR("packet_pool_capacity (%u) exceeds maximum 16777216 (16M slots)", config->packet_pool_capacity);
     return -1;
   }
-#ifdef USE_AF_XDP
-  if (config->af_xdp_interface[0] == '\0') {
-    SFU_LOG_ERROR("af_xdp_interface must not be empty in an AF_XDP build");
-    return -1;
-  }
-  if (config->af_xdp_queues_set && config->af_xdp_queue_id_set) {
-    SFU_LOG_ERROR("af_xdp queues and queue_id cannot both be specified");
-    return -1;
-  }
-  if (config->af_xdp_queues[0] == '\0') {
-    SFU_LOG_ERROR("af_xdp queues must not be empty");
-    return -1;
-  }
-  if (config->af_xdp_frame_count < 8 || (config->af_xdp_frame_count & (config->af_xdp_frame_count - 1)) != 0) {
-    SFU_LOG_ERROR("af_xdp_frame_count must be a power of two >= 8 (got %u)", config->af_xdp_frame_count);
-    return -1;
-  }
-  if (config->af_xdp_frame_size < config->packet_buf_size + 64u ||
-      (config->af_xdp_frame_size != 2048u && config->af_xdp_frame_size != 4096u)) {
-    SFU_LOG_ERROR("af_xdp_frame_size must be 2048 or 4096 and fit packet_buf_size plus headers (frame=%u packet=%u)", config->af_xdp_frame_size,
-                  config->packet_buf_size);
-    return -1;
-  }
-  if (strcmp(config->af_xdp_mode, "native") != 0 && strcmp(config->af_xdp_mode, "skb") != 0 && strcmp(config->af_xdp_mode, "auto") != 0) {
-    SFU_LOG_ERROR("af_xdp_mode must be native, skb, or auto (got '%s')", config->af_xdp_mode);
-    return -1;
-  }
-#endif
 #undef REQUIRE_POWER_OF_TWO
   return 0;
 }

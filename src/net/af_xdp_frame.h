@@ -38,5 +38,8 @@ bool sfu_af_xdp_partition_frames(uint32_t total, uint32_t *rx, uint32_t *tx);
 bool sfu_af_xdp_parse_frame(uint8_t *frame, uint32_t frame_len, uint32_t frame_capacity, uint16_t media_port,
                             sfu_af_xdp_parse_result_t *result);
 bool sfu_af_xdp_build_frame(uint8_t *frame, uint32_t frame_capacity, const sfu_af_xdp_frame_params_t *params, uint32_t *out_len);
+uint32_t sfu_af_xdp_frames_per_queue(uint32_t total_frames, uint32_t queue_count);
+bool sfu_af_xdp_encode_rx_return(uint32_t queue_slot, uint32_t frame, uintptr_t *token);
+bool sfu_af_xdp_decode_rx_return(uintptr_t token, uint32_t *queue_slot, uint32_t *frame);
 
 #endif /* SFU_NET_AF_XDP_FRAME_H */
