@@ -6,6 +6,14 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 
 AF_XDP is the default network backend; io_uring is available as a fallback for environments where AF_XDP isn't supported.
 
+## Why mezon-sfu?
+
+Existing SFUs like mediasoup and LiveKit are capable, but heavy — large dependency trees, runtime overhead, and general-purpose designs that aren't tuned for any one use case. mezon-sfu exists because we needed something different:
+
+* **Standalone, dependency-light:** No external media-server runtime to operate — build it, run the binary.
+* **Deeply optimized for meetings:** Built from scratch around the meeting workload specifically (HD video, screen share, large rooms) rather than adapted from a general-purpose media server.
+* **Lightweight and easy to integrate:** Small enough to embed into the existing Mezon ecosystem without dragging in a heavyweight stack.
+
 ## Features
 
 * **WebRTC Compliance:** Compatible with both standard WebRTC clients and [libmezia](https://github.com/mezonai/libmezia) — a lightweight, ultra-low-latency audio/video library for native platforms
@@ -202,6 +210,8 @@ Modern WebRTC engines restrict local network discovery (mDNS protection) when ru
 3. Input `jwt_secret` (from `config.ini`). This is for testing purposes only.
 4. Click **Connect** to start streaming!
 
+See [`examples/webrtc_test_client.html`](examples/webrtc_test_client.html) and its [README](examples/README.md) for the full client — camera + screen-share publishing, speaker/audience join modes, and a field-by-field walkthrough of the join form.
+
 ## Agent integration
 
 [mezon-call-translation](https://github.com/mezonai/mezon-call-translation) is a companion service that adds real-time speech-to-text and translation to calls running on the SFU, via a general-purpose Voice AI Agent (not tied to any specific WebRTC provider).
@@ -218,6 +228,8 @@ Modern WebRTC engines restrict local network discovery (mDNS protection) when ru
 * Health is exposed via `/health` and `/health/simple`, which the load balancer polls to route around unhealthy instances.
 
 **Setup:** see the [mezon-call-translation Quick Start](https://github.com/mezonai/mezon-call-translation#-quick-start) and [Setup Guide](https://github.com/mezonai/mezon-call-translation/blob/main/docs/setup/SETUP-GUIDE.md) for environment configuration and the Vosk/Kokoro models downloaded via the provided scripts.
+
+> Note: some of mezon-call-translation's published docs still describe the agent as LiveKit-specific — treat that framing as outdated; the agent itself is provider-agnostic.
 
 ## Editor & debugger integration (Zed / VS Code)
 
