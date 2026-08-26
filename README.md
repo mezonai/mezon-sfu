@@ -91,7 +91,7 @@ sudo make install
 
 ## default AF_XDP build
 
-The default build uses AF_XDP (`USE_AF_XDP=ON`). Install clang, libxdp, libbpf, and matching Linux headers:
+The default build uses AF_XDP (`SFU_NET_BACKEND="af_xdp"`). Install clang, libxdp, libbpf, and matching Linux headers:
 
 ```sh
 sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
@@ -110,7 +110,7 @@ cd liburing
 make -j$(nproc)
 sudo make install
 cd -
-cmake -S . -B build-uring -DUSE_AF_XDP=OFF
+cmake -S . -B build-uring -DSFU_NET_BACKEND="io_uring"
 cmake --build build-uring -j$(nproc)
 ```
 
