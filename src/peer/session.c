@@ -10,6 +10,7 @@
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
+#include "pipeline/paced_send.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_kf.h"
@@ -1158,6 +1159,7 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     SFU_FREE(s->egress.schedulers);
     s->egress.schedulers = NULL;
   }
+  sfu_paced_send_destroy(&s->egress.paced_screen);
   if (s->leave_event) {
     assert(!atomic_load_explicit(&s->leave_event_in_use, memory_order_acquire));
     SFU_FREE(s->leave_event);
@@ -1486,6 +1488,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   atomic_store_explicit(&s->egress.video_runtime_state, SFU_VIDEO_RUNTIME_UNINITIALIZED, memory_order_relaxed);
   sfu_rtp_seq_translator_init(&s->cold->rtp_seq_translator);
+  sfu_paced_send_init(&s->egress.paced_screen);
   sfu_pacer_init(&s->egress.pacer);
   sfu_pacer_set_rate(&s->egress.pacer, SFU_BWE_START_BPS, (int64_t)sfu_now_us());
 

@@ -5,6 +5,7 @@
 #include "config/config.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
+#include "pipeline/paced_send.h"
 #include "runtime/cpu.h"
 #include "runtime/epoch_reclaimer.h"
 #include "runtime/fanout.h"
@@ -237,6 +238,7 @@ static void *worker_thread_main(void *arg) {
       for (uint32_t li = 0; li < twcc_count; li++) {
         sfu_peer_session_t *ls = w->twcc_scratch[li];
         if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
+          sfu_paced_send_drain(&ls->egress.paced_screen, w, now_us);
           if (twcc_due) {
             sfu_session_maybe_send_twcc_feedback(w, ls);
             flushed_twcc = true;
