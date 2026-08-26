@@ -204,20 +204,20 @@ Modern WebRTC engines restrict local network discovery (mDNS protection) when ru
 
 ## Agent integration
 
-[mezon-call-translation](https://github.com/mezonai/mezon-call-translation) is a companion service that adds real-time speech-to-text and translation to calls running on the SFU, via a LiveKit-based agent.
+[mezon-call-translation](https://github.com/mezonai/mezon-call-translation) is a companion service that adds real-time speech-to-text and translation to calls running on the SFU, via a general-purpose Voice AI Agent (not tied to any specific WebRTC provider).
 
 **What it does:**
-* Joins a call as a LiveKit agent and pulls audio through voice activity detection (VAD) to filter out silence before transcription.
+* Joins a call as a Voice AI Agent and pulls audio through voice activity detection (VAD) to filter out silence before transcription.
 * Transcribes speech with the [Vosk](https://alphacephei.com/vosk/) offline STT engine and can synthesize translated audio back with Kokoro TTS.
 * Runs behind a FastAPI server that fans work out to multiple STT workers, so one deployment can serve many simultaneous calls.
 * Scales horizontally — an Nginx load balancer sits in front of multiple server instances, each with its own worker pool, so agent capacity can grow independently of the SFU.
 
 **How it connects:**
-* The agent is dispatched into a room through the server's `POST /agent/join` REST endpoint.
+* The agent is dispatched into a call through the server's `POST /agent/join` REST endpoint.
 * Audio and results flow over a WebSocket API (`ws://<host>:8000/ws/vosk/`), which accepts per-client parameters (`client_id`, `session_id`, `language`, and whether transcript and/or translation output is wanted) and returns JSON transcript/translation events.
 * Health is exposed via `/health` and `/health/simple`, which the load balancer polls to route around unhealthy instances.
 
-**Setup:** see the [mezon-call-translation Quick Start](https://github.com/mezonai/mezon-call-translation#-quick-start) and [Setup Guide](https://github.com/mezonai/mezon-call-translation/blob/main/docs/setup/SETUP-GUIDE.md) — it requires LiveKit credentials (`LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`) pointing at the same LiveKit-compatible signaling used by mezon-sfu, plus the Vosk and Kokoro models downloaded via the provided scripts.
+**Setup:** see the [mezon-call-translation Quick Start](https://github.com/mezonai/mezon-call-translation#-quick-start) and [Setup Guide](https://github.com/mezonai/mezon-call-translation/blob/main/docs/setup/SETUP-GUIDE.md) for environment configuration and the Vosk/Kokoro models downloaded via the provided scripts.
 
 ## Editor & debugger integration (Zed / VS Code)
 
