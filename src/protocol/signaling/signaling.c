@@ -1552,8 +1552,12 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
   bool in_room = has_session && session->room == c->joined_room;
   bool is_audience = has_session && atomic_load_explicit(&session->is_audience, memory_order_acquire);
   bool audio_send_negotiated = has_session && atomic_load_explicit(&session->media.audio_send_negotiated, memory_order_acquire);
-  bool negotiation_ok = !active || audio_send_negotiated;
-  bool accepted = has_session && in_room && is_audience && negotiation_ok && room_set_peer_ptt_active(c->joined_room, session, active);
+  bool was_ptt_active = has_session && atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
+  bool accepted = has_session && in_room && is_audience && room_set_peer_ptt_active(c->joined_room, session, active);
+  if (accepted && active && !was_ptt_active && !audio_send_negotiated) {
+    SFU_LOG_INFO("signaling: push_to_talk requires sender negotiation ufrag=%s peer_id=%u", c->client_ufrag, session->peer_id);
+    sfu_signaling_trigger_peer_renegotiation(session);
+  }
   if (!accepted) {
     static const char rejected[] = "{\"type\":\"error\",\"message\":\"push_to_talk_rejected\"}";
     sfu_ws_send_text(c->fd, rejected, sizeof(rejected) - 1);
@@ -1567,9 +1571,9 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
       uint32_t gen = session->cold ? session->cold->transport_generation : 0;
       SFU_LOG_WARN("signaling: push_to_talk rejected user_id=%" PRId64
                    " ufrag=%s peer_id=%u requested_active=%d has_session=%d in_room=%d "
-                   "is_audience=%d audio_send_negotiated=%d negotiation_ok=%d ptt_active=%d audio_ssrc=%u audio_active=%d generation=%u",
-                   c->user_id, c->client_ufrag, session->peer_id, active, has_session, in_room, is_audience, audio_send_negotiated, negotiation_ok, ptt_active,
-                   snap.audio_ssrc, snap.audio_active, gen);
+                   "is_audience=%d audio_send_negotiated=%d ptt_active=%d audio_ssrc=%u audio_active=%d generation=%u",
+                   c->user_id, c->client_ufrag, session->peer_id, active, has_session, in_room, is_audience, audio_send_negotiated, ptt_active, snap.audio_ssrc,
+                   snap.audio_active, gen);
     }
 #endif
 
@@ -1727,9 +1731,6 @@ static void handle_visibility(sfu_client_conn_t *c, const char *buf, size_t n) {
     sfu_ws_send_text(c->fd, invalid_visibility, sizeof(invalid_visibility) - 1);
     return;
   }
-  /* TEMPORARY: keep media forwarding enabled while validating whether the
-   * visibility gate causes VP9 screen-share cessation. */
-  visible = true;
 
   sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
   if (!session || session->room != c->joined_room) {
