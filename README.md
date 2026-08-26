@@ -8,7 +8,7 @@ AF_XDP is the default network backend; io_uring is available as a fallback for e
 
 ## Why mezon-sfu?
 
-Existing SFUs like mediasoup and LiveKit are capable, but heavy — large dependency trees, runtime overhead, and general-purpose designs that aren't tuned for any one use case. mezon-sfu exists because we needed something different:
+Existing SFUs options are capable, but heavy — large dependency trees, runtime overhead, and general-purpose designs that aren't tuned for any one use case. mezon-sfu exists because we needed something different:
 
 * **Standalone, dependency-light:** No external media-server runtime to operate — build it, run the binary.
 * **Deeply optimized for meetings:** Built from scratch around the meeting workload specifically (HD video, screen share, large rooms) rather than adapted from a general-purpose media server.
