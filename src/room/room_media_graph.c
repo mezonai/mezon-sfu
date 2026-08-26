@@ -10,15 +10,19 @@
 #include "util/log.h"
 
 #define SFU_DEFERRED_CAP (SFU_ROOM_MAX_PEERS * 3)
+
 typedef enum { SFU_RECLAIM_RECEIVERS = 0, SFU_RECLAIM_FANOUT } sfu_reclaim_kind_t;
+
 typedef struct {
   void *ptr;
   sfu_reclaim_kind_t kind;
 } sfu_deferred_entry_t;
+
 typedef struct {
   sfu_deferred_entry_t entries[SFU_DEFERRED_CAP];
   uint32_t count;
 } sfu_deferred_reclaim_t;
+
 typedef struct {
   sfu_peer_session_t *owner;
   uint32_t slot;
@@ -303,19 +307,23 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
   if (peer->room == room) {
     goto out;
   }
+
   if (peer->room || !sfu_session_accepts_work(peer)) {
     goto out;
   }
+
   if (room->peer_count >= room->peer_capacity || room->free_count == 0) {
     result = SFU_ROOM_ADMISSION_CAPACITY;
     goto out;
   }
+
   for (uint32_t i = 0; i < room->peer_capacity; i++) {
     sfu_peer_session_t *other = room->occupied[i] ? room->peers[i] : NULL;
     if (other && other != peer && sfu_session_accepts_work(other)) {
       targets[target_count++] = other;
     }
   }
+
   for (uint32_t i = 0; i < target_count; i++) {
     if (!sfu_session_remote_slot_reserve(targets[i], peer->user_id, peer->peer_id, &target_slots[i], &target_generations[i])) {
       result = SFU_ROOM_ADMISSION_CAPACITY;
@@ -328,6 +336,7 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
     }
     reservations[reservation_count++] = (sfu_slot_reservation_t){peer, peer_slots[i], peer_generations[i]};
   }
+
   event = sfu_membership_event_alloc();
   if (!event) {
     goto out;
@@ -340,10 +349,12 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
   if (!peer_receivers) {
     goto out;
   }
+
   peer_fanout = sfu_fanout_bundle_alloc();
   if (!peer_fanout) {
     goto out;
   }
+
   for (uint32_t i = 0; i < target_count; i++) {
     target_receivers[i] = snapshot_build_at(targets[i], peer, target_slots[i], target_generations[i]);
     if (!target_receivers[i]) {
@@ -366,14 +377,17 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
       goto out;
     }
   }
+
   if (!sfu_session_accepts_work(peer)) {
     goto out;
   }
+
   for (uint32_t i = 0; i < target_count; i++) {
     if (!sfu_session_accepts_work(targets[i])) {
       goto out;
     }
   }
+
   event->member_count = target_count + 1;
   membership_capture_member(&event->members[0], peer, NULL);
   event->recipient_count = target_count + 1;
@@ -395,9 +409,11 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
                                                             .send_delta = true,
                                                             .renegotiate = true};
   }
+
   if (!sfu_signaling_reserve_membership_event(&event_reservation)) {
     goto out;
   }
+
   prepared = true;
   uint32_t room_slot = room->free_slots[room->free_count - 1];
   for (uint32_t i = 0; i < target_count; i++) {
@@ -416,6 +432,7 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
   room->peer_count++;
   peer->room = room;
   peer->room_slot = room_slot;
+
   if (++room->membership_revision == 0) {
     room->membership_revision = 1;
   }
@@ -446,6 +463,7 @@ out:
     sfu_subscriptions_snapshot_release(peer_receivers);
     sfu_fanout_bundle_release(peer_fanout);
   }
+
   deferred_flush(&deferred);
   if (!admitted) {
     sfu_membership_event_release(event);
