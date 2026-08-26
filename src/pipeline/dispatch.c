@@ -3,7 +3,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include "memory/packet_pool.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "protocol/signaling/signaling.h"
@@ -45,7 +45,7 @@ static void send_raw(sfu_worker_t *w, const uint8_t *data, size_t len, const str
   }
   if (len > out->cap) {
     SFU_LOG_WARN("handshake response too large (%zu > %u), dropping", len, out->cap);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
+    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
     return;
   }
 
@@ -54,12 +54,12 @@ static void send_raw(sfu_worker_t *w, const uint8_t *data, size_t len, const str
 
   SFU_LOG_DEBUG("SEND_ZC worker=%u pkt=%p len=%lu", w->worker_index, data, len);
 
-  if (sfu_ring_queue_send_zc(&w->send_ring, out, (const struct sockaddr *)dst, dst_len) != 0) {
+  if (sfu_net_send(w->send_net, out, (const struct sockaddr *)dst, dst_len) != 0) {
     SFU_LOG_WARN("worker %u: send SQ full, dropping handshake response", w->worker_index);
   }
 
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
-  sfu_ring_submit(&w->send_ring);
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
+  sfu_net_flush(w->send_net);
 }
 
 static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
@@ -392,7 +392,7 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_metric_inc("dispatch_null_payload");
     SFU_LOG_WARN("worker %u: dropping packet with null payload len=%u cap=%u src=%u", w->worker_index, pkt->len, pkt->cap, pkt->buf_source);
     if (pkt->data) {
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     }
     return;
   }
@@ -404,14 +404,14 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (sfu_stun_is_stun_packet(pkt->data, pkt->len)) {
     SFU_LOG_DEBUG("worker %u: Identified STUN packet from %s:%u", w->worker_index, ip, port);
     handle_stun(w, pkt);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
 
   if (sfu_dtls_is_dtls_packet(pkt->data, pkt->len)) {
     SFU_LOG_DEBUG("worker %u: Identified DTLS packet from %s:%u", w->worker_index, ip, port);
     handle_dtls(w, pkt);
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
     return;
   }
 

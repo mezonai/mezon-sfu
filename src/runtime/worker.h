@@ -6,7 +6,7 @@
 
 #include "memory/packet_pool.h"
 #include "memory/worker_packet_arena.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "room/room_registry.h"
 #include "runtime/fanout.h"
 #include "runtime/routing_context.h"
@@ -30,7 +30,7 @@ typedef struct sfu_worker_hot_counters {
 } sfu_worker_hot_counters_t;
 
 typedef struct sfu_worker {
-  sfu_ring_t send_ring;
+  sfu_net_t *send_net;
   sfu_spsc_ring_t inbox;
   sfu_spsc_ring_t release_to_dispatcher;
   sfu_worker_packet_arena_t output_arena;

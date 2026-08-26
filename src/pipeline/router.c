@@ -6,7 +6,7 @@
 
 #include "memory/packet_pool.h"
 #include "memory/refcount.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "peer/session.h"
 #include "pipeline/egress.h"
 #include "runtime/fanout.h"
@@ -51,7 +51,7 @@ static bool ensure_remote_source(sfu_worker_t *w, const sfu_packet_t *plain, sfu
   if (*source) return true;
   sfu_packet_t *copy = sfu_packet_pool_alloc(w->pp);
   if (!copy || plain->len > copy->cap) {
-    if (copy) sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, copy);
+    if (copy) sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, copy);
     return false;
   }
   memcpy(copy->data, plain->data, plain->len);
@@ -89,7 +89,7 @@ static void flush_remote_batch(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     else diag->enqueue_fail++;
   }
 #endif
-  if (!enqueued) sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, *remote_source);
+  if (!enqueued) sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, *remote_source);
   builder->count = 0;
 }
 
@@ -238,6 +238,6 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   }
 #endif
   sfu_fanout_bundle_release(bundle);
-  if (remote_source) sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, remote_source);
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, m->pkt);
+  if (remote_source) sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, remote_source);
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, m->pkt);
 }

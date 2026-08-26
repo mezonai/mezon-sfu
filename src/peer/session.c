@@ -2050,7 +2050,7 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
     if (protected) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
 
-      int sent = sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
+      int sent = sfu_net_send(w->send_net, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
       if (sent != 0) {
         SFU_LOG_ERROR("Failed to enqueue PLI to send_ring for peer %u", publisher->peer_id);
       } else {
@@ -2062,7 +2062,7 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
     }
   }
 
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
 }
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
@@ -2096,7 +2096,7 @@ bool sfu_session_send_remb_for_source(sfu_worker_t *w, sfu_peer_session_t *publi
     pthread_mutex_unlock(&publisher->crypto_lock);
     if (protected) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
-      if (sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len) == 0) {
+      if (sfu_net_send(w->send_net, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len) == 0) {
         sfu_metric_inc("remb_sent");
         sent = true;
       } else {
@@ -2107,7 +2107,7 @@ bool sfu_session_send_remb_for_source(sfu_worker_t *w, sfu_peer_session_t *publi
     }
   }
 
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
   return sent;
 }
 
@@ -2387,7 +2387,7 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
 
     int rtcp_len = sfu_twcc_feedback_build(t, sfu_sender_ssrc, media_ssrc, now_us, rtcp_pkt->data, rtcp_pkt->cap);
     if (rtcp_len <= 0) {
-      sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
       if (rtcp_len < 0) {
         break;
       }
@@ -2399,7 +2399,7 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
     pthread_mutex_unlock(&publisher->crypto_lock);
     if (protected) {
       rtcp_pkt->len = (uint32_t)rtcp_len;
-      int sent = sfu_ring_queue_send_zc(&w->send_ring, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
+      int sent = sfu_net_send(w->send_net, rtcp_pkt, (const struct sockaddr *)&publisher->cold->addr, publisher->cold->addr_len);
       if (sent != 0) {
         SFU_LOG_ERROR("Failed to enqueue TWCC feedback to send_ring for peer %u", publisher->peer_id);
       }
@@ -2407,6 +2407,6 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
       SFU_LOG_WARN("Failed to SRTP protect TWCC feedback for peer %u", publisher->peer_id);
     }
 
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
   }
 }

@@ -1,5 +1,5 @@
 #include "runtime/fanout_job.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "peer/session.h"
 #include "pipeline/egress.h"
 #include "runtime/worker.h"
@@ -32,7 +32,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
       sfu_peer_session_t *subscriber = target->subscriber;
       if (!subscriber || sfu_session_owner_worker(subscriber) != w->worker_index || !sfu_session_accepts_work(subscriber)) {
         if (w->reserved_outputs[i]) {
-          sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, w->reserved_outputs[i]);
+          sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, w->reserved_outputs[i]);
           w->reserved_outputs[i] = NULL;
         }
         if (subscriber) {
@@ -63,7 +63,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
     if (job->publisher) {
       sfu_session_release(job->publisher);
     }
-    sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
+    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
     sfu_fanout_mesh_free_job(w->mesh, job);
     return;
   }
@@ -99,11 +99,11 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
     sfu_fanout_mesh_free_job(w->mesh, job);
     return;
   } else {
-    if (sfu_ring_queue_send_zc(&w->send_ring, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
+    if (sfu_net_send(w->send_net, job->pkt, (const struct sockaddr *)&job->dst, job->dst_len) != 0) {
       SFU_LOG_WARN("worker %u: [EGRESS DROP] remote-fanout send SQ full, dropping packet", w->worker_index);
     }
   }
 
-  sfu_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
   sfu_fanout_mesh_free_job(w->mesh, job);
 }

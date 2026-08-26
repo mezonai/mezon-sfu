@@ -1,4 +1,4 @@
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "memory/refcount.h"
 #include "memory/worker_packet_arena.h"
 #include "net/batch.h"
@@ -8,6 +8,7 @@
 #include "util/metrics.h"
 
 #include <arpa/inet.h>
+#include <liburing.h>
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,21 @@
 
 #define SFU_CQE_PKT_PTR_MASK 0x0000ffffffffffffULL
 #define SFU_CQE_PKT_GEN_SHIFT 48
+#define SFU_CQE_TAG_RECV 0x1ULL
+
+struct sfu_net {
+  struct io_uring ring;
+  struct msghdr recv_msg_template;
+  uint8_t recv_cmsg_buf[SFU_RECV_CMSG_BUFSIZE];
+  struct io_uring_buf_ring *buf_ring;
+  void *buf_ring_mem;
+  uint32_t buf_count;
+  uint32_t buf_size;
+  uint32_t payload_cap;
+  _Atomic uint32_t outstanding_sends;
+  int bgid;
+  int fd;
+};
 
 static uint64_t sfu_cqe_pack_packet(sfu_packet_t *pkt) {
   uint32_t gen = sfu_packet_generation(pkt) & 0xffffu;
@@ -30,11 +46,16 @@ static sfu_packet_t *sfu_cqe_unpack_packet(uint64_t data) {
   return pkt;
 }
 
-uint32_t sfu_ring_recv_overhead(void) {
+uint32_t sfu_net_recv_overhead(void) {
   return (uint32_t)sizeof(struct io_uring_recvmsg_out) + (uint32_t)sizeof(struct sockaddr_storage) + SFU_RECV_CMSG_BUFSIZE;
 }
 
-uint32_t sfu_ring_recv_slot_size(uint32_t payload_cap) { return payload_cap + sfu_ring_recv_overhead(); }
+uint32_t sfu_net_recv_slot_size(uint32_t payload_cap) { return payload_cap + sfu_net_recv_overhead(); }
+
+uint64_t sfu_net_recv_capacity_bytes(const sfu_net_backend_options_t *backend_options, uint32_t recv_buffer_count, uint32_t payload_cap) {
+  (void)backend_options;
+  return (uint64_t)recv_buffer_count * sfu_net_recv_slot_size(payload_cap);
+}
 
 static void format_ring_peer_addr(const struct sockaddr *addr, char *out_ip, uint16_t *out_port) {
   strcpy(out_ip, "unknown");
@@ -53,8 +74,21 @@ static void format_ring_peer_addr(const struct sockaddr *addr, char *out_ip, uin
   }
 }
 
-int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entries, uint32_t buf_count, uint32_t buf_size, int bgid, bool with_recv_bufs) {
-  memset(r, 0, sizeof(*r));
+sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
+  if (!options) {
+    return NULL;
+  }
+  sfu_net_t *r = SFU_CALLOC(1, sizeof(*r));
+  if (!r) {
+    return NULL;
+  }
+  int fd = options->fd;
+  uint32_t sq_entries = options->send_entries;
+  uint32_t cq_entries = options->completion_entries;
+  uint32_t buf_count = options->recv_buffer_count;
+  uint32_t buf_size = options->recv_buffer_size;
+  int bgid = options->buffer_group_id;
+  bool with_recv_bufs = options->receive;
   r->fd = fd;
 
   struct io_uring_params params;
@@ -65,29 +99,32 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
   int rc = io_uring_queue_init_params(sq_entries, &r->ring, &params);
   if (rc < 0) {
     SFU_LOG_ERROR("io_uring_queue_init_params failed: %s", strerror(-rc));
-    return -1;
+    SFU_FREE(r);
+    return NULL;
   }
 
   if (!with_recv_bufs) {
     SFU_LOG_INFO("io_uring ring initialized (send-only): sq=%u cq=%u on fd=%d", sq_entries, cq_entries, fd);
-    return 0;
+    return r;
   }
 
   if ((buf_count & (buf_count - 1)) != 0) {
     SFU_LOG_ERROR("buf_count must be a power of two (got %u)", buf_count);
     io_uring_queue_exit(&r->ring);
-    return -1;
+    SFU_FREE(r);
+    return NULL;
   }
 
   r->payload_cap = buf_size;
-  r->buf_size = sfu_ring_recv_slot_size(buf_size);
+  r->buf_size = sfu_net_recv_slot_size(buf_size);
   r->buf_count = buf_count;
   r->bgid = bgid;
   r->buf_ring_mem = SFU_ALIGNED_ALLOC(SFU_CACHELINE_SIZE, (size_t)buf_count * r->buf_size);
   if (!r->buf_ring_mem) {
     SFU_LOG_ERROR("failed to allocate provided-buffer backing store");
     io_uring_queue_exit(&r->ring);
-    return -1;
+    SFU_FREE(r);
+    return NULL;
   }
 
   int setup_ret = 0;
@@ -96,7 +133,8 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
     SFU_LOG_ERROR("io_uring_setup_buf_ring failed: %s", strerror(-setup_ret));
     SFU_FREE(r->buf_ring_mem);
     io_uring_queue_exit(&r->ring);
-    return -1;
+    SFU_FREE(r);
+    return NULL;
   }
 
   int mask = io_uring_buf_ring_mask(buf_count);
@@ -112,11 +150,14 @@ int sfu_ring_init(sfu_ring_t *r, int fd, uint32_t sq_entries, uint32_t cq_entrie
   r->recv_msg_template.msg_controllen = sizeof(r->recv_cmsg_buf);
 
   SFU_LOG_INFO("io_uring ring initialized: sq=%u cq=%u bufs=%u x %uB slot (payload=%u + overhead=%u) bgid=%d on fd=%d", sq_entries, cq_entries, buf_count,
-               r->buf_size, r->payload_cap, sfu_ring_recv_overhead(), bgid, fd);
-  return 0;
+               r->buf_size, r->payload_cap, sfu_net_recv_overhead(), bgid, fd);
+  return r;
 }
 
-void sfu_ring_destroy(sfu_ring_t *r) {
+void sfu_net_destroy(sfu_net_t *r) {
+  if (!r) {
+    return;
+  }
   if (r->buf_ring) {
     io_uring_free_buf_ring(&r->ring, r->buf_ring, r->buf_count, r->bgid);
     r->buf_ring = NULL;
@@ -124,9 +165,10 @@ void sfu_ring_destroy(sfu_ring_t *r) {
   SFU_FREE(r->buf_ring_mem);
   r->buf_ring_mem = NULL;
   io_uring_queue_exit(&r->ring);
+  SFU_FREE(r);
 }
 
-int sfu_ring_arm_recv(sfu_ring_t *r) {
+int sfu_net_recv(sfu_net_t *r) {
   struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
   if (!sqe) {
     SFU_LOG_ERROR("SQ full, cannot arm recv on fd=%d", r->fd);
@@ -141,7 +183,7 @@ int sfu_ring_arm_recv(sfu_ring_t *r) {
   return 0;
 }
 
-int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
+int sfu_net_send(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
   if (!r || !pkt || !dst || dst_len == 0 || (size_t)dst_len > sizeof(pkt->peer_addr)) {
     return -1;
   }
@@ -162,7 +204,7 @@ int sfu_ring_queue_send_zc(sfu_ring_t *r, sfu_packet_t *pkt, const struct sockad
   return 0;
 }
 
-int sfu_ring_submit(sfu_ring_t *r) {
+int sfu_net_flush(sfu_net_t *r) {
   int rc = io_uring_submit(&r->ring);
   if (rc < 0) {
     SFU_LOG_ERROR("io_uring_submit failed on fd=%d: %s", r->fd, strerror(-rc));
@@ -170,7 +212,7 @@ int sfu_ring_submit(sfu_ring_t *r) {
   return rc;
 }
 
-void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
+void sfu_net_release_packet(sfu_net_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
   if (!sfu_packet_release(pkt)) {
     return;
   }
@@ -188,7 +230,7 @@ void sfu_ring_release_packet(sfu_ring_t *r, sfu_packet_pool_t *pp, sfu_packet_t 
   }
 }
 
-void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt) {
+void sfu_net_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt) {
   if (!sfu_packet_release(pkt)) {
     return;
   }
@@ -208,7 +250,7 @@ void sfu_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispat
   }
 }
 
-unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *from_worker, unsigned max_count) {
+unsigned sfu_net_drain_buffer_returns(sfu_net_t *r, sfu_spsc_ring_t *from_worker, unsigned max_count) {
   unsigned n = 0;
   int mask = io_uring_buf_ring_mask(r->buf_count);
   void *item;
@@ -226,7 +268,7 @@ unsigned sfu_ring_drain_kernel_buffer_returns(sfu_ring_t *r, sfu_spsc_ring_t *fr
   return n;
 }
 
-static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_pool_t *pp, sfu_on_recv_fn on_recv, void *user_data) {
+static void handle_recv_cqe(sfu_net_t *r, struct io_uring_cqe *cqe, sfu_packet_pool_t *pp, sfu_net_on_recv_fn on_recv, void *user_data) {
   if (cqe->res < 0) {
     if (cqe->res == -ENOBUFS) {
       SFU_LOG_WARN("CRITICAL: io_uring kernel drop on fd=%d: ENOBUFS (Provided buffer ring is entirely full!)", r->fd);
@@ -314,14 +356,14 @@ static void handle_recv_cqe(sfu_ring_t *r, struct io_uring_cqe *cqe, sfu_packet_
 
 maybe_rearm:
   if (!(cqe->flags & IORING_CQE_F_MORE)) {
-    if (sfu_ring_arm_recv(r) != 0) {
+    if (sfu_net_recv(r) != 0) {
       SFU_LOG_ERROR("failed to re-arm multishot recv after termination on fd=%d", r->fd);
     }
   }
 }
 
-unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher, sfu_on_recv_fn on_recv,
-                       sfu_on_send_complete_fn on_send_complete, void *user_data) {
+unsigned sfu_net_poll(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher, sfu_net_on_recv_fn on_recv,
+                       sfu_net_on_send_complete_fn on_send_complete, void *user_data) {
   struct io_uring_cqe *cqes[256];
   if (max_count > 256) {
     max_count = 256;
@@ -353,9 +395,9 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
         }
 
         if (release_to_dispatcher) {
-          sfu_worker_release_packet(pp, release_to_dispatcher, pkt);
+          sfu_net_worker_release_packet(pp, release_to_dispatcher, pkt);
         } else {
-          sfu_ring_release_packet(r, pp, pkt);
+          sfu_net_release_packet(r, pp, pkt);
         }
       } else {
         if (cqe->res < 0) {
@@ -366,9 +408,9 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
             r->outstanding_sends--;
           }
           if (release_to_dispatcher) {
-            sfu_worker_release_packet(pp, release_to_dispatcher, pkt);
+            sfu_net_worker_release_packet(pp, release_to_dispatcher, pkt);
           } else {
-            sfu_ring_release_packet(r, pp, pkt);
+            sfu_net_release_packet(r, pp, pkt);
           }
         }
       }
@@ -378,32 +420,30 @@ unsigned sfu_ring_reap(sfu_ring_t *r, unsigned max_count, sfu_packet_pool_t *pp,
   sfu_batch_advance_cqe(&r->ring, n);
 
   if (needs_submit) {
-    sfu_ring_submit(r);
+    sfu_net_flush(r);
   }
 
   return n;
 }
 
-int sfu_ring_backend_init(int fd, const sfu_ring_backend_options_t *options) {
+int sfu_net_backend_init(int fd, const sfu_net_backend_options_t *options) {
   (void)fd;
   (void)options;
   return 0;
 }
 
-void sfu_ring_backend_destroy(void) {}
+void sfu_net_backend_destroy(void) {}
 
-unsigned sfu_ring_backend_service(sfu_ring_t *recv_ring, sfu_ring_t *send_rings, uint32_t send_ring_count, unsigned max_count) {
-  (void)recv_ring;
-  (void)send_rings;
-  (void)send_ring_count;
+unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_count) {
+  (void)recv_net;
+  (void)send_net;
   (void)max_count;
   return 0;
 }
 
-unsigned sfu_ring_backend_cancel(sfu_ring_t *send_rings, uint32_t send_ring_count) {
-  (void)send_rings;
-  (void)send_ring_count;
+unsigned sfu_net_cancel(sfu_net_t *send_net) {
+  (void)send_net;
   return 0;
 }
 
-uint32_t sfu_ring_outstanding_sends(const sfu_ring_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }
+uint32_t sfu_net_outstanding_sends(const sfu_net_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }

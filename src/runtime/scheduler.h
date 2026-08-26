@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "memory/packet_pool.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "runtime/routing_context.h"
 #include "transport/stun/stun.h"
 
@@ -24,7 +24,7 @@ typedef struct sfu_affinity_entry {
 typedef struct sfu_worker sfu_worker_t;
 
 typedef struct sfu_scheduler {
-  sfu_ring_t recv_ring;
+  sfu_net_t *recv_net;
   sfu_packet_pool_t *pp;
   sfu_worker_t *workers;
   sfu_routing_table_t *routing_table;
