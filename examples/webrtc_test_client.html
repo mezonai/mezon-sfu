@@ -370,6 +370,63 @@
                 background: var(--tile);
                 color: var(--accent);
             }
+
+            #statsBtn {
+                background: var(--tile);
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                padding: 5px 10px;
+                font-size: 12px;
+                cursor: pointer;
+                margin-right: 10px;
+            }
+            #statsBtn:hover { background: var(--border); }
+            #statsBtn.on { background: var(--accent); color: #11111b; }
+
+            #statsPanel {
+                position: fixed;
+                top: 48px;
+                right: 12px;
+                width: 440px;
+                max-width: calc(100vw - 24px);
+                max-height: calc(100vh - 140px);
+                overflow-y: auto;
+                background: rgba(17, 17, 27, 0.95);
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 12px 14px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 11px;
+                line-height: 1.55;
+                color: var(--text);
+                z-index: 2000;
+                display: none;
+                box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+            }
+            #statsPanel.show { display: block; }
+            #statsPanel .panel-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 6px;
+            }
+            #statsPanel .hd { color: var(--accent); font-weight: 700; font-size: 12px; }
+            #statsPanel .stream {
+                border-top: 1px solid var(--border);
+                padding: 7px 0;
+            }
+            #statsPanel .stream:first-child { border-top: none; }
+            #statsPanel .stream .hd {
+                color: var(--ok);
+                font-weight: 700;
+                font-size: 11px;
+                margin-bottom: 2px;
+            }
+            #statsPanel .meta { color: var(--muted); }
+            #statsPanel .bad { color: var(--err); font-weight: 700; }
+            #statsPanel .warn { color: var(--warn); font-weight: 700; }
+            #statsPanel .ok { color: var(--ok); }
         </style>
     </head>
     <body>
@@ -434,6 +491,13 @@
                     <span id="participantCount"></span>
                 </div>
                 <div id="connState">
+                    <button
+                        id="statsBtn"
+                        onclick="toggleStats()"
+                        title="Show/hide WebRTC stats"
+                    >
+                        📊 Stats
+                    </button>
                     <span class="dot" id="connDot"></span
                     ><span id="connText">connecting…</span>
                 </div>
@@ -483,6 +547,14 @@
                     Leave
                 </button>
             </div>
+        </div>
+
+        <div id="statsPanel">
+            <div class="panel-head">
+                <span class="hd">WebRTC Stats</span>
+                <span id="statsClock" class="meta"></span>
+            </div>
+            <div id="statsBody"><div class="meta">Waiting for first sample…</div></div>
         </div>
 
         <script>
@@ -1714,6 +1786,19 @@ async function applyVideoEncodingParams(pc) {
                 await applyVideoEncodingParams(pc);
             }
 
+            function toggleStats() {
+                const panel = document.getElementById("statsPanel");
+                const btn = document.getElementById("statsBtn");
+                const show = !panel.classList.contains("show");
+                panel.classList.toggle("show", show);
+                btn.classList.toggle("on", show);
+                btn.textContent = show ? "📊 Hide Stats" : "📊 Stats";
+            }
+
+            function statRow(label, value, cls = "") {
+                return `<div><span class="meta">${label}</span> <span class="${cls}">${value}</span></div>`;
+            }
+
             function startGccStatsMonitor(pc) {
                 // Per-ssrc last sample for actual media send/recv rate (bytes delta).
                 const prevOutBySsrc = new Map();
@@ -1753,6 +1838,7 @@ async function applyVideoEncodingParams(pc) {
                     });
 
                     const nowMs = performance.now();
+                    const panelParts = [];
                     stats.forEach((report) => {
                         if (
                             report.type === "outbound-rtp" &&
@@ -1803,6 +1889,23 @@ async function applyVideoEncodingParams(pc) {
                                     <span class="badge">${sentKbps}kbps</span>
                                 `;
                             }
+
+                            const oNack = report.nackCount ?? 0;
+                            const oPli = report.pliCount ?? 0;
+                            const oFir = report.firCount ?? 0;
+                            const oHuge = report.hugeFramesSent ?? 0;
+                            panelParts.push(
+                                `<div class="stream">` +
+                                    `<div class="hd">OUT ${report.contentType === "screenshare" ? "screen" : "camera"} · mid=${report.mid || "?"} · ${codecName}/${encoder}</div>` +
+                                    statRow("ssrc", report.ssrc) +
+                                    statRow("res", `${res} @ ${fps}fps (${mode})`) +
+                                    statRow("sent", `${sentKbps} kbps`) +
+                                    statRow("pkt / frames / kf", `${report.packetsSent} / ${report.framesEncoded} / ${report.keyFramesEncoded ?? 0}`) +
+                                    statRow("nack / pli / fir", `${oNack} / ${oPli} / ${oFir}`, oNack || oPli ? "warn" : "") +
+                                    statRow("hugeFrames", oHuge, oHuge ? "warn" : "") +
+                                    statRow("quality", report.qualityLimitationReason || "none") +
+                                `</div>`
+                            );
                         }
 
                         if (
@@ -1836,8 +1939,38 @@ async function applyVideoEncodingParams(pc) {
                                     `res=${res} fps=${fps} decoded=${decoded} ` +
                                     `pkts=${received} lost=${lost} ssrc=${report.ssrc || "?"}`
                             );
+
+                            const srcKind = remoteKindFromMid(report.mid);
+                            const srcLabel = srcKind === "screen" ? "screen" :
+                                             srcKind === "camera" ? "camera" :
+                                             srcKind === "audio" ? "audio" : "video";
+                            const iNack = report.nackCount ?? 0;
+                            const iPli = report.pliCount ?? 0;
+                            const iFir = report.firCount ?? 0;
+                            const iDropped = report.framesDropped ?? 0;
+                            panelParts.push(
+                                `<div class="stream">` +
+                                    `<div class="hd">IN ${srcLabel} · mid=${report.mid || "?"} · ${codecName}</div>` +
+                                    statRow("ssrc", report.ssrc || "?") +
+                                    statRow("res", `${res} @ ${fps}fps`) +
+                                    statRow("recv", `${recvKbps} kbps`) +
+                                    statRow("pkt / lost", `${received} / ${lost}`, lost ? "bad" : "") +
+                                    statRow("decoded / dropped", `${decoded} / ${iDropped}`, iDropped ? "warn" : "") +
+                                    statRow("kf / frag", `${report.keyFramesDecoded ?? 0} / ${report.framesAssembledFromMultiplePackets ?? 0}`) +
+                                    statRow("nack / pli / fir", `${iNack} / ${iPli} / ${iFir}`, iNack || iPli ? "warn" : "") +
+                                    statRow("jitter", report.jitter ?? 0) +
+                                `</div>`
+                            );
                         }
                     });
+
+                    document.getElementById("statsBody").innerHTML =
+                        panelParts.length
+                            ? panelParts.join("")
+                            : '<div class="meta">No video streams active</div>';
+                    document.getElementById("statsClock").textContent =
+                        new Date().toLocaleTimeString() +
+                        (availableOutKbps != null ? ` · availTx ${availableOutKbps} kbps` : "");
                 }, 2000);
             }
 
