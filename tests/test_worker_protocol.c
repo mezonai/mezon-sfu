@@ -9,7 +9,7 @@
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
 #include "memory/packet_pool.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "peer/session.h"
 #include "pipeline/ingress.h"
 #include "pipeline/router.h"
@@ -120,7 +120,7 @@ static uint32_t pool_free_count(sfu_packet_pool_t *pp) {
     tmp[n++] = p;
   }
   for (uint32_t i = 0; i < n; i++) {
-    sfu_worker_release_packet(pp, NULL, tmp[i]);
+    sfu_net_worker_release_packet(pp, NULL, tmp[i]);
   }
   return n;
 }
@@ -178,11 +178,12 @@ static void fixture_init(fixture_t *f) {
   /* Small real send ring over a pipe fd: queueing RTX/keyframe sends stays
    * in-process and never submits, so nothing reaches the kernel. */
   assert(pipe(f->send_fds) == 0);
-  assert(sfu_ring_init(&f->w.send_ring, f->send_fds[1], 8, 16, 0, 0, -1, false) == 0);
+  f->w.send_net = sfu_net_create(&(sfu_net_options_t){.fd = f->send_fds[1], .send_entries = 8, .completion_entries = 16});
+  assert(f->w.send_net != NULL);
 }
 
 static void fixture_destroy(fixture_t *f) {
-  sfu_ring_destroy(&f->w.send_ring);
+  sfu_net_destroy(f->w.send_net);
   close(f->send_fds[0]);
   close(f->send_fds[1]);
   sfu_rtx_cache_destroy(f->cache);
@@ -235,7 +236,7 @@ static void test_malformed_rtp_dropped_by_ingress_parser(void) {
   m.pkt = pkt;
   assert(!sfu_rtp_packet_parse(pkt->data, pkt->len, &m.rtp));
 
-  sfu_worker_release_packet(&f.pp, NULL, pkt);
+  sfu_net_worker_release_packet(&f.pp, NULL, pkt);
   assert(pool_free_count(&f.pp) == POOL_CAPACITY);
 
   fixture_destroy(&f);
@@ -1035,7 +1036,8 @@ static void test_remote_forward_egress_on_owner(void) {
   w1.mesh = &mesh;
   int w1_fds[2];
   assert(pipe(w1_fds) == 0);
-  assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
+  w1.send_net = sfu_net_create(&(sfu_net_options_t){.fd = w1_fds[1], .send_entries = 8, .completion_entries = 16});
+  assert(w1.send_net != NULL);
 
   sfu_peer_session_t *sub = f.base.session;
   sfu_session_set_owner_worker(sub, 1); /* owned by the other worker */
@@ -1078,7 +1080,7 @@ static void test_remote_forward_egress_on_owner(void) {
   assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   assert(info.size_bytes > plain_len);
 
-  sfu_ring_destroy(&w1.send_ring);
+  sfu_net_destroy(w1.send_net);
   close(w1_fds[0]);
   close(w1_fds[1]);
   f.base.w.mesh = NULL;
@@ -1537,7 +1539,8 @@ static void test_kf_request_cross_worker_no_packet_leak(void) {
   w1.mesh = &mesh;
   int w1_fds[2];
   assert(pipe(w1_fds) == 0);
-  assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
+  w1.send_net = sfu_net_create(&(sfu_net_options_t){.fd = w1_fds[1], .send_entries = 8, .completion_entries = 16});
+  assert(w1.send_net != NULL);
 
   unsigned drained = sfu_fanout_mesh_drain(&mesh, 1, 8, sfu_worker_handle_fanout_job, &w1);
   assert(drained == 1);
@@ -1546,7 +1549,7 @@ static void test_kf_request_cross_worker_no_packet_leak(void) {
    * submitted, so its retained ref is still out). */
   assert(pool_free_count(&f.base.pp) == before - 1);
 
-  sfu_ring_destroy(&w1.send_ring);
+  sfu_net_destroy(w1.send_net);
   close(w1_fds[0]);
   close(w1_fds[1]);
   f.base.w.mesh = NULL;
@@ -1588,7 +1591,8 @@ static void test_kf_enqueue_ring_full_drops_ref(void) {
   w1.mesh = &mesh;
   int w1_fds[2];
   assert(pipe(w1_fds) == 0);
-  assert(sfu_ring_init(&w1.send_ring, w1_fds[1], 8, 16, 0, 0, -1, false) == 0);
+  w1.send_net = sfu_net_create(&(sfu_net_options_t){.fd = w1_fds[1], .send_entries = 8, .completion_entries = 16});
+  assert(w1.send_net != NULL);
 
   unsigned drained = sfu_fanout_mesh_drain(&mesh, 1, 8, sfu_worker_handle_fanout_job, &w1);
   assert(drained == 4);
@@ -1598,7 +1602,7 @@ static void test_kf_enqueue_ring_full_drops_ref(void) {
    * packet; the other three hit the execution throttle and alloc nothing. */
   assert(pool_free_count(&f.base.pp) == POOL_CAPACITY - 1);
 
-  sfu_ring_destroy(&w1.send_ring);
+  sfu_net_destroy(w1.send_net);
   close(w1_fds[0]);
   close(w1_fds[1]);
   f.base.w.mesh = NULL;

@@ -116,7 +116,15 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
     return -1;
   }
 
-  if (sfu_ring_init(&w->send_ring, fd, SFU_WORKER_SEND_SQ_ENTRIES, SFU_WORKER_SEND_CQ_ENTRIES, 0, 0, send_bgid, false) != 0) {
+  sfu_net_options_t net_options = {
+      .fd = fd,
+      .send_entries = SFU_WORKER_SEND_SQ_ENTRIES,
+      .completion_entries = SFU_WORKER_SEND_CQ_ENTRIES,
+      .buffer_group_id = send_bgid,
+      .receive = false,
+  };
+  w->send_net = sfu_net_create(&net_options);
+  if (!w->send_net) {
     SFU_LOG_ERROR("worker %u: failed to init send ring", worker_index);
     sfu_worker_packet_arena_destroy(&w->output_arena);
     sfu_spsc_ring_destroy(&w->release_to_dispatcher);
@@ -142,7 +150,8 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   w->twcc_scratch_capacity = 0;
   pthread_mutex_unlock(&w->local_sessions_lock);
   pthread_mutex_destroy(&w->local_sessions_lock);
-  sfu_ring_destroy(&w->send_ring);
+  sfu_net_destroy(w->send_net);
+  w->send_net = NULL;
   if (w->output_arena.in_use != 0) {
     SFU_LOG_WARN("worker %u: destroying output arena with %u sends still outstanding", w->worker_index, w->output_arena.in_use);
   }
@@ -246,10 +255,10 @@ static void *worker_thread_main(void *arg) {
     }
 
     if (drained > 0 || fanned > 0 || flushed_twcc || scanned_remb) {
-      sfu_ring_submit(&w->send_ring);
+      sfu_net_flush(w->send_net);
     }
 
-    unsigned reaped = sfu_ring_reap(&w->send_ring, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w);
+    unsigned reaped = sfu_net_poll(w->send_net, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w);
     if (reaped > 0) {
       did_work = true;
     }
@@ -276,7 +285,7 @@ static void *worker_thread_main(void *arg) {
     atomic_fetch_add_explicit(&w->generation, 1, memory_order_release);
   }
 
-  for (unsigned idle_passes = 0; idle_passes < 32 || sfu_ring_outstanding_sends(&w->send_ring) > 0;) {
+  for (unsigned idle_passes = 0; idle_passes < 32 || sfu_net_outstanding_sends(w->send_net) > 0;) {
     bool did_work = false;
 
     void *item;
@@ -289,11 +298,11 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
-    if (sfu_ring_submit(&w->send_ring) > 0) {
+    if (sfu_net_flush(w->send_net) > 0) {
       did_work = true;
     }
 
-    if (sfu_ring_reap(&w->send_ring, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w) > 0) {
+    if (sfu_net_poll(w->send_net, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w) > 0) {
       did_work = true;
     }
 

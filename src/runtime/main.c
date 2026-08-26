@@ -9,7 +9,7 @@
 #include "api/hook/producer.h"
 #include "config/config.h"
 #include "memory/packet_pool.h"
-#include "net/io_backend.h"
+#include "net/net.h"
 #include "net/socket.h"
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
@@ -152,12 +152,20 @@ int main(int argc, char **argv) {
   }
   SFU_LOG_INFO("detected %d online cpus: 1 dispatcher + %u workers", online, worker_count);
 
+  sfu_net_backend_options_t backend_options = {
+      .interface_name = g_sfu_config.af_xdp_interface,
+      .queue_spec = g_sfu_config.af_xdp_queue_id_set ? NULL : g_sfu_config.af_xdp_queues,
+      .queue_id = g_sfu_config.af_xdp_queue_id,
+      .queue_id_set = g_sfu_config.af_xdp_queue_id_set,
+      .media_port = port,
+      .frame_count = g_sfu_config.af_xdp_frame_count,
+      .frame_size = g_sfu_config.af_xdp_frame_size,
+      .xdp_mode = g_sfu_config.af_xdp_mode,
+  };
+
   uint64_t packet_pool_bytes = (uint64_t)g_sfu_config.packet_pool_capacity * ((uint64_t)sizeof(sfu_packet_t) + g_sfu_config.packet_buf_size);
-#ifdef USE_AF_XDP
-  uint64_t provided_buffer_bytes = (uint64_t)g_sfu_config.af_xdp_frame_count * g_sfu_config.af_xdp_frame_size;
-#else
-  uint64_t provided_buffer_bytes = (uint64_t)g_sfu_config.provided_buf_count * sfu_ring_recv_slot_size(g_sfu_config.packet_buf_size);
-#endif
+  uint64_t provided_buffer_bytes =
+      sfu_net_recv_capacity_bytes(&backend_options, g_sfu_config.provided_buf_count, g_sfu_config.packet_buf_size);
   uint64_t queue_slot_bytes =
       (uint64_t)worker_count *
       ((uint64_t)g_sfu_config.worker_queue_capacity + g_sfu_config.release_queue_capacity + (uint64_t)worker_count * g_sfu_config.fanout_ring_capacity) *
@@ -172,17 +180,7 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
 
-  sfu_ring_backend_options_t backend_options = {
-      .interface_name = g_sfu_config.af_xdp_interface,
-      .queue_spec = g_sfu_config.af_xdp_queue_id_set ? NULL : g_sfu_config.af_xdp_queues,
-      .queue_id = g_sfu_config.af_xdp_queue_id,
-      .queue_id_set = g_sfu_config.af_xdp_queue_id_set,
-      .media_port = port,
-      .frame_count = g_sfu_config.af_xdp_frame_count,
-      .frame_size = g_sfu_config.af_xdp_frame_size,
-      .xdp_mode = g_sfu_config.af_xdp_mode,
-  };
-  if (sfu_ring_backend_init(fd, &backend_options) != 0) {
+  if (sfu_net_backend_init(fd, &backend_options) != 0) {
     SFU_LOG_ERROR("failed to initialize media I/O backend");
     goto cleanup;
   }
@@ -277,7 +275,7 @@ cleanup:
     sfu_worker_destroy(&workers[i]);
   }
   if (net_backend_initialized) {
-    sfu_ring_backend_destroy();
+    sfu_net_backend_destroy();
   }
   if (sessions_initialized) {
     sfu_session_table_destroy(sessions);

@@ -71,7 +71,17 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_
   s->routing_table = routing_table;
   s->ice_creds = ice_creds;
 
-  if (sfu_ring_init(&s->recv_ring, fd, SFU_DISPATCH_SQ_ENTRIES, SFU_DISPATCH_CQ_ENTRIES, buf_count, buf_size, recv_bgid, true) != 0) {
+  sfu_net_options_t net_options = {
+      .fd = fd,
+      .send_entries = SFU_DISPATCH_SQ_ENTRIES,
+      .completion_entries = SFU_DISPATCH_CQ_ENTRIES,
+      .recv_buffer_count = buf_count,
+      .recv_buffer_size = buf_size,
+      .buffer_group_id = recv_bgid,
+      .receive = true,
+  };
+  s->recv_net = sfu_net_create(&net_options);
+  if (!s->recv_net) {
     SFU_LOG_ERROR("scheduler: failed to init recv ring");
     return -1;
   }
@@ -79,7 +89,10 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_
   return 0;
 }
 
-void sfu_scheduler_destroy(sfu_scheduler_t *s) { sfu_ring_destroy(&s->recv_ring); }
+void sfu_scheduler_destroy(sfu_scheduler_t *s) {
+  sfu_net_destroy(s->recv_net);
+  s->recv_net = NULL;
+}
 
 typedef struct {
   sfu_scheduler_t *s;
@@ -94,7 +107,7 @@ static void on_recv(void *user_data, sfu_packet_t *pkt) {
 
   if (SFU_UNLIKELY(s->worker_count == 0)) {
     SFU_LOG_ERROR("scheduler: worker_count is 0; dropping packet (misconfiguration)");
-    sfu_ring_release_packet(&s->recv_ring, s->pp, pkt);
+    sfu_net_release_packet(s->recv_net, s->pp, pkt);
     return;
   }
 
@@ -104,7 +117,7 @@ static void on_recv(void *user_data, sfu_packet_t *pkt) {
   if (!sfu_spsc_ring_push(&s->workers[worker_idx].inbox, pkt)) {
     sfu_metric_inc("worker_inbox_full");
     SFU_LOG_WARN("worker %u inbox full, dropping packet", worker_idx);
-    sfu_ring_release_packet(&s->recv_ring, s->pp, pkt);
+    sfu_net_release_packet(s->recv_net, s->pp, pkt);
   }
 }
 
@@ -114,24 +127,24 @@ static void *scheduler_thread_main(void *arg) {
 
   recv_ctx_t ctx = {.s = s};
 
-  if (sfu_ring_arm_recv(&s->recv_ring) != 0) {
+  if (sfu_net_recv(s->recv_net) != 0) {
     SFU_LOG_ERROR("scheduler: failed to arm initial recv");
     return NULL;
   }
-  sfu_ring_submit(&s->recv_ring);
+  sfu_net_flush(s->recv_net);
 
   SFU_LOG_INFO("scheduler (dispatcher) started on core %d", s->core_id);
 
   uint32_t idle_sleep_us = SFU_DISPATCH_IDLE_SLEEP_MIN_US;
 
   while (!sfu_shutdown_requested()) {
-    unsigned reaped = sfu_ring_reap(&s->recv_ring, SFU_DISPATCH_REAP_BATCH, s->pp, NULL, on_recv, NULL, &ctx);
+    unsigned reaped = sfu_net_poll(s->recv_net, SFU_DISPATCH_REAP_BATCH, s->pp, NULL, on_recv, NULL, &ctx);
 
     unsigned returned = 0;
     unsigned backend_work = 0;
     for (uint32_t i = 0; i < s->worker_count; i++) {
-      returned += sfu_ring_drain_kernel_buffer_returns(&s->recv_ring, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
-      backend_work += sfu_ring_backend_service(&s->recv_ring, &s->workers[i].send_ring, 1, SFU_DISPATCH_REAP_BATCH);
+      returned += sfu_net_drain_buffer_returns(s->recv_net, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
+      backend_work += sfu_net_service(s->recv_net, s->workers[i].send_net, SFU_DISPATCH_REAP_BATCH);
     }
 
     if (reaped == 0 && returned == 0 && backend_work == 0) {
@@ -156,9 +169,9 @@ static void *scheduler_thread_main(void *arg) {
     unsigned work = 0;
     for (uint32_t i = 0; i < s->worker_count; i++) {
       workers_finished &= sfu_worker_drain_finished(&s->workers[i]);
-      pending |= sfu_ring_outstanding_sends(&s->workers[i].send_ring) > 0;
-      work += sfu_ring_drain_kernel_buffer_returns(&s->recv_ring, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
-      work += sfu_ring_backend_service(&s->recv_ring, &s->workers[i].send_ring, 1, SFU_DISPATCH_REAP_BATCH);
+      pending |= sfu_net_outstanding_sends(s->workers[i].send_net) > 0;
+      work += sfu_net_drain_buffer_returns(s->recv_net, &s->workers[i].release_to_dispatcher, SFU_DISPATCH_REAP_BATCH);
+      work += sfu_net_service(s->recv_net, s->workers[i].send_net, SFU_DISPATCH_REAP_BATCH);
     }
     if (!canceling && sfu_now_us() >= drain_deadline_us) {
       canceling = true;
@@ -166,7 +179,7 @@ static void *scheduler_thread_main(void *arg) {
     }
     if (canceling) {
       for (uint32_t i = 0; i < s->worker_count; i++) {
-        work += sfu_ring_backend_cancel(&s->workers[i].send_ring, 1);
+        work += sfu_net_cancel(s->workers[i].send_net);
       }
     }
     if (workers_finished && !pending && work == 0) {

@@ -8,7 +8,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(SFU_ENABLE_ASAN "Build with AddressSanitizer" OFF)
 option(SFU_ENABLE_TSAN "Build with ThreadSanitizer" OFF)
 option(SFU_DIAG_LOG "Compile in diagnostic logging for the SRTP key-desync investigation (ON = verbose drops/dumps, OFF = silent)" ON)
-option(USE_AF_XDP "Use AF_XDP instead of io_uring for media I/O" ON)
+set(SFU_NET_BACKEND "af_xdp" CACHE STRING "Media network backend: af_xdp or io_uring")
+set_property(CACHE SFU_NET_BACKEND PROPERTY STRINGS af_xdp io_uring)
 option(SFU_ENABLE_PRIVILEGED_TESTS "Register privileged network integration tests" OFF)
 
 if(SFU_DIAG_LOG)
@@ -44,7 +45,7 @@ set(SFU_NET_SOURCES)
 set(SFU_NET_INCLUDE_DIRS)
 set(SFU_NET_LIBRARIES)
 
-if(USE_AF_XDP)
+if(SFU_NET_BACKEND STREQUAL "af_xdp")
   find_package(PkgConfig REQUIRED)
 
   set(ENV{PKG_CONFIG_PATH} "/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/share/pkgconfig:$ENV{PKG_CONFIG_PATH}")
@@ -65,15 +66,17 @@ if(USE_AF_XDP)
     VERBATIM
   )
   add_custom_target(sfu_xdp_program DEPENDS "${SFU_XDP_OBJECT}")
-  add_compile_definitions(USE_AF_XDP=1 SFU_XDP_OBJECT_PATH="${SFU_XDP_OBJECT}")
+  add_compile_definitions(SFU_XDP_OBJECT_PATH="${SFU_XDP_OBJECT}")
   list(APPEND SFU_NET_SOURCES src/net/af_xdp.c src/net/af_xdp_frame.c)
   list(APPEND SFU_NET_LIBRARIES PkgConfig::LIBXDP PkgConfig::LIBBPF)
-else()
+elseif(SFU_NET_BACKEND STREQUAL "io_uring")
   find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
   find_library(URING_LIB uring REQUIRED)
   list(APPEND SFU_NET_SOURCES src/net/io_uring.c src/net/batch.c)
   list(APPEND SFU_NET_INCLUDE_DIRS ${URING_INCLUDE_DIR})
   list(APPEND SFU_NET_LIBRARIES ${URING_LIB})
+else()
+  message(FATAL_ERROR "Unsupported SFU_NET_BACKEND='${SFU_NET_BACKEND}' (expected af_xdp or io_uring)")
 endif()
 
 # Explicitly target the paths provided to avoid picking up system OpenSSL
@@ -178,7 +181,7 @@ target_link_libraries(sfu_core PUBLIC
   stdc++
 )
 set_target_properties(sfu_core PROPERTIES LINKER_LANGUAGE CXX)
-if(USE_AF_XDP)
+if(SFU_NET_BACKEND STREQUAL "af_xdp")
   add_dependencies(sfu_core sfu_xdp_program)
 endif()
 
