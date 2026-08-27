@@ -39,6 +39,34 @@
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
 
+#ifdef SFU_DIAG_LOG
+static void record_screen_ingress_packet(sfu_peer_session_t *session, const sfu_packet_t *pkt, const sfu_rtp_packet_t *rtp) {
+  if (!session || !pkt || !rtp || pkt->recv_ts_ns == 0) return;
+  sfu_screen_ingress_diag_t *diag = &session->egress.diag.screen_ingress;
+  int64_t arrival_us = (int64_t)(pkt->recv_ts_ns / 1000ULL);
+  if (!diag->frame_active || diag->frame_timestamp != rtp->timestamp) {
+    if (diag->frame_active) {
+      diag->missing_marker_frames++;
+    }
+    if (diag->last_packet_us > 0 && arrival_us >= diag->last_packet_us) {
+      int64_t gap_us = arrival_us - diag->last_packet_us;
+      if (gap_us > diag->max_inter_frame_gap_us) diag->max_inter_frame_gap_us = gap_us;
+    }
+    diag->frame_timestamp = rtp->timestamp;
+    diag->frame_start_us = arrival_us;
+    diag->frame_active = true;
+  }
+  diag->media_ssrc = rtp->ssrc;
+  diag->last_packet_us = arrival_us;
+  if (rtp->marker) {
+    int64_t span_us = arrival_us >= diag->frame_start_us ? arrival_us - diag->frame_start_us : 0;
+    if (span_us > diag->max_frame_span_us) diag->max_frame_span_us = span_us;
+    diag->completed_frames++;
+    diag->frame_active = false;
+  }
+}
+#endif
+
 static uint32_t allocation_for_stream(const sfu_bandwidth_allocation_t *allocation, uint32_t publisher_peer_id,
                                       sfu_bandwidth_stream_kind_t kind) {
   for (size_t i = 0; i < allocation->stream_count; i++) {
@@ -985,6 +1013,11 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (learned) {
     atomic_store_explicit(&sender_session->media.uplink_ssrc_dirty, true, memory_order_release);
   }
+#ifdef SFU_DIAG_LOG
+  if (m.source == SFU_MEDIA_SCREEN && !is_rtx) {
+    record_screen_ingress_packet(sender_session, pkt, &m.rtp);
+  }
+#endif
   sfu_svc_parse_status_t svc_status = extract_svc_metadata(sender_session, &m);
   if (svc_status == SFU_SVC_PARSE_MALFORMED) {
     sfu_metric_inc("vp9_descriptor_parse_fail");

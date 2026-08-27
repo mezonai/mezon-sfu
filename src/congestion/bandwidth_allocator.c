@@ -7,19 +7,24 @@
 #include <string.h>
 
 static bool stream_key_less(const sfu_bandwidth_stream_input_t *a, const sfu_bandwidth_stream_input_t *b) {
-  if (a->remote_slot != b->remote_slot) return a->remote_slot < b->remote_slot;
-  if (a->publisher_peer_id != b->publisher_peer_id) return a->publisher_peer_id < b->publisher_peer_id;
-  if (a->kind != b->kind) return a->kind < b->kind;
+  if (a->remote_slot != b->remote_slot) {
+    return a->remote_slot < b->remote_slot;
+  }
+  if (a->publisher_peer_id != b->publisher_peer_id) {
+    return a->publisher_peer_id < b->publisher_peer_id;
+  }
+  if (a->kind != b->kind) {
+    return a->kind < b->kind;
+  }
   return a->assignment_generation < b->assignment_generation;
 }
 
 static bool same_stream_key(const sfu_bandwidth_stream_input_t *a, const sfu_bandwidth_stream_input_t *b) {
-  return a->publisher_peer_id == b->publisher_peer_id && a->remote_slot == b->remote_slot &&
-         a->assignment_generation == b->assignment_generation && a->kind == b->kind;
+  return a->publisher_peer_id == b->publisher_peer_id && a->remote_slot == b->remote_slot && a->assignment_generation == b->assignment_generation &&
+         a->kind == b->kind;
 }
 
-static void fill_class(sfu_bandwidth_allocation_t *allocation, sfu_bandwidth_stream_kind_t kind, uint32_t target_bps,
-                       uint64_t *remaining_bps) {
+static void fill_class(sfu_bandwidth_allocation_t *allocation, sfu_bandwidth_stream_kind_t kind, uint32_t target_bps, uint64_t *remaining_bps) {
   size_t eligible[SFU_BANDWIDTH_ALLOCATOR_MAX_STREAMS];
   size_t eligible_count = 0;
   uint64_t need = 0;
@@ -29,9 +34,13 @@ static void fill_class(sfu_bandwidth_allocation_t *allocation, sfu_bandwidth_str
       need += target_bps - allocation->streams[i].allocated_bps;
     }
   }
-  if (eligible_count == 0 || *remaining_bps == 0) return;
+  if (eligible_count == 0 || *remaining_bps == 0) {
+    return;
+  }
   if (*remaining_bps >= need) {
-    for (size_t i = 0; i < eligible_count; i++) allocation->streams[eligible[i]].allocated_bps = target_bps;
+    for (size_t i = 0; i < eligible_count; i++) {
+      allocation->streams[eligible[i]].allocated_bps = target_bps;
+    }
     *remaining_bps -= need;
     return;
   }
@@ -41,7 +50,9 @@ static void fill_class(sfu_bandwidth_allocation_t *allocation, sfu_bandwidth_str
   for (size_t i = 0; i < eligible_count; i++) {
     uint64_t increment = share + (i < remainder ? 1u : 0u);
     uint64_t deficit = target_bps - allocation->streams[eligible[i]].allocated_bps;
-    if (increment > deficit) increment = deficit;
+    if (increment > deficit) {
+      increment = deficit;
+    }
     allocation->streams[eligible[i]].allocated_bps += (uint32_t)increment;
     *remaining_bps -= increment;
   }
@@ -58,8 +69,11 @@ static void record_allocation_metrics(const sfu_bandwidth_allocation_t *allocati
     const sfu_bandwidth_stream_allocation_t *stream = &allocation->streams[i];
     if (stream->kind == SFU_BANDWIDTH_STREAM_SCREEN) {
       has_screen = true;
-      if (stream->allocated_bps >= screen_preferred_bps) screen_at_preferred = true;
-      else screen_below_preferred = true;
+      if (stream->allocated_bps >= screen_preferred_bps) {
+        screen_at_preferred = true;
+      } else {
+        screen_below_preferred = true;
+      }
     } else if (stream->kind == SFU_BANDWIDTH_STREAM_CAMERA && stream->allocated_bps <= admission_bps) {
       camera_deferred = true;
     }
@@ -67,14 +81,21 @@ static void record_allocation_metrics(const sfu_bandwidth_allocation_t *allocati
   sfu_metric_inc("bandwidth_allocator_runs");
   sfu_metric_add("bandwidth_allocator_active_streams", allocation->stream_count);
   sfu_metric_add("bandwidth_allocator_unallocated_bps", allocation->unallocated_bps);
-  if (screen_at_preferred) sfu_metric_inc("bandwidth_screen_preferred");
-  if (screen_below_preferred) sfu_metric_inc("bandwidth_screen_below_preferred");
-  if (has_screen && camera_deferred) sfu_metric_inc("bandwidth_camera_deferred_for_screen");
+  if (screen_at_preferred) {
+    sfu_metric_inc("bandwidth_screen_preferred");
+  }
+  if (screen_below_preferred) {
+    sfu_metric_inc("bandwidth_screen_below_preferred");
+  }
+  if (has_screen && camera_deferred) {
+    sfu_metric_inc("bandwidth_camera_deferred_for_screen");
+  }
 }
 
-void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t input_count, uint64_t estimated_bps,
-                            sfu_bandwidth_allocation_t *allocation) {
-  if (!allocation) return;
+void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t input_count, uint64_t estimated_bps, sfu_bandwidth_allocation_t *allocation) {
+  if (!allocation) {
+    return;
+  }
   memset(allocation, 0, sizeof(*allocation));
   uint32_t pool_percent = policy_value(g_sfu_config.bandwidth_video_pool_percent, SFU_BANDWIDTH_VIDEO_POOL_PERCENT);
   uint32_t admission_bps = policy_value(g_sfu_config.bandwidth_source_admission_bps, SFU_BANDWIDTH_SOURCE_ADMISSION_BPS);
@@ -122,7 +143,9 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
 
   for (size_t i = 0; i < order_count; i++) {
     const sfu_bandwidth_stream_input_t *input = &inputs[order[i]];
-    if (i > 0 && same_stream_key(input, &inputs[order[i - 1]])) continue;
+    if (i > 0 && same_stream_key(input, &inputs[order[i - 1]])) {
+      continue;
+    }
     sfu_bandwidth_stream_allocation_t *stream = &allocation->streams[allocation->stream_count++];
     stream->publisher_peer_id = input->publisher_peer_id;
     stream->remote_slot = input->remote_slot;
@@ -143,8 +166,7 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
     const sfu_bandwidth_stream_allocation_t *stream = &allocation->streams[i];
     allocation->allocated_bps += stream->allocated_bps;
     size_t publisher_index = 0;
-    while (publisher_index < allocation->publisher_count &&
-           allocation->publishers[publisher_index].publisher_peer_id != stream->publisher_peer_id) {
+    while (publisher_index < allocation->publisher_count && allocation->publishers[publisher_index].publisher_peer_id != stream->publisher_peer_id) {
       publisher_index++;
     }
     if (publisher_index == allocation->publisher_count) {

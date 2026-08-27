@@ -51,7 +51,6 @@ typedef struct sfu_bandwidth_allocation {
   sfu_bandwidth_publisher_allocation_t publishers[SFU_BANDWIDTH_ALLOCATOR_MAX_PUBLISHERS];
 } sfu_bandwidth_allocation_t;
 
-void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t input_count, uint64_t estimated_bps,
-                            sfu_bandwidth_allocation_t *allocation);
+void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t input_count, uint64_t estimated_bps, sfu_bandwidth_allocation_t *allocation);
 
 #endif /* SFU_CONGESTION_BANDWIDTH_ALLOCATOR_H */

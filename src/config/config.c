@@ -96,10 +96,8 @@ int sfu_config_validate(const sfu_config_t *config) {
   }
   if (config->bandwidth_video_pool_percent == 0 || config->bandwidth_video_pool_percent > 100 || config->bandwidth_source_admission_bps == 0 ||
       config->bandwidth_source_admission_bps > config->bandwidth_screen_preferred_bps ||
-      config->bandwidth_screen_preferred_bps > config->bandwidth_screen_mid_bps ||
-      config->bandwidth_screen_mid_bps > config->bandwidth_screen_cap_bps ||
-      config->bandwidth_source_admission_bps > config->bandwidth_camera_mid_bps ||
-      config->bandwidth_camera_mid_bps > config->bandwidth_camera_cap_bps) {
+      config->bandwidth_screen_preferred_bps > config->bandwidth_screen_mid_bps || config->bandwidth_screen_mid_bps > config->bandwidth_screen_cap_bps ||
+      config->bandwidth_source_admission_bps > config->bandwidth_camera_mid_bps || config->bandwidth_camera_mid_bps > config->bandwidth_camera_cap_bps) {
     SFU_LOG_ERROR("invalid bandwidth policy (pool=%u admission=%u screen=%u/%u/%u camera=%u/%u)", config->bandwidth_video_pool_percent,
                   config->bandwidth_source_admission_bps, config->bandwidth_screen_preferred_bps, config->bandwidth_screen_mid_bps,
                   config->bandwidth_screen_cap_bps, config->bandwidth_camera_mid_bps, config->bandwidth_camera_cap_bps);
