@@ -22,6 +22,7 @@
 #define SFU_WORKER_IDLE_SLEEP_MAX_US 5000
 #define SFU_WORKER_TWCC_FLUSH_INTERVAL_US 15000LL
 #define SFU_WORKER_REMB_SCAN_INTERVAL_US 50000LL
+#define SFU_WORKER_PACED_SEND_SCAN_INTERVAL_US 2000LL
 #ifdef SFU_DIAG_LOG
 #define SFU_WORKER_DIAG_SCAN_INTERVAL_US 100000LL
 #endif
@@ -189,14 +190,19 @@ static void *worker_thread_main(void *arg) {
     int64_t now_us = (int64_t)sfu_now_us();
     bool flushed_twcc = false;
     bool scanned_remb = false;
+    bool paced_sent = false;
     bool twcc_due = now_us - w->last_twcc_flush_us >= SFU_WORKER_TWCC_FLUSH_INTERVAL_US;
     bool remb_due = now_us - w->last_remb_scan_us >= SFU_WORKER_REMB_SCAN_INTERVAL_US;
+    bool paced_due = now_us - w->last_paced_send_scan_us >= SFU_WORKER_PACED_SEND_SCAN_INTERVAL_US;
 #ifdef SFU_DIAG_LOG
     bool diag_due = now_us - w->last_diag_scan_us >= SFU_WORKER_DIAG_SCAN_INTERVAL_US;
 #else
     bool diag_due = false;
 #endif
-    if (twcc_due || remb_due || diag_due) {
+    if (twcc_due || remb_due || paced_due || diag_due) {
+      if (paced_due) {
+        w->last_paced_send_scan_us = now_us;
+      }
       if (twcc_due) {
         w->last_twcc_flush_us = now_us;
       }
@@ -238,7 +244,10 @@ static void *worker_thread_main(void *arg) {
       for (uint32_t li = 0; li < twcc_count; li++) {
         sfu_peer_session_t *ls = w->twcc_scratch[li];
         if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
-          sfu_paced_send_drain(&ls->egress.paced_screen, w, now_us);
+          if (paced_due && sfu_paced_send_drain(&ls->egress.paced_screen, w, now_us)) {
+            paced_sent = true;
+            did_work = true;
+          }
           if (twcc_due) {
             sfu_session_maybe_send_twcc_feedback(w, ls);
             flushed_twcc = true;
@@ -256,7 +265,7 @@ static void *worker_thread_main(void *arg) {
       }
     }
 
-    if (drained > 0 || fanned > 0 || flushed_twcc || scanned_remb) {
+    if (drained > 0 || fanned > 0 || paced_sent || flushed_twcc || scanned_remb) {
       sfu_net_flush(w->send_net);
     }
 

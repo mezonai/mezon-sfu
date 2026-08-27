@@ -155,6 +155,19 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     pkt->data[1] = (pkt->data[1] & 0x80) | (media->video_pt & 0x7F);
   }
 
+  if (pkt->len < 12) {
+    sfu_metric_inc("egress_seq_translate_fail");
+    return false;
+  }
+
+  bool screen_packet = media->source == SFU_MEDIA_SCREEN && !media->has_svc && media->has_video && !media->is_audio;
+  uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
+  bool source_marker = (pkt->data[1] & 0x80u) != 0;
+  if (screen_packet && !sfu_paced_send_admit_frame_packet(&sub_session->egress.paced_screen, source_timestamp, source_marker, media->is_keyframe,
+                                                          (int64_t)sfu_now_us())) {
+    return false;
+  }
+
   int64_t send_time_us = (int64_t)sfu_now_us();
   sfu_pacer_class_t cls = media->is_audio ? SFU_PACER_CLASS_AUDIO : (media->has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
   bool allow_congestion_drop = decision && decision->pacer_frame_start;
@@ -164,10 +177,6 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return false;
   }
 
-  if (pkt->len < 12) {
-    sfu_metric_inc("egress_seq_translate_fail");
-    return false;
-  }
   uint16_t source_seq = sfu_read_be16(pkt->data + 2);
   uint32_t outbound_ssrc = sfu_read_be32(pkt->data + 8);
   uint16_t subscriber_seq = 0;
@@ -264,11 +273,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 #endif
   pkt->len = (uint32_t)enc_len;
 
-  bool screen_packet = media->source == SFU_MEDIA_SCREEN && !media->has_svc && media->has_video && !media->is_audio;
-  bool pace_screen = screen_packet && (sub_session->egress.paced_screen.frame_active || media->is_keyframe || sub_session->egress.paced_screen.count > 0);
-  if (pace_screen) {
-    bool marker = (pkt->data[1] & 0x80u) != 0;
-    sub_session->egress.paced_screen.frame_active = !marker;
+  if (screen_packet) {
     int64_t enqueue_now = (int64_t)sfu_now_us();
     int64_t release_at_us = 0;
     if (enc_len <= 0 || (uint32_t)enc_len > SFU_PACED_SEND_MAX_PAYLOAD ||
