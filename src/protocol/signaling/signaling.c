@@ -1718,41 +1718,6 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
   sfu_session_release(session);
 }
 
-static void handle_visibility(sfu_client_conn_t *c, const char *buf, size_t n) {
-  if (!c->joined_room || c->client_ufrag[0] == '\0') {
-    static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
-    sfu_ws_send_text(c->fd, must_join, sizeof(must_join) - 1);
-    return;
-  }
-
-  bool visible = true;
-  if (sfu_json_extract_bool(buf, n, "visible", &visible) != 0) {
-    static const char invalid_visibility[] = "{\"type\":\"error\",\"message\":\"invalid_visibility\"}";
-    sfu_ws_send_text(c->fd, invalid_visibility, sizeof(invalid_visibility) - 1);
-    return;
-  }
-
-  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
-  if (!session || session->room != c->joined_room) {
-    static const char no_session[] = "{\"type\":\"error\",\"message\":\"session_not_found\"}";
-    sfu_ws_send_text(c->fd, no_session, sizeof(no_session) - 1);
-    if (session) {
-      sfu_session_release(session);
-    }
-    return;
-  }
-
-  atomic_store_explicit(&session->media.visible, visible, memory_order_release);
-  sfu_session_release(session);
-
-  char response[96];
-  int response_len = snprintf(response, sizeof(response), "{\"type\":\"visibility_changed\",\"visible\":%s}", visible ? "true" : "false");
-  if (response_len > 0 && (size_t)response_len < sizeof(response)) {
-    sfu_ws_send_text(c->fd, response, (size_t)response_len);
-  }
-  SFU_LOG_INFO("signaling: visibility user_id=%" PRId64 " visible=%s (fd=%d)", c->user_id, visible ? "true" : "false", c->fd);
-}
-
 static void send_participant_action_completed(sfu_client_conn_t *c, const char *action, int64_t user_id, uint32_t affected) {
   char response[160];
   int response_len =
@@ -1911,8 +1876,6 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
     handle_push_to_talk(c, buf, n);
   } else if (strcmp(type, "role_change") == 0) {
     handle_role_change(c, s, buf, n);
-  } else if (strcmp(type, "visibility") == 0) {
-    handle_visibility(c, buf, n);
   } else if (strcmp(type, "mute") == 0) {
     handle_self_mute(c, buf, n);
   } else if (strcmp(type, "participant_action") == 0) {
