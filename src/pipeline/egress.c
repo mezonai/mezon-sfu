@@ -6,6 +6,7 @@
 #include "net/net.h"
 #include "peer/session.h"
 #include "pipeline/keyframe.h"
+#include "pipeline/paced_send.h"
 #include "rtp/rtp_ext.h"
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
@@ -35,20 +36,34 @@ static inline uint64_t sfu_egress_profile_cycles(void) {
 #ifdef SFU_DIAG_LOG
 static const char *sfu_vp9_reject_reason_name(sfu_layer_reject_reason_t reason) {
   switch (reason) {
-    case SFU_LAYER_REJECT_INVALID_SID: return "invalid_sid";
-    case SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED: return "over_target_or_failed";
-    case SFU_LAYER_REJECT_MISSING_FRAME_START: return "missing_frame_start";
-    case SFU_LAYER_REJECT_KEYFRAME_REQUIRED: return "keyframe_required";
-    case SFU_LAYER_REJECT_KEYFRAME_MISMATCH: return "keyframe_mismatch";
-    case SFU_LAYER_REJECT_SPATIAL_TARGET: return "spatial_target";
-    case SFU_LAYER_REJECT_SPATIAL_TRANSITION: return "spatial_transition";
-    case SFU_LAYER_REJECT_SPATIAL_START: return "spatial_start";
-    case SFU_LAYER_REJECT_SPATIAL_DEPENDENCY: return "spatial_dependency";
-    case SFU_LAYER_REJECT_TEMPORAL_TRANSITION: return "temporal_transition";
-    case SFU_LAYER_REJECT_TEMPORAL_SWITCH: return "temporal_switch";
-    case SFU_LAYER_REJECT_PACER_OVERLAP: return "pacer_overlap";
-    case SFU_LAYER_REJECT_PACER_ORPHAN: return "pacer_orphan";
-    default: return "none";
+    case SFU_LAYER_REJECT_INVALID_SID:
+      return "invalid_sid";
+    case SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED:
+      return "over_target_or_failed";
+    case SFU_LAYER_REJECT_MISSING_FRAME_START:
+      return "missing_frame_start";
+    case SFU_LAYER_REJECT_KEYFRAME_REQUIRED:
+      return "keyframe_required";
+    case SFU_LAYER_REJECT_KEYFRAME_MISMATCH:
+      return "keyframe_mismatch";
+    case SFU_LAYER_REJECT_SPATIAL_TARGET:
+      return "spatial_target";
+    case SFU_LAYER_REJECT_SPATIAL_TRANSITION:
+      return "spatial_transition";
+    case SFU_LAYER_REJECT_SPATIAL_START:
+      return "spatial_start";
+    case SFU_LAYER_REJECT_SPATIAL_DEPENDENCY:
+      return "spatial_dependency";
+    case SFU_LAYER_REJECT_TEMPORAL_TRANSITION:
+      return "temporal_transition";
+    case SFU_LAYER_REJECT_TEMPORAL_SWITCH:
+      return "temporal_switch";
+    case SFU_LAYER_REJECT_PACER_OVERLAP:
+      return "pacer_overlap";
+    case SFU_LAYER_REJECT_PACER_ORPHAN:
+      return "pacer_orphan";
+    default:
+      return "none";
   }
 }
 
@@ -56,49 +71,56 @@ static void sfu_log_vp9_scheduler_drop(const sfu_peer_session_t *sub_session, co
                                        const sfu_layer_scheduler_decision_t *decision) {
   static _Atomic uint32_t drop_logs;
   uint32_t n = atomic_fetch_add_explicit(&drop_logs, 1, memory_order_relaxed);
-  if (n != 0 && (n & 127u) != 0) return;
-  SFU_LOG_WARN("[VP9-DBG] drop n=%u reason=%s sub=%u pub=%u source=%u ts=%u sid=%u tid=%u b=%u e=%u p=%u u=%u d=%u kf=%u "
-               "target=%u/%u current=%u/%u need_kf=%u kf_active=%u kf_failed=%u spatial=%u/%u temporal=%u/%u pacer=%u pacer_ts=%u "
-               "masks=%02x/%02x/%02x",
-               n + 1, sfu_vp9_reject_reason_name(decision->reject_reason), sub_session->peer_id,
-               media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source, decision->rtp_timestamp, decision->sid, decision->tid,
-               decision->b_bit, decision->e_bit, media->svc.p_bit, media->svc.u_bit, media->svc.d_bit, media->is_keyframe, sched->target_sid,
-               sched->target_tid, sched->current_sid, sched->current_tid, sched->needs_keyframe, sched->keyframe_active, sched->keyframe_failed,
-               sched->transition_active, sched->transition_failed, sched->temporal_transition_active, sched->temporal_transition_failed,
-               sched->pacer_frame_active, sched->pacer_frame_timestamp, sched->started_sid_mask, sched->completed_sid_mask, sched->failed_sid_mask);
+  if (n != 0 && (n & 127u) != 0) {
+    return;
+  }
+  SFU_LOG_WARN(
+      "[VP9-DBG] drop n=%u reason=%s sub=%u pub=%u source=%u ts=%u sid=%u tid=%u b=%u e=%u p=%u u=%u d=%u kf=%u "
+      "target=%u/%u current=%u/%u need_kf=%u kf_active=%u kf_failed=%u spatial=%u/%u temporal=%u/%u pacer=%u pacer_ts=%u "
+      "masks=%02x/%02x/%02x",
+      n + 1, sfu_vp9_reject_reason_name(decision->reject_reason), sub_session->peer_id, media->publisher ? media->publisher->peer_id : 0,
+      (unsigned)media->source, decision->rtp_timestamp, decision->sid, decision->tid, decision->b_bit, decision->e_bit, media->svc.p_bit, media->svc.u_bit,
+      media->svc.d_bit, media->is_keyframe, sched->target_sid, sched->target_tid, sched->current_sid, sched->current_tid, sched->needs_keyframe,
+      sched->keyframe_active, sched->keyframe_failed, sched->transition_active, sched->transition_failed, sched->temporal_transition_active,
+      sched->temporal_transition_failed, sched->pacer_frame_active, sched->pacer_frame_timestamp, sched->started_sid_mask, sched->completed_sid_mask,
+      sched->failed_sid_mask);
 }
 
 static void sfu_log_vp9_keyframe_intent(const sfu_peer_session_t *sub_session, const sfu_egress_media_t *media, const sfu_layer_scheduler_t *sched) {
   static _Atomic uint32_t keyframe_logs;
   uint32_t n = atomic_fetch_add_explicit(&keyframe_logs, 1, memory_order_relaxed);
-  if (n != 0 && (n & 127u) != 0) return;
-  SFU_LOG_WARN("[VP9-DBG] keyframe-intent n=%u sub=%u pub=%u source=%u ts=%u target=%u/%u current=%u/%u need_kf=%u spatial=%u/%u",
-               n + 1, sub_session->peer_id, media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source, media->svc.rtp_timestamp,
-               sched->target_sid, sched->target_tid, sched->current_sid, sched->current_tid, sched->needs_keyframe, sched->transition_active,
-               sched->transition_failed);
+  if (n != 0 && (n & 127u) != 0) {
+    return;
+  }
+  SFU_LOG_WARN("[VP9-DBG] keyframe-intent n=%u sub=%u pub=%u source=%u ts=%u target=%u/%u current=%u/%u need_kf=%u spatial=%u/%u", n + 1, sub_session->peer_id,
+               media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source, media->svc.rtp_timestamp, sched->target_sid, sched->target_tid,
+               sched->current_sid, sched->current_tid, sched->needs_keyframe, sched->transition_active, sched->transition_failed);
 }
 
 static bool sfu_is_vp9_screen_media(const sfu_egress_media_t *media) {
   return media && media->source == SFU_MEDIA_SCREEN && media->has_svc && media->has_video && !media->is_audio;
 }
 
-static void sfu_log_vp9_egress_event(const char *event, const char *path, const char *reason, const sfu_worker_t *w,
-                                     const sfu_peer_session_t *sub_session, const sfu_packet_t *pkt, const sfu_egress_media_t *media) {
-  if (!sfu_is_vp9_screen_media(media)) return;
+static void sfu_log_vp9_egress_event(const char *event, const char *path, const char *reason, const sfu_worker_t *w, const sfu_peer_session_t *sub_session,
+                                     const sfu_packet_t *pkt, const sfu_egress_media_t *media) {
+  if (!sfu_is_vp9_screen_media(media)) {
+    return;
+  }
   static _Atomic uint32_t entry_logs;
   static _Atomic uint32_t reject_logs;
   _Atomic uint32_t *counter = reason ? &reject_logs : &entry_logs;
   uint32_t n = atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
-  if (n != 0 && (n & 127u) != 0) return;
+  if (n != 0 && (n & 127u) != 0) {
+    return;
+  }
   uint16_t seq = pkt && pkt->len >= 4 ? sfu_read_be16(pkt->data + 2) : 0;
   uint32_t input_ssrc = pkt && pkt->len >= 12 ? sfu_read_be32(pkt->data + 8) : 0;
   uint16_t owner = sub_session ? sfu_session_owner_worker(sub_session) : SFU_SESSION_OWNER_NONE;
-  SFU_LOG_WARN("[VP9-DBG] %s n=%u path=%s reason=%s worker=%u owner=%u sub=%u pub=%u source=%u input_ssrc=%" PRIu32
-               " output_ssrc=%" PRIu32 " seq=%u ts=%u sid=%u tid=%u b=%u kf=%u slot=%u gen=%" PRIu64,
-               event, n + 1, path, reason ? reason : "none", w ? w->worker_index : UINT32_MAX, owner,
-               sub_session ? sub_session->peer_id : 0, media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source,
-               input_ssrc, media->video_ssrc, seq, media->svc.rtp_timestamp, media->svc.sid, media->svc.tid, media->svc.b_bit,
-               media->is_keyframe, media->remote_slot, media->assignment_generation);
+  SFU_LOG_WARN("[VP9-DBG] %s n=%u path=%s reason=%s worker=%u owner=%u sub=%u pub=%u source=%u input_ssrc=%" PRIu32 " output_ssrc=%" PRIu32
+               " seq=%u ts=%u sid=%u tid=%u b=%u kf=%u slot=%u gen=%" PRIu64,
+               event, n + 1, path, reason ? reason : "none", w ? w->worker_index : UINT32_MAX, owner, sub_session ? sub_session->peer_id : 0,
+               media->publisher ? media->publisher->peer_id : 0, (unsigned)media->source, input_ssrc, media->video_ssrc, seq, media->svc.rtp_timestamp,
+               media->svc.sid, media->svc.tid, media->svc.b_bit, media->is_keyframe, media->remote_slot, media->assignment_generation);
 }
 #endif
 
@@ -118,20 +140,32 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
         applied = atomic_load_explicit(&sub_session->graph.remote_slots.applied_assignment_generations[media->remote_slot], memory_order_acquire);
       }
       uint32_t mid = sfu_remote_slot_first_mid(media->remote_slot) + (media->is_audio ? 0u : media->source == SFU_MEDIA_SCREEN ? 2u : 1u);
-      SFU_LOG_WARN("egress: unauthorized n=%u sub_peer=%u pub_peer=%u slot=%u mid=%u audio=%d source=%d route_gen=%" PRIu64 " applied_gen=%" PRIu64,
-                   n + 1, sub_session->peer_id, media->publisher ? media->publisher->peer_id : 0, media->remote_slot, mid, media->is_audio ? 1 : 0,
-                   (int)media->source, media->assignment_generation, applied);
+      SFU_LOG_WARN("egress: unauthorized n=%u sub_peer=%u pub_peer=%u slot=%u mid=%u audio=%d source=%d route_gen=%" PRIu64 " applied_gen=%" PRIu64, n + 1,
+                   sub_session->peer_id, media->publisher ? media->publisher->peer_id : 0, media->remote_slot, mid, media->is_audio ? 1 : 0, (int)media->source,
+                   media->assignment_generation, applied);
     }
 #endif
     return false;
   }
 
-  uint32_t mid = sfu_remote_slot_first_mid(media->remote_slot) +
-                 (media->is_audio ? 0u : media->source == SFU_MEDIA_SCREEN ? 2u : 1u);
+  uint32_t mid = sfu_remote_slot_first_mid(media->remote_slot) + (media->is_audio ? 0u : media->source == SFU_MEDIA_SCREEN ? 2u : 1u);
 
   uint8_t incoming_pt = pkt->data[1] & 0x7F;
   if (!media->is_audio && media->has_video && media->video_pt != 0 && incoming_pt != media->video_pt) {
     pkt->data[1] = (pkt->data[1] & 0x80) | (media->video_pt & 0x7F);
+  }
+
+  if (pkt->len < 12) {
+    sfu_metric_inc("egress_seq_translate_fail");
+    return false;
+  }
+
+  bool screen_packet = media->source == SFU_MEDIA_SCREEN && !media->has_svc && media->has_video && !media->is_audio;
+  uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
+  bool source_marker = (pkt->data[1] & 0x80u) != 0;
+  if (screen_packet && !sfu_paced_send_admit_frame_packet(&sub_session->egress.paced_screen, source_timestamp, source_marker, media->is_keyframe,
+                                                          (int64_t)sfu_now_us())) {
+    return false;
   }
 
   int64_t send_time_us = (int64_t)sfu_now_us();
@@ -143,10 +177,6 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return false;
   }
 
-  if (pkt->len < 12) {
-    sfu_metric_inc("egress_seq_translate_fail");
-    return false;
-  }
   uint16_t source_seq = sfu_read_be16(pkt->data + 2);
   uint32_t outbound_ssrc = sfu_read_be32(pkt->data + 8);
   uint16_t subscriber_seq = 0;
@@ -193,14 +223,14 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
 
   uint8_t twcc_send_extmap_id = egress_msnap.twcc_send_extmap_id;
+  uint16_t twcc_seq = 0;
+  bool twcc_written = false;
   if (twcc_send_extmap_id != 0) {
-    uint16_t twcc_seq = atomic_fetch_add_explicit(&sub_session->egress.next_twcc_seq, 1, memory_order_relaxed);
+    twcc_seq = atomic_fetch_add_explicit(&sub_session->egress.next_twcc_seq, 1, memory_order_relaxed);
     size_t new_len = (size_t)enc_len;
     if (sfu_rtp_ext_write_twcc(pkt->data, (size_t)enc_len, pkt->cap, twcc_send_extmap_id, twcc_seq, &new_len)) {
       enc_len = (int)new_len;
-      if (sfu_session_video_runtime_ready(sub_session) && sub_session->egress.twcc_history) {
-        sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
-      }
+      twcc_written = true;
     } else {
       sfu_metric_inc("twcc_write_fail");
     }
@@ -243,6 +273,26 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 #endif
   pkt->len = (uint32_t)enc_len;
 
+  if (screen_packet) {
+    int64_t enqueue_now = (int64_t)sfu_now_us();
+    int64_t release_at_us = 0;
+    if (enc_len <= 0 || (uint32_t)enc_len > SFU_PACED_SEND_MAX_PAYLOAD ||
+        !sfu_paced_send_enqueue(&sub_session->egress.paced_screen, pkt->data, (uint16_t)enc_len, dst, dst_len, sub_session->egress.pacer.pacing_bps,
+                                enqueue_now, &release_at_us)) {
+      sfu_metric_inc("paced_send_enqueue_drop");
+      return false;
+    }
+    w->hot.output_queued++;
+    if (twcc_written && sfu_session_video_runtime_ready(sub_session) && sub_session->egress.twcc_history) {
+      sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, release_at_us, (uint32_t)enc_len);
+    }
+    return true;
+  }
+
+  if (twcc_written && sfu_session_video_runtime_ready(sub_session) && sub_session->egress.twcc_history) {
+    sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
+  }
+
   if (sfu_net_send(w->send_net, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
     SFU_LOG_WARN("worker %u: [EGRESS DROP] send SQ full", w->worker_index);
     sfu_metric_inc("egress_send_full");
@@ -257,8 +307,13 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
                                                 const struct sockaddr_storage *dst, socklen_t dst_len, const sfu_egress_media_t *media) {
   if (!w || !sub_session || !plain || !dst || !media || sfu_session_owner_worker(sub_session) != w->worker_index || !sfu_session_accepts_work(sub_session)) {
 #ifdef SFU_DIAG_LOG
-    const char *reason = !w ? "null_worker" : !sub_session ? "null_subscriber" : !plain ? "null_packet" : !dst ? "null_destination" : !media ? "null_media" :
-                         sfu_session_owner_worker(sub_session) != w->worker_index ? "owner_mismatch" : "session_not_accepting";
+    const char *reason = !w                                                         ? "null_worker"
+                         : !sub_session                                             ? "null_subscriber"
+                         : !plain                                                   ? "null_packet"
+                         : !dst                                                     ? "null_destination"
+                         : !media                                                   ? "null_media"
+                         : sfu_session_owner_worker(sub_session) != w->worker_index ? "owner_mismatch"
+                                                                                    : "session_not_accepting";
     sfu_log_vp9_egress_event("egress-reject", reserved_output ? "reserved" : "plaintext", reason, w, sub_session, plain, media);
 #endif
     if (w && reserved_output) {
@@ -383,7 +438,12 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
                         const sfu_egress_media_t *media) {
   if (!w || !sub_session || !pkt || !dst || !media || sfu_session_owner_worker(sub_session) != w->worker_index) {
 #ifdef SFU_DIAG_LOG
-    const char *reason = !w ? "null_worker" : !sub_session ? "null_subscriber" : !pkt ? "null_packet" : !dst ? "null_destination" : !media ? "null_media" : "owner_mismatch";
+    const char *reason = !w             ? "null_worker"
+                         : !sub_session ? "null_subscriber"
+                         : !pkt         ? "null_packet"
+                         : !dst         ? "null_destination"
+                         : !media       ? "null_media"
+                                        : "owner_mismatch";
     sfu_log_vp9_egress_event("egress-reject", "owned", reason, w, sub_session, pkt, media);
 #endif
     if (w && pkt) {

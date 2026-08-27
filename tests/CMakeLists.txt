@@ -3,6 +3,10 @@ add_compile_options(
   $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-UNDEBUG>
 )
 
+add_executable(test_paced_send test_paced_send.c)
+target_link_libraries(test_paced_send PRIVATE sfu_core)
+add_test(NAME paced_send COMMAND test_paced_send)
+
 add_executable(test_memory_pool test_memory_pool.c)
 target_link_libraries(test_memory_pool PRIVATE sfu_core)
 add_test(NAME memory_pool COMMAND test_memory_pool)

@@ -131,6 +131,7 @@ add_library(sfu_core STATIC
   src/pipeline/ingress.c
   src/pipeline/router.c
   src/pipeline/egress.c
+  src/pipeline/paced_send.c
   src/pipeline/keyframe.c
   src/runtime/cpu.c
   src/runtime/fanout_job.c

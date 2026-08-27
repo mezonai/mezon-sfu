@@ -10,6 +10,7 @@
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
+#include "pipeline/paced_send.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room_media_graph.h"
 #include "rtcp/rtcp_kf.h"
@@ -1158,6 +1159,7 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     SFU_FREE(s->egress.schedulers);
     s->egress.schedulers = NULL;
   }
+  sfu_paced_send_destroy(&s->egress.paced_screen);
   if (s->leave_event) {
     assert(!atomic_load_explicit(&s->leave_event_in_use, memory_order_acquire));
     SFU_FREE(s->leave_event);
@@ -1486,6 +1488,7 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   atomic_store_explicit(&s->egress.video_runtime_state, SFU_VIDEO_RUNTIME_UNINITIALIZED, memory_order_relaxed);
   sfu_rtp_seq_translator_init(&s->cold->rtp_seq_translator);
+  sfu_paced_send_init(&s->egress.paced_screen);
   sfu_pacer_init(&s->egress.pacer);
   sfu_pacer_set_rate(&s->egress.pacer, SFU_BWE_START_BPS, (int64_t)sfu_now_us());
 
@@ -2334,11 +2337,15 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       "congestion session=%u worker=%u gcc=%u ack=%u overuse=%u twcc_loss=%u/%u pool=%u reserve=%u "
       "alloc=%u unalloc=%u streams=[%s] alloc_truncated=%u pacer_bps=%u debt=%" PRId64 " drop_delta=%" PRIu64 " rtx_drop_delta=%" PRIu64 " nack_delta=%" PRIu64
       " cache_delta=%" PRIu64 "/%" PRIu64 " rtx_delta=%" PRIu64 " pli_delta=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+      " paced=count:%u,high:%u,delay:%" PRId64 ",cap:%" PRIu64 ",late:%" PRId64 ",queue:%" PRId64 ",input:%" PRId64
       " remb=contrib:%u,target:%u,last_camera:%u,last_screen:%u,sent:%u,fresh:%u,stale:%u",
       session->peer_id, w->worker_index, diag->latest_gcc_bps, diag->latest_ack_bps, diag->latest_overuse, diag->latest_twcc_lost, diag->latest_twcc_total,
       diag->allocation_pool_bps, diag->allocation_reserve_bps, diag->allocation_allocated_bps, diag->allocation_unallocated_bps, allocations,
       allocations_truncated ? 1u : 0u, session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta, nack_delta, cache_hit_delta, cache_miss_delta,
-      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, diag->remb_contribution_bps, diag->remb_target_bps,
+      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, session->egress.paced_screen.count, session->egress.paced_screen.high_water,
+      sfu_paced_send_projected_delay_us(&session->egress.paced_screen, (int64_t)now_us), session->egress.paced_screen.drain_cap_hits,
+      session->egress.paced_screen.max_release_late_us, session->egress.paced_screen.max_enqueue_to_send_us,
+      session->egress.paced_screen.max_input_frame_span_us, diag->remb_contribution_bps, diag->remb_target_bps,
       session->egress.last_camera_remb_bps, session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale);
   diag->last_logged_nack_requests = diag->nack_requests;
   diag->last_logged_cache_hits = diag->cache_hits;

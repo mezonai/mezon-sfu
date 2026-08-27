@@ -87,6 +87,18 @@ static const char *const k_metric_names[] = {
     "egress_copied_bytes",
     "fanout_batch_jobs",
     "fanout_batch_targets",
+    "paced_send_enqueued",
+    "paced_send_sent",
+    "paced_send_full_drop",
+    "paced_send_enqueue_drop",
+    "paced_send_sq_full",
+    "paced_send_delay_frame_drop",
+    "paced_send_frame_packet_drop",
+    "paced_send_delay_crossing",
+    "paced_send_rate_floor",
+    "paced_send_drain_cap_hit",
+    "paced_send_release_late",
+    "paced_send_input_frame_slow",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

@@ -48,6 +48,7 @@ typedef struct sfu_worker {
   _Atomic bool drain_finished;
   int64_t last_twcc_flush_us;
   int64_t last_remb_scan_us;
+  int64_t last_paced_send_scan_us;
 #ifdef SFU_DIAG_LOG
   int64_t last_diag_scan_us;
 #endif

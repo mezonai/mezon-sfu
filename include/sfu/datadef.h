@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
+#include "pipeline/paced_send.h"
 #include "rtp/rtp_seq_translate.h"
 
 // Max DTLS-SRTP exporter length: GCM-256 is 2 x (32-byte key + 12-byte salt) = 88
@@ -437,6 +438,7 @@ typedef struct {
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;
   uint8_t fir_seq;
+  sfu_paced_send_t paced_screen;
 } sfu_session_egress_t;
 
 typedef struct sfu_peer_session {
