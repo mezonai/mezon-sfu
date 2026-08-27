@@ -37,7 +37,18 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
   }
   bool new_frame = !q->input_frame_active || q->input_timestamp != rtp_timestamp;
   if (new_frame) {
+    if (q->input_frame_active && now_us >= q->input_frame_started_us) {
+      int64_t span_us = now_us - q->input_frame_started_us;
+      if (span_us > q->max_input_frame_span_us) {
+        q->max_input_frame_span_us = span_us;
+      }
+      if (span_us > SFU_PACED_SEND_MAX_DELAY_US) {
+        q->input_frames_over_delay++;
+        sfu_metric_inc("paced_send_input_frame_slow");
+      }
+    }
     q->input_timestamp = rtp_timestamp;
+    q->input_frame_started_us = now_us;
     q->input_frame_active = true;
     q->drop_input_frame = !keyframe && sfu_paced_send_projected_delay_us(q, now_us) >= SFU_PACED_SEND_MAX_DELAY_US;
     if (q->drop_input_frame) {
@@ -52,6 +63,16 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
     sfu_metric_inc("paced_send_frame_packet_drop");
   }
   if (marker) {
+    if (now_us >= q->input_frame_started_us) {
+      int64_t span_us = now_us - q->input_frame_started_us;
+      if (span_us > q->max_input_frame_span_us) {
+        q->max_input_frame_span_us = span_us;
+      }
+      if (span_us > SFU_PACED_SEND_MAX_DELAY_US) {
+        q->input_frames_over_delay++;
+        sfu_metric_inc("paced_send_input_frame_slow");
+      }
+    }
     q->input_frame_active = false;
     q->drop_input_frame = false;
   }
@@ -89,6 +110,7 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
 
   sfu_paced_send_entry_t *e = &q->entries[q->tail];
   e->release_at_us = base;
+  e->enqueued_at_us = now_us;
   memcpy(&e->dst, dst, sizeof(e->dst));
   e->dst_len = dst_len;
   e->len = len;
@@ -112,7 +134,9 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, int64_t now_us) 
     return false;
   }
   bool sent = false;
-  while (q->count > 0) {
+  uint32_t sent_this_scan = 0;
+  q->drain_invocations++;
+  while (q->count > 0 && sent_this_scan < SFU_PACED_SEND_MAX_DRAIN_PER_SCAN) {
     sfu_paced_send_entry_t *e = &q->entries[q->head];
     if (e->release_at_us > now_us) {
       break;
@@ -147,7 +171,28 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, int64_t now_us) 
     q->count--;
     q->sent++;
     sent = true;
+    sent_this_scan++;
+    int64_t enqueue_to_send_us = now_us >= e->enqueued_at_us ? now_us - e->enqueued_at_us : 0;
+    int64_t release_late_us = now_us >= e->release_at_us ? now_us - e->release_at_us : 0;
+    q->enqueue_to_send_sum_us += (uint64_t)enqueue_to_send_us;
+    q->enqueue_to_send_samples++;
+    if (enqueue_to_send_us > q->max_enqueue_to_send_us) {
+      q->max_enqueue_to_send_us = enqueue_to_send_us;
+    }
+    if (release_late_us > q->max_release_late_us) {
+      q->max_release_late_us = release_late_us;
+    }
+    if (release_late_us > SFU_PACED_SEND_SCAN_INTERVAL_US) {
+      sfu_metric_inc("paced_send_release_late");
+    }
     sfu_metric_inc("paced_send_sent");
+  }
+  if (sent_this_scan > q->max_drain_packets) {
+    q->max_drain_packets = sent_this_scan;
+  }
+  if (sent_this_scan == SFU_PACED_SEND_MAX_DRAIN_PER_SCAN && q->count > 0 && q->entries[q->head].release_at_us <= now_us) {
+    q->drain_cap_hits++;
+    sfu_metric_inc("paced_send_drain_cap_hit");
   }
   if (q->count == 0) {
     q->head = 0;

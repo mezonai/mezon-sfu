@@ -123,6 +123,23 @@ static void test_rate_above_floor(void) {
   sfu_paced_send_destroy(&q);
 }
 
+static void test_frame_input_span(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+
+  assert(sfu_paced_send_admit_frame_packet(&q, 20, false, false, 1000000));
+  assert(sfu_paced_send_admit_frame_packet(&q, 20, true, false, 1250000));
+  assert(q.max_input_frame_span_us == 250000);
+  assert(q.input_frames_over_delay == 1);
+
+  assert(sfu_paced_send_admit_frame_packet(&q, 21, false, false, 1300000));
+  assert(sfu_paced_send_admit_frame_packet(&q, 22, true, false, 1550000));
+  assert(q.max_input_frame_span_us == 250000);
+  assert(q.input_frames_over_delay == 2);
+
+  sfu_paced_send_destroy(&q);
+}
+
 int main(void) {
   test_enqueue_spacing_and_copy();
   test_rate_floor_and_size_limit();
@@ -130,5 +147,6 @@ int main(void) {
   test_projected_delay();
   test_large_frame_serialization_bound();
   test_rate_above_floor();
+  test_frame_input_span();
   return 0;
 }

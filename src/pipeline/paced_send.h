@@ -8,11 +8,14 @@
 typedef struct sfu_worker sfu_worker_t;
 
 #define SFU_PACED_SEND_MAX_PAYLOAD 2048u
+#define SFU_PACED_SEND_MAX_DRAIN_PER_SCAN 1u
+#define SFU_PACED_SEND_SCAN_INTERVAL_US 2000LL
 #define SFU_PACED_SEND_MIN_BPS 2000000u
 #define SFU_PACED_SEND_MAX_DELAY_US 200000LL
 
 typedef struct sfu_paced_send_entry {
   int64_t release_at_us;
+  int64_t enqueued_at_us;
   struct sockaddr_storage dst;
   socklen_t dst_len;
   uint16_t len;
@@ -28,6 +31,16 @@ typedef struct sfu_paced_send {
   int64_t next_release_us;
   uint32_t input_timestamp;
   uint32_t high_water;
+  int64_t input_frame_started_us;
+  int64_t max_input_frame_span_us;
+  int64_t max_enqueue_to_send_us;
+  int64_t max_release_late_us;
+  uint64_t enqueue_to_send_sum_us;
+  uint64_t enqueue_to_send_samples;
+  uint64_t input_frames_over_delay;
+  uint64_t drain_invocations;
+  uint64_t drain_cap_hits;
+  uint32_t max_drain_packets;
   bool input_frame_active;
   bool drop_input_frame;
   uint64_t sent;
