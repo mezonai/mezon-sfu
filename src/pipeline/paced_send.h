@@ -8,6 +8,7 @@
 typedef struct sfu_worker sfu_worker_t;
 
 #define SFU_PACED_SEND_MAX_PAYLOAD 2048u
+#define SFU_PACED_SEND_MIN_BPS 2000000u
 #define SFU_PACED_SEND_MAX_DELAY_US 200000LL
 
 typedef struct sfu_paced_send_entry {

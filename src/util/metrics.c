@@ -95,6 +95,7 @@ static const char *const k_metric_names[] = {
     "paced_send_delay_frame_drop",
     "paced_send_frame_packet_drop",
     "paced_send_delay_crossing",
+    "paced_send_rate_floor",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

@@ -8,7 +8,6 @@
 #include "util/metrics.h"
 
 #define SFU_PACED_SEND_CAPACITY 512u
-#define SFU_PACED_SEND_MIN_BPS 200000u
 
 void sfu_paced_send_init(sfu_paced_send_t *q) {
   if (!q) {
@@ -77,9 +76,14 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
     return false;
   }
 
-  uint32_t bps = pacing_bps < SFU_PACED_SEND_MIN_BPS ? SFU_PACED_SEND_MIN_BPS : pacing_bps;
+  uint32_t bps = pacing_bps;
+  if (bps < SFU_PACED_SEND_MIN_BPS) {
+    bps = SFU_PACED_SEND_MIN_BPS;
+    sfu_metric_inc("paced_send_rate_floor");
+  }
 
-  int64_t span_us = ((int64_t)len * 8 * 1000000) / (int64_t)bps;
+  int64_t bits_us = (int64_t)len * 8LL * 1000000LL;
+  int64_t span_us = (bits_us + (int64_t)bps - 1LL) / (int64_t)bps;
 
   int64_t base = q->next_release_us > now_us ? q->next_release_us : now_us;
 
