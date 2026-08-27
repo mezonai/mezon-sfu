@@ -1,5 +1,6 @@
 #include "congestion/bandwidth_allocator.h"
 
+#include "config/config.h"
 #include "util/metrics.h"
 
 #include <limits.h>
@@ -46,23 +47,48 @@ static void fill_class(sfu_bandwidth_allocation_t *allocation, sfu_bandwidth_str
   }
 }
 
-static void record_allocation_metrics(const sfu_bandwidth_allocation_t *allocation) {
+static uint32_t policy_value(uint32_t configured, uint32_t fallback) { return configured ? configured : fallback; }
+
+static void record_allocation_metrics(const sfu_bandwidth_allocation_t *allocation, uint32_t screen_preferred_bps, uint32_t admission_bps) {
+  bool has_screen = false;
+  bool screen_below_preferred = false;
+  bool screen_at_preferred = false;
+  bool camera_deferred = false;
+  for (size_t i = 0; i < allocation->stream_count; i++) {
+    const sfu_bandwidth_stream_allocation_t *stream = &allocation->streams[i];
+    if (stream->kind == SFU_BANDWIDTH_STREAM_SCREEN) {
+      has_screen = true;
+      if (stream->allocated_bps >= screen_preferred_bps) screen_at_preferred = true;
+      else screen_below_preferred = true;
+    } else if (stream->kind == SFU_BANDWIDTH_STREAM_CAMERA && stream->allocated_bps <= admission_bps) {
+      camera_deferred = true;
+    }
+  }
   sfu_metric_inc("bandwidth_allocator_runs");
   sfu_metric_add("bandwidth_allocator_active_streams", allocation->stream_count);
   sfu_metric_add("bandwidth_allocator_unallocated_bps", allocation->unallocated_bps);
+  if (screen_at_preferred) sfu_metric_inc("bandwidth_screen_preferred");
+  if (screen_below_preferred) sfu_metric_inc("bandwidth_screen_below_preferred");
+  if (has_screen && camera_deferred) sfu_metric_inc("bandwidth_camera_deferred_for_screen");
 }
 
 void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t input_count, uint64_t estimated_bps,
                             sfu_bandwidth_allocation_t *allocation) {
   if (!allocation) return;
   memset(allocation, 0, sizeof(*allocation));
+  uint32_t pool_percent = policy_value(g_sfu_config.bandwidth_video_pool_percent, SFU_BANDWIDTH_VIDEO_POOL_PERCENT);
+  uint32_t admission_bps = policy_value(g_sfu_config.bandwidth_source_admission_bps, SFU_BANDWIDTH_SOURCE_ADMISSION_BPS);
+  uint32_t screen_preferred_bps = policy_value(g_sfu_config.bandwidth_screen_preferred_bps, SFU_BANDWIDTH_SCREEN_PREFERRED_BPS);
+  uint32_t screen_mid_bps = policy_value(g_sfu_config.bandwidth_screen_mid_bps, 1440000u);
+  uint32_t screen_cap_bps = policy_value(g_sfu_config.bandwidth_screen_cap_bps, SFU_BANDWIDTH_SCREEN_CAP_BPS);
+  uint32_t camera_mid_bps = policy_value(g_sfu_config.bandwidth_camera_mid_bps, 720000u);
+  uint32_t camera_cap_bps = policy_value(g_sfu_config.bandwidth_camera_cap_bps, SFU_BANDWIDTH_CAMERA_CAP_BPS);
   allocation->estimated_bps = estimated_bps;
-  allocation->video_pool_bps = estimated_bps / 100u * SFU_BANDWIDTH_VIDEO_POOL_PERCENT +
-                               estimated_bps % 100u * SFU_BANDWIDTH_VIDEO_POOL_PERCENT / 100u;
+  allocation->video_pool_bps = estimated_bps / 100u * pool_percent + estimated_bps % 100u * pool_percent / 100u;
   allocation->reserve_bps = estimated_bps - allocation->video_pool_bps;
   allocation->unallocated_bps = allocation->video_pool_bps;
   if (!inputs || input_count == 0 || allocation->video_pool_bps == 0) {
-    record_allocation_metrics(allocation);
+    record_allocation_metrics(allocation, screen_preferred_bps, admission_bps);
     return;
   }
 
@@ -105,15 +131,13 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
   }
 
   uint64_t remaining = allocation->video_pool_bps;
-  static const uint32_t thresholds[] = {SFU_BANDWIDTH_SOURCE_ADMISSION_BPS, 720000u, 1440000u};
-  for (size_t i = 0; i < sizeof(thresholds) / sizeof(thresholds[0]) && remaining > 0; i++) {
-    uint32_t screen_target = thresholds[i] < SFU_BANDWIDTH_SCREEN_CAP_BPS ? thresholds[i] : SFU_BANDWIDTH_SCREEN_CAP_BPS;
-    uint32_t camera_target = thresholds[i] < SFU_BANDWIDTH_CAMERA_CAP_BPS ? thresholds[i] : SFU_BANDWIDTH_CAMERA_CAP_BPS;
-    fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_target, &remaining);
-    fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_target, &remaining);
-  }
-  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, SFU_BANDWIDTH_SCREEN_CAP_BPS, &remaining);
-  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, SFU_BANDWIDTH_CAMERA_CAP_BPS, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, admission_bps < screen_cap_bps ? admission_bps : screen_cap_bps, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, admission_bps < camera_cap_bps ? admission_bps : camera_cap_bps, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_preferred_bps, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_mid_bps, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_mid_bps, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_cap_bps, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_cap_bps, &remaining);
 
   for (size_t i = 0; i < allocation->stream_count; i++) {
     const sfu_bandwidth_stream_allocation_t *stream = &allocation->streams[i];
@@ -131,5 +155,5 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
     allocation->publishers[publisher_index].allocated_bps = publisher_total > UINT32_MAX ? UINT32_MAX : (uint32_t)publisher_total;
   }
   allocation->unallocated_bps = allocation->video_pool_bps - allocation->allocated_bps;
-  record_allocation_metrics(allocation);
+  record_allocation_metrics(allocation, screen_preferred_bps, admission_bps);
 }
