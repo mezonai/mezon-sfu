@@ -155,8 +155,8 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
 
   uint64_t remaining = allocation->video_pool_bps;
   fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, admission_bps < screen_cap_bps ? admission_bps : screen_cap_bps, &remaining);
-  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, admission_bps < camera_cap_bps ? admission_bps : camera_cap_bps, &remaining);
   fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_preferred_bps, &remaining);
+  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, admission_bps < camera_cap_bps ? admission_bps : camera_cap_bps, &remaining);
   fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_mid_bps, &remaining);
   fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_mid_bps, &remaining);
   fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_cap_bps, &remaining);

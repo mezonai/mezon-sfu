@@ -66,12 +66,12 @@ static void test_threshold_boundaries_and_screen_priority(void) {
   assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 0);
 
   sfu_bandwidth_allocate(streams, 2, estimate_for_pool(480000), &a);
-  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == 240000);
-  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 240000);
+  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == 480000);
+  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 0);
 
   sfu_bandwidth_allocate(streams, 2, estimate_for_pool(960000), &a);
-  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == 720000);
-  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 240000);
+  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_PREFERRED_BPS);
+  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 160000);
 
   sfu_bandwidth_allocate(streams, 2, estimate_for_pool(1040000), &a);
   assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_PREFERRED_BPS);
