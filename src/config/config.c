@@ -48,9 +48,9 @@ void sfu_config_set_defaults(void) {
 
   g_sfu_config.bandwidth_video_pool_percent = 85;
   g_sfu_config.bandwidth_source_admission_bps = 240000;
-  g_sfu_config.bandwidth_screen_preferred_bps = 800000;
-  g_sfu_config.bandwidth_screen_mid_bps = 1440000;
-  g_sfu_config.bandwidth_screen_cap_bps = 2500000;
+  g_sfu_config.bandwidth_screen_preferred_bps = 2000000;
+  g_sfu_config.bandwidth_screen_mid_bps = 3000000;
+  g_sfu_config.bandwidth_screen_cap_bps = 3500000;
   g_sfu_config.bandwidth_camera_mid_bps = 720000;
   g_sfu_config.bandwidth_camera_cap_bps = 1000000;
 

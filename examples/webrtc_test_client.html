@@ -1375,7 +1375,7 @@
                 }
             }
 
-            /* Screen share: preserve native 1080p detail at 5-10 FPS. */
+            /* Screen share: preserve native 1080p text detail at 5 FPS. */
             async function applyScreenEncodingParams(sender) {
                 if (!sender || typeof sender.getParameters !== "function") return;
                 try {
@@ -1418,7 +1418,7 @@
                             cursor: "always",
                             width: { ideal: 1920 },
                             height: { ideal: 1080 },
-                            frameRate: { ideal: 10, max: 10 },
+                            frameRate: { ideal: 5, max: 5 },
                         },
                         audio: false,
                     });
