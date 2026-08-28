@@ -1375,7 +1375,7 @@
                 }
             }
 
-            /* Screen share: VP9, scalabilityMode=L1T3, preserve native 1080x1920 resolution. */
+            /* Screen share: preserve native 1080p detail at 5-10 FPS. */
             async function applyScreenEncodingParams(sender) {
                 if (!sender || typeof sender.getParameters !== "function") return;
                 try {
@@ -1383,14 +1383,14 @@
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    params.degradationPreference = "maintain-framerate";
+                    params.degradationPreference = "maintain-resolution";
                     const enc = params.encodings[0];
                     if (SCREEN_CODEC.toUpperCase() === "VP9") {
                         enc.scalabilityMode = SCREEN_SVC_MODE;
                     } else if ("scalabilityMode" in enc) {
                         delete enc.scalabilityMode;
                     }
-                    enc.maxFramerate = 15;
+                    enc.maxFramerate = 10;
                     enc.maxBitrate = SCREEN_MAX_BITRATE_BPS;
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
@@ -1416,9 +1416,9 @@
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             cursor: "always",
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 },
-                            frameRate: { ideal: 15, max: 20 },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                            frameRate: { ideal: 10, max: 10 },
                         },
                         audio: false,
                     });
