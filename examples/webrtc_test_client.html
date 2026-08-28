@@ -1200,7 +1200,7 @@
                     if (screenTc) forceVideoCodec(screenTc, SCREEN_CODEC);
 
                     const answer = await pc.createAnswer();
-                    /* Camera (mid:1) is VP8, screen share (mid:2) is VP9 L1T3. */
+                    /* Camera (mid:1) is VP8, screen share (mid:2) is VP9 L1T1. */
                     const mungedSdp = mungeVideoBitrates(answer.sdp);
                     await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
 
@@ -1692,14 +1692,14 @@
 
 /* Codec configuration is fixed:
  *   - Camera (mid:1): VP8, single encoding, 320x480.
- *   - Screen  (mid:2): VP8, scalabilityMode=L1T3, 1280x720.
+ *   - Screen  (mid:2): VP9, scalabilityMode=L1T1, 1920x1080.
  * There are no UI controls for either codec or SVC mode.
  */
 const CAMERA_CODEC = "VP8";
-const SCREEN_CODEC = "VP8";
-const SCREEN_SVC_MODE = "L1T3";
+const SCREEN_CODEC = "VP9";
+const SCREEN_SVC_MODE = "L1T1";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
-const SCREEN_RESOLUTION = { width: 1280, height: 720 };
+const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
 const CAMERA_MAX_BITRATE_BPS = 1_000_000;
 const SCREEN_MAX_BITRATE_BPS = 3_500_000;
 const CAMERA_MIN_BITRATE_KBPS = 250;
@@ -1707,7 +1707,7 @@ const CAMERA_START_BITRATE_KBPS = 500;
 const CAMERA_MAX_BITRATE_KBPS = 1000;
 const SCREEN_MIN_BITRATE_KBPS = 400;
 const SCREEN_START_BITRATE_KBPS = 1000;
-const SCREEN_MAX_BITRATE_KBPS = 2500;
+const SCREEN_MAX_BITRATE_KBPS = 3500;
 
 async function applyVideoEncodingParams(pc) {
                 const uplink =
