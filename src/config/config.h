@@ -27,6 +27,14 @@ typedef struct {
   uint32_t fanout_job_pool_capacity;
   uint32_t release_queue_capacity;
 
+  uint32_t bandwidth_video_pool_percent;
+  uint32_t bandwidth_source_admission_bps;
+  uint32_t bandwidth_screen_preferred_bps;
+  uint32_t bandwidth_screen_mid_bps;
+  uint32_t bandwidth_screen_cap_bps;
+  uint32_t bandwidth_camera_mid_bps;
+  uint32_t bandwidth_camera_cap_bps;
+
   char af_xdp_interface[64];
   char af_xdp_queues[256];
   uint32_t af_xdp_queue_id;

@@ -46,6 +46,14 @@ void sfu_config_set_defaults(void) {
   g_sfu_config.fanout_job_pool_capacity = 16384;
   g_sfu_config.release_queue_capacity = 8192;
 
+  g_sfu_config.bandwidth_video_pool_percent = 85;
+  g_sfu_config.bandwidth_source_admission_bps = 240000;
+  g_sfu_config.bandwidth_screen_preferred_bps = 800000;
+  g_sfu_config.bandwidth_screen_mid_bps = 1440000;
+  g_sfu_config.bandwidth_screen_cap_bps = 2500000;
+  g_sfu_config.bandwidth_camera_mid_bps = 720000;
+  g_sfu_config.bandwidth_camera_cap_bps = 1000000;
+
   snprintf(g_sfu_config.af_xdp_interface, sizeof(g_sfu_config.af_xdp_interface), "eth0");
   snprintf(g_sfu_config.af_xdp_queues, sizeof(g_sfu_config.af_xdp_queues), "auto");
   g_sfu_config.af_xdp_queue_id = 0;
@@ -84,6 +92,15 @@ int sfu_config_validate(const sfu_config_t *config) {
   }
   if (config->packet_pool_capacity > 16777216u) {
     SFU_LOG_ERROR("packet_pool_capacity (%u) exceeds maximum 16777216 (16M slots)", config->packet_pool_capacity);
+    return -1;
+  }
+  if (config->bandwidth_video_pool_percent == 0 || config->bandwidth_video_pool_percent > 100 || config->bandwidth_source_admission_bps == 0 ||
+      config->bandwidth_source_admission_bps > config->bandwidth_screen_preferred_bps ||
+      config->bandwidth_screen_preferred_bps > config->bandwidth_screen_mid_bps || config->bandwidth_screen_mid_bps > config->bandwidth_screen_cap_bps ||
+      config->bandwidth_source_admission_bps > config->bandwidth_camera_mid_bps || config->bandwidth_camera_mid_bps > config->bandwidth_camera_cap_bps) {
+    SFU_LOG_ERROR("invalid bandwidth policy (pool=%u admission=%u screen=%u/%u/%u camera=%u/%u)", config->bandwidth_video_pool_percent,
+                  config->bandwidth_source_admission_bps, config->bandwidth_screen_preferred_bps, config->bandwidth_screen_mid_bps,
+                  config->bandwidth_screen_cap_bps, config->bandwidth_camera_mid_bps, config->bandwidth_camera_cap_bps);
     return -1;
   }
 #undef REQUIRE_POWER_OF_TWO
@@ -162,6 +179,20 @@ int sfu_config_load_ini(const char *filepath) {
       g_sfu_config.fanout_job_pool_capacity = (uint32_t)atoi(val);
     } else if (strcmp(key, "release_queue_capacity") == 0) {
       g_sfu_config.release_queue_capacity = (uint32_t)atoi(val);
+    } else if (strcmp(key, "video_pool_percent") == 0 && strcmp(section, "bandwidth") == 0) {
+      g_sfu_config.bandwidth_video_pool_percent = (uint32_t)atoi(val);
+    } else if (strcmp(key, "source_admission_bps") == 0 && strcmp(section, "bandwidth") == 0) {
+      g_sfu_config.bandwidth_source_admission_bps = (uint32_t)atoi(val);
+    } else if (strcmp(key, "screen_preferred_bps") == 0 && strcmp(section, "bandwidth") == 0) {
+      g_sfu_config.bandwidth_screen_preferred_bps = (uint32_t)atoi(val);
+    } else if (strcmp(key, "screen_mid_bps") == 0 && strcmp(section, "bandwidth") == 0) {
+      g_sfu_config.bandwidth_screen_mid_bps = (uint32_t)atoi(val);
+    } else if (strcmp(key, "screen_cap_bps") == 0 && strcmp(section, "bandwidth") == 0) {
+      g_sfu_config.bandwidth_screen_cap_bps = (uint32_t)atoi(val);
+    } else if (strcmp(key, "camera_mid_bps") == 0 && strcmp(section, "bandwidth") == 0) {
+      g_sfu_config.bandwidth_camera_mid_bps = (uint32_t)atoi(val);
+    } else if (strcmp(key, "camera_cap_bps") == 0 && strcmp(section, "bandwidth") == 0) {
+      g_sfu_config.bandwidth_camera_cap_bps = (uint32_t)atoi(val);
     } else if (strcmp(key, "interface") == 0 && strcmp(section, "af_xdp") == 0) {
       snprintf(g_sfu_config.af_xdp_interface, sizeof(g_sfu_config.af_xdp_interface), "%s", val);
     } else if (strcmp(key, "queues") == 0 && strcmp(section, "af_xdp") == 0) {

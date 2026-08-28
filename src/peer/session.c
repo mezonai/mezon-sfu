@@ -2088,6 +2088,7 @@ bool sfu_session_send_remb_for_source(sfu_worker_t *w, sfu_peer_session_t *publi
 
   sfu_packet_t *rtcp_pkt = sfu_packet_pool_alloc(w->pp);
   if (!rtcp_pkt) {
+    sfu_metric_inc("remb_packet_alloc_fail");
     return false;
   }
 
@@ -2181,6 +2182,11 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
   }
 
   uint32_t targets[2] = {0, 0};
+  uint32_t fresh_by_source[2] = {0, 0};
+  uint32_t stale_by_source[2] = {0, 0};
+  uint32_t winner_peer_id[2] = {0, 0};
+  uint32_t winner_remote_slot[2] = {0, 0};
+  uint64_t winner_generation[2] = {0, 0};
   uint32_t fresh = 0;
   uint32_t stale = 0;
   bool saw_route = false;
@@ -2199,14 +2205,31 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
         uint32_t contribution_bps = source == SFU_MEDIA_SCREEN ? screen_bps : camera_bps;
         if (contribution_bps > targets[pass]) {
           targets[pass] = contribution_bps;
+          winner_peer_id[pass] = route->subscriber->peer_id;
+          winner_remote_slot[pass] = route->remote_slot;
+          winner_generation[pass] = route->assignment_generation;
         }
+        fresh_by_source[pass]++;
         fresh++;
       } else {
+        stale_by_source[pass]++;
         stale++;
       }
     }
   }
   sfu_fanout_bundle_release(bundle);
+
+  sfu_media_snapshot_t media = sfu_session_load_media(publisher);
+  sfu_remb_source_diag_t *source_diag[2] = {&publisher->egress.diag.remb_camera, &publisher->egress.diag.remb_screen};
+  for (unsigned pass = 0; pass < 2; pass++) {
+    source_diag[pass]->target_bps = targets[pass];
+    source_diag[pass]->media_ssrc = pass == 0 ? media.video_ssrc : media.screen_ssrc;
+    source_diag[pass]->winner_peer_id = winner_peer_id[pass];
+    source_diag[pass]->winner_remote_slot = winner_remote_slot[pass];
+    source_diag[pass]->winner_assignment_generation = winner_generation[pass];
+    source_diag[pass]->fresh_routes = fresh_by_source[pass];
+    source_diag[pass]->stale_routes = stale_by_source[pass];
+  }
 
   uint32_t previous_target_bps = publisher->egress.diag.remb_target_bps;
   uint32_t aggregate_target_bps = targets[0] > targets[1] ? targets[0] : targets[1];
@@ -2232,9 +2255,18 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_VIDEO, targets[0])) {
         publisher->egress.last_camera_remb_bps = targets[0];
         publisher->egress.last_camera_remb_time_us = now_us;
+        source_diag[0]->last_sent_bps = targets[0];
+        source_diag[0]->last_sent_us = now_us;
+        source_diag[0]->sent_count++;
+        sfu_metric_inc("remb_camera_sent");
         sent = true;
+      } else {
+        source_diag[0]->rejected_count++;
+        sfu_metric_inc("remb_camera_rejected");
       }
     } else {
+      source_diag[0]->throttled_count++;
+      sfu_metric_inc("remb_camera_throttled");
       sfu_metric_inc("remb_aggregate_throttled");
     }
   }
@@ -2243,9 +2275,18 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_SCREEN, targets[1])) {
         publisher->egress.last_screen_remb_bps = targets[1];
         publisher->egress.last_screen_remb_time_us = now_us;
+        source_diag[1]->last_sent_bps = targets[1];
+        source_diag[1]->last_sent_us = now_us;
+        source_diag[1]->sent_count++;
+        sfu_metric_inc("remb_screen_sent");
         sent = true;
+      } else {
+        source_diag[1]->rejected_count++;
+        sfu_metric_inc("remb_screen_rejected");
       }
     } else {
+      source_diag[1]->throttled_count++;
+      sfu_metric_inc("remb_screen_throttled");
       sfu_metric_inc("remb_aggregate_throttled");
     }
   }
@@ -2338,7 +2379,10 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       "alloc=%u unalloc=%u streams=[%s] alloc_truncated=%u pacer_bps=%u debt=%" PRId64 " drop_delta=%" PRIu64 " rtx_drop_delta=%" PRIu64 " nack_delta=%" PRIu64
       " cache_delta=%" PRIu64 "/%" PRIu64 " rtx_delta=%" PRIu64 " pli_delta=%" PRIu64 "/%" PRIu64 "/%" PRIu64
       " paced=count:%u,high:%u,delay:%" PRId64 ",cap:%" PRIu64 ",late:%" PRId64 ",queue:%" PRId64 ",input:%" PRId64
-      " remb=contrib:%u,target:%u,last_camera:%u,last_screen:%u,sent:%u,fresh:%u,stale:%u",
+      " remb=contrib:%u,target:%u,last_camera:%u,last_screen:%u,sent:%u,fresh:%u,stale:%u"
+      " remb_camera=target:%u,ssrc:%u,last_sent:%u@%" PRId64 ",fresh:%u,stale:%u,winner:%u/%u/%" PRIu64 ",sent:%" PRIu64 ",throttled:%" PRIu64 ",rejected:%" PRIu64
+      " remb_screen=target:%u,ssrc:%u,last_sent:%u@%" PRId64 ",fresh:%u,stale:%u,winner:%u/%u/%" PRIu64 ",sent:%" PRIu64 ",throttled:%" PRIu64 ",rejected:%" PRIu64
+      " screen_ingress=ssrc:%u,span:%" PRId64 ",gap:%" PRId64 ",frames:%" PRIu64 ",missing_marker:%" PRIu64,
       session->peer_id, w->worker_index, diag->latest_gcc_bps, diag->latest_ack_bps, diag->latest_overuse, diag->latest_twcc_lost, diag->latest_twcc_total,
       diag->allocation_pool_bps, diag->allocation_reserve_bps, diag->allocation_allocated_bps, diag->allocation_unallocated_bps, allocations,
       allocations_truncated ? 1u : 0u, session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta, nack_delta, cache_hit_delta, cache_miss_delta,
@@ -2346,7 +2390,15 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       sfu_paced_send_projected_delay_us(&session->egress.paced_screen, (int64_t)now_us), session->egress.paced_screen.drain_cap_hits,
       session->egress.paced_screen.max_release_late_us, session->egress.paced_screen.max_enqueue_to_send_us,
       session->egress.paced_screen.max_input_frame_span_us, diag->remb_contribution_bps, diag->remb_target_bps,
-      session->egress.last_camera_remb_bps, session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale);
+      session->egress.last_camera_remb_bps, session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale,
+      diag->remb_camera.target_bps, diag->remb_camera.media_ssrc, diag->remb_camera.last_sent_bps, diag->remb_camera.last_sent_us,
+      diag->remb_camera.fresh_routes, diag->remb_camera.stale_routes, diag->remb_camera.winner_peer_id, diag->remb_camera.winner_remote_slot,
+      diag->remb_camera.winner_assignment_generation, diag->remb_camera.sent_count, diag->remb_camera.throttled_count, diag->remb_camera.rejected_count,
+      diag->remb_screen.target_bps, diag->remb_screen.media_ssrc, diag->remb_screen.last_sent_bps, diag->remb_screen.last_sent_us,
+      diag->remb_screen.fresh_routes, diag->remb_screen.stale_routes, diag->remb_screen.winner_peer_id, diag->remb_screen.winner_remote_slot,
+      diag->remb_screen.winner_assignment_generation, diag->remb_screen.sent_count, diag->remb_screen.throttled_count, diag->remb_screen.rejected_count,
+      diag->screen_ingress.media_ssrc, diag->screen_ingress.max_frame_span_us, diag->screen_ingress.max_inter_frame_gap_us,
+      diag->screen_ingress.completed_frames, diag->screen_ingress.missing_marker_frames);
   diag->last_logged_nack_requests = diag->nack_requests;
   diag->last_logged_cache_hits = diag->cache_hits;
   diag->last_logged_cache_misses = diag->cache_misses;
