@@ -85,13 +85,28 @@ static void test_threshold_boundaries_and_screen_priority(void) {
   assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_MID_BPS);
   assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 240000);
 
-  sfu_bandwidth_allocate(streams, 2, estimate_for_pool(3960000), &a);
-  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == 3240000);
+  sfu_bandwidth_allocate(streams, 2, estimate_for_pool(3740000), &a);
+  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_CAP_BPS);
+  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 240000);
+
+  sfu_bandwidth_allocate(streams, 2, estimate_for_pool(5000000), &a);
+  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_CAP_BPS);
+  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 240000);
+  assert(a.unallocated_bps == 1260000);
+}
+
+static void test_camera_only_tiers(void) {
+  sfu_bandwidth_stream_input_t camera = input(10, 0, 1, SFU_BANDWIDTH_STREAM_CAMERA);
+  sfu_bandwidth_allocation_t a;
+
+  sfu_bandwidth_allocate(&camera, 1, estimate_for_pool(240000), &a);
+  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 240000);
+
+  sfu_bandwidth_allocate(&camera, 1, estimate_for_pool(720000), &a);
   assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 720000);
 
-  sfu_bandwidth_allocate(streams, 2, estimate_for_pool(4220000), &a);
-  assert(find_stream(&a, 20, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_CAP_BPS);
-  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == 720000);
+  sfu_bandwidth_allocate(&camera, 1, estimate_for_pool(1000000), &a);
+  assert(find_stream(&a, 10, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_CAMERA_CAP_BPS);
 }
 
 static void test_equal_sharing_remainder_and_stable_order(void) {
@@ -144,10 +159,10 @@ static void test_caps_safe_pool_and_overflow(void) {
   sfu_bandwidth_allocate(streams, 3, UINT64_MAX, &a);
   assert(a.video_pool_bps <= UINT64_MAX - a.reserve_bps);
   assert(a.allocated_bps <= a.video_pool_bps);
-  assert(a.allocated_bps == 2u * SFU_BANDWIDTH_CAMERA_CAP_BPS + SFU_BANDWIDTH_SCREEN_CAP_BPS);
+  assert(a.allocated_bps == 2u * SFU_BANDWIDTH_SOURCE_ADMISSION_BPS + SFU_BANDWIDTH_SCREEN_CAP_BPS);
   assert(a.unallocated_bps == a.video_pool_bps - a.allocated_bps);
-  assert(find_stream(&a, 1, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_CAMERA_CAP_BPS);
-  assert(find_stream(&a, 2, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_CAMERA_CAP_BPS);
+  assert(find_stream(&a, 1, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_SOURCE_ADMISSION_BPS);
+  assert(find_stream(&a, 2, SFU_BANDWIDTH_STREAM_CAMERA)->allocated_bps == SFU_BANDWIDTH_SOURCE_ADMISSION_BPS);
   assert(find_stream(&a, 1, SFU_BANDWIDTH_STREAM_SCREEN)->allocated_bps == SFU_BANDWIDTH_SCREEN_CAP_BPS);
 
   sfu_bandwidth_allocate(streams, 3, UINT32_MAX, &a);
@@ -178,6 +193,7 @@ static void test_low_cardinality_metrics(void) {
 int main(void) {
   test_empty_and_inactive();
   test_threshold_boundaries_and_screen_priority();
+  test_camera_only_tiers();
   test_equal_sharing_remainder_and_stable_order();
   test_publisher_aggregation_duplicates_and_generation();
   test_caps_safe_pool_and_overflow();
