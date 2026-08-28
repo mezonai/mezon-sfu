@@ -1383,7 +1383,7 @@
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    params.degradationPreference = "maintain-resolution";
+                    params.degradationPreference = "maintain-framerate";
                     const enc = params.encodings[0];
                     if (SCREEN_CODEC.toUpperCase() === "VP9") {
                         enc.scalabilityMode = SCREEN_SVC_MODE;
@@ -1416,8 +1416,8 @@
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             cursor: "always",
-                            width: { ideal: 1920 },
-                            height: { ideal: 1080 },
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 },
                             frameRate: { ideal: 15, max: 20 },
                         },
                         audio: false,
@@ -1692,14 +1692,14 @@
 
 /* Codec configuration is fixed:
  *   - Camera (mid:1): VP8, single encoding, 320x480.
- *   - Screen  (mid:2): VP9, scalabilityMode=L1T3, 1920x1080.
+ *   - Screen  (mid:2): VP8, scalabilityMode=L1T3, 1280x720.
  * There are no UI controls for either codec or SVC mode.
  */
 const CAMERA_CODEC = "VP8";
 const SCREEN_CODEC = "VP8";
 const SCREEN_SVC_MODE = "L1T3";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
-const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
+const SCREEN_RESOLUTION = { width: 1280, height: 720 };
 const CAMERA_MAX_BITRATE_BPS = 1_000_000;
 const SCREEN_MAX_BITRATE_BPS = 2_500_000;
 const CAMERA_MIN_BITRATE_KBPS = 250;
@@ -1721,7 +1721,7 @@ async function applyVideoEncodingParams(pc) {
                         params.encodings = [{}];
                     }
                     // Camera: VP8 single encoding, no SVC.
-                    params.degradationPreference = "maintain-resolution";
+                    params.degradationPreference = "maintain-framerate";
                     if ("scalabilityMode" in params.encodings[0]) {
                         delete params.encodings[0].scalabilityMode;
                     }

@@ -381,6 +381,33 @@ typedef struct {
   _Atomic bool uplink_ssrc_dirty;
 } sfu_session_media_t;
 
+typedef struct sfu_remb_source_diag {
+  uint32_t target_bps;
+  uint32_t media_ssrc;
+  uint32_t last_sent_bps;
+  uint32_t winner_peer_id;
+  uint32_t winner_remote_slot;
+  uint64_t winner_assignment_generation;
+  int64_t last_sent_us;
+  uint32_t fresh_routes;
+  uint32_t stale_routes;
+  uint64_t sent_count;
+  uint64_t throttled_count;
+  uint64_t rejected_count;
+} sfu_remb_source_diag_t;
+
+typedef struct sfu_screen_ingress_diag {
+  uint32_t media_ssrc;
+  uint32_t frame_timestamp;
+  int64_t frame_start_us;
+  int64_t last_packet_us;
+  int64_t max_frame_span_us;
+  int64_t max_inter_frame_gap_us;
+  uint64_t completed_frames;
+  uint64_t missing_marker_frames;
+  bool frame_active;
+} sfu_screen_ingress_diag_t;
+
 typedef struct sfu_congestion_diag {
   uint64_t last_log_us;
   uint64_t last_twcc_us;
@@ -414,6 +441,9 @@ typedef struct sfu_congestion_diag {
   uint32_t remb_target_bps;
   uint32_t remb_fresh;
   uint32_t remb_stale;
+  sfu_remb_source_diag_t remb_camera;
+  sfu_remb_source_diag_t remb_screen;
+  sfu_screen_ingress_diag_t screen_ingress;
   uint8_t latest_overuse;
   bool remb_sent;
 } sfu_congestion_diag_t;
