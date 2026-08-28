@@ -1471,6 +1471,7 @@
                 });
 
                 screenSharing = true;
+                await applyVideoEncodingParams(pc);
                 setScreenButtonActive(true);
                 updateLocalScreenBadge(true);
 
@@ -1525,6 +1526,7 @@
 
                 cameraTrackBackup = null;
                 screenSharing = false;
+                await applyVideoEncodingParams(pc);
                 setScreenButtonActive(false);
                 updateLocalScreenBadge(false);
                 removeTile("local-screen");
@@ -1701,6 +1703,7 @@ const SCREEN_SVC_MODE = "L1T1";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
 const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
 const CAMERA_MAX_BITRATE_BPS = 1_000_000;
+const CAMERA_MAX_FRAMERATE = 30;
 const SCREEN_MAX_BITRATE_BPS = 3_500_000;
 const CAMERA_MIN_BITRATE_KBPS = 250;
 const CAMERA_START_BITRATE_KBPS = 500;
@@ -1725,11 +1728,12 @@ async function applyVideoEncodingParams(pc) {
                     if ("scalabilityMode" in params.encodings[0]) {
                         delete params.encodings[0].scalabilityMode;
                     }
+                    params.encodings[0].active = !screenSharing;
                     params.encodings[0].maxBitrate = CAMERA_MAX_BITRATE_BPS;
-                    params.encodings[0].maxFramerate = 30;
+                    params.encodings[0].maxFramerate = CAMERA_MAX_FRAMERATE;
                     params.encodings[0].scaleResolutionDownBy = 1;
-                    params.encodings[0].priority = "high";
-                    params.encodings[0].networkPriority = "high";
+                    params.encodings[0].priority = "medium";
+                    params.encodings[0].networkPriority = "medium";
                     await uplink.sender.setParameters(params);
                     const enc0 = (uplink.sender.getParameters().encodings || [{}])[0];
                     console.log(
@@ -1742,7 +1746,7 @@ async function applyVideoEncodingParams(pc) {
                 }
             }
 
-            /* Configure video transceivers: VP8 for camera, VP9 + L1T3 for screen share. */
+            /* Configure VP8 video transceivers for camera and screen share. */
             async function enableSvcForVideoSender(pc, videoTrack) {
                 const transceiver =
                     pc.getTransceivers().find(
