@@ -1383,7 +1383,7 @@
                     if (!params.encodings || params.encodings.length === 0) {
                         params.encodings = [{}];
                     }
-                    params.degradationPreference = "maintain-resolution";
+                    params.degradationPreference = "maintain-framerate";
                     const enc = params.encodings[0];
                     if (SCREEN_CODEC.toUpperCase() === "VP9") {
                         enc.scalabilityMode = SCREEN_SVC_MODE;
@@ -1721,7 +1721,7 @@ async function applyVideoEncodingParams(pc) {
                         params.encodings = [{}];
                     }
                     // Camera: VP8 single encoding, no SVC.
-                    params.degradationPreference = "maintain-resolution";
+                    params.degradationPreference = "maintain-framerate";
                     if ("scalabilityMode" in params.encodings[0]) {
                         delete params.encodings[0].scalabilityMode;
                     }
