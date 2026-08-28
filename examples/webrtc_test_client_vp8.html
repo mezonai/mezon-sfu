@@ -1200,7 +1200,7 @@
                     if (screenTc) forceVideoCodec(screenTc, SCREEN_CODEC);
 
                     const answer = await pc.createAnswer();
-                    /* Camera (mid:1) is VP8, screen share (mid:2) is VP9 L1T1. */
+                    /* Camera (mid:1) and screen share (mid:2) use VP8. */
                     const mungedSdp = mungeVideoBitrates(answer.sdp);
                     await pc.setLocalDescription({ type: "answer", sdp: mungedSdp });
 
@@ -1692,11 +1692,11 @@
 
 /* Codec configuration is fixed:
  *   - Camera (mid:1): VP8, single encoding, 320x480.
- *   - Screen  (mid:2): VP9, scalabilityMode=L1T1, 1920x1080.
+ *   - Screen  (mid:2): VP8 single-layer, 1920x1080.
  * There are no UI controls for either codec or SVC mode.
  */
 const CAMERA_CODEC = "VP8";
-const SCREEN_CODEC = "VP9";
+const SCREEN_CODEC = "VP8";
 const SCREEN_SVC_MODE = "L1T1";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
 const SCREEN_RESOLUTION = { width: 1920, height: 1080 };

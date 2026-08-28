@@ -100,7 +100,7 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
   uint32_t pool_percent = policy_value(g_sfu_config.bandwidth_video_pool_percent, SFU_BANDWIDTH_VIDEO_POOL_PERCENT);
   uint32_t admission_bps = policy_value(g_sfu_config.bandwidth_source_admission_bps, SFU_BANDWIDTH_SOURCE_ADMISSION_BPS);
   uint32_t screen_preferred_bps = policy_value(g_sfu_config.bandwidth_screen_preferred_bps, SFU_BANDWIDTH_SCREEN_PREFERRED_BPS);
-  uint32_t screen_mid_bps = policy_value(g_sfu_config.bandwidth_screen_mid_bps, 1440000u);
+  uint32_t screen_mid_bps = policy_value(g_sfu_config.bandwidth_screen_mid_bps, SFU_BANDWIDTH_SCREEN_MID_BPS);
   uint32_t screen_cap_bps = policy_value(g_sfu_config.bandwidth_screen_cap_bps, SFU_BANDWIDTH_SCREEN_CAP_BPS);
   uint32_t camera_mid_bps = policy_value(g_sfu_config.bandwidth_camera_mid_bps, 720000u);
   uint32_t camera_cap_bps = policy_value(g_sfu_config.bandwidth_camera_cap_bps, SFU_BANDWIDTH_CAMERA_CAP_BPS);
