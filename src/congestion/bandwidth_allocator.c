@@ -153,14 +153,25 @@ void sfu_bandwidth_allocate(const sfu_bandwidth_stream_input_t *inputs, size_t i
     stream->kind = input->kind;
   }
 
+  bool has_screen = false;
+  for (size_t i = 0; i < allocation->stream_count; i++) {
+    if (allocation->streams[i].kind == SFU_BANDWIDTH_STREAM_SCREEN) {
+      has_screen = true;
+      break;
+    }
+  }
+
   uint64_t remaining = allocation->video_pool_bps;
   fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, admission_bps < screen_cap_bps ? admission_bps : screen_cap_bps, &remaining);
   fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_preferred_bps, &remaining);
   fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, admission_bps < camera_cap_bps ? admission_bps : camera_cap_bps, &remaining);
-  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_mid_bps, &remaining);
-  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_mid_bps, &remaining);
-  fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_cap_bps, &remaining);
-  fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_cap_bps, &remaining);
+  if (has_screen) {
+    fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_mid_bps, &remaining);
+    fill_class(allocation, SFU_BANDWIDTH_STREAM_SCREEN, screen_cap_bps, &remaining);
+  } else {
+    fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_mid_bps, &remaining);
+    fill_class(allocation, SFU_BANDWIDTH_STREAM_CAMERA, camera_cap_bps, &remaining);
+  }
 
   for (size_t i = 0; i < allocation->stream_count; i++) {
     const sfu_bandwidth_stream_allocation_t *stream = &allocation->streams[i];
