@@ -32,7 +32,7 @@ func main() {
 		roomStartID  = flag.Uint64("room-start-id", 1000, "Initial room ID")
 		userStartID  = flag.Int64("user-start-id", 10000, "Initial user ID")
 		fps          = flag.Int("fps", 30, "Video target FPS for speakers")
-		bitrateBps   = flag.Int("bitrate", 500000, "Video target bitrate in bps for speakers")
+		bitrateBps   = flag.Int("bitrate", 240000, "Video target bitrate in bps for speakers")
 
 		// Thresholds
 		minSuccessRate   = flag.Float64("min-success-rate", 95.0, "Minimum required peer connection success rate %")

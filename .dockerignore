@@ -1,0 +1,11 @@
+.git
+.github
+.claude
+build*
+Testing
+**/__pycache__
+*.o
+*.log
+*.pcap
+.env
+loadtest-results

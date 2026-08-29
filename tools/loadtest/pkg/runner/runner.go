@@ -61,7 +61,7 @@ func NewRunner(cfg Config) *Runner {
 		cfg.FPS = 30
 	}
 	if cfg.BitrateBps <= 0 {
-		cfg.BitrateBps = 500000
+		cfg.BitrateBps = 240000
 	}
 
 	return &Runner{

@@ -1,0 +1,43 @@
+services:
+  sfu:
+    restart: "no"
+    environment:
+      SFU_PUBLIC_HOST: sfu
+
+  loadtest:
+    build:
+      context: ./tools/loadtest
+      dockerfile: Dockerfile
+    depends_on:
+      sfu:
+        condition: service_healthy
+    environment:
+      SFU_WS_URL: ws://sfu:8000/ws
+      SFU_JWT_SECRET: ${SFU_JWT_SECRET:?Set SFU_JWT_SECRET in .env}
+    command:
+      - -rooms
+      - ${LOADTEST_ROOMS:-30}
+      - -peers
+      - ${LOADTEST_PEERS_PER_ROOM:-10}
+      - -speakers
+      - ${LOADTEST_SPEAKERS_PER_ROOM:-2}
+      - -duration
+      - ${LOADTEST_DURATION:-60s}
+      - -ramp-duration
+      - ${LOADTEST_RAMP_DURATION:-30s}
+      - -bitrate
+      - ${LOADTEST_VIDEO_BITRATE:-240000}
+      - -min-success-rate
+      - ${LOADTEST_MIN_SUCCESS_RATE:-100}
+      - -max-packet-loss
+      - ${LOADTEST_MAX_PACKET_LOSS:-1}
+      - -min-rx-packets
+      - ${LOADTEST_MIN_RX_PACKETS:-1}
+      - -json-file
+      - /results/report.json
+    volumes:
+      - ./loadtest-results:/results
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
