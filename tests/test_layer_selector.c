@@ -243,6 +243,27 @@ static void test_keyframe_gate_does_not_jump_to_target(void) {
   assert(sched.current_tid == 0);
 }
 
+static void test_l1t1_10fps_multi_packet_delta_frame(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.needs_keyframe = false;
+  sched.target_sid = 0;
+  sched.target_tid = 0;
+
+  sfu_layer_scheduler_decision_t decision;
+  const uint32_t first_timestamp = 90000;
+  for (int frame = 0; frame < 2; frame++) {
+    uint32_t timestamp = first_timestamp + (uint32_t)frame * 9000;
+    for (int packet = 0; packet < 5; packet++) {
+      sfu_svc_descriptor_t desc = make_desc(timestamp, 0, 0, 1, 0, 0, packet == 0, packet == 4);
+      assert(sfu_layer_scheduler_prepare_packet(&sched, &desc, false, &decision));
+      assert(decision.pacer_class == (packet == 0 ? SFU_PACER_CLASS_VIDEO_BASE : SFU_PACER_CLASS_VIDEO_TRANSITION));
+      assert(decision.set_marker == (packet == 4));
+      sfu_layer_scheduler_commit_packet(&sched, &decision);
+    }
+  }
+}
+
 static void test_multi_packet_keyframe_transaction(void) {
   sfu_layer_scheduler_t sched;
   sfu_layer_scheduler_init(&sched, 1);
@@ -257,10 +278,14 @@ static void test_multi_packet_keyframe_transaction(void) {
   sfu_layer_scheduler_commit_packet(&sched, &decision);
   assert(sched.needs_keyframe && sched.keyframe_active);
 
-  sfu_svc_descriptor_t middle = make_desc(600, 0, 0, 0, 0, 0, 0, 0);
-  assert(sfu_layer_scheduler_prepare_packet(&sched, &middle, false, &decision));
-  sfu_layer_scheduler_commit_packet(&sched, &decision);
-  assert(sched.needs_keyframe);
+  for (int packet = 0; packet < 32; packet++) {
+    sfu_svc_descriptor_t middle = make_desc(600, 0, 0, 0, 0, 0, 0, 0);
+    assert(sfu_layer_scheduler_prepare_packet(&sched, &middle, false, &decision));
+    assert(decision.pacer_class == SFU_PACER_CLASS_VIDEO_TRANSITION);
+    assert(!decision.set_marker);
+    sfu_layer_scheduler_commit_packet(&sched, &decision);
+    assert(sched.needs_keyframe);
+  }
 
   sfu_svc_descriptor_t end = make_desc(600, 0, 0, 0, 0, 0, 0, 1);
   assert(sfu_layer_scheduler_prepare_packet(&sched, &end, false, &decision));
@@ -285,6 +310,13 @@ static void test_keyframe_reject_keeps_gate_armed(void) {
 
   sfu_svc_descriptor_t end = make_desc(700, 0, 0, 0, 0, 0, 0, 1);
   assert(!sfu_layer_scheduler_prepare_packet(&sched, &end, false, &decision));
+
+  sfu_svc_descriptor_t recovery = make_desc(9000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &recovery, true, &decision));
+  assert(decision.pacer_class == SFU_PACER_CLASS_VIDEO_TRANSITION);
+  assert(decision.set_marker);
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe && !sched.keyframe_failed);
 }
 
 static void test_temporal_transition_commits_on_end(void) {
@@ -357,6 +389,7 @@ int main(void) {
   test_spatial_transition_reject_prevents_promotion();
   test_independent_spatial_transition_and_picture_reset();
   test_keyframe_gate_does_not_jump_to_target();
+  test_l1t1_10fps_multi_packet_delta_frame();
   test_multi_packet_keyframe_transaction();
   test_keyframe_reject_keeps_gate_armed();
   test_temporal_transition_commits_on_end();

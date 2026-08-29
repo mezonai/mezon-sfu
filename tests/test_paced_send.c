@@ -140,6 +140,57 @@ static void test_frame_input_span(void) {
   sfu_paced_send_destroy(&q);
 }
 
+static void test_vp9_l1t1_frame_admission(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+
+  const uint32_t timestamp = 90000;
+  for (int packet = 0; packet < 35; packet++) {
+    bool scheduler_marker = packet == 34;
+    assert(sfu_paced_send_admit_frame_packet(&q, timestamp, scheduler_marker, packet == 0, 1000000));
+    assert(q.input_frame_active == !scheduler_marker);
+  }
+  assert(!q.drop_input_frame);
+  assert(q.dropped_frame_packets == 0);
+
+  sfu_paced_send_destroy(&q);
+}
+
+static void test_35mbps_10fps_release_schedule(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+
+  uint8_t payload[1200] = {0};
+  struct sockaddr_storage dst;
+  memset(&dst, 0, sizeof(dst));
+
+  const uint32_t pacing_bps = 3500000;
+  const int packets_per_frame = 36;
+  int64_t now_us = 2000000;
+  int64_t release_at_us = 0;
+  for (int frame = 0; frame < 10; frame++) {
+    uint32_t timestamp = 90000u + (uint32_t)frame * 9000u;
+    for (int packet = 0; packet < packets_per_frame; packet++) {
+      bool marker = packet == packets_per_frame - 1;
+      assert(sfu_paced_send_admit_frame_packet(&q, timestamp, marker, frame == 0, now_us));
+      assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), &dst, sizeof(struct sockaddr_in), pacing_bps, now_us, &release_at_us));
+    }
+    now_us += 100000;
+  }
+
+  assert(q.count == 10u * (uint32_t)packets_per_frame);
+  assert(q.dropped_full == 0);
+  assert(q.dropped_delay_frames == 0);
+  assert(q.next_release_us - 2000000 <= 1000000);
+
+  /* Four overdue packets per 2 ms scan can catch up after worker jitter and
+   * exceeds the 3.5 Mbps requirement even for sub-MTU packets. */
+  const uint64_t min_drain_bps = (uint64_t)SFU_PACED_SEND_MAX_DRAIN_PER_SCAN * 800u * 8u * 1000000u / SFU_PACED_SEND_SCAN_INTERVAL_US;
+  assert(min_drain_bps >= pacing_bps);
+
+  sfu_paced_send_destroy(&q);
+}
+
 int main(void) {
   test_enqueue_spacing_and_copy();
   test_rate_floor_and_size_limit();
@@ -148,5 +199,7 @@ int main(void) {
   test_large_frame_serialization_bound();
   test_rate_above_floor();
   test_frame_input_span();
+  test_vp9_l1t1_frame_admission();
+  test_35mbps_10fps_release_schedule();
   return 0;
 }
