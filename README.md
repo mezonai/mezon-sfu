@@ -183,6 +183,122 @@ ctest --output-on-failure
 
 The compiled binary will be generated at `./build/mezon-sfu`.
 
+## Docker deployment (`io_uring`)
+
+The production container uses the `io_uring` backend. It does not require host networking, eBPF access, or a privileged container. The host must provide a modern Linux kernel and adequate `nofile` and `memlock` limits.
+
+Create the runtime environment file and replace both placeholders:
+
+```sh
+cp .env.example .env
+# SFU_PUBLIC_HOST must be the public IP or DNS name clients can reach.
+# SFU_JWT_SECRET must be a long random secret and must match the token issuer.
+```
+
+Build and start NATS and the SFU:
+
+```sh
+docker compose build --pull
+docker compose up -d
+docker compose ps
+docker compose logs -f sfu
+```
+
+The container exposes UDP `7000` for WebRTC media and TCP `8000` for signaling by default. Open both ports in the host and cloud firewalls. Docker/Kubernetes secrets can be mounted and selected with `SFU_JWT_SECRET_FILE`; this takes precedence over `SFU_JWT_SECRET`.
+
+The health check performs a WebSocket upgrade against the signaling listener. Stop gracefully with:
+
+```sh
+docker compose down --timeout 30
+```
+
+AF_XDP remains available for native-host deployments. It is intentionally not used by this container because it requires host networking, the physical NIC and queue configuration, BPF access, and elevated capabilities.
+
+## WebRTC load test
+
+`tools/loadtest` is a separate Go/Pion client that exercises JWT authentication, WebSocket signaling, ICE, DTLS-SRTP, renegotiation, synthetic Opus/VP8 publishing, and subscriber RTP reception.
+
+### Run against an existing SFU
+
+Requirements: Go 1.24+, an accessible signaling URL, open UDP media routing, and the same JWT secret configured on the SFU.
+
+```sh
+cd tools/loadtest
+go test ./...
+go run . \
+  -url ws://127.0.0.1:8000/ws \
+  -jwt-secret 'replace-with-the-sfu-jwt-secret' \
+  -rooms 1 \
+  -peers 3 \
+  -speakers 1 \
+  -duration 30s \
+  -ramp-duration 5s \
+  -bitrate 240000 \
+  -json-file ../../loadtest-results/smoke-report.json
+```
+
+For the production topology, run:
+
+```sh
+cd tools/loadtest
+mkdir -p ../../loadtest-results
+go run . \
+  -url ws://SFU_HOST:8000/ws \
+  -jwt-secret 'replace-with-the-sfu-jwt-secret' \
+  -rooms 30 \
+  -peers 10 \
+  -speakers 2 \
+  -duration 60m \
+  -ramp-duration 30s \
+  -bitrate 240000 \
+  -min-success-rate 100 \
+  -max-packet-loss 1 \
+  -min-rx-packets 1 \
+  -json-file ../../loadtest-results/capacity-report.json
+```
+
+The process exits nonzero when an enabled threshold fails. Use `go run . -help` for all topology, media, threshold, and reporting options.
+
+### Run with Docker Compose
+
+Copy the environment example, set a strong JWT secret, and create the report directory:
+
+```sh
+cp .env.example .env
+# Edit .env: set SFU_PUBLIC_HOST and SFU_JWT_SECRET.
+mkdir -p loadtest-results
+```
+
+Run a small functional smoke test locally:
+
+```sh
+mkdir -p loadtest-results
+LOADTEST_ROOMS=1 \
+LOADTEST_PEERS_PER_ROOM=3 \
+LOADTEST_SPEAKERS_PER_ROOM=1 \
+LOADTEST_DURATION=30s \
+docker compose -f compose.yaml -f compose.loadtest.yaml up \
+  --build --abort-on-container-exit --exit-code-from loadtest
+```
+
+Run the target topology of 300 participants across 30 rooms, with two speakers per room:
+
+```sh
+mkdir -p loadtest-results
+docker compose -f compose.yaml -f compose.loadtest.yaml up \
+  --build --abort-on-container-exit --exit-code-from loadtest
+```
+
+The report is written to `loadtest-results/report.json`. Defaults require all peers to connect, subscriber media reception, and no more than 1% measured packet loss. Override `LOADTEST_DURATION`, `LOADTEST_RAMP_DURATION`, `LOADTEST_VIDEO_BITRATE`, `LOADTEST_MIN_SUCCESS_RATE`, `LOADTEST_MAX_PACKET_LOSS`, and `LOADTEST_MIN_RX_PACKETS` when needed.
+
+Stop and remove the test stack after completion:
+
+```sh
+docker compose -f compose.yaml -f compose.loadtest.yaml down --timeout 30
+```
+
+A same-host Compose run is a functional regression test, not authoritative capacity evidence. For production qualification, run the load generator from separate machines for at least 60 minutes and record SFU CPU, RSS, NIC throughput/drops, container restarts, and packet-pool or queue exhaustion logs. Approve 300-user capacity only with at least 30% CPU and network headroom.
+
 ## Running the server
 
 `mezon-sfu` can be configured using environment variables and runtime flags.

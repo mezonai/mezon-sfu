@@ -1,0 +1,39 @@
+[server]
+log_level = @SFU_LOG_LEVEL@
+media_port = @SFU_MEDIA_PORT@
+signaling_port = @SFU_SIGNALING_PORT@
+public_host = @SFU_PUBLIC_HOST@
+jwt_secret = @SFU_JWT_SECRET@
+
+[nats]
+nats_url = @SFU_NATS_URL@
+nats_client_name = @SFU_NATS_CLIENT_NAME@
+nats_hook_topic = @SFU_NATS_HOOK_TOPIC@
+
+[buffers]
+packet_buf_size = @SFU_PACKET_BUF_SIZE@
+packet_pool_capacity = @SFU_PACKET_POOL_CAPACITY@
+provided_buf_count = @SFU_PROVIDED_BUF_COUNT@
+provided_buf_group_id = @SFU_PROVIDED_BUF_GROUP_ID@
+
+[queues]
+worker_queue_capacity = @SFU_WORKER_QUEUE_CAPACITY@
+fanout_ring_capacity = @SFU_FANOUT_RING_CAPACITY@
+fanout_job_pool_capacity = @SFU_FANOUT_JOB_POOL_CAPACITY@
+release_queue_capacity = @SFU_RELEASE_QUEUE_CAPACITY@
+
+[bandwidth]
+video_pool_percent = @SFU_VIDEO_POOL_PERCENT@
+source_admission_bps = @SFU_SOURCE_ADMISSION_BPS@
+screen_preferred_bps = @SFU_SCREEN_PREFERRED_BPS@
+screen_mid_bps = @SFU_SCREEN_MID_BPS@
+screen_cap_bps = @SFU_SCREEN_CAP_BPS@
+camera_mid_bps = @SFU_CAMERA_MID_BPS@
+camera_cap_bps = @SFU_CAMERA_CAP_BPS@
+
+[af_xdp]
+interface = @SFU_AF_XDP_INTERFACE@
+queues = @SFU_AF_XDP_QUEUES@
+frame_count = @SFU_AF_XDP_FRAME_COUNT@
+frame_size = @SFU_AF_XDP_FRAME_SIZE@
+mode = @SFU_AF_XDP_MODE@

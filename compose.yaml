@@ -1,0 +1,37 @@
+services:
+  nats:
+    image: nats:2.11.8-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    command: ["--name", "mezon-sfu-nats", "--http_port", "8222"]
+
+  sfu:
+    image: mezon-sfu:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      SFU_PUBLIC_HOST: ${SFU_PUBLIC_HOST:?Set SFU_PUBLIC_HOST in .env}
+      SFU_JWT_SECRET: ${SFU_JWT_SECRET:?Set SFU_JWT_SECRET in .env}
+      SFU_MEDIA_PORT: ${SFU_MEDIA_PORT:-7000}
+      SFU_SIGNALING_PORT: ${SFU_SIGNALING_PORT:-8000}
+      SFU_NATS_URL: ${SFU_NATS_URL:-nats://nats:4222}
+    ports:
+      - "${SFU_MEDIA_PORT:-7000}:${SFU_MEDIA_PORT:-7000}/udp"
+      - "${SFU_SIGNALING_PORT:-8000}:${SFU_SIGNALING_PORT:-8000}/tcp"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
+    stop_grace_period: 30s
