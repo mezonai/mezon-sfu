@@ -160,9 +160,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return false;
   }
 
-  bool screen_packet = media->source == SFU_MEDIA_SCREEN && !media->has_svc && media->has_video && !media->is_audio;
+  bool screen_packet = media->source == SFU_MEDIA_SCREEN && media->has_video && !media->is_audio;
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
-  bool source_marker = (pkt->data[1] & 0x80u) != 0;
+  bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
   if (screen_packet && !sfu_paced_send_admit_frame_packet(&sub_session->egress.paced_screen, source_timestamp, source_marker, media->is_keyframe,
                                                           (int64_t)sfu_now_us())) {
     return false;
@@ -289,15 +289,15 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return true;
   }
 
-  if (twcc_written && sfu_session_video_runtime_ready(sub_session) && sub_session->egress.twcc_history) {
-    sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
-  }
-
   if (sfu_net_send(w->send_net, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
     SFU_LOG_WARN("worker %u: [EGRESS DROP] send SQ full", w->worker_index);
     sfu_metric_inc("egress_send_full");
     sfu_metric_inc("send_sq_full");
     return false;
+  }
+
+  if (twcc_written && sfu_session_video_runtime_ready(sub_session) && sub_session->egress.twcc_history) {
+    sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
   }
   w->hot.output_queued++;
   return true;

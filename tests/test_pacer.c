@@ -154,6 +154,38 @@ static void test_admission_timestamp_is_send_time(void) {
 /* CC-16: the RTX budget serves a burst of loss immediately, then throttles
  * sustained line-rate NACKs to a fraction of the pacing rate, and refills
  * over time. */
+static void test_vp9_l1t1_10fps_burst_cadence(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+
+  /* 3.5 Mbps estimate -> 8.75 Mbps pacing. Ten-fps frames arrive every
+   * 100 ms, leaving enough refill time for a 3.5 Mbps average stream. */
+  int64_t now = 1000000;
+  sfu_pacer_set_rate(&p, 3500 * KB, now);
+  assert(p.active);
+
+  /* A large VP9 keyframe is transition traffic and must remain intact. */
+  for (int packet = 0; packet < 50; packet++) {
+    assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_TRANSITION, 1200, false, &now));
+  }
+  assert(p.sent[SFU_PACER_CLASS_VIDEO_TRANSITION] == 50);
+
+  /* Nine 10-fps delta frames at the configured average bitrate. Base-layer
+   * packets may borrow tokens, but they must never be partially dropped. */
+  for (int frame = 1; frame < 10; frame++) {
+    now += 100000;
+    for (int packet = 0; packet < 36; packet++) {
+      assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 1200, false, &now));
+    }
+  }
+  assert(p.sent[SFU_PACER_CLASS_VIDEO_BASE] == 9 * 36);
+  assert(p.dropped_enh == 0);
+
+  /* One idle frame interval clears any remaining burst debt. */
+  now += 100000;
+  assert(sfu_pacer_debt_after(&p, 0, now) == 0);
+}
+
 static void test_rtx_budget_window(void) {
   sfu_pacer_t p;
   sfu_pacer_init(&p);
@@ -201,6 +233,7 @@ int main(void) {
   test_refill_restores_budget();
   test_retune_preserves_debt();
   test_admission_timestamp_is_send_time();
+  test_vp9_l1t1_10fps_burst_cadence();
   test_rtx_budget_window();
   test_rtx_budget_unpaced_when_inactive();
   printf("test_pacer: OK\n");

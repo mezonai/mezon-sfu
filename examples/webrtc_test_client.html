@@ -1382,7 +1382,7 @@
                 }
             }
 
-            /* Screen share: preserve native 1080p text detail at 5 FPS. */
+            /* Screen share: preserve native 1080p text detail at 10 FPS. */
             async function applyScreenEncodingParams(sender) {
                 if (!sender || typeof sender.getParameters !== "function") return;
                 try {
@@ -1397,7 +1397,7 @@
                     } else if ("scalabilityMode" in enc) {
                         delete enc.scalabilityMode;
                     }
-                    enc.maxFramerate = 5;
+                    enc.maxFramerate = 10;
                     enc.maxBitrate = SCREEN_MAX_BITRATE_BPS;
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
@@ -1425,7 +1425,7 @@
                             cursor: "always",
                             width: { ideal: 1920 },
                             height: { ideal: 1080 },
-                            frameRate: { ideal: 5, max: 5 },
+                            frameRate: { ideal: 10, max: 10 },
                         },
                         audio: false,
                     });
