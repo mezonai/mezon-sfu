@@ -163,8 +163,8 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   bool screen_packet = media->source == SFU_MEDIA_SCREEN && media->has_video && !media->is_audio;
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
-  if (screen_packet && !sfu_paced_send_admit_frame_packet(&sub_session->egress.paced_screen, source_timestamp, source_marker, media->is_keyframe,
-                                                          (int64_t)sfu_now_us())) {
+  if (screen_packet &&
+      !sfu_paced_send_admit_frame_packet(&sub_session->egress.paced_screen, source_timestamp, source_marker, media->is_keyframe, (int64_t)sfu_now_us())) {
     return false;
   }
 
