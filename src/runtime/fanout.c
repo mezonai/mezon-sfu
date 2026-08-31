@@ -43,8 +43,13 @@ int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count, uint32_
 
   uint32_t cell_count = worker_count * worker_count;
   mesh->rings = SFU_CALLOC(cell_count, sizeof(sfu_spsc_ring_t));
-  if (!mesh->rings) {
+  mesh->return_rings = SFU_CALLOC(cell_count, sizeof(sfu_spsc_ring_t));
+  if (!mesh->rings || !mesh->return_rings) {
     SFU_LOG_ERROR("fanout mesh: failed to allocate ring array");
+    SFU_FREE(mesh->rings);
+    SFU_FREE(mesh->return_rings);
+    mesh->rings = NULL;
+    mesh->return_rings = NULL;
     for (uint32_t i = 0; i < worker_count; i++) {
       sfu_pool_destroy(&mesh->job_pools[i]);
     }
@@ -54,13 +59,16 @@ int sfu_fanout_mesh_init(sfu_fanout_mesh_t *mesh, uint32_t worker_count, uint32_
   }
 
   for (uint32_t i = 0; i < cell_count; i++) {
-    if (sfu_spsc_ring_init(&mesh->rings[i], ring_capacity) != 0) {
+    if (sfu_spsc_ring_init(&mesh->rings[i], ring_capacity) != 0 || sfu_spsc_ring_init(&mesh->return_rings[i], ring_capacity) != 0) {
       SFU_LOG_ERROR("fanout mesh: failed to init ring %u", i);
-      for (uint32_t j = 0; j < i; j++) {
+      for (uint32_t j = 0; j <= i; j++) {
         sfu_spsc_ring_destroy(&mesh->rings[j]);
+        sfu_spsc_ring_destroy(&mesh->return_rings[j]);
       }
       SFU_FREE(mesh->rings);
+      SFU_FREE(mesh->return_rings);
       mesh->rings = NULL;
+      mesh->return_rings = NULL;
       for (uint32_t j = 0; j < worker_count; j++) {
         sfu_pool_destroy(&mesh->job_pools[j]);
       }
@@ -78,13 +86,20 @@ void sfu_fanout_mesh_destroy(sfu_fanout_mesh_t *mesh) {
   uint32_t cell_count = mesh->worker_count * mesh->worker_count;
   for (uint32_t i = 0; i < cell_count; i++) {
     sfu_spsc_ring_destroy(&mesh->rings[i]);
+    if (mesh->return_rings) {
+      sfu_spsc_ring_destroy(&mesh->return_rings[i]);
+    }
   }
   SFU_FREE(mesh->rings);
+  SFU_FREE(mesh->return_rings);
+  mesh->rings = NULL;
+  mesh->return_rings = NULL;
   if (mesh->job_pools) {
     for (uint32_t i = 0; i < mesh->worker_count; i++) {
       sfu_pool_destroy(&mesh->job_pools[i]);
     }
     SFU_FREE(mesh->job_pools);
+    mesh->job_pools = NULL;
   }
 }
 
@@ -192,8 +207,8 @@ unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, uns
   return drained;
 }
 
-bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker,
-                                                         sfu_peer_session_t *publisher, sfu_media_kind_t source) {
+bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher,
+                                                         sfu_media_kind_t source) {
   if (!mesh || dst_worker >= mesh->worker_count || !publisher) {
     return false;
   }
@@ -222,6 +237,52 @@ bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh
 
 bool sfu_fanout_mesh_enqueue_keyframe_request(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_peer_session_t *publisher) {
   return sfu_fanout_mesh_enqueue_keyframe_request_for_source(mesh, src_worker, dst_worker, publisher, SFU_MEDIA_VIDEO);
+}
+
+bool sfu_fanout_mesh_enqueue_ingress(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, sfu_packet_t *pkt) {
+  if (!mesh || dst_worker >= mesh->worker_count || !pkt) {
+    return false;
+  }
+  sfu_fanout_job_t *job = mesh_job_alloc(mesh, src_worker, dst_worker);
+  if (!job) {
+    return false;
+  }
+  job->kind = SFU_FANOUT_JOB_INGRESS;
+  job->pkt = pkt;
+  if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
+    sfu_metric_inc("fanout_ring_full");
+    SFU_LOG_WARN("fanout mesh: ingress ring %u->%u full, dropping", src_worker, dst_worker);
+    sfu_fanout_mesh_free_job(mesh, job);
+    return false;
+  }
+  return true;
+}
+
+bool sfu_fanout_mesh_return_rx_frame(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint32_t dst_worker, uintptr_t token) {
+  if (!mesh || !mesh->return_rings || src_worker >= mesh->worker_count || dst_worker >= mesh->worker_count) {
+    return false;
+  }
+  sfu_spsc_ring_t *ring = &mesh->return_rings[src_worker * mesh->worker_count + dst_worker];
+  return sfu_spsc_ring_push(ring, (void *)token);
+}
+
+unsigned sfu_fanout_mesh_drain_returns(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_return_fn on_return, void *user_data) {
+  if (!mesh || !mesh->return_rings || dst_worker >= mesh->worker_count || !on_return) {
+    return 0;
+  }
+  unsigned drained = 0;
+  for (uint32_t src = 0; src < mesh->worker_count && drained < max_count; src++) {
+    if (src == dst_worker) {
+      continue;
+    }
+    sfu_spsc_ring_t *ring = &mesh->return_rings[src * mesh->worker_count + dst_worker];
+    void *item;
+    while (drained < max_count && sfu_spsc_ring_pop(ring, &item)) {
+      on_return(user_data, (uintptr_t)item);
+      drained++;
+    }
+  }
+  return drained;
 }
 
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job) { sfu_pool_free(&mesh->job_pools[job->pool_dst], job->pool_index); }

@@ -54,7 +54,7 @@ static void test_snapshot_format(void) {
   sfu_metric_inc("json_reject");
   sfu_metric_add("egress_copied_bytes", 1234);
 
-  char buf[4096]; /* table grows as counters are added */
+  char buf[8192]; /* table grows as counters are added */
   size_t n = sfu_metrics_snapshot(buf, sizeof(buf));
   EXPECT(n > 0);
   EXPECT(n < sizeof(buf)); /* fits */
@@ -95,6 +95,9 @@ static void test_snapshot_format(void) {
   EXPECT(strstr(buf, "remb_aggregate_no_fresh 0\n") != NULL);
   EXPECT(strstr(buf, "remb_aggregate_target_changed 0\n") != NULL);
   EXPECT(strstr(buf, "congestion_pli_received 0\n") != NULL);
+  EXPECT(strstr(buf, "af_xdp_invalid_rx_frame 0\n") != NULL);
+  EXPECT(strstr(buf, "af_xdp_tx_kernel_fallback 0\n") != NULL);
+  EXPECT(strstr(buf, "af_xdp_invalid_tx_completion 0\n") != NULL);
 
   /* Truncation: tiny buffer still NUL-terminated; return is full length. */
   char tiny[8];

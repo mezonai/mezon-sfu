@@ -109,6 +109,19 @@ static const char *const k_metric_names[] = {
     "paced_send_drain_cap_hit",
     "paced_send_release_late",
     "paced_send_input_frame_slow",
+    "dispatch_null_payload",
+    "af_xdp_invalid_rx_frame",
+    "af_xdp_invalid_rx_return",
+    "af_xdp_neighbor_miss",
+    "af_xdp_tx_kernel_fallback",
+    "af_xdp_tx_kernel_fallback_backpressure",
+    "af_xdp_tx_kernel_fallback_error",
+    "af_xdp_invalid_tx_completion",
+    "af_xdp_tx_frame_starvation",
+    "af_xdp_tx_kernel_fallback_completed",
+    "af_xdp_tx_permanent_failure",
+    "af_xdp_tx_ring_backpressure",
+    "af_xdp_tx_canceled_shutdown",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

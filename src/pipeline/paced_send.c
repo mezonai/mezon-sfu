@@ -144,7 +144,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, int64_t now_us) 
 
     sfu_packet_t *out = sfu_worker_packet_arena_alloc(&w->output_arena);
     if (out && e->len > out->cap) {
-      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
+      sfu_worker_release_packet(w,out);
       out = NULL;
     }
     if (!out) {
@@ -152,7 +152,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, int64_t now_us) 
     }
     if (!out || e->len > out->cap) {
       if (out) {
-        sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
+        sfu_worker_release_packet(w,out);
       }
       break;
     }
@@ -161,7 +161,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, int64_t now_us) 
     out->len = e->len;
 
     int rc = sfu_net_send(w->send_net, out, (const struct sockaddr *)&e->dst, e->dst_len);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
+    sfu_worker_release_packet(w,out);
     if (rc != 0) {
       sfu_metric_inc("paced_send_sq_full");
       break;
