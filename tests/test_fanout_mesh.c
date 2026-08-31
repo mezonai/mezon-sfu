@@ -115,6 +115,24 @@ int main(void) {
   assert(atomic_load(&subscribers[1].refcount) == 2);
   assert(atomic_load(&fake_pkt.refcount) == 1);
 
+  /* Ingress job and return ring verification */
+  assert(sfu_fanout_mesh_enqueue_ingress(&mesh, 0, 1, &fake_pkt));
+  c.count = 0;
+  drained = sfu_fanout_mesh_drain(&mesh, 1, 16, collect, &c);
+  assert(drained == 1 && c.count == 1);
+
+  uintptr_t token = 0x12345678ULL;
+  assert(sfu_fanout_mesh_return_rx_frame(&mesh, 1, 0, token));
+  struct return_ctx {
+    uintptr_t val;
+  } ret_ctx = {0};
+  void on_ret(void *user_data, uintptr_t tok) {
+    ((struct return_ctx *)user_data)->val = tok;
+  }
+  unsigned drained_returns = sfu_fanout_mesh_drain_returns(&mesh, 0, 16, on_ret, &ret_ctx);
+  assert(drained_returns == 1);
+  assert(ret_ctx.val == token);
+
   sfu_fanout_mesh_destroy(&mesh);
   printf("test_fanout_mesh: OK\n");
   return 0;

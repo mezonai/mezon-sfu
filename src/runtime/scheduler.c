@@ -21,14 +21,20 @@ static bool affinity_addr_equal(const sfu_affinity_entry_t *entry, uint32_t hash
   return entry->valid && entry->hash == hash && entry->addr_len == addr_len && memcmp(&entry->addr, addr, addr_len) == 0;
 }
 
-static uint32_t scheduler_select_worker(sfu_scheduler_t *s, sfu_packet_t *pkt, uint32_t hash) {
+uint32_t sfu_scheduler_select_worker(sfu_scheduler_t *s, sfu_packet_t *pkt, uint32_t hash) {
+  if (!s || s->worker_count == 0) {
+    return 0;
+  }
   uint32_t fallback = hash % s->worker_count;
   bool is_stun = pkt->data && sfu_stun_is_stun_packet(pkt->data, pkt->len);
+  pthread_mutex_lock(&s->affinity_lock);
   sfu_affinity_entry_t *entry = &s->affinity[hash & (SFU_AFFINITY_CACHE_CAP - 1)];
   bool cache_hit = affinity_addr_equal(entry, hash, &pkt->peer_addr, pkt->peer_addr_len);
   if (cache_hit && !is_stun) {
     entry->last_seen_ns = pkt->recv_ts_ns;
-    return entry->worker_index;
+    uint32_t worker_index = entry->worker_index;
+    pthread_mutex_unlock(&s->affinity_lock);
+    return worker_index;
   }
 
   uint32_t selected = cache_hit ? entry->worker_index : fallback;
@@ -57,19 +63,28 @@ static uint32_t scheduler_select_worker(sfu_scheduler_t *s, sfu_packet_t *pkt, u
   entry->worker_index = selected;
   entry->last_seen_ns = pkt->recv_ts_ns;
   entry->valid = true;
+  pthread_mutex_unlock(&s->affinity_lock);
   return selected;
 }
 
-int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count,
-                       sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds, int recv_bgid, uint32_t buf_count, uint32_t buf_size) {
+int sfu_scheduler_init_routing(sfu_scheduler_t *s, sfu_worker_t *workers, uint32_t worker_count, sfu_routing_table_t *routing_table,
+                               const sfu_ice_credentials_t *ice_creds) {
   memset(s, 0, sizeof(*s));
-  s->core_id = core_id;
-  s->fd = fd;
-  s->pp = pp;
   s->workers = workers;
   s->worker_count = worker_count;
   s->routing_table = routing_table;
   s->ice_creds = ice_creds;
+  return pthread_mutex_init(&s->affinity_lock, NULL) == 0 ? 0 : -1;
+}
+
+int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count,
+                       sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds, int recv_bgid, uint32_t buf_count, uint32_t buf_size) {
+  if (sfu_scheduler_init_routing(s, workers, worker_count, routing_table, ice_creds) != 0) {
+    return -1;
+  }
+  s->core_id = core_id;
+  s->fd = fd;
+  s->pp = pp;
 
   sfu_net_options_t net_options = {
       .fd = fd,
@@ -83,6 +98,7 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_
   s->recv_net = sfu_net_create(&net_options);
   if (!s->recv_net) {
     SFU_LOG_ERROR("scheduler: failed to init recv ring");
+    pthread_mutex_destroy(&s->affinity_lock);
     return -1;
   }
 
@@ -92,6 +108,7 @@ int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_
 void sfu_scheduler_destroy(sfu_scheduler_t *s) {
   sfu_net_destroy(s->recv_net);
   s->recv_net = NULL;
+  pthread_mutex_destroy(&s->affinity_lock);
 }
 
 typedef struct {
@@ -112,7 +129,7 @@ static void on_recv(void *user_data, sfu_packet_t *pkt) {
   }
 
   uint32_t h = fnv1a(&pkt->peer_addr, pkt->peer_addr_len);
-  uint32_t worker_idx = scheduler_select_worker(s, pkt, h);
+  uint32_t worker_idx = sfu_scheduler_select_worker(s, pkt, h);
 
   if (!sfu_spsc_ring_push(&s->workers[worker_idx].inbox, pkt)) {
     sfu_metric_inc("worker_inbox_full");

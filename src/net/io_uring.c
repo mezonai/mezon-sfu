@@ -230,6 +230,17 @@ void sfu_net_release_packet(sfu_net_t *r, sfu_packet_pool_t *pp, sfu_packet_t *p
   }
 }
 
+bool sfu_net_worker_release_packet_routed(sfu_net_t *net, sfu_packet_pool_t *pp, sfu_packet_t *pkt, uint32_t current_worker,
+                                          uint32_t *owner_worker, uintptr_t *token) {
+  (void)net;
+  (void)pp;
+  (void)pkt;
+  (void)current_worker;
+  (void)owner_worker;
+  (void)token;
+  return false;
+}
+
 void sfu_net_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt) {
   if (!sfu_packet_release(pkt)) {
     return;
@@ -426,6 +437,9 @@ unsigned sfu_net_poll(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, s
   return n;
 }
 
+bool sfu_net_backend_is_worker_driven(void) { return false; }
+uint32_t sfu_net_backend_queue_count(void) { return 1; }
+
 int sfu_net_backend_init(int fd, const sfu_net_backend_options_t *options) {
   (void)fd;
   (void)options;
@@ -444,6 +458,12 @@ unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_
 unsigned sfu_net_cancel(sfu_net_t *send_net) {
   (void)send_net;
   return 0;
+}
+
+bool sfu_net_recycle_rx_token(sfu_net_t *net, uintptr_t token) {
+  (void)net;
+  (void)token;
+  return false;
 }
 
 uint32_t sfu_net_outstanding_sends(const sfu_net_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }

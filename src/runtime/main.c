@@ -140,18 +140,6 @@ int main(int argc, char **argv) {
   }
   packet_pool_initialized = true;
 
-  online = sfu_online_cpu_count();
-  worker_count = (uint32_t)(online > 1 ? online - 1 : 1);
-  if (worker_count > SFU_MAX_WORKERS) {
-    worker_count = SFU_MAX_WORKERS;
-  }
-
-  if (worker_count < 1 || worker_count > SFU_MAX_WORKERS) {
-    SFU_LOG_ERROR("invalid worker_count %u (must be 1..%d)", worker_count, SFU_MAX_WORKERS);
-    goto cleanup;
-  }
-  SFU_LOG_INFO("detected %d online cpus: 1 dispatcher + %u workers", online, worker_count);
-
   sfu_net_backend_options_t backend_options = {
       .interface_name = g_sfu_config.af_xdp_interface,
       .queue_spec = g_sfu_config.af_xdp_queue_id_set ? NULL : g_sfu_config.af_xdp_queues,
@@ -162,6 +150,32 @@ int main(int argc, char **argv) {
       .frame_size = g_sfu_config.af_xdp_frame_size,
       .xdp_mode = g_sfu_config.af_xdp_mode,
   };
+
+  if (sfu_net_backend_init(fd, &backend_options) != 0) {
+    SFU_LOG_ERROR("failed to initialize media I/O backend");
+    goto cleanup;
+  }
+  net_backend_initialized = true;
+
+  online = sfu_online_cpu_count();
+  if (sfu_net_backend_is_worker_driven()) {
+    worker_count = sfu_net_backend_queue_count();
+  } else {
+    worker_count = (uint32_t)(online > 1 ? online - 1 : 1);
+  }
+  if (worker_count > SFU_MAX_WORKERS) {
+    worker_count = SFU_MAX_WORKERS;
+  }
+
+  if (worker_count < 1 || worker_count > SFU_MAX_WORKERS) {
+    SFU_LOG_ERROR("invalid worker_count %u (must be 1..%d)", worker_count, SFU_MAX_WORKERS);
+    goto cleanup;
+  }
+  if (sfu_net_backend_is_worker_driven()) {
+    SFU_LOG_INFO("AF_XDP worker-driven mode: %u workers pinned 1:1 to queues", worker_count);
+  } else {
+    SFU_LOG_INFO("detected %d online cpus: 1 dispatcher + %u workers", online, worker_count);
+  }
 
   uint64_t packet_pool_bytes = (uint64_t)g_sfu_config.packet_pool_capacity * ((uint64_t)sizeof(sfu_packet_t) + g_sfu_config.packet_buf_size);
   uint64_t provided_buffer_bytes =
@@ -180,12 +194,6 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
 
-  if (sfu_net_backend_init(fd, &backend_options) != 0) {
-    SFU_LOG_ERROR("failed to initialize media I/O backend");
-    goto cleanup;
-  }
-  net_backend_initialized = true;
-
   if (sfu_routing_table_init(routing_table) != 0) {
     goto cleanup;
   }
@@ -201,8 +209,9 @@ int main(int argc, char **argv) {
   }
   mesh_initialized = true;
 
+  bool is_worker_driven = sfu_net_backend_is_worker_driven();
   for (uint32_t i = 0; i < worker_count; i++) {
-    int core_id = (int)(i + 1) % (online > 1 ? online : 1);
+    int core_id = is_worker_driven ? (int)i % online : (int)(i + 1) % (online > 1 ? online : 1);
     int send_bgid = g_sfu_config.provided_buf_group_id + 1 + (int)i;
     if (sfu_worker_init(&workers[i], core_id, i, fd, pp, room_registry, mesh, sessions, routing_table, &ice_creds, scheduler,
                         g_sfu_config.worker_queue_capacity, send_bgid) != 0) {
@@ -216,11 +225,18 @@ int main(int argc, char **argv) {
   }
   sessions_initialized = true;
 
-  if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, routing_table, &ice_creds, g_sfu_config.provided_buf_group_id,
-                         g_sfu_config.provided_buf_count, g_sfu_config.packet_buf_size) != 0) {
-    goto cleanup;
+  if (is_worker_driven) {
+    if (sfu_scheduler_init_routing(scheduler, workers, worker_count, routing_table, &ice_creds) != 0) {
+      goto cleanup;
+    }
+    scheduler_initialized = true;
+  } else {
+    if (sfu_scheduler_init(scheduler, 0, fd, pp, workers, worker_count, routing_table, &ice_creds, g_sfu_config.provided_buf_group_id,
+                           g_sfu_config.provided_buf_count, g_sfu_config.packet_buf_size) != 0) {
+      goto cleanup;
+    }
+    scheduler_initialized = true;
   }
-  scheduler_initialized = true;
 
   for (uint32_t i = 0; i < worker_count; i++) {
     if (sfu_worker_start(&workers[i]) != 0) {
@@ -229,10 +245,12 @@ int main(int argc, char **argv) {
     workers_started++;
   }
 
-  if (sfu_scheduler_start(scheduler) != 0) {
-    goto cleanup;
+  if (!is_worker_driven) {
+    if (sfu_scheduler_start(scheduler) != 0) {
+      goto cleanup;
+    }
+    scheduler_started = true;
   }
-  scheduler_started = true;
 
   if (init_nats_connection(g_sfu_config.nats_url, g_sfu_config.nats_client_name) != NATS_OK) {
     goto cleanup;
@@ -245,8 +263,15 @@ int main(int argc, char **argv) {
   signaling_started = true;
 
   SFU_LOG_INFO("mezon-sfu ready: media UDP port %u, signaling ws://%s:%u (pid=%d)", port, public_host, signaling_port, getpid());
-  sfu_scheduler_join(scheduler);
-  scheduler_started = false;
+  if (scheduler_started) {
+    sfu_scheduler_join(scheduler);
+    scheduler_started = false;
+  } else {
+    for (uint32_t i = 0; i < workers_started; i++) {
+      sfu_worker_join(&workers[i]);
+    }
+    workers_started = 0;
+  }
   rc = 0;
 
 cleanup:

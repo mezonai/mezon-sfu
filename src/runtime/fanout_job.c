@@ -1,12 +1,21 @@
 #include "runtime/fanout_job.h"
 #include "net/net.h"
 #include "peer/session.h"
+#include "pipeline/dispatch.h"
 #include "pipeline/egress.h"
 #include "runtime/worker.h"
 #include "util/log.h"
 
 void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
   sfu_worker_t *w = (sfu_worker_t *)user_data;
+
+  if (job->kind == SFU_FANOUT_JOB_INGRESS) {
+    if (job->pkt) {
+      sfu_dispatch_packet(w, job->pkt);
+    }
+    sfu_fanout_mesh_free_job(w->mesh, job);
+    return;
+  }
 
   if (job->kind == SFU_FANOUT_JOB_BATCH) {
     for (uint8_t i = 0; i < job->target_count; i++) {
@@ -32,7 +41,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
       sfu_peer_session_t *subscriber = target->subscriber;
       if (!subscriber || sfu_session_owner_worker(subscriber) != w->worker_index || !sfu_session_accepts_work(subscriber)) {
         if (w->reserved_outputs[i]) {
-          sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, w->reserved_outputs[i]);
+          sfu_worker_release_packet(w,w->reserved_outputs[i]);
           w->reserved_outputs[i] = NULL;
         }
         if (subscriber) {
@@ -63,7 +72,7 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
     if (job->publisher) {
       sfu_session_release(job->publisher);
     }
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
+    sfu_worker_release_packet(w,job->pkt);
     sfu_fanout_mesh_free_job(w->mesh, job);
     return;
   }
@@ -104,6 +113,6 @@ void sfu_worker_handle_fanout_job(void *user_data, sfu_fanout_job_t *job) {
     }
   }
 
-  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, job->pkt);
+  sfu_worker_release_packet(w,job->pkt);
   sfu_fanout_mesh_free_job(w->mesh, job);
 }

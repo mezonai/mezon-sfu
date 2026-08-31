@@ -67,7 +67,7 @@ if(SFU_NET_BACKEND STREQUAL "af_xdp")
   )
   add_custom_target(sfu_xdp_program DEPENDS "${SFU_XDP_OBJECT}")
   add_compile_definitions(SFU_XDP_OBJECT_PATH="${SFU_XDP_OBJECT}")
-  list(APPEND SFU_NET_SOURCES src/net/af_xdp.c src/net/af_xdp_frame.c)
+  list(APPEND SFU_NET_SOURCES src/net/af_xdp.c)
   list(APPEND SFU_NET_LIBRARIES PkgConfig::LIBXDP PkgConfig::LIBBPF)
 elseif(SFU_NET_BACKEND STREQUAL "io_uring")
   find_path(URING_INCLUDE_DIR liburing.h REQUIRED)
@@ -101,6 +101,7 @@ find_path(NATS_INCLUDE_DIR NAMES nats/nats.h)
 find_library(NATS_LIBRARY NAMES nats)
 
 add_library(sfu_core STATIC
+  src/net/af_xdp_frame.c
   src/media/svc/svc_parser.c
   src/media/svc/svc_descriptor.c
   src/media/svc/layer_scheduler.c

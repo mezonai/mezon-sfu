@@ -73,5 +73,6 @@ void sfu_worker_join(sfu_worker_t *w);
 bool sfu_worker_drain_finished(const sfu_worker_t *w);
 bool sfu_worker_register_session(sfu_worker_t *w, sfu_peer_session_t *s);
 void sfu_worker_unregister_session(sfu_worker_t *w, sfu_peer_session_t *s);
+void sfu_worker_release_packet(sfu_worker_t *w, sfu_packet_t *pkt);
 
 #endif /* SFU_RUNTIME_WORKER_H */

@@ -25,7 +25,6 @@
 #include "rtp/rtp_packet.h"
 #include "rtp/rtx.h"
 #include "rtp/rtx_build.h"
-#include "runtime/fanout.h"
 #include "runtime/timer.h"
 #include "runtime/worker.h"
 #include "transport/srtp/srtp.h"
@@ -379,13 +378,13 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     pthread_mutex_unlock(&sender_session->crypto_lock);
     if (!translated) {
       sfu_metric_inc("rtx_seq_translate_fail");
-      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+      sfu_worker_release_packet(w, rtx_enc);
       continue;
     }
     size_t rtx_built_len = 0;
     if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, subscriber_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
       sfu_metric_inc("rtx_build_fail");
-      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+      sfu_worker_release_packet(w, rtx_enc);
       continue;
     }
 
@@ -421,7 +420,7 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       }
       sfu_metric_inc("rtx_protect_fail");
     }
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtx_enc);
+    sfu_worker_release_packet(w, rtx_enc);
   }
 
   if (capped) {
@@ -497,7 +496,7 @@ static void handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     }
   }
 
-  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+  sfu_worker_release_packet(w, pkt);
 }
 
 typedef enum sfu_svc_parse_status {
@@ -600,12 +599,12 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       port = ntohs(s6->sin6_port);
     }
     SFU_LOG_DEBUG("worker %u: [INGRESS DROP] RTP from unknown peer %s:%u pkt_len=%u", w->worker_index, ip, port, pkt->len);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     return;
   }
   if (sender_session->state != SFU_SESSION_ESTABLISHED) {
     SFU_LOG_WARN("worker %u: [INGRESS DROP] RTP from unestablished session (state=%d)! pkt_len=%u", w->worker_index, sender_session->state, pkt->len);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
@@ -613,7 +612,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   pthread_mutex_lock(&sender_session->ingress_lock);
   if (sfu_session_owner_worker(sender_session) != w->worker_index || !sfu_session_accepts_work(sender_session)) {
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
@@ -822,7 +821,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
 #endif
 
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
@@ -841,7 +840,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     SFU_LOG_DEBUG("worker %u: [INGRESS DROP] malformed RTP header (len=%u)", w->worker_index, pkt->len);
     sfu_metric_inc("rtp_parse_fail");
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
@@ -855,14 +854,14 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (is_audience && (!m.is_audio || !ptt_active)) {
     sfu_metric_inc(m.is_audio ? "ptt_inactive_audio_drop" : "audience_rtp_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
   if (m.is_audio && atomic_load_explicit(&sender_session->media.is_mute, memory_order_acquire)) {
     sfu_metric_inc("muted_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
@@ -905,7 +904,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 #endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
@@ -920,21 +919,21 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
 #endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
   if (m.source == SFU_MEDIA_SCREEN && !atomic_load_explicit(&sender_session->media.screen_enabled, memory_order_acquire)) {
     sfu_metric_inc("screen_disabled_rtp_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
   if (is_audience && !atomic_load_explicit(&sender_session->media.ptt_active, memory_order_acquire)) {
     sfu_metric_inc("ptt_inactive_audio_drop");
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }
@@ -1013,7 +1012,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_metric_inc("vp9_descriptor_parse_fail");
     sfu_worker_request_keyframe_throttled_for_source(w, sender_session, m.source);
     pthread_mutex_unlock(&sender_session->ingress_lock);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
     return;
   }

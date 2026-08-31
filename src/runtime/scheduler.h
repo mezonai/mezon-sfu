@@ -30,16 +30,20 @@ typedef struct sfu_scheduler {
   sfu_routing_table_t *routing_table;
   const sfu_ice_credentials_t *ice_creds;
   sfu_affinity_entry_t affinity[SFU_AFFINITY_CACHE_CAP];
+  pthread_mutex_t affinity_lock;
   pthread_t thread;
   uint32_t worker_count;
   int core_id;
   int fd;
 } sfu_scheduler_t;
 
+int sfu_scheduler_init_routing(sfu_scheduler_t *s, sfu_worker_t *workers, uint32_t worker_count, sfu_routing_table_t *routing_table,
+                               const sfu_ice_credentials_t *ice_creds);
 int sfu_scheduler_init(sfu_scheduler_t *s, int core_id, int fd, sfu_packet_pool_t *pp, sfu_worker_t *workers, uint32_t worker_count,
                        sfu_routing_table_t *routing_table, const sfu_ice_credentials_t *ice_creds, int recv_bgid, uint32_t buf_count, uint32_t buf_size);
 void sfu_scheduler_destroy(sfu_scheduler_t *s);
 int sfu_scheduler_start(sfu_scheduler_t *s);
 void sfu_scheduler_join(sfu_scheduler_t *s);
+uint32_t sfu_scheduler_select_worker(sfu_scheduler_t *s, sfu_packet_t *pkt, uint32_t hash);
 
 #endif /* SFU_RUNTIME_SCHEDULER_H */
