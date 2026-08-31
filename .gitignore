@@ -24,3 +24,5 @@ build-af-xdp/
 build-af-xdp-recheck/
 Testing/Temporary/CTestCostData.txt
 loadtest-results/
+tools/__pycache__/
+tools/loadtest/vendor/
