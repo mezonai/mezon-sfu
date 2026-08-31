@@ -652,6 +652,9 @@ int sfu_net_send(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, so
     return -1;
   }
 
+  memcpy(&pkt->peer_addr, dst, dst_len);
+  pkt->peer_addr_len = dst_len;
+
   if (r->queue_bound && r->queue) {
     sfu_xdp_queue_t *q = r->queue;
     if (q->tx_free_count == 0) {
