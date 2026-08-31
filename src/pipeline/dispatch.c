@@ -45,7 +45,7 @@ static void send_raw(sfu_worker_t *w, const uint8_t *data, size_t len, const str
   }
   if (len > out->cap) {
     SFU_LOG_WARN("handshake response too large (%zu > %u), dropping", len, out->cap);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
+    sfu_worker_release_packet(w,out);
     return;
   }
 
@@ -58,7 +58,7 @@ static void send_raw(sfu_worker_t *w, const uint8_t *data, size_t len, const str
     SFU_LOG_WARN("worker %u: send SQ full, dropping handshake response", w->worker_index);
   }
 
-  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, out);
+  sfu_worker_release_packet(w,out);
   sfu_net_flush(w->send_net);
 }
 
@@ -392,7 +392,7 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     sfu_metric_inc("dispatch_null_payload");
     SFU_LOG_WARN("worker %u: dropping packet with null payload len=%u cap=%u src=%u", w->worker_index, pkt->len, pkt->cap, pkt->buf_source);
     if (pkt->data) {
-      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+      sfu_worker_release_packet(w,pkt);
     }
     return;
   }
@@ -404,14 +404,14 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (sfu_stun_is_stun_packet(pkt->data, pkt->len)) {
     SFU_LOG_DEBUG("worker %u: Identified STUN packet from %s:%u", w->worker_index, ip, port);
     handle_stun(w, pkt);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w,pkt);
     return;
   }
 
   if (sfu_dtls_is_dtls_packet(pkt->data, pkt->len)) {
     SFU_LOG_DEBUG("worker %u: Identified DTLS packet from %s:%u", w->worker_index, ip, port);
     handle_dtls(w, pkt);
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+    sfu_worker_release_packet(w,pkt);
     return;
   }
 

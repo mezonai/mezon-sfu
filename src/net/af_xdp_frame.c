@@ -175,3 +175,38 @@ bool sfu_af_xdp_build_frame(uint8_t *frame, uint32_t frame_capacity, const sfu_a
   *out_len = SFU_AF_XDP_FRAME_HEADER_SIZE + params->payload_len;
   return true;
 }
+
+uint32_t sfu_af_xdp_frames_per_queue(uint32_t total_frames, uint32_t queue_count) {
+  if (queue_count == 0) {
+    return 0;
+  }
+  uint32_t available = total_frames / queue_count;
+  uint32_t frames = 1;
+  while (frames <= available / 2) {
+    frames <<= 1;
+  }
+  return frames >= 8 ? frames : 0;
+}
+
+bool sfu_af_xdp_encode_rx_return(uint32_t queue_slot, uint32_t frame, uintptr_t *token) {
+  if (!token || queue_slot == UINT32_MAX || frame == UINT32_MAX) {
+    return false;
+  }
+  *token = (uintptr_t)(((uint64_t)(queue_slot + 1u) << 32) | (uint64_t)(frame + 1u));
+  return true;
+}
+
+bool sfu_af_xdp_decode_rx_return(uintptr_t token, uint32_t *queue_slot, uint32_t *frame) {
+  if (!queue_slot || !frame) {
+    return false;
+  }
+  uint64_t value = (uint64_t)token;
+  uint32_t slot_value = (uint32_t)(value >> 32);
+  uint32_t frame_value = (uint32_t)value;
+  if (!slot_value || !frame_value) {
+    return false;
+  }
+  *queue_slot = slot_value - 1u;
+  *frame = frame_value - 1u;
+  return true;
+}

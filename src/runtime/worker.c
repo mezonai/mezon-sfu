@@ -1,5 +1,6 @@
 #include "runtime/worker.h"
 #include <inttypes.h>
+#include <sched.h>
 #include <string.h>
 #include <unistd.h>
 #include "config/config.h"
@@ -10,10 +11,64 @@
 #include "runtime/epoch_reclaimer.h"
 #include "runtime/fanout.h"
 #include "runtime/fanout_job.h"
+#include "runtime/scheduler.h"
 #include "runtime/signal.h"
 #include "runtime/timer.h"
 #include "util/alloc.h"
 #include "util/log.h"
+#include "util/metrics.h"
+
+#define SFU_WORKER_RETURN_DRAIN_BATCH 128
+
+static void worker_on_rx_packet(void *user_data, sfu_packet_t *pkt) {
+  sfu_worker_t *w = (sfu_worker_t *)user_data;
+  if (!w || !pkt) {
+    return;
+  }
+  if (pkt->recv_ts_ns == 0) {
+    pkt->recv_ts_ns = sfu_now_ns();
+  }
+
+  uint32_t h = fnv1a(&pkt->peer_addr, pkt->peer_addr_len);
+  uint32_t target_worker = sfu_scheduler_select_worker(w->scheduler, pkt, h);
+  if (target_worker == w->worker_index) {
+    sfu_dispatch_packet(w, pkt);
+  } else {
+    if (!sfu_fanout_mesh_enqueue_ingress(w->mesh, w->worker_index, target_worker, pkt)) {
+      sfu_metric_inc("worker_inbox_full");
+      if (sfu_net_backend_is_worker_driven()) {
+        sfu_net_release_packet(w->send_net, w->pp, pkt);
+      } else {
+        sfu_worker_release_packet(w, pkt);
+      }
+    }
+  }
+}
+
+static void worker_on_rx_return(void *user_data, uintptr_t token) {
+  sfu_worker_t *w = (sfu_worker_t *)user_data;
+  if (w) {
+    (void)sfu_net_recycle_rx_token(w->send_net, token);
+  }
+}
+
+void sfu_worker_release_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
+  if (!w || !pkt) {
+    return;
+  }
+  uint32_t owner_worker = w->worker_index;
+  uintptr_t token = 0;
+  if (sfu_net_worker_release_packet_routed(w->send_net, w->pp, pkt, w->worker_index, &owner_worker, &token)) {
+    if (token) {
+      while (!sfu_fanout_mesh_return_rx_frame(w->mesh, w->worker_index, owner_worker, token)) {
+        (void)sfu_fanout_mesh_drain_returns(w->mesh, w->worker_index, SFU_WORKER_RETURN_DRAIN_BATCH, worker_on_rx_return, w);
+        sched_yield();
+      }
+    }
+    return;
+  }
+  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, pkt);
+}
 
 #define SFU_WORKER_SEND_SQ_ENTRIES 1024
 #define SFU_WORKER_SEND_CQ_ENTRIES 2048
@@ -123,7 +178,8 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
       .send_entries = SFU_WORKER_SEND_SQ_ENTRIES,
       .completion_entries = SFU_WORKER_SEND_CQ_ENTRIES,
       .buffer_group_id = send_bgid,
-      .receive = false,
+      .queue_slot = worker_index,
+      .receive = sfu_net_backend_is_worker_driven(),
   };
   w->send_net = sfu_net_create(&net_options);
   if (!w->send_net) {
@@ -171,6 +227,7 @@ static void *worker_thread_main(void *arg) {
   uint32_t idle_sleep_us = SFU_WORKER_IDLE_SLEEP_MIN_US;
 
   uint32_t loop_counter = 0;
+  bool is_worker_driven = sfu_net_backend_is_worker_driven();
   while (!sfu_shutdown_requested()) {
     bool did_work = false;
 
@@ -185,6 +242,13 @@ static void *worker_thread_main(void *arg) {
     unsigned fanned = sfu_fanout_mesh_drain(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, sfu_worker_handle_fanout_job, w);
     if (fanned > 0) {
       did_work = true;
+    }
+
+    if (is_worker_driven) {
+      unsigned returned = sfu_fanout_mesh_drain_returns(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, worker_on_rx_return, w);
+      if (returned > 0) {
+        did_work = true;
+      }
     }
 
     int64_t now_us = (int64_t)sfu_now_us();
@@ -269,7 +333,8 @@ static void *worker_thread_main(void *arg) {
       sfu_net_flush(w->send_net);
     }
 
-    unsigned reaped = sfu_net_poll(w->send_net, SFU_WORKER_REAP_BATCH, w->pp, &w->release_to_dispatcher, NULL, NULL, w);
+    unsigned reaped = sfu_net_poll(w->send_net, SFU_WORKER_REAP_BATCH, w->pp, is_worker_driven ? NULL : &w->release_to_dispatcher,
+                                   is_worker_driven ? worker_on_rx_packet : NULL, NULL, w);
     if (reaped > 0) {
       did_work = true;
     }
@@ -309,6 +374,10 @@ static void *worker_thread_main(void *arg) {
       did_work = true;
     }
 
+    if (is_worker_driven && sfu_fanout_mesh_drain_returns(w->mesh, w->worker_index, SFU_WORKER_REAP_BATCH, worker_on_rx_return, w) > 0) {
+      did_work = true;
+    }
+
     if (sfu_net_flush(w->send_net) > 0) {
       did_work = true;
     }
@@ -336,12 +405,11 @@ static void *worker_thread_main(void *arg) {
   }
 
   atomic_store_explicit(&w->drain_finished, true, memory_order_release);
-  SFU_LOG_INFO("worker %u fanout stats: arena_alloc=%" PRIu64 " reserved=%" PRIu64 " fallback=%" PRIu64 " queued=%" PRIu64
-               " recycled=%" PRIu64 " exhausted=%" PRIu64 " high_water=%u copied_bytes=%" PRIu64 " samples=%" PRIu64
-               " copy_cycles=%" PRIu64 " crypto_cycles=%" PRIu64,
+  SFU_LOG_INFO("worker %u fanout stats: arena_alloc=%" PRIu64 " reserved=%" PRIu64 " fallback=%" PRIu64 " queued=%" PRIu64 " recycled=%" PRIu64
+               " exhausted=%" PRIu64 " high_water=%u copied_bytes=%" PRIu64 " samples=%" PRIu64 " copy_cycles=%" PRIu64 " crypto_cycles=%" PRIu64,
                w->worker_index, w->hot.output_arena_allocated, w->hot.output_reserved, w->hot.output_pool_fallback, w->hot.output_queued,
-               w->output_arena.recycled, w->output_arena.exhausted, w->output_arena.high_water, w->hot.copied_bytes, w->hot.profile_samples,
-               w->hot.copy_cycles, w->hot.crypto_cycles);
+               w->output_arena.recycled, w->output_arena.exhausted, w->output_arena.high_water, w->hot.copied_bytes, w->hot.profile_samples, w->hot.copy_cycles,
+               w->hot.crypto_cycles);
   SFU_LOG_INFO("worker %u shutting down", w->worker_index);
   return NULL;
 }
@@ -357,6 +425,4 @@ int sfu_worker_start(sfu_worker_t *w) {
 
 void sfu_worker_join(sfu_worker_t *w) { pthread_join(w->thread, NULL); }
 
-bool sfu_worker_drain_finished(const sfu_worker_t *w) {
-  return w && atomic_load_explicit(&w->drain_finished, memory_order_acquire);
-}
+bool sfu_worker_drain_finished(const sfu_worker_t *w) { return w && atomic_load_explicit(&w->drain_finished, memory_order_acquire); }

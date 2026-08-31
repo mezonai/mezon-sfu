@@ -2065,7 +2065,7 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
     }
   }
 
-  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+  sfu_worker_release_packet(w,rtcp_pkt);
 }
 
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir) {
@@ -2111,7 +2111,7 @@ bool sfu_session_send_remb_for_source(sfu_worker_t *w, sfu_peer_session_t *publi
     }
   }
 
-  sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+  sfu_worker_release_packet(w,rtcp_pkt);
   return sent;
 }
 
@@ -2446,7 +2446,7 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
 
     int rtcp_len = sfu_twcc_feedback_build(t, sfu_sender_ssrc, media_ssrc, now_us, rtcp_pkt->data, rtcp_pkt->cap);
     if (rtcp_len <= 0) {
-      sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+      sfu_worker_release_packet(w,rtcp_pkt);
       if (rtcp_len < 0) {
         break;
       }
@@ -2466,6 +2466,6 @@ void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *p
       SFU_LOG_WARN("Failed to SRTP protect TWCC feedback for peer %u", publisher->peer_id);
     }
 
-    sfu_net_worker_release_packet(w->pp, &w->release_to_dispatcher, rtcp_pkt);
+    sfu_worker_release_packet(w,rtcp_pkt);
   }
 }

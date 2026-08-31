@@ -40,15 +40,20 @@
 #define SFU_AF_XDP_BATCH 256u
 #define SFU_AF_XDP_MAX_QUEUES 128u
 
+typedef struct sfu_xdp_queue sfu_xdp_queue_t;
+
 struct sfu_net {
+  sfu_xdp_queue_t *queue;
   sfu_spsc_ring_t tx_pending;
   sfu_spsc_ring_t tx_completed;
   sfu_packet_t *tx_retry;
   _Atomic uint32_t outstanding_sends;
   uint32_t queue_capacity;
+  uint32_t queue_slot;
   int fd;
   bool with_recv_bufs;
   bool queues_initialized;
+  bool queue_bound;
 };
 
 typedef enum {
@@ -222,18 +227,6 @@ static int parse_queue_spec(const char *interface_name, const char *spec, uint32
   }
   *queue_count = count;
   return 0;
-}
-
-uint32_t sfu_af_xdp_frames_per_queue(uint32_t total_frames, uint32_t queue_count) {
-  if (queue_count == 0) {
-    return 0;
-  }
-  uint32_t available = total_frames / queue_count;
-  uint32_t frames = 1;
-  while (frames <= available / 2) {
-    frames <<= 1;
-  }
-  return frames >= 8 ? frames : 0;
 }
 
 static int read_interface_addresses(sfu_xdp_device_t *d) {
@@ -489,11 +482,9 @@ int sfu_net_backend_init(int fd, const sfu_net_backend_options_t *options) {
   g_xdp.xsks_map_fd = -1;
   g_xdp.config_map_fd = -1;
   if (!options || !options->interface_name || !*options->interface_name || options->frame_count < 8 ||
-      (options->frame_count & (options->frame_count - 1)) != 0 ||
-      (options->frame_size != 2048u && options->frame_size != 4096u) || options->frame_size < sfu_net_recv_overhead() + 1u ||
-      (options->queue_spec && options->queue_id_set) ||
-      (options->xdp_mode && strcmp(options->xdp_mode, "native") != 0 && strcmp(options->xdp_mode, "skb") != 0 &&
-       strcmp(options->xdp_mode, "auto") != 0)) {
+      (options->frame_count & (options->frame_count - 1)) != 0 || (options->frame_size != 2048u && options->frame_size != 4096u) ||
+      options->frame_size < sfu_net_recv_overhead() + 1u || (options->queue_spec && options->queue_id_set) ||
+      (options->xdp_mode && strcmp(options->xdp_mode, "native") != 0 && strcmp(options->xdp_mode, "skb") != 0 && strcmp(options->xdp_mode, "auto") != 0)) {
     SFU_LOG_ERROR("AF_XDP: invalid backend options");
     return -1;
   }
@@ -598,6 +589,21 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
   bool with_recv_bufs = options->receive;
   r->fd = fd;
   r->with_recv_bufs = with_recv_bufs;
+  r->queue_slot = options->queue_slot;
+
+  if (g_xdp.initialized && options->queue_slot < g_xdp.queue_count) {
+    r->queue = &g_xdp.queues[options->queue_slot];
+    r->queue_bound = true;
+    uint32_t capacity = sq_entries;
+    if (capacity < 2 || (capacity & (capacity - 1)) != 0) {
+      capacity = SFU_AF_XDP_TX_QUEUE_CAPACITY;
+    }
+    if (sfu_spsc_ring_init(&r->tx_completed, capacity) == 0) {
+      r->queues_initialized = true;
+    }
+    return r;
+  }
+
   if (!with_recv_bufs) {
     uint32_t capacity = sq_entries;
     if (capacity < 2 || (capacity & (capacity - 1)) != 0) {
@@ -621,16 +627,102 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
 void sfu_net_destroy(sfu_net_t *r) {
   if (r && r->queues_initialized) {
     sfu_spsc_ring_destroy(&r->tx_completed);
-    sfu_spsc_ring_destroy(&r->tx_pending);
+    if (!r->queue_bound) {
+      sfu_spsc_ring_destroy(&r->tx_pending);
+    }
     r->queues_initialized = false;
   }
   SFU_FREE(r);
 }
 
-int sfu_net_recv(sfu_net_t *r) { return r && r->with_recv_bufs && g_xdp.initialized ? 0 : -1; }
+int sfu_net_recv(sfu_net_t *r) { return r && (r->queue_bound || (r->with_recv_bufs && g_xdp.initialized)) ? 0 : -1; }
+
+typedef enum {
+  SFU_AF_XDP_TX_BUILD_ERROR = -1,
+  SFU_AF_XDP_TX_KERNEL_FALLBACK = 0,
+  SFU_AF_XDP_TX_FRAME_READY = 1,
+} sfu_af_xdp_tx_build_result_t;
+
+static int kernel_fallback_send(sfu_packet_t *pkt);
+static sfu_af_xdp_tx_build_result_t build_tx_frame(sfu_xdp_queue_t *q, uint32_t frame_id, sfu_packet_t *pkt, uint32_t *out_length);
+static unsigned reap_tx_completions(sfu_xdp_queue_t *q);
 
 int sfu_net_send(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
-  if (!r || !r->queues_initialized || !pkt || !dst || dst->sa_family != AF_INET || dst_len != sizeof(struct sockaddr_in)) {
+  if (!r || !pkt || !dst || dst->sa_family != AF_INET || dst_len != sizeof(struct sockaddr_in)) {
+    return -1;
+  }
+
+  if (r->queue_bound && r->queue) {
+    sfu_xdp_queue_t *q = r->queue;
+    if (q->tx_free_count == 0) {
+      sfu_metric_inc("af_xdp_tx_frame_starvation");
+      return -1;
+    }
+
+    uint32_t frame = (uint32_t)q->tx_free[--q->tx_free_count];
+    uint32_t length = 0;
+    bool delivered_by_fallback = false;
+    sfu_af_xdp_tx_build_result_t build_result = build_tx_frame(q, frame, pkt, &length);
+    if (build_result == SFU_AF_XDP_TX_KERNEL_FALLBACK) {
+      int fallback = kernel_fallback_send(pkt);
+      if (fallback == 0) {
+        q->tx_free[q->tx_free_count++] = frame;
+        return -1;
+      }
+      if (fallback > 0) {
+        delivered_by_fallback = true;
+        sfu_metric_inc("af_xdp_tx_kernel_fallback_completed");
+      }
+      build_result = SFU_AF_XDP_TX_BUILD_ERROR;
+    }
+
+    if (build_result == SFU_AF_XDP_TX_BUILD_ERROR) {
+      if (!delivered_by_fallback) {
+        sfu_metric_inc("af_xdp_tx_permanent_failure");
+        q->tx_free[q->tx_free_count++] = frame;
+        return -1;
+      }
+      q->tx_free[q->tx_free_count++] = frame;
+      memcpy(&pkt->peer_addr, dst, dst_len);
+      pkt->peer_addr_len = dst_len;
+      sfu_packet_retain(pkt, 1);
+      r->outstanding_sends++;
+      if (r->queues_initialized && sfu_spsc_ring_push(&r->tx_completed, pkt)) {
+        return 0;
+      }
+      r->outstanding_sends--;
+      (void)sfu_packet_release(pkt);
+      sfu_metric_inc("af_xdp_tx_ring_backpressure");
+      return -1;
+    }
+
+    uint32_t tx_index;
+    if (xsk_ring_prod__reserve(&q->tx, 1, &tx_index) != 1) {
+      q->tx_free[q->tx_free_count++] = frame;
+      sfu_metric_inc("af_xdp_tx_ring_backpressure");
+      return -1;
+    }
+
+    struct xdp_desc *desc = xsk_ring_prod__tx_desc(&q->tx, tx_index);
+    desc->addr = (uint64_t)frame * q->frame_size;
+    desc->len = length;
+    q->frames[frame].packet = pkt;
+    q->frames[frame].origin = r;
+    q->frames[frame].state = SFU_XDP_FRAME_TX_KERNEL;
+
+    memcpy(&pkt->peer_addr, dst, dst_len);
+    pkt->peer_addr_len = dst_len;
+    sfu_packet_retain(pkt, 1);
+    r->outstanding_sends++;
+
+    xsk_ring_prod__submit(&q->tx, 1);
+    if (xsk_ring_prod__needs_wakeup(&q->tx)) {
+      (void)sendto(xsk_socket__fd(q->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+    }
+    return 0;
+  }
+
+  if (!r->queues_initialized) {
     return -1;
   }
   memcpy(&pkt->peer_addr, dst, dst_len);
@@ -645,7 +737,9 @@ int sfu_net_send(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, so
 }
 
 int sfu_net_flush(sfu_net_t *r) {
-  (void)r;
+  if (r && r->queue_bound && r->queue && xsk_ring_prod__needs_wakeup(&r->queue->tx)) {
+    (void)sendto(xsk_socket__fd(r->queue->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+  }
   return 0;
 }
 
@@ -691,8 +785,7 @@ static unsigned reap_rx_queue(sfu_xdp_queue_t *q, unsigned max_count, sfu_packet
     pkt->buf_owner = q;
     q->frames[frame_id].state = SFU_XDP_FRAME_RX_APP;
 #ifdef SFU_DIAG_LOG
-    if (pkt->len >= 20 && (pkt->data[0] & 0xc0) == 0 && pkt->data[4] == 0x21 && pkt->data[5] == 0x12 && pkt->data[6] == 0xa4 &&
-        pkt->data[7] == 0x42) {
+    if (pkt->len >= 20 && (pkt->data[0] & 0xc0) == 0 && pkt->data[4] == 0x21 && pkt->data[5] == 0x12 && pkt->data[6] == 0xa4 && pkt->data[7] == 0x42) {
       const struct sockaddr_in *peer = (const struct sockaddr_in *)&pkt->peer_addr;
       char ip[INET_ADDRSTRLEN] = "?";
       char transaction_id[25];
@@ -753,37 +846,26 @@ static unsigned reap_worker_completions(sfu_net_t *r, unsigned max_count, sfu_pa
 }
 
 unsigned sfu_net_poll(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, sfu_spsc_ring_t *release_to_dispatcher, sfu_net_on_recv_fn on_recv,
-                       sfu_net_on_send_complete_fn on_send_complete, void *user_data) {
-  if (!r || !g_xdp.initialized) {
+                      sfu_net_on_send_complete_fn on_send_complete, void *user_data) {
+  if (!r) {
     return 0;
+  }
+  if (r->queue_bound && r->queue) {
+    unsigned reaped = 0;
+    if (on_recv) {
+      reaped += reap_rx_queue(r->queue, max_count, pp, on_recv, user_data);
+    }
+    reaped += reap_tx_completions(r->queue);
+    reaped += reap_worker_completions(r, max_count, pp, release_to_dispatcher, on_send_complete, user_data);
+    return reaped;
+  }
+  if (!g_xdp.initialized) {
+    return reap_worker_completions(r, max_count, pp, release_to_dispatcher, on_send_complete, user_data);
   }
   if (r->with_recv_bufs) {
     return on_recv ? reap_rx(max_count, pp, on_recv, user_data) : 0;
   }
   return reap_worker_completions(r, max_count, pp, release_to_dispatcher, on_send_complete, user_data);
-}
-
-bool sfu_af_xdp_encode_rx_return(uint32_t queue_slot, uint32_t frame, uintptr_t *token) {
-  if (!token || queue_slot == UINT32_MAX || frame == UINT32_MAX) {
-    return false;
-  }
-  *token = (uintptr_t)(((uint64_t)(queue_slot + 1u) << 32) | (uint64_t)(frame + 1u));
-  return true;
-}
-
-bool sfu_af_xdp_decode_rx_return(uintptr_t token, uint32_t *queue_slot, uint32_t *frame) {
-  if (!queue_slot || !frame) {
-    return false;
-  }
-  uint64_t value = (uint64_t)token;
-  uint32_t slot_value = (uint32_t)(value >> 32);
-  uint32_t frame_value = (uint32_t)value;
-  if (!slot_value || !frame_value) {
-    return false;
-  }
-  *queue_slot = slot_value - 1u;
-  *frame = frame_value - 1u;
-  return true;
 }
 
 void sfu_net_release_packet(sfu_net_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt) {
@@ -802,6 +884,34 @@ void sfu_net_release_packet(sfu_net_t *r, sfu_packet_pool_t *pp, sfu_packet_t *p
   } else {
     sfu_packet_pool_free(pp, pkt);
   }
+}
+
+bool sfu_net_worker_release_packet_routed(sfu_net_t *r, sfu_packet_pool_t *pp, sfu_packet_t *pkt, uint32_t current_worker,
+                                          uint32_t *owner_worker, uintptr_t *token) {
+  if (!r || !r->queue_bound || !pkt || pkt->buf_source != SFU_BUF_SOURCE_AF_XDP) {
+    return false;
+  }
+  if (!sfu_packet_release(pkt)) {
+    return true;
+  }
+  sfu_xdp_queue_t *q = pkt->buf_owner;
+  uint32_t frame = pkt->kbuf_index;
+  sfu_packet_pool_free_meta(pp, pkt);
+  if (!q || q->slot >= g_xdp.queue_count || frame >= q->rx_frame_count) {
+    sfu_metric_inc("af_xdp_invalid_rx_return");
+    return true;
+  }
+  if (q->slot == current_worker) {
+    recycle_rx_frame(q, frame);
+    refill_rx(q);
+    return true;
+  }
+  if (!owner_worker || !token || !sfu_af_xdp_encode_rx_return(q->slot, frame, token)) {
+    sfu_metric_inc("af_xdp_invalid_rx_return");
+    return true;
+  }
+  *owner_worker = q->slot;
+  return true;
 }
 
 void sfu_net_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_dispatcher, sfu_packet_t *pkt) {
@@ -828,6 +938,18 @@ void sfu_net_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_di
   }
 }
 
+bool sfu_net_recycle_rx_token(sfu_net_t *r, uintptr_t token) {
+  uint32_t slot, frame;
+  if (!r || !r->queue_bound || !r->queue || !sfu_af_xdp_decode_rx_return(token, &slot, &frame) || slot != r->queue_slot ||
+      frame >= r->queue->rx_frame_count) {
+    sfu_metric_inc("af_xdp_invalid_rx_return");
+    return false;
+  }
+  recycle_rx_frame(r->queue, frame);
+  refill_rx(r->queue);
+  return true;
+}
+
 unsigned sfu_net_drain_buffer_returns(sfu_net_t *r, sfu_spsc_ring_t *from_worker, unsigned max_count) {
   (void)r;
   unsigned count = 0;
@@ -845,12 +967,6 @@ unsigned sfu_net_drain_buffer_returns(sfu_net_t *r, sfu_spsc_ring_t *from_worker
   }
   return count;
 }
-
-typedef enum {
-  SFU_AF_XDP_TX_BUILD_ERROR = -1,
-  SFU_AF_XDP_TX_KERNEL_FALLBACK = 0,
-  SFU_AF_XDP_TX_FRAME_READY = 1,
-} sfu_af_xdp_tx_build_result_t;
 
 static sfu_af_xdp_tx_build_result_t build_tx_frame(sfu_xdp_queue_t *q, uint32_t frame_id, sfu_packet_t *pkt, uint32_t *out_length) {
   struct sockaddr_in *destination = (struct sockaddr_in *)&pkt->peer_addr;
@@ -1066,5 +1182,8 @@ unsigned sfu_net_cancel(sfu_net_t *send_net) {
   }
   return work;
 }
+
+bool sfu_net_backend_is_worker_driven(void) { return true; }
+uint32_t sfu_net_backend_queue_count(void) { return g_xdp.initialized ? g_xdp.queue_count : 0; }
 
 uint32_t sfu_net_outstanding_sends(const sfu_net_t *r) { return r ? atomic_load_explicit(&r->outstanding_sends, memory_order_relaxed) : 0; }
