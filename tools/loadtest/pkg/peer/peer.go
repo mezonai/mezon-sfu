@@ -59,10 +59,35 @@ type Peer struct {
 	videoRxBytes   atomic.Uint64
 	packetsLost    atomic.Uint64
 
-	lastAudioSeq atomic.Uint32
-	lastVideoSeq atomic.Uint32
-	hasAudioSeq  atomic.Bool
-	hasVideoSeq  atomic.Bool
+	// Per-SSRC RTP sequence tracking. Loss detection must key on the
+	// remote SSRC, not the peer: an audience peer receives one SSRC per
+	// publishing speaker, and interleaving them onto a single shared
+	// counter produces phantom "gaps" (and 96% false loss).
+	seqMu     sync.Mutex
+	seqStates map[uint32]*seqTracker
+}
+
+// seqTracker tracks RTP sequence continuity for a single SSRC stream.
+type seqTracker struct {
+	lastSeq uint32
+	hasSeq  bool
+}
+
+// track records the next sequence number for this SSRC and returns the
+// number of packets lost since the previous one (RTP 16-bit wraparound-safe).
+func (t *seqTracker) track(seq uint32) uint64 {
+	if !t.hasSeq {
+		t.hasSeq = true
+		t.lastSeq = seq
+		return 0
+	}
+	prev := t.lastSeq
+	t.lastSeq = seq
+	diff := (seq - prev) & 0xFFFF
+	if diff > 1 && diff < 3000 { // Gap detected, packets lost
+		return uint64(diff - 1)
+	}
+	return 0
 }
 
 // NewPeer constructs a new Peer instance.
@@ -76,6 +101,7 @@ func NewPeer(cfg Config, collector *metrics.Collector) *Peer {
 		cfg:       cfg,
 		peerKey:   peerKey,
 		collector: collector,
+		seqStates: make(map[uint32]*seqTracker),
 	}
 }
 
@@ -272,39 +298,30 @@ func (p *Peer) handleRemoteTrack(track *webrtc.TrackRemote) {
 
 			size := uint64(pkt.MarshalSize())
 			seq := uint32(pkt.SequenceNumber)
+			ssrc := uint32(track.SSRC())
+
+			p.seqMu.Lock()
+			st := p.seqStates[ssrc]
+			if st == nil {
+				st = &seqTracker{}
+				p.seqStates[ssrc] = st
+			}
+			lost := st.track(seq)
+			p.seqMu.Unlock()
+
+			if lost > 0 {
+				p.packetsLost.Add(lost)
+			}
 
 			if isAudio {
 				p.audioRxPackets.Add(1)
 				p.audioRxBytes.Add(size)
-
-				if p.hasAudioSeq.CompareAndSwap(false, true) {
-					p.lastAudioSeq.Store(seq)
-				} else {
-					prev := p.lastAudioSeq.Swap(seq)
-					p.checkSeqGap(prev, seq)
-				}
 			} else {
 				p.videoRxPackets.Add(1)
 				p.videoRxBytes.Add(size)
-
-				if p.hasVideoSeq.CompareAndSwap(false, true) {
-					p.lastVideoSeq.Store(seq)
-				} else {
-					prev := p.lastVideoSeq.Swap(seq)
-					p.checkSeqGap(prev, seq)
-				}
 			}
 		}
 	}()
-}
-
-func (p *Peer) checkSeqGap(prev, cur uint32) {
-	// Standard RTP sequence number gap check (modulo 65536)
-	diff := (cur - prev) & 0xFFFF
-	if diff > 1 && diff < 3000 { // Gap detected, packets lost
-		lost := uint64(diff - 1)
-		p.packetsLost.Add(lost)
-	}
 }
 
 func (p *Peer) handleServerOffer(offer signaling.OfferMessage) {

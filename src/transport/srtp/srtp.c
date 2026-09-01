@@ -192,17 +192,16 @@ const char *sfu_srtp_status_name(srtp_err_status_t status) {
 }
 
 srtp_err_status_t sfu_srtp_protect_rtp_status(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
-  if ((size_t)*len + SRTP_MAX_TRAILER_LEN > cap) {
+  if (!ctx || !ctx->outbound || !buf || !len) {
+    return srtp_err_status_no_ctx;
+  }
+  if (*len < 0 || (size_t)*len + SRTP_MAX_TRAILER_LEN > cap) {
     return srtp_err_status_bad_param;
   }
   return srtp_protect(ctx->outbound, buf, len);
 }
 
 bool sfu_srtp_protect_rtp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
-  if ((size_t)*len + SRTP_MAX_TRAILER_LEN > cap) {
-    SFU_LOG_WARN("SRTP protect (RTP): insufficient buffer headroom (%d + trailer > %zu)", *len, cap);
-    return false;
-  }
   srtp_err_status_t rc = sfu_srtp_protect_rtp_status(ctx, buf, len, cap);
   if (rc != srtp_err_status_ok) {
     SFU_LOG_WARN("SRTP protect (RTP) failed: %d (%s)", (int)rc, sfu_srtp_status_name(rc));
@@ -221,11 +220,14 @@ srtp_err_status_t sfu_srtp_unprotect_rtcp_status(sfu_srtp_ctx_t *ctx, uint8_t *b
 bool sfu_srtp_unprotect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len) { return sfu_srtp_unprotect_rtcp_status(ctx, buf, len) == srtp_err_status_ok; }
 
 bool sfu_srtp_protect_rtcp(sfu_srtp_ctx_t *ctx, uint8_t *buf, int *len, size_t cap) {
-  if (buf[1] == 206) {
+  if (!ctx || !ctx->outbound || !buf || !len) {
+    return false;
+  }
+  if (*len >= 2 && buf[1] == 206) {
     SFU_LOG_INFO("Received RTCP PLI (Keyframe Request)! Routing to the rest...");
   }
 
-  if ((size_t)*len + SRTP_MAX_TRAILER_LEN + 4 > cap) { /* RTCP trailer also carries an E-flag+SRTCP index word */
+  if (*len < 0 || (size_t)*len + SRTP_MAX_TRAILER_LEN + 4 > cap) { /* RTCP trailer also carries an E-flag+SRTCP index word */
     SFU_LOG_WARN("SRTP protect (RTCP): insufficient buffer headroom");
     return false;
   }

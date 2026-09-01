@@ -121,8 +121,35 @@ static void run_srtp_test_for_profile(unsigned long profile_id, size_t key_len, 
   sfu_srtp_ctx_destroy(&sfu_ctx);
 }
 
+static void test_protect_invalid_context(void) {
+  sfu_srtp_ctx_t ctx;
+  memset(&ctx, 0, sizeof(ctx));
+
+  uint8_t rtp[128] = {0x80, 111};
+  uint8_t rtcp[128] = {0x81, 206};
+  int rtp_len = 12;
+  int rtcp_len = 12;
+
+  assert(sfu_srtp_protect_rtp_status(NULL, rtp, &rtp_len, sizeof(rtp)) == srtp_err_status_no_ctx);
+  assert(sfu_srtp_protect_rtp_status(&ctx, rtp, &rtp_len, sizeof(rtp)) == srtp_err_status_no_ctx);
+  assert(sfu_srtp_protect_rtp_status(&ctx, NULL, &rtp_len, sizeof(rtp)) == srtp_err_status_no_ctx);
+  assert(sfu_srtp_protect_rtp_status(&ctx, rtp, NULL, sizeof(rtp)) == srtp_err_status_no_ctx);
+  assert(!sfu_srtp_protect_rtp(&ctx, rtp, &rtp_len, sizeof(rtp)));
+
+  assert(!sfu_srtp_protect_rtcp(NULL, rtcp, &rtcp_len, sizeof(rtcp)));
+  assert(!sfu_srtp_protect_rtcp(&ctx, rtcp, &rtcp_len, sizeof(rtcp)));
+  assert(!sfu_srtp_protect_rtcp(&ctx, NULL, &rtcp_len, sizeof(rtcp)));
+  assert(!sfu_srtp_protect_rtcp(&ctx, rtcp, NULL, sizeof(rtcp)));
+
+  sfu_srtp_ctx_destroy(&ctx);
+  assert(sfu_srtp_protect_rtp_status(&ctx, rtp, &rtp_len, sizeof(rtp)) == srtp_err_status_no_ctx);
+  assert(!sfu_srtp_protect_rtcp(&ctx, rtcp, &rtcp_len, sizeof(rtcp)));
+}
+
 int main(void) {
   assert(sfu_srtp_global_init() == 0);
+
+  test_protect_invalid_context();
 
   /* Run tests simulating SFU as BOTH DTLS Server and DTLS Client */
   for (int role_server = 0; role_server <= 1; role_server++) {
