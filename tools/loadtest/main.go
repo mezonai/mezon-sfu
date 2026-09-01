@@ -22,7 +22,7 @@ func getEnvOrDefault(envKey, defaultValue string) string {
 
 func main() {
 	var (
-		wsURL        = flag.String("url", getEnvOrDefault("SFU_WS_URL", "wss://test-sfu.nccsoft.vn/ws"), "Signaling WebSocket URL")
+		wsURL        = flag.String("url", getEnvOrDefault("SFU_WS_URL", "ws://127.0.0.1:8000/ws"), "Signaling WebSocket URL")
 		jwtSecret    = flag.String("jwt-secret", getEnvOrDefault("SFU_JWT_SECRET", "default"), "HMAC-SHA256 JWT Secret")
 		rooms        = flag.Int("rooms", 30, "Number of concurrent rooms")
 		peersPerRoom = flag.Int("peers", 10, "Peers per room")
