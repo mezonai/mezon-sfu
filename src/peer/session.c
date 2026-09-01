@@ -1989,6 +1989,9 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
     SFU_LOG_WARN("[KF-DBG] sfu_session_request_keyframe called with NULL worker or publisher");
     return;
   }
+  if (publisher->state != SFU_SESSION_ESTABLISHED || !sfu_session_accepts_work(publisher)) {
+    return;
+  }
 
   uint16_t owner_worker = sfu_session_owner_worker(publisher);
   if (owner_worker != w->worker_index) {
