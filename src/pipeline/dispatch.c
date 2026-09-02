@@ -54,10 +54,8 @@ static void send_raw(sfu_worker_t *w, const uint8_t *data, size_t len, const str
 
   SFU_LOG_DEBUG("SEND_ZC worker=%u pkt=%p len=%lu", w->worker_index, data, len);
 
-  if (sfu_net_send(w->send_net, out, (const struct sockaddr *)dst, dst_len) != 0) {
-    if (sfu_log_rate_limit("dispatch_send_full", 1000000000ULL)) {
-      SFU_LOG_WARN("worker %u: send queue full, dropping handshake response", w->worker_index);
-    }
+  if (sfu_net_send_ex(w->send_net, out, (const struct sockaddr *)dst, dst_len, SFU_NET_PRIORITY_CONTROL) != 0) {
+    SFU_LOG_WARN("worker %u: send SQ full, dropping handshake response", w->worker_index);
   }
 
   sfu_worker_release_packet(w,out);
