@@ -8,15 +8,6 @@
 
 static _Atomic int g_min_level = SFU_LOG_LEVEL_INFO;
 
-/*
- * Cheap hash-based rate limiter. Buckets keyed by the pointer value of a
- * string-literal bucket name, resolved via an open-addressing probe into a
- * fixed table. g_rate_last_ns[i] stores the monotonic timestamp of the most
- * recent admitted emission for bucket i; a bucket whose timestamp has been
- * evicted naturally falls back to the first-call admission path. All state
- * is touched only under relaxed atomics: worst case two admissions race and
- * both emit, which is harmless for a diagnostic limiter.
- */
 #define SFU_LOG_RATE_BUCKET_COUNT 64u
 
 static _Atomic int64_t g_rate_last_ns[SFU_LOG_RATE_BUCKET_COUNT];
@@ -53,16 +44,11 @@ bool sfu_log_rate_limit(const char *bucket, uint64_t interval_ns) {
     if (atomic_compare_exchange_strong_explicit(&g_rate_last_ns[idx], &last, now_signed, memory_order_relaxed, memory_order_relaxed)) {
       return true;
     }
-    /* CAS failed: another thread raced us into this slot. Re-check the slot
-     * (which may now hold a fresher or different bucket's timestamp); never
-     * allow unbounded duplication of one bucket. */
     last = atomic_load_explicit(&g_rate_last_ns[idx], memory_order_relaxed);
     if (last != 0 && now_signed - last >= 0 && now_signed - last < (int64_t)interval_ns) {
       return false;
     }
-    /* Fall through and probe the next candidate slot. */
   }
-  /* Table saturated: err on the side of still allowing the log through. */
   return true;
 }
 

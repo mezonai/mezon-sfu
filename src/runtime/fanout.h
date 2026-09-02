@@ -67,9 +67,6 @@ typedef struct sfu_fanout_mesh {
   sfu_spsc_ring_t *return_rings;
   uint32_t worker_count;
   uint32_t per_partition_capacity;
-  /* Rotating cursors so drain scans start at a different source partition on
-   * each call, preventing the lowest-indexed source (or a busy low-indexed
-   * source) from starving the others when max_count caps per-call work. */
   _Atomic uint32_t drain_cursor;
   _Atomic uint32_t return_cursor;
 } sfu_fanout_mesh_t;
@@ -94,4 +91,4 @@ unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, uns
 unsigned sfu_fanout_mesh_drain_returns(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_return_fn on_return, void *user_data);
 void sfu_fanout_mesh_free_job(sfu_fanout_mesh_t *mesh, sfu_fanout_job_t *job);
 
-#endif /* SFU_RUNTIME_FANOUT_H */
+#endif
