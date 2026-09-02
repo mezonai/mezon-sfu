@@ -38,6 +38,7 @@ type TestConfig struct {
 	RampDuration time.Duration `json:"ramp_duration"`
 	FPS          int           `json:"fps"`
 	BitrateBps   int           `json:"bitrate_bps"`
+	AudioOnly    bool          `json:"audio_only"`
 }
 
 // TestReport contains the full report data for JSON and human output.
@@ -160,7 +161,11 @@ func (r *TestReport) FormatReadable() string {
 	sb.WriteString(fmt.Sprintf("Topology        : %d Rooms x %d Peers (%d Speakers, %d Audience)\n",
 		r.Config.Rooms, r.Config.PeersPerRoom, r.Config.Speakers, r.Config.PeersPerRoom-r.Config.Speakers))
 	sb.WriteString(fmt.Sprintf("Test Duration   : %s (Ramp-up: %s)\n", r.Config.Duration, r.Config.RampDuration))
-	sb.WriteString(fmt.Sprintf("Media Config    : %d FPS, %d kbps\n", r.Config.FPS, r.Config.BitrateBps/1000))
+	if r.Config.AudioOnly {
+		sb.WriteString("Media Config    : Audio Only (Opus)\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("Media Config    : %d FPS, %d kbps\n", r.Config.FPS, r.Config.BitrateBps/1000))
+	}
 
 	sb.WriteString("\n" + subsep + "\n")
 	sb.WriteString("PEER CONNECTION SUMMARY\n")
@@ -169,6 +174,30 @@ func (r *TestReport) FormatReadable() string {
 	sb.WriteString(fmt.Sprintf("Connected Peers : %-8d  Failed Peers    : %d\n", r.Summary.ConnectedPeers, r.Summary.FailedPeers))
 	sb.WriteString(fmt.Sprintf("Success Rate    : %.2f%%\n", r.Summary.SuccessRatePct))
 	sb.WriteString(fmt.Sprintf("Elapsed Time    : %.2f seconds\n", float64(r.Summary.DurationMs)/1000.0))
+
+	if r.Summary.FailedPeers > 0 {
+		sb.WriteString("\n" + subsep + "\n")
+		sb.WriteString("FAILURE STAGE BREAKDOWN\n")
+		sb.WriteString(subsep + "\n")
+		stages := []metrics.FailureStage{
+			metrics.FailureStageSetup,
+			metrics.FailureStageWebSocket,
+			metrics.FailureStageSignaling,
+			metrics.FailureStageNegotiation,
+			metrics.FailureStageWebRTC,
+			metrics.FailureStageNotConnected,
+		}
+		for _, stage := range stages {
+			stageSummary, ok := r.Summary.FailureStages[stage]
+			if !ok || stageSummary.Count == 0 {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("%-16s: %d\n", stage, stageSummary.Count))
+			for _, sample := range stageSummary.SampleErrors {
+				sb.WriteString(fmt.Sprintf("  - %s\n", sample))
+			}
+		}
+	}
 
 	sb.WriteString("\n" + subsep + "\n")
 	sb.WriteString("JOIN LATENCY BREAKDOWN (ms)\n")

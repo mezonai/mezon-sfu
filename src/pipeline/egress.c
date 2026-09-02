@@ -290,7 +290,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
 
   if (sfu_net_send(w->send_net, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
-    SFU_LOG_WARN("worker %u: [EGRESS DROP] send SQ full", w->worker_index);
+    if (sfu_log_rate_limit("egress_send_full", 1000000000ULL)) {
+      SFU_LOG_WARN("worker %u: [EGRESS DROP] send queue full", w->worker_index);
+    }
     sfu_metric_inc("egress_send_full");
     sfu_metric_inc("send_sq_full");
     return false;

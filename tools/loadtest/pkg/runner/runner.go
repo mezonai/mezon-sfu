@@ -23,6 +23,7 @@ type Config struct {
 	RampDuration    time.Duration
 	FPS             int
 	BitrateBps      int
+	AudioOnly       bool
 	Thresholds      report.Thresholds
 }
 
@@ -97,6 +98,7 @@ func (r *Runner) Run(ctx context.Context) (report.TestReport, error) {
 				WSURL:      r.cfg.WSURL,
 				FPS:        r.cfg.FPS,
 				BitrateBps: r.cfg.BitrateBps,
+				AudioOnly:  r.cfg.AudioOnly,
 			})
 		}
 	}
@@ -157,6 +159,7 @@ func (r *Runner) Run(ctx context.Context) (report.TestReport, error) {
 		RampDuration: r.cfg.RampDuration,
 		FPS:          r.cfg.FPS,
 		BitrateBps:   r.cfg.BitrateBps,
+		AudioOnly:    r.cfg.AudioOnly,
 	}
 
 	testReport := report.GenerateReport(repCfg, summary, r.cfg.Thresholds)

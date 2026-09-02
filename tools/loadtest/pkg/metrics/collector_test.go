@@ -52,6 +52,54 @@ func TestCollector_RegisterAndSummary(t *testing.T) {
 	}
 }
 
+func TestCollector_FailureStages(t *testing.T) {
+	c := NewCollector()
+	c.RegisterPeer("ws", 1, 100, "audience")
+	c.RegisterPeer("neg", 2, 100, "audience")
+	c.RegisterPeer("unknown", 3, 100, "audience")
+	c.RegisterPeer("connected", 4, 100, "audience")
+
+	c.RecordFailure("ws", FailureStageWebSocket, errors.New("dial refused"))
+	c.RecordFailure("ws", FailureStageSignaling, errors.New("cascade error"))
+	c.RecordFailure("neg", FailureStageNegotiation, errors.New("bad SDP"))
+	c.RecordFailure("connected", FailureStageWebRTC, errors.New("transient"))
+	c.RecordJoinSuccess("connected")
+
+	summary := c.Summary()
+	if summary.FailedPeers != 3 {
+		t.Fatalf("expected 3 failed peers, got %d", summary.FailedPeers)
+	}
+	if got := summary.FailureStages[FailureStageWebSocket].Count; got != 1 {
+		t.Errorf("expected 1 websocket failure, got %d", got)
+	}
+	if got := summary.FailureStages[FailureStageNegotiation].Count; got != 1 {
+		t.Errorf("expected 1 negotiation failure, got %d", got)
+	}
+	if got := summary.FailureStages[FailureStageNotConnected].Count; got != 1 {
+		t.Errorf("expected 1 unclassified failure, got %d", got)
+	}
+	if got := summary.FailureStages[FailureStageSignaling].Count; got != 0 {
+		t.Errorf("expected first failure stage to win, got %d signaling failures", got)
+	}
+	if got := summary.FailureStages[FailureStageWebRTC].Count; got != 0 {
+		t.Errorf("connected peer must not count as failed, got %d", got)
+	}
+}
+
+func TestCollector_FailureSamplesAreUniqueAndBounded(t *testing.T) {
+	c := NewCollector()
+	for i := 0; i < 5; i++ {
+		key := string(rune('a' + i))
+		c.RegisterPeer(key, int64(i), 100, "audience")
+		c.RecordFailure(key, FailureStageWebSocket, errors.New(key))
+	}
+
+	samples := c.Summary().FailureStages[FailureStageWebSocket].SampleErrors
+	if len(samples) != 3 {
+		t.Fatalf("expected 3 bounded samples, got %d", len(samples))
+	}
+}
+
 func TestComputeLatencySummary(t *testing.T) {
 	latencies := []float64{10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0}
 	summary := computeLatencySummary(latencies)

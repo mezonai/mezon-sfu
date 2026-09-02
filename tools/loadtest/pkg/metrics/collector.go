@@ -6,6 +6,24 @@ import (
 	"time"
 )
 
+// FailureStage identifies where a peer failed to establish its connection.
+type FailureStage string
+
+const (
+	FailureStageSetup        FailureStage = "setup"
+	FailureStageWebSocket    FailureStage = "websocket"
+	FailureStageSignaling    FailureStage = "signaling"
+	FailureStageNegotiation  FailureStage = "negotiation"
+	FailureStageWebRTC       FailureStage = "webrtc"
+	FailureStageNotConnected FailureStage = "not_connected"
+)
+
+// FailureStageSummary aggregates failed peers and representative errors for one stage.
+type FailureStageSummary struct {
+	Count        int      `json:"count"`
+	SampleErrors []string `json:"sample_errors,omitempty"`
+}
+
 // PeerMetrics stores performance and packet stats for an individual peer.
 type PeerMetrics struct {
 	PeerID    uint32 `json:"peer_id"`
@@ -30,8 +48,10 @@ type PeerMetrics struct {
 	PacketsLost uint64  `json:"packets_lost"`
 	LossRatePct float64 `json:"loss_rate_pct"`
 
-	ErrorCount int    `json:"error_count"`
-	LastError  string `json:"last_error,omitempty"`
+	ErrorCount   int          `json:"error_count"`
+	LastError    string       `json:"last_error,omitempty"`
+	FailureStage FailureStage `json:"failure_stage,omitempty"`
+	FailureError string       `json:"failure_error,omitempty"`
 }
 
 // LatencySummary contains percentiles for join latency.
@@ -72,6 +92,8 @@ type AggregatedSummary struct {
 
 	TotalTxBitrateKbps float64 `json:"total_tx_bitrate_kbps"`
 	TotalRxBitrateKbps float64 `json:"total_rx_bitrate_kbps"`
+
+	FailureStages map[FailureStage]FailureStageSummary `json:"failure_stages,omitempty"`
 }
 
 // Collector is a thread-safe registry of all peer metrics during a load test run.
@@ -116,15 +138,24 @@ func (c *Collector) RecordJoinSuccess(key string) {
 	}
 }
 
-// RecordError increments the error count for a peer.
-func (c *Collector) RecordError(key string, err error) {
+// RecordFailure records an error and attributes the peer's first failure stage.
+func (c *Collector) RecordFailure(key string, stage FailureStage, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if pm, ok := c.peers[key]; ok && err != nil {
 		pm.ErrorCount++
 		pm.LastError = err.Error()
+		if pm.FailureStage == "" {
+			pm.FailureStage = stage
+			pm.FailureError = err.Error()
+		}
 	}
+}
+
+// RecordError increments the error count for a peer.
+func (c *Collector) RecordError(key string, err error) {
+	c.RecordFailure(key, FailureStageSetup, err)
 }
 
 // UpdateMediaStats updates the transmitted/received counts for a peer.
@@ -174,8 +205,9 @@ func (c *Collector) Summary() AggregatedSummary {
 	}
 
 	summary := AggregatedSummary{
-		TotalPeers: len(c.peers),
-		DurationMs: duration.Milliseconds(),
+		TotalPeers:    len(c.peers),
+		DurationMs:    duration.Milliseconds(),
+		FailureStages: make(map[FailureStage]FailureStageSummary),
 	}
 
 	roomsMap := make(map[uint64]struct{})
@@ -195,6 +227,18 @@ func (c *Collector) Summary() AggregatedSummary {
 			joinLatencies = append(joinLatencies, latMs)
 		} else {
 			summary.FailedPeers++
+			stage := pm.FailureStage
+			errText := pm.FailureError
+			if stage == "" {
+				stage = FailureStageNotConnected
+				errText = "peer did not reach connected state before test ended"
+			}
+			stageSummary := summary.FailureStages[stage]
+			stageSummary.Count++
+			if errText != "" && len(stageSummary.SampleErrors) < 3 && !containsString(stageSummary.SampleErrors, errText) {
+				stageSummary.SampleErrors = append(stageSummary.SampleErrors, errText)
+			}
+			summary.FailureStages[stage] = stageSummary
 		}
 
 		summary.TotalAudioPacketsSent += pm.AudioPacketsSent
@@ -222,6 +266,15 @@ func (c *Collector) Summary() AggregatedSummary {
 
 	summary.JoinLatency = computeLatencySummary(joinLatencies)
 	return summary
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func computeLatencySummary(latencies []float64) LatencySummary {
