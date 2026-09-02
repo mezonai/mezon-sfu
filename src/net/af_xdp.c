@@ -626,6 +626,18 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
 
 void sfu_net_destroy(sfu_net_t *r) {
   if (r && r->queues_initialized) {
+    if (!r->queue_bound) {
+      void *item;
+      if (r->tx_retry) {
+        atomic_fetch_sub_explicit(&r->outstanding_sends, 1, memory_order_relaxed);
+        (void)sfu_packet_release(r->tx_retry);
+        r->tx_retry = NULL;
+      }
+      while (sfu_spsc_ring_pop(&r->tx_pending, &item)) {
+        atomic_fetch_sub_explicit(&r->outstanding_sends, 1, memory_order_relaxed);
+        (void)sfu_packet_release((sfu_packet_t *)item);
+      }
+    }
     sfu_spsc_ring_destroy(&r->tx_completed);
     if (!r->queue_bound) {
       sfu_spsc_ring_destroy(&r->tx_pending);
@@ -733,8 +745,10 @@ int sfu_net_send(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, so
   sfu_packet_retain(pkt, 1);
   if (!sfu_spsc_ring_push(&r->tx_pending, pkt)) {
     (void)sfu_packet_release(pkt);
+    sfu_metric_inc("af_xdp_pending_full");
     return -1;
   }
+  sfu_metric_inc("af_xdp_send_queued");
   r->outstanding_sends++;
   return 0;
 }

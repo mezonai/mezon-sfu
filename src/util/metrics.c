@@ -122,6 +122,10 @@ static const char *const k_metric_names[] = {
     "af_xdp_tx_permanent_failure",
     "af_xdp_tx_ring_backpressure",
     "af_xdp_tx_canceled_shutdown",
+    "io_uring_send_queued",
+    "io_uring_pending_full",
+    "af_xdp_send_queued",
+    "af_xdp_pending_full",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

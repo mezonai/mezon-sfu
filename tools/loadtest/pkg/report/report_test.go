@@ -122,3 +122,50 @@ func TestGenerateReport_ReadableAndJSON(t *testing.T) {
 		t.Errorf("parsed JSON report mismatch: %+v", parsed)
 	}
 }
+
+func TestGenerateReport_AudioOnlyConfig(t *testing.T) {
+	rep := GenerateReport(TestConfig{AudioOnly: true}, metrics.AggregatedSummary{}, Thresholds{})
+	if !strings.Contains(rep.FormatReadable(), "Media Config    : Audio Only (Opus)") {
+		t.Fatalf("readable report missing audio-only media mode")
+	}
+
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatalf("WriteJSON failed: %v", err)
+	}
+	var parsed TestReport
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("failed to unmarshal JSON report: %v", err)
+	}
+	if !parsed.Config.AudioOnly {
+		t.Fatalf("JSON report did not preserve audio-only mode")
+	}
+}
+
+func TestGenerateReport_FailureStageBreakdown(t *testing.T) {
+	summary := metrics.AggregatedSummary{
+		TotalPeers:  2,
+		FailedPeers: 2,
+		FailureStages: map[metrics.FailureStage]metrics.FailureStageSummary{
+			metrics.FailureStageWebSocket: {
+				Count:        2,
+				SampleErrors: []string{"dial refused"},
+			},
+		},
+	}
+	rep := GenerateReport(TestConfig{}, summary, Thresholds{})
+	readable := rep.FormatReadable()
+	if !strings.Contains(readable, "FAILURE STAGE BREAKDOWN") ||
+		!strings.Contains(readable, "websocket") ||
+		!strings.Contains(readable, "dial refused") {
+		t.Fatalf("readable report missing failure breakdown: %s", readable)
+	}
+
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatalf("WriteJSON failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"failure_stages"`) || !strings.Contains(buf.String(), `"websocket"`) {
+		t.Fatalf("JSON report missing failure stages: %s", buf.String())
+	}
+}

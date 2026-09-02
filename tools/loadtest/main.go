@@ -33,6 +33,7 @@ func main() {
 		userStartID  = flag.Int64("user-start-id", 10000, "Initial user ID")
 		fps          = flag.Int("fps", 30, "Video target FPS for speakers")
 		bitrateBps   = flag.Int("bitrate", 240000, "Video target bitrate in bps for speakers")
+		audioOnly    = flag.Bool("audio-only", false, "Disable video publishing and run audio-only")
 
 		// Thresholds
 		minSuccessRate   = flag.Float64("min-success-rate", 95.0, "Minimum required peer connection success rate %")
@@ -71,6 +72,7 @@ func main() {
 		RampDuration:    *rampDuration,
 		FPS:             *fps,
 		BitrateBps:      *bitrateBps,
+		AudioOnly:       *audioOnly,
 		Thresholds:      thresholds,
 	}
 
