@@ -186,7 +186,7 @@ size_t sfu_metrics_snapshot(char *buf, size_t cap) {
     needed += (size_t)n;
 
     if (buf && cap > 0 && used + 1 < cap) {
-      size_t space = cap - 1 - used; /* leave room for NUL */
+      size_t space = cap - 1 - used;
       size_t copy = (size_t)n < space ? (size_t)n : space;
       memcpy(buf + used, line, copy);
       used += copy;

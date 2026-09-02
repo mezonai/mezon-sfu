@@ -171,7 +171,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   int64_t send_time_us = (int64_t)sfu_now_us();
   sfu_pacer_class_t cls = media->is_audio ? SFU_PACER_CLASS_AUDIO : (media->has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
   bool allow_congestion_drop = decision && decision->pacer_frame_start;
-  if (!sfu_pacer_should_send(&sub_session->egress.pacer, cls, (uint32_t)enc_len + 10 /* SRTP auth tag */, allow_congestion_drop, &send_time_us)) {
+  if (!sfu_pacer_should_send(&sub_session->egress.pacer, cls, (uint32_t)enc_len + 10, allow_congestion_drop, &send_time_us)) {
     sfu_metric_inc("pacer_dropped_enh");
     sfu_metric_inc("pacer_dropped_enh_frames");
     return false;
