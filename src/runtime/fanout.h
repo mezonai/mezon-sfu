@@ -1,6 +1,7 @@
 #ifndef SFU_RUNTIME_FANOUT_H
 #define SFU_RUNTIME_FANOUT_H
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
@@ -66,6 +67,11 @@ typedef struct sfu_fanout_mesh {
   sfu_spsc_ring_t *return_rings;
   uint32_t worker_count;
   uint32_t per_partition_capacity;
+  /* Rotating cursors so drain scans start at a different source partition on
+   * each call, preventing the lowest-indexed source (or a busy low-indexed
+   * source) from starving the others when max_count caps per-call work. */
+  _Atomic uint32_t drain_cursor;
+  _Atomic uint32_t return_cursor;
 } sfu_fanout_mesh_t;
 
 typedef void (*sfu_fanout_job_fn)(void *user_data, sfu_fanout_job_t *job);

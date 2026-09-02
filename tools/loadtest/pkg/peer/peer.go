@@ -27,6 +27,7 @@ type Config struct {
 	WSURL      string
 	FPS        int
 	BitrateBps int
+	AudioOnly  bool
 }
 
 // Peer encapsulates a single WebRTC participant connected via WebSocket and Pion.
@@ -105,9 +106,23 @@ func NewPeer(cfg Config, collector *metrics.Collector) *Peer {
 	}
 }
 
+func (p *Peer) recordFailure(stage metrics.FailureStage, err error) {
+	if p.collector != nil {
+		p.collector.RecordFailure(p.peerKey, stage, err)
+	}
+}
+
+func (p *Peer) setupError(format string, err error) error {
+	wrapped := fmt.Errorf(format, err)
+	p.recordFailure(metrics.FailureStageSetup, wrapped)
+	return wrapped
+}
+
 // Start initiates the WebSocket signaling and WebRTC connection.
 func (p *Peer) Start(ctx context.Context) error {
+	p.mu.Lock()
 	p.ctx, p.cancel = context.WithCancel(ctx)
+	p.mu.Unlock()
 
 	// 1. Create Pion PeerConnection
 	mediaEngine := &webrtc.MediaEngine{}
@@ -123,7 +138,7 @@ func (p *Peer) Start(ctx context.Context) error {
 		},
 		PayloadType: media.OpusDefaultPayloadType,
 	}, webrtc.RTPCodecTypeAudio); err != nil {
-		return fmt.Errorf("failed to register opus codec: %w", err)
+		return p.setupError("failed to register opus codec: %w", err)
 	}
 
 	// Register VP8 codec with NACK/PLI/TWCC feedback
@@ -141,7 +156,7 @@ func (p *Peer) Start(ctx context.Context) error {
 		},
 		PayloadType: media.VP8DefaultPayloadType,
 	}, webrtc.RTPCodecTypeVideo); err != nil {
-		return fmt.Errorf("failed to register vp8 codec: %w", err)
+		return p.setupError("failed to register vp8 codec: %w", err)
 	}
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine))
@@ -149,7 +164,7 @@ func (p *Peer) Start(ctx context.Context) error {
 		SDPSemantics: webrtc.SDPSemanticsUnifiedPlan,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create peer connection: %w", err)
+		return p.setupError("failed to create peer connection: %w", err)
 	}
 	p.pc = pc
 
@@ -159,7 +174,8 @@ func (p *Peer) Start(ctx context.Context) error {
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateConnected {
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
 			if p.connectedOnce.CompareAndSwap(false, true) {
 				if p.collector != nil {
 					p.collector.RecordJoinSuccess(p.peerKey)
@@ -170,10 +186,18 @@ func (p *Peer) Start(ctx context.Context) error {
 					}
 					if p.videoGen != nil {
 						p.videoGen.Start(p.ctx)
+						// Signal camera is active only when publishing video.
+						_ = p.wsClient.SendCamera(true)
 					}
-					// Signal camera is active
-					_ = p.wsClient.SendCamera(true)
 				}
+			}
+		case webrtc.PeerConnectionStateFailed:
+			if !p.connectedOnce.Load() && !p.closed.Load() {
+				p.recordFailure(metrics.FailureStageWebRTC, errors.New("peer connection failed before reaching connected state"))
+			}
+		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateClosed:
+			if !p.connectedOnce.Load() && !p.closed.Load() {
+				p.recordFailure(metrics.FailureStageWebRTC, fmt.Errorf("peer connection entered %s before reaching connected state", state.String()))
 			}
 		}
 	})
@@ -186,31 +210,33 @@ func (p *Peer) Start(ctx context.Context) error {
 			fmt.Sprintf("user-%d-stream", p.cfg.UserID),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to create local audio track: %w", err)
+			return p.setupError("failed to create local audio track: %w", err)
 		}
 		p.audioTrack = audioTrack
 		if _, err := pc.AddTrack(audioTrack); err != nil {
-			return fmt.Errorf("failed to add audio track to pc: %w", err)
+			return p.setupError("failed to add audio track to pc: %w", err)
 		}
 		p.audioGen = media.NewOpusGenerator(audioTrack, media.OpusDefaultPayloadType, 0)
 
-		videoTrack, err := webrtc.NewTrackLocalStaticRTP(
-			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
-			"video",
-			fmt.Sprintf("user-%d-stream", p.cfg.UserID),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to create local video track: %w", err)
-		}
-		p.videoTrack = videoTrack
-		videoSender, err := pc.AddTrack(videoTrack)
-		if err != nil {
-			return fmt.Errorf("failed to add video track to pc: %w", err)
-		}
-		p.videoGen = media.NewVP8Generator(videoTrack, media.VP8DefaultPayloadType, 0, p.cfg.FPS, p.cfg.BitrateBps)
+		if !p.cfg.AudioOnly {
+			videoTrack, err := webrtc.NewTrackLocalStaticRTP(
+				webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
+				"video",
+				fmt.Sprintf("user-%d-stream", p.cfg.UserID),
+			)
+			if err != nil {
+				return p.setupError("failed to create local video track: %w", err)
+			}
+			p.videoTrack = videoTrack
+			videoSender, err := pc.AddTrack(videoTrack)
+			if err != nil {
+				return p.setupError("failed to add video track to pc: %w", err)
+			}
+			p.videoGen = media.NewVP8Generator(videoTrack, media.VP8DefaultPayloadType, 0, p.cfg.FPS, p.cfg.BitrateBps)
 
-		// Read RTCP feedback from video sender to react to PLI/FIR
-		go p.readRTCP(videoSender)
+			// Read RTCP feedback from video sender to react to PLI/FIR
+			go p.readRTCP(videoSender)
+		}
 	}
 
 	// 4. Set up Signaling Client
@@ -222,33 +248,34 @@ func (p *Peer) Start(ctx context.Context) error {
 			p.handleServerOffer(offer)
 		},
 		OnError: func(err signaling.ErrorMessage) {
-			if p.collector != nil {
-				p.collector.RecordError(p.peerKey, fmt.Errorf("signaling error: %s", err.Message))
-			}
+			p.recordFailure(metrics.FailureStageSignaling, fmt.Errorf("signaling error: %s", err.Message))
 		},
 		OnClose: func(err error) {
-			if err != nil && p.collector != nil && !p.closed.Load() {
-				p.collector.RecordError(p.peerKey, err)
+			if err != nil && !p.closed.Load() && !p.connectedOnce.Load() {
+				p.recordFailure(metrics.FailureStageWebSocket, err)
 			}
 		},
 	}
 
 	p.wsClient = signaling.NewClient(p.cfg.WSURL, handlers)
 	if err := p.wsClient.Connect(p.ctx); err != nil {
-		if p.collector != nil {
-			p.collector.RecordError(p.peerKey, err)
-		}
-		return fmt.Errorf("signaling connect failed: %w", err)
+		wrapped := fmt.Errorf("signaling connect failed: %w", err)
+		p.recordFailure(metrics.FailureStageWebSocket, wrapped)
+		return wrapped
 	}
 
 	// 5. Generate JWT and Send Join
 	token, err := auth.GenerateToken(p.cfg.JWTSecret, p.cfg.UserID, p.cfg.RoomID, 24*time.Hour)
 	if err != nil {
-		return fmt.Errorf("failed to generate jwt: %w", err)
+		wrapped := fmt.Errorf("failed to generate jwt: %w", err)
+		p.recordFailure(metrics.FailureStageSetup, wrapped)
+		return wrapped
 	}
 
 	if err := p.wsClient.Join(token, p.cfg.Role, "vp8"); err != nil {
-		return fmt.Errorf("failed to send join: %w", err)
+		wrapped := fmt.Errorf("failed to send join: %w", err)
+		p.recordFailure(metrics.FailureStageSignaling, wrapped)
+		return wrapped
 	}
 
 	// Launch background stats reporter
@@ -343,9 +370,7 @@ func (p *Peer) handleServerOffer(offer signaling.OfferMessage) {
 
 		err := p.processOffer(*currentOffer)
 		if err != nil {
-			if p.collector != nil {
-				p.collector.RecordError(p.peerKey, fmt.Errorf("negotiation error: %w", err))
-			}
+			p.recordFailure(metrics.FailureStageNegotiation, fmt.Errorf("negotiation error: %w", err))
 		}
 
 		p.mu.Lock()
@@ -429,8 +454,11 @@ func (p *Peer) flushStats() {
 // Close terminates peer connection, signaling, and media generators.
 func (p *Peer) Close() error {
 	if p.closed.CompareAndSwap(false, true) {
-		if p.cancel != nil {
-			p.cancel()
+		p.mu.Lock()
+		cancel := p.cancel
+		p.mu.Unlock()
+		if cancel != nil {
+			cancel()
 		}
 		if p.audioGen != nil {
 			p.audioGen.Stop()

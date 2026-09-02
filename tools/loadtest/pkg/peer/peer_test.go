@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"errors"
 	"testing"
 
 	"mezon-sfu/tools/loadtest/pkg/metrics"
@@ -46,6 +47,21 @@ func TestSeqTracker_IsolatedPerSSRC(t *testing.T) {
 		if got := audioB.track(uint32(5001 + i)); got != 0 {
 			t.Errorf("ssrc B: expected 0 lost at iter %d, got %d", i, got)
 		}
+	}
+}
+
+func TestPeer_RecordFailure(t *testing.T) {
+	c := metrics.NewCollector()
+	p := NewPeer(Config{UserID: 42, RoomID: 999, Role: "audience"}, c)
+	p.recordFailure(metrics.FailureStageWebSocket, errors.New("dial failed"))
+	p.recordFailure(metrics.FailureStageSignaling, errors.New("secondary error"))
+
+	summary := c.Summary()
+	if got := summary.FailureStages[metrics.FailureStageWebSocket].Count; got != 1 {
+		t.Fatalf("expected websocket failure attribution, got %d", got)
+	}
+	if got := summary.FailureStages[metrics.FailureStageSignaling].Count; got != 0 {
+		t.Fatalf("expected first failure to win, got %d signaling failures", got)
 	}
 }
 

@@ -3,9 +3,74 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 static _Atomic int g_min_level = SFU_LOG_LEVEL_INFO;
+
+/*
+ * Cheap hash-based rate limiter. Buckets keyed by the pointer value of a
+ * string-literal bucket name, resolved via an open-addressing probe into a
+ * fixed table. g_rate_last_ns[i] stores the monotonic timestamp of the most
+ * recent admitted emission for bucket i; a bucket whose timestamp has been
+ * evicted naturally falls back to the first-call admission path. All state
+ * is touched only under relaxed atomics: worst case two admissions race and
+ * both emit, which is harmless for a diagnostic limiter.
+ */
+#define SFU_LOG_RATE_BUCKET_COUNT 64u
+
+static _Atomic int64_t g_rate_last_ns[SFU_LOG_RATE_BUCKET_COUNT];
+
+static uint64_t rate_monotonic_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static uint32_t rate_bucket_hash(const char *bucket) {
+  uint32_t h = 2166136261u;
+  for (const unsigned char *p = (const unsigned char *)bucket; *p; p++) {
+    h ^= (uint32_t)*p;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+bool sfu_log_rate_limit(const char *bucket, uint64_t interval_ns) {
+  if (!bucket || interval_ns == 0) {
+    return true;
+  }
+  uint32_t h = rate_bucket_hash(bucket);
+  uint64_t now = rate_monotonic_ns();
+  int64_t now_signed = (int64_t)now;
+
+  for (uint32_t i = 0; i < SFU_LOG_RATE_BUCKET_COUNT; i++) {
+    uint32_t idx = (h + i) & (SFU_LOG_RATE_BUCKET_COUNT - 1u);
+    int64_t last = atomic_load_explicit(&g_rate_last_ns[idx], memory_order_relaxed);
+    if (last != 0 && now_signed - last >= 0 && now_signed - last < (int64_t)interval_ns) {
+      return false;
+    }
+    if (atomic_compare_exchange_strong_explicit(&g_rate_last_ns[idx], &last, now_signed, memory_order_relaxed, memory_order_relaxed)) {
+      return true;
+    }
+    /* CAS failed: another thread raced us into this slot. Re-check the slot
+     * (which may now hold a fresher or different bucket's timestamp); never
+     * allow unbounded duplication of one bucket. */
+    last = atomic_load_explicit(&g_rate_last_ns[idx], memory_order_relaxed);
+    if (last != 0 && now_signed - last >= 0 && now_signed - last < (int64_t)interval_ns) {
+      return false;
+    }
+    /* Fall through and probe the next candidate slot. */
+  }
+  /* Table saturated: err on the side of still allowing the log through. */
+  return true;
+}
+
+void sfu_log_rate_limit_reset(void) {
+  for (uint32_t i = 0; i < SFU_LOG_RATE_BUCKET_COUNT; i++) {
+    atomic_store_explicit(&g_rate_last_ns[i], 0, memory_order_relaxed);
+  }
+}
 
 static const char *level_name(sfu_log_level_t level) {
   switch (level) {

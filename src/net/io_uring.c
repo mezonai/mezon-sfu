@@ -28,6 +28,10 @@ struct sfu_net {
   uint32_t buf_size;
   uint32_t payload_cap;
   _Atomic uint32_t outstanding_sends;
+  sfu_packet_t **pending_sends;
+  uint32_t pending_capacity;
+  uint32_t pending_head;
+  uint32_t pending_count;
   int bgid;
   int fd;
 };
@@ -90,6 +94,12 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
   int bgid = options->buffer_group_id;
   bool with_recv_bufs = options->receive;
   r->fd = fd;
+  r->pending_capacity = sq_entries ? sq_entries : 1;
+  r->pending_sends = SFU_CALLOC(r->pending_capacity, sizeof(*r->pending_sends));
+  if (!r->pending_sends) {
+    SFU_FREE(r);
+    return NULL;
+  }
 
   struct io_uring_params params;
   memset(&params, 0, sizeof(params));
@@ -99,6 +109,7 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
   int rc = io_uring_queue_init_params(sq_entries, &r->ring, &params);
   if (rc < 0) {
     SFU_LOG_ERROR("io_uring_queue_init_params failed: %s", strerror(-rc));
+    SFU_FREE(r->pending_sends);
     SFU_FREE(r);
     return NULL;
   }
@@ -111,6 +122,7 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
   if ((buf_count & (buf_count - 1)) != 0) {
     SFU_LOG_ERROR("buf_count must be a power of two (got %u)", buf_count);
     io_uring_queue_exit(&r->ring);
+    SFU_FREE(r->pending_sends);
     SFU_FREE(r);
     return NULL;
   }
@@ -123,6 +135,7 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
   if (!r->buf_ring_mem) {
     SFU_LOG_ERROR("failed to allocate provided-buffer backing store");
     io_uring_queue_exit(&r->ring);
+    SFU_FREE(r->pending_sends);
     SFU_FREE(r);
     return NULL;
   }
@@ -133,6 +146,7 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
     SFU_LOG_ERROR("io_uring_setup_buf_ring failed: %s", strerror(-setup_ret));
     SFU_FREE(r->buf_ring_mem);
     io_uring_queue_exit(&r->ring);
+    SFU_FREE(r->pending_sends);
     SFU_FREE(r);
     return NULL;
   }
@@ -158,6 +172,9 @@ void sfu_net_destroy(sfu_net_t *r) {
   if (!r) {
     return;
   }
+  (void)sfu_net_cancel(r);
+  SFU_FREE(r->pending_sends);
+  r->pending_sends = NULL;
   if (r->buf_ring) {
     io_uring_free_buf_ring(&r->ring, r->buf_ring, r->buf_count, r->bgid);
     r->buf_ring = NULL;
@@ -183,28 +200,68 @@ int sfu_net_recv(sfu_net_t *r) {
   return 0;
 }
 
+static bool pending_push(sfu_net_t *r, sfu_packet_t *pkt) {
+  if (r->pending_count == r->pending_capacity) {
+    return false;
+  }
+  uint32_t tail = (r->pending_head + r->pending_count) % r->pending_capacity;
+  r->pending_sends[tail] = pkt;
+  r->pending_count++;
+  return true;
+}
+
+static unsigned drain_pending(sfu_net_t *r) {
+  unsigned count = 0;
+  while (r->pending_count) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
+    if (!sqe) {
+      break;
+    }
+    sfu_packet_t *pkt = r->pending_sends[r->pending_head];
+    io_uring_prep_send_zc(sqe, r->fd, pkt->data, pkt->len, 0, 0);
+    io_uring_prep_send_set_addr(sqe, (const struct sockaddr *)&pkt->peer_addr, pkt->peer_addr_len);
+    io_uring_sqe_set_data64(sqe, sfu_cqe_pack_packet(pkt));
+    r->pending_sends[r->pending_head] = NULL;
+    r->pending_head = (r->pending_head + 1) % r->pending_capacity;
+    r->pending_count--;
+    count++;
+  }
+  return count;
+}
+
 int sfu_net_send(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst, socklen_t dst_len) {
   if (!r || !pkt || !dst || dst_len == 0 || (size_t)dst_len > sizeof(pkt->peer_addr)) {
     return -1;
   }
 
-  struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
-  if (!sqe) {
-    return -1;
-  }
-
   memcpy(&pkt->peer_addr, dst, dst_len);
   pkt->peer_addr_len = dst_len;
+  struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
+  if (!sqe) {
+    if (r->pending_count == r->pending_capacity) {
+      sfu_metric_inc("io_uring_pending_full");
+      return -1;
+    }
+    sfu_packet_retain(pkt, 1);
+    (void)pending_push(r, pkt);
+    atomic_fetch_add_explicit(&r->outstanding_sends, 1, memory_order_relaxed);
+    sfu_metric_inc("io_uring_send_queued");
+    return 0;
+  }
+
   sfu_packet_retain(pkt, 1);
   io_uring_prep_send_zc(sqe, r->fd, pkt->data, pkt->len, 0, 0);
   io_uring_prep_send_set_addr(sqe, (const struct sockaddr *)&pkt->peer_addr, pkt->peer_addr_len);
   io_uring_sqe_set_data64(sqe, sfu_cqe_pack_packet(pkt));
-  r->outstanding_sends++;
-
+  atomic_fetch_add_explicit(&r->outstanding_sends, 1, memory_order_relaxed);
   return 0;
 }
 
 int sfu_net_flush(sfu_net_t *r) {
+  if (!r) {
+    return 0;
+  }
+  (void)drain_pending(r);
   int rc = io_uring_submit(&r->ring);
   if (rc < 0) {
     SFU_LOG_ERROR("io_uring_submit failed on fd=%d: %s", r->fd, strerror(-rc));
@@ -430,6 +487,9 @@ unsigned sfu_net_poll(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, s
 
   sfu_batch_advance_cqe(&r->ring, n);
 
+  if (drain_pending(r) > 0) {
+    needs_submit = true;
+  }
   if (needs_submit) {
     sfu_net_flush(r);
   }
@@ -450,14 +510,32 @@ void sfu_net_backend_destroy(void) {}
 
 unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_count) {
   (void)recv_net;
-  (void)send_net;
   (void)max_count;
-  return 0;
+  if (!send_net) {
+    return 0;
+  }
+  unsigned drained = drain_pending(send_net);
+  if (drained) {
+    (void)sfu_net_flush(send_net);
+  }
+  return drained;
 }
 
 unsigned sfu_net_cancel(sfu_net_t *send_net) {
-  (void)send_net;
-  return 0;
+  if (!send_net) {
+    return 0;
+  }
+  unsigned canceled = 0;
+  while (send_net->pending_count) {
+    sfu_packet_t *pkt = send_net->pending_sends[send_net->pending_head];
+    send_net->pending_sends[send_net->pending_head] = NULL;
+    send_net->pending_head = (send_net->pending_head + 1) % send_net->pending_capacity;
+    send_net->pending_count--;
+    atomic_fetch_sub_explicit(&send_net->outstanding_sends, 1, memory_order_relaxed);
+    (void)sfu_packet_release(pkt);
+    canceled++;
+  }
+  return canceled;
 }
 
 bool sfu_net_recycle_rx_token(sfu_net_t *net, uintptr_t token) {
