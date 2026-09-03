@@ -1056,6 +1056,159 @@ static void test_remote_slot_reuse_over_1000_churn(void) {
   sfu_room_destroy(&room);
 }
 
+static void test_audience_join_renegotiation_suppression(void) {
+  signaling_test_server.test_auto_drain = false;
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 8) == 0);
+
+  sfu_peer_session_t *speaker_a = mock_session("spk-a");
+  speaker_a->peer_id = 101;
+  speaker_a->user_id = 1001;
+  speaker_a->media.uplink_audio.ssrc = 1111;
+  speaker_a->media.uplink_audio.active = true;
+  speaker_a->media.uplink_video.ssrc = 2222;
+  speaker_a->media.uplink_video.rtx_ssrc = 3333;
+  speaker_a->media.uplink_video.payload_type = 96;
+  speaker_a->media.uplink_video.rtx_payload_type = 97;
+  speaker_a->media.uplink_video.codec = SFU_VIDEO_CODEC_VP8;
+  speaker_a->media.uplink_video.active = true;
+
+  sfu_peer_session_t *audience_b = mock_session("aud-b");
+  audience_b->peer_id = 102;
+  audience_b->user_id = 1002;
+  audience_b->media.uplink_audio.ssrc = 7777;
+  audience_b->media.uplink_audio.active = false;
+  audience_b->media.uplink_video.active = false;
+  atomic_store(&audience_b->media.audio_send_negotiated, true);
+  atomic_store(&audience_b->is_audience, true);
+
+  sfu_peer_session_t *speaker_c = mock_session("spk-c");
+  speaker_c->peer_id = 103;
+  speaker_c->user_id = 1003;
+  speaker_c->media.uplink_audio.ssrc = 4444;
+  speaker_c->media.uplink_audio.active = true;
+
+  assert(room_add_peer(&room, speaker_a));
+  sfu_membership_event_t *event_a = sfu_signaling_membership_test_pop(&signaling_test_server);
+  assert(event_a != NULL);
+  assert(event_a->kind == SFU_MEMBERSHIP_JOIN);
+  assert(event_a->room_revision == 1);
+  assert(event_a->participant_count == 1);
+  assert(event_a->subject_peer_id == speaker_a->peer_id);
+  assert(!event_a->subject_is_audience);
+  assert(event_a->recipient_count == 1);
+  assert(event_a->recipients[0].session == speaker_a);
+  assert(event_a->recipients[0].send_snapshot);
+  assert(!event_a->recipients[0].send_delta);
+  assert(!event_a->recipients[0].renegotiate);
+  assert(event_a->recipients[0].remote_slot == UINT32_MAX);
+  assert(event_a->member_count == 1);
+  assert(event_a->members[0].peer_id == speaker_a->peer_id);
+  assert(!event_a->members[0].is_audience);
+  sfu_membership_event_release(event_a);
+
+  assert(room_add_peer(&room, audience_b));
+  sfu_membership_event_t *event_b = sfu_signaling_membership_test_pop(&signaling_test_server);
+  assert(event_b != NULL);
+  assert(event_b->kind == SFU_MEMBERSHIP_JOIN);
+  assert(event_b->room_revision == 2);
+  assert(event_b->participant_count == 2);
+  assert(event_b->subject_peer_id == audience_b->peer_id);
+  assert(event_b->subject_is_audience);
+  assert(event_b->recipient_count == 2);
+  assert(event_b->recipients[0].session == audience_b);
+  assert(event_b->recipients[0].send_snapshot);
+  assert(!event_b->recipients[0].send_delta);
+  assert(event_b->recipients[0].renegotiate);
+  assert(event_b->recipients[0].remote_slot == UINT32_MAX);
+  assert(event_b->recipients[1].session == speaker_a);
+  assert(!event_b->recipients[1].send_snapshot);
+  assert(event_b->recipients[1].send_delta);
+  assert(!event_b->recipients[1].renegotiate);
+  assert(event_b->recipients[1].remote_slot != UINT32_MAX);
+  assert(event_b->recipients[1].mid_audio == sfu_remote_slot_first_mid(event_b->recipients[1].remote_slot));
+  assert(event_b->recipients[1].mid_video == event_b->recipients[1].mid_audio + 1);
+  assert(event_b->recipients[1].mid_screen == event_b->recipients[1].mid_audio + 2);
+  assert(event_b->member_count == 2);
+  assert(event_b->members[0].peer_id == audience_b->peer_id);
+  assert(event_b->members[0].is_audience);
+  assert(event_b->members[1].peer_id == speaker_a->peer_id);
+  assert(!event_b->members[1].is_audience);
+  assert(event_b->members[1].remote_slot == 0);
+  assert(event_b->members[1].mid_audio == SFU_REMOTE_MID_BASE);
+  sfu_membership_event_release(event_b);
+
+  assert(room_add_peer(&room, speaker_c));
+  sfu_membership_event_t *event_c = sfu_signaling_membership_test_pop(&signaling_test_server);
+  assert(event_c != NULL);
+  assert(event_c->kind == SFU_MEMBERSHIP_JOIN);
+  assert(event_c->room_revision == 3);
+  assert(event_c->participant_count == 3);
+  assert(event_c->subject_peer_id == speaker_c->peer_id);
+  assert(!event_c->subject_is_audience);
+  assert(event_c->recipient_count == 3);
+  assert(event_c->recipients[0].session == speaker_c);
+  assert(event_c->recipients[0].send_snapshot);
+  assert(!event_c->recipients[0].send_delta);
+  assert(event_c->recipients[0].renegotiate);
+  for (uint32_t i = 1; i < event_c->recipient_count; i++) {
+    assert(event_c->recipients[i].send_delta);
+    assert(event_c->recipients[i].renegotiate);
+    assert(event_c->recipients[i].remote_slot != UINT32_MAX);
+    assert(event_c->recipients[i].mid_audio == sfu_remote_slot_first_mid(event_c->recipients[i].remote_slot));
+  }
+  assert(event_c->member_count == 3);
+  sfu_membership_event_release(event_c);
+
+  assert(room_set_peer_ptt_active(&room, audience_b, true));
+  assert(atomic_load(&audience_b->media.ptt_active));
+  assert(audio_route_count(audience_b) == 2);
+  assert(room_set_peer_ptt_active(&room, audience_b, false));
+  assert(!atomic_load(&audience_b->media.ptt_active));
+  assert(audio_route_count(audience_b) == 0);
+
+  assert(room_update_peer_role(&room, audience_b, false));
+  assert(!atomic_load(&audience_b->is_audience));
+  audience_b->media.uplink_audio.ssrc = 7777;
+  audience_b->media.uplink_audio.active = true;
+  room_refresh_peer_streams(&room, audience_b);
+  {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker_a);
+    assert(snap != NULL);
+    const sfu_receiver_entry_t *entry = sfu_receiver_snapshot_find_peer(snap, audience_b, NULL);
+    assert(entry != NULL && entry->audio_active && entry->audio_ssrc == 7777);
+    sfu_subscriptions_snapshot_release(snap);
+  }
+
+  assert(room_update_peer_role(&room, audience_b, true));
+  assert(atomic_load(&audience_b->is_audience));
+  {
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(speaker_a);
+    assert(snap != NULL);
+    const sfu_receiver_entry_t *entry = sfu_receiver_snapshot_find_peer(snap, audience_b, NULL);
+    assert(entry != NULL && !entry->audio_active);
+    sfu_subscriptions_snapshot_release(snap);
+  }
+
+  room_remove_peer(&room, speaker_c);
+  sfu_membership_event_t *leave_c = sfu_signaling_membership_test_pop(&signaling_test_server);
+  if (leave_c) sfu_membership_event_release(leave_c);
+  room_remove_peer(&room, audience_b);
+  sfu_membership_event_t *leave_b = sfu_signaling_membership_test_pop(&signaling_test_server);
+  if (leave_b) sfu_membership_event_release(leave_b);
+  room_remove_peer(&room, speaker_a);
+  sfu_membership_event_t *leave_a = sfu_signaling_membership_test_pop(&signaling_test_server);
+  if (leave_a) sfu_membership_event_release(leave_a);
+
+  assert(sfu_signaling_membership_test_pop(&signaling_test_server) == NULL);
+  signaling_test_server.test_auto_drain = true;
+
+  sfu_session_release(speaker_c);
+  sfu_session_release(audience_b);
+  sfu_session_release(speaker_a);
+  sfu_room_destroy(&room);
+}
+
 int main(void) {
   sfu_signaling_membership_test_server_init(&signaling_test_server);
   signaling_test_server.test_auto_drain = true;
@@ -1063,6 +1216,7 @@ int main(void) {
   test_chunked_subscription_root_copy();
   test_add_remove();
   test_audience_role_asymmetry_and_transition();
+  test_audience_join_renegotiation_suppression();
   test_snapshot_hold_across_replace();
   test_concurrent_snapshot_read_write();
   test_concurrent_fanout_bundle_acquire_iterate_churn();

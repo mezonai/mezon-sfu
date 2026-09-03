@@ -388,6 +388,7 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
     }
   }
 
+  bool peer_is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
   event->member_count = target_count + 1;
   membership_capture_member(&event->members[0], peer, NULL);
   event->recipient_count = target_count + 1;
@@ -407,7 +408,7 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
                                                             .remote_slot = recipient_entry->remote_slot,
                                                             .assignment_generation = recipient_entry->assignment_generation,
                                                             .send_delta = true,
-                                                            .renegotiate = true};
+                                                            .renegotiate = !peer_is_audience};
   }
 
   if (!sfu_signaling_reserve_membership_event(&event_reservation)) {
