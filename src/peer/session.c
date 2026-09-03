@@ -840,6 +840,24 @@ bool sfu_session_remote_slot_retire(sfu_peer_session_t *session, uint32_t slot, 
       remote->state = SFU_REMOTE_SLOT_RETIRING;
     } else {
       memset(remote, 0, sizeof(*remote));
+      while (session->graph.remote_slots.high_water_slots > 0) {
+        uint32_t last = session->graph.remote_slots.high_water_slots - 1;
+        if (session->graph.remote_slots.slots[last].state != SFU_REMOTE_SLOT_FREE) {
+          break;
+        }
+        if (atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[last], memory_order_acquire) != 0) {
+          break;
+        }
+        if (session->graph.remote_slots.offered_manifest &&
+            last < session->graph.remote_slots.offered_manifest->high_water_slots &&
+            session->graph.remote_slots.offered_manifest->assignment_generations[last] != 0) {
+          break;
+        }
+        if (session->graph.remote_slots.offered_slot_floor > last) {
+          break;
+        }
+        session->graph.remote_slots.high_water_slots = last;
+      }
     }
   }
   pthread_mutex_unlock(&session->graph.lock);
