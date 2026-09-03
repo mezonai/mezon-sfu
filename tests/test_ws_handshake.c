@@ -1,21 +1,46 @@
 #include "protocol/websocket/ws.h"
 
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+static void set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  assert(flags >= 0);
+  assert(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
+}
+
 static size_t build_masked_frame(uint8_t *frame, int fin, uint8_t opcode, const char *payload, size_t len, const uint8_t mask_key[4]) {
-  assert(len < 126);
   size_t off = 0;
   frame[off++] = (fin ? 0x80 : 0) | opcode;
-  frame[off++] = 0x80 | (uint8_t)len;
-  memcpy(frame + off, mask_key, 4);
-  off += 4;
-  for (size_t i = 0; i < len; i++) {
-    frame[off++] = (uint8_t)payload[i] ^ mask_key[i % 4];
+  if (len < 126) {
+    frame[off++] = 0x80 | (uint8_t)len;
+  } else if (len <= 0xFFFF) {
+    frame[off++] = 0x80 | 126;
+    frame[off++] = (uint8_t)(len >> 8);
+    frame[off++] = (uint8_t)(len & 0xFF);
+  } else {
+    frame[off++] = 0x80 | 127;
+    for (int i = 0; i < 8; i++) {
+      frame[off++] = (uint8_t)(len >> (8 * (7 - i)));
+    }
+  }
+  if (mask_key) {
+    memcpy(frame + off, mask_key, 4);
+    off += 4;
+    for (size_t i = 0; i < len; i++) {
+      frame[off++] = (uint8_t)payload[i] ^ mask_key[i % 4];
+    }
+  } else {
+    frame[1] &= 0x7F;
+    for (size_t i = 0; i < len; i++) {
+      frame[off++] = (uint8_t)payload[i];
+    }
   }
   return off;
 }
@@ -318,6 +343,142 @@ int main(void) {
     write_masked_frame(fds[1], 1, 0x8, "", 0, mask);
     char buf[32];
     assert(sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf)) == 0);
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  {
+    int fds[2];
+    open_pair(fds);
+    set_nonblocking(fds[0]);
+    memset(&state, 0, sizeof(state));
+
+    const char *payload = "hello nonblocking streaming world!";
+    size_t plen = strlen(payload);
+    const uint8_t mask[4] = {0x11, 0x22, 0x33, 0x44};
+    uint8_t frame[128];
+    size_t flen = build_masked_frame(frame, 1, 0x1, payload, plen, mask);
+
+    char buf[128];
+    for (size_t i = 0; i < flen; i++) {
+      assert(write(fds[1], frame + i, 1) == 1);
+      ssize_t n = sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf));
+      if (i + 1 < flen) {
+        assert(n == -1);
+        assert(errno == EAGAIN || errno == EWOULDBLOCK);
+      } else {
+        assert(n == (ssize_t)plen);
+        assert(strcmp(buf, payload) == 0);
+      }
+    }
+
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  {
+    int fds[2];
+    open_pair(fds);
+    set_nonblocking(fds[0]);
+    memset(&state, 0, sizeof(state));
+
+    char payload_16bit[300];
+    for (size_t i = 0; i < sizeof(payload_16bit) - 1; i++) {
+      payload_16bit[i] = (char)('a' + (i % 26));
+    }
+    payload_16bit[sizeof(payload_16bit) - 1] = '\0';
+    size_t plen = strlen(payload_16bit);
+
+    const uint8_t mask[4] = {0xaa, 0xbb, 0xcc, 0xdd};
+    uint8_t frame[512];
+    size_t flen = build_masked_frame(frame, 1, 0x1, payload_16bit, plen, mask);
+
+    char buf[512];
+    for (size_t i = 0; i < flen; i++) {
+      assert(write(fds[1], frame + i, 1) == 1);
+      ssize_t n = sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf));
+      if (i + 1 < flen) {
+        assert(n == -1);
+        assert(errno == EAGAIN || errno == EWOULDBLOCK);
+      } else {
+        assert(n == (ssize_t)plen);
+        assert(strcmp(buf, payload_16bit) == 0);
+      }
+    }
+
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  {
+    int fds[2];
+    open_pair(fds);
+    set_nonblocking(fds[0]);
+    memset(&state, 0, sizeof(state));
+
+    const uint8_t mask1[4] = {1, 2, 3, 4};
+    const uint8_t mask_ping[4] = {5, 6, 7, 8};
+    const uint8_t mask2[4] = {9, 10, 11, 12};
+
+    uint8_t f1[64];
+    size_t f1_len = build_masked_frame(f1, 0, 0x1, "frag1_", 6, mask1);
+    uint8_t f_ping[64];
+    size_t f_ping_len = build_masked_frame(f_ping, 1, 0x9, "pingdata", 8, mask_ping);
+    uint8_t f2[64];
+    size_t f2_len = build_masked_frame(f2, 1, 0x0, "frag2", 5, mask2);
+
+    uint8_t stream[256];
+    size_t stream_len = 0;
+    memcpy(stream + stream_len, f1, f1_len);
+    stream_len += f1_len;
+    memcpy(stream + stream_len, f_ping, f_ping_len);
+    stream_len += f_ping_len;
+    memcpy(stream + stream_len, f2, f2_len);
+    stream_len += f2_len;
+
+    char buf[64];
+    for (size_t i = 0; i < stream_len; i++) {
+      assert(write(fds[1], stream + i, 1) == 1);
+      ssize_t res = sfu_ws_recv_text(fds[0], &state, buf, sizeof(buf));
+      if (i + 1 < stream_len) {
+        assert(res == -1);
+        assert(errno == EAGAIN || errno == EWOULDBLOCK);
+      } else {
+        assert(res == 11);
+        assert(strcmp(buf, "frag1_frag2") == 0);
+      }
+    }
+
+    uint8_t pong[32];
+    ssize_t pn = read(fds[1], pong, sizeof(pong));
+    assert(pn == 10);
+    assert(pong[0] == 0x8A);
+    assert(pong[1] == 8);
+    assert(memcmp(pong + 2, "pingdata", 8) == 0);
+
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  {
+    int fds[2];
+    open_pair(fds);
+    set_nonblocking(fds[0]);
+    memset(&state, 0, sizeof(state));
+
+    const uint8_t mask[4] = {0x55, 0x66, 0x77, 0x88};
+    uint8_t frame[64];
+    (void)build_masked_frame(frame, 0, 0x1, "partial_msg", 11, mask);
+    assert(write(fds[1], frame, 5) == 5);
+
+    char buf1[64];
+    assert(sfu_ws_recv_text(fds[0], &state, buf1, sizeof(buf1)) == -1);
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+
+    char buf2[64];
+    assert(sfu_ws_recv_text(fds[0], &state, buf2, sizeof(buf2)) == -1);
+    assert(errno == EINVAL);
+
     close(fds[0]);
     close(fds[1]);
   }

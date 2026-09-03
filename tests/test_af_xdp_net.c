@@ -74,6 +74,53 @@ static void test_enqueue_and_queue_full(void) {
   sfu_net_destroy(net);
 }
 
+static void test_priority_queue(void) {
+  sfu_net_options_t options = {.fd = -1, .send_entries = 2, .completion_entries = 2};
+  sfu_net_t *net = sfu_net_create(&options);
+  assert(net != NULL);
+  uint8_t data[67][1] = {{0}};
+  sfu_packet_t packets[67];
+  for (unsigned i = 0; i < 67; i++) init_packet(&packets[i], data[i], 1);
+  struct sockaddr_in dst = destination();
+  assert(sfu_net_send(net, &packets[0], (struct sockaddr *)&dst, sizeof(dst)) == 0);
+  assert(sfu_net_send(net, &packets[1], (struct sockaddr *)&dst, sizeof(dst)) == 0);
+  assert(sfu_net_send(net, &packets[2], (struct sockaddr *)&dst, sizeof(dst)) == -1);
+  struct sockaddr_in first = dst, second = dst;
+  first.sin_port = htons(7001);
+  second.sin_port = htons(7002);
+  assert(sfu_net_send_ex(net, &packets[2], (struct sockaddr *)&first, sizeof(first), SFU_NET_PRIORITY_CONTROL) == 0);
+  assert(sfu_net_send_ex(net, &packets[2], (struct sockaddr *)&second, sizeof(second), SFU_NET_PRIORITY_CONTROL) == 0);
+  for (unsigned i = 3; i < 65; i++)
+    assert(sfu_net_send_ex(net, &packets[i], (struct sockaddr *)&dst, sizeof(dst), SFU_NET_PRIORITY_CONTROL) == 0);
+  assert(sfu_net_send_ex(net, &packets[65], (struct sockaddr *)&dst, sizeof(dst), SFU_NET_PRIORITY_CONTROL) == -1);
+  assert(atomic_load_explicit(&packets[65].refcount, memory_order_relaxed) == 1);
+  struct sockaddr_storage copied;
+  socklen_t copied_len;
+  sfu_packet_t *queued;
+  assert(sfu_net_test_pending_at(net, SFU_NET_PRIORITY_CONTROL, 0, &queued, &copied, &copied_len));
+  assert(queued == &packets[2] && ((struct sockaddr_in *)&copied)->sin_port == first.sin_port);
+  assert(sfu_net_test_pending_at(net, SFU_NET_PRIORITY_CONTROL, 1, &queued, &copied, &copied_len));
+  assert(((struct sockaddr_in *)&copied)->sin_port == second.sin_port);
+  assert(sfu_net_outstanding_sends(net) == 66);
+  assert(sfu_net_cancel(net) == 66);
+  assert(sfu_net_outstanding_sends(net) == 0);
+  assert(atomic_load_explicit(&packets[0].refcount, memory_order_relaxed) == 1);
+  assert(atomic_load_explicit(&packets[2].refcount, memory_order_relaxed) == 1);
+  sfu_net_destroy(net);
+}
+
+static void test_selection(void) {
+  sfu_net_send_priority_t input[] = {SFU_NET_PRIORITY_NORMAL, SFU_NET_PRIORITY_CONTROL, SFU_NET_PRIORITY_CONTROL,
+                                     SFU_NET_PRIORITY_CONTROL, SFU_NET_PRIORITY_CONTROL, SFU_NET_PRIORITY_CONTROL,
+                                     SFU_NET_PRIORITY_NORMAL, SFU_NET_PRIORITY_CONTROL};
+  sfu_net_send_priority_t output[8];
+  assert(sfu_net_test_select_priorities(input, 8, output, 8) == 8);
+  sfu_net_send_priority_t expected[] = {SFU_NET_PRIORITY_CONTROL, SFU_NET_PRIORITY_CONTROL, SFU_NET_PRIORITY_CONTROL,
+                                        SFU_NET_PRIORITY_CONTROL, SFU_NET_PRIORITY_NORMAL, SFU_NET_PRIORITY_CONTROL,
+                                        SFU_NET_PRIORITY_CONTROL, SFU_NET_PRIORITY_NORMAL};
+  assert(memcmp(output, expected, sizeof(expected)) == 0);
+}
+
 static void test_multi_queue_helpers(void) {
   assert(sfu_af_xdp_frames_per_queue(16384, 8) == 2048);
   assert(sfu_af_xdp_frames_per_queue(16384, 3) == 4096);
@@ -93,6 +140,8 @@ static void test_multi_queue_helpers(void) {
 int main(void) {
   test_create_and_validation();
   test_enqueue_and_queue_full();
+  test_priority_queue();
+  test_selection();
   test_multi_queue_helpers();
   printf("test_af_xdp_net: OK\n");
   return 0;

@@ -122,10 +122,19 @@ static const char *const k_metric_names[] = {
     "af_xdp_tx_permanent_failure",
     "af_xdp_tx_ring_backpressure",
     "af_xdp_tx_canceled_shutdown",
-    "io_uring_send_queued",
+    "send_control_accepted",
+    "send_control_queue_full",
+    "send_normal_queue_full",
+    "send_control_dispatched",
+    "send_normal_dispatched",
+    "send_control_bypass",
+    "send_fairness_normal",
+    "send_control_canceled",
+    "send_normal_canceled",
     "io_uring_pending_full",
-    "af_xdp_send_queued",
+    "io_uring_send_queued",
     "af_xdp_pending_full",
+    "af_xdp_send_queued",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };
@@ -186,7 +195,7 @@ size_t sfu_metrics_snapshot(char *buf, size_t cap) {
     needed += (size_t)n;
 
     if (buf && cap > 0 && used + 1 < cap) {
-      size_t space = cap - 1 - used;
+      size_t space = cap - 1 - used; /* leave room for NUL */
       size_t copy = (size_t)n < space ? (size_t)n : space;
       memcpy(buf + used, line, copy);
       used += copy;
