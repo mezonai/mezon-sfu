@@ -454,7 +454,7 @@ ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t c
 
       if (!control) {
         uint64_t remaining_in_frame = state->payload_len - state->payload_read;
-        if (remaining_in_frame > (uint64_t)(cap - 1 - state->msg_len)) {
+        if (state->msg_len >= cap || remaining_in_frame > (uint64_t)(cap - 1 - state->msg_len)) {
           SFU_LOG_WARN("WS: message payload exceeds buffer capacity (%zu)", cap);
           reset_all_state(state);
           errno = EPROTO;
