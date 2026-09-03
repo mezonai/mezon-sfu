@@ -7,10 +7,36 @@
 
 #define SFU_WS_PREFETCH_CAP 4096
 
+typedef enum sfu_ws_frame_state { SFU_WS_STATE_HEADER = 0, SFU_WS_STATE_EXT_LEN, SFU_WS_STATE_MASK, SFU_WS_STATE_PAYLOAD } sfu_ws_frame_state_t;
+
 typedef struct sfu_ws_read_state {
   uint8_t prefetched[SFU_WS_PREFETCH_CAP];
   size_t prefetched_offset;
   size_t prefetched_len;
+
+  sfu_ws_frame_state_t frame_state;
+  uint8_t hdr[2];
+  size_t hdr_bytes;
+
+  uint8_t ext_len_buf[8];
+  size_t ext_len_needed;
+  size_t ext_len_bytes;
+
+  uint8_t mask_key[4];
+  size_t mask_bytes;
+
+  uint8_t opcode;
+  int fin;
+  int masked;
+  uint64_t payload_len;
+  uint64_t payload_read;
+
+  uint8_t control_payload[125];
+
+  char *msg_buf;
+  size_t msg_cap;
+  size_t msg_len;
+  int fragmented;
 } sfu_ws_read_state_t;
 
 int sfu_ws_handshake(int fd, sfu_ws_read_state_t *state);
