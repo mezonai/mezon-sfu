@@ -351,6 +351,7 @@ int main(void) {
     int fds[2];
     open_pair(fds);
     set_nonblocking(fds[0]);
+    sfu_ws_read_state_free(&state);
     memset(&state, 0, sizeof(state));
 
     const char *payload = "hello nonblocking streaming world!";
@@ -380,6 +381,7 @@ int main(void) {
     int fds[2];
     open_pair(fds);
     set_nonblocking(fds[0]);
+    sfu_ws_read_state_free(&state);
     memset(&state, 0, sizeof(state));
 
     char payload_16bit[300];
@@ -414,6 +416,7 @@ int main(void) {
     int fds[2];
     open_pair(fds);
     set_nonblocking(fds[0]);
+    sfu_ws_read_state_free(&state);
     memset(&state, 0, sizeof(state));
 
     const uint8_t mask1[4] = {1, 2, 3, 4};
@@ -464,25 +467,68 @@ int main(void) {
     int fds[2];
     open_pair(fds);
     set_nonblocking(fds[0]);
+    sfu_ws_read_state_free(&state);
     memset(&state, 0, sizeof(state));
 
     const uint8_t mask[4] = {0x55, 0x66, 0x77, 0x88};
     uint8_t frame[64];
-    (void)build_masked_frame(frame, 0, 0x1, "partial_msg", 11, mask);
+    size_t frame_len = build_masked_frame(frame, 1, 0x1, "partial_msg", 11, mask);
     assert(write(fds[1], frame, 5) == 5);
 
     char buf1[64];
     assert(sfu_ws_recv_text(fds[0], &state, buf1, sizeof(buf1)) == -1);
     assert(errno == EAGAIN || errno == EWOULDBLOCK);
 
+    assert(write(fds[1], frame + 5, frame_len - 5) == (ssize_t)(frame_len - 5));
     char buf2[64];
-    assert(sfu_ws_recv_text(fds[0], &state, buf2, sizeof(buf2)) == -1);
-    assert(errno == EINVAL);
+    assert(sfu_ws_recv_text(fds[0], &state, buf2, sizeof(buf2)) == 11);
+    assert(strcmp(buf2, "partial_msg") == 0);
 
+    sfu_ws_read_state_free(&state);
     close(fds[0]);
     close(fds[1]);
   }
 
+  {
+    int a[2];
+    int b[2];
+    open_pair(a);
+    open_pair(b);
+    set_nonblocking(a[0]);
+    set_nonblocking(b[0]);
+    sfu_ws_read_state_t state_a = {0};
+    sfu_ws_read_state_t state_b = {0};
+
+    const uint8_t mask[4] = {0x01, 0x02, 0x03, 0x04};
+    const char *long_msg = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const char *short_msg = "BBBBBBBBBB";
+    uint8_t frame_a[256];
+    size_t len_a = build_masked_frame(frame_a, 1, 0x1, long_msg, strlen(long_msg), mask);
+    uint8_t frame_b[256];
+    size_t len_b = build_masked_frame(frame_b, 1, 0x1, short_msg, strlen(short_msg), mask);
+
+    char shared[128];
+    assert(write(a[1], frame_a, 20) == 20);
+    assert(sfu_ws_recv_text(a[0], &state_a, shared, sizeof(shared)) == -1);
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+
+    assert(write(b[1], frame_b, len_b) == (ssize_t)len_b);
+    assert(sfu_ws_recv_text(b[0], &state_b, shared, sizeof(shared)) == (ssize_t)strlen(short_msg));
+    assert(strcmp(shared, short_msg) == 0);
+
+    assert(write(a[1], frame_a + 20, len_a - 20) == (ssize_t)(len_a - 20));
+    assert(sfu_ws_recv_text(a[0], &state_a, shared, sizeof(shared)) == (ssize_t)strlen(long_msg));
+    assert(strcmp(shared, long_msg) == 0);
+
+    sfu_ws_read_state_free(&state_a);
+    sfu_ws_read_state_free(&state_b);
+    close(a[0]);
+    close(a[1]);
+    close(b[0]);
+    close(b[1]);
+  }
+
+  sfu_ws_read_state_free(&state);
   printf("test_ws_handshake: OK\n");
   return 0;
 }

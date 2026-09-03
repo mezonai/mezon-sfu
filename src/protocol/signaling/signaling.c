@@ -1024,6 +1024,7 @@ static void finish_client_close(sfu_client_conn_t *c) {
     close(c->fd);
     c->fd = -1;
   }
+  sfu_ws_read_state_free(&c->ws_read);
   SFU_FREE(c);
 }
 

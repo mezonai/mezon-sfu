@@ -45,6 +45,8 @@ ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t c
 
 int sfu_ws_read_state_has_pending(const sfu_ws_read_state_t *state);
 
+void sfu_ws_read_state_free(sfu_ws_read_state_t *state);
+
 int sfu_ws_send_text(int fd, const char *data, size_t len);
 int sfu_ws_send_close(int fd, uint16_t code, const char *reason, size_t reason_len);
 
