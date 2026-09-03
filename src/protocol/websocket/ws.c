@@ -14,6 +14,7 @@
 
 #define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_HANDSHAKE_BUF_CAP 4096
+#define WS_MSG_INITIAL_CAP 16384
 #define WS_SEND_LOCK_COUNT 256
 
 static pthread_mutex_t g_ws_send_locks[WS_SEND_LOCK_COUNT];
@@ -232,10 +233,35 @@ static void reset_current_frame(sfu_ws_read_state_t *state) {
 
 static void reset_all_state(sfu_ws_read_state_t *state) {
   reset_current_frame(state);
-  state->msg_buf = NULL;
-  state->msg_cap = 0;
   state->msg_len = 0;
   state->fragmented = 0;
+}
+
+void sfu_ws_read_state_free(sfu_ws_read_state_t *state) {
+  if (!state) {
+    return;
+  }
+  reset_all_state(state);
+  free(state->msg_buf);
+  state->msg_buf = NULL;
+  state->msg_cap = 0;
+}
+
+static int ensure_msg_capacity(sfu_ws_read_state_t *state, size_t needed) {
+  if (needed <= state->msg_cap) {
+    return 1;
+  }
+  size_t next = state->msg_cap ? state->msg_cap : WS_MSG_INITIAL_CAP;
+  while (next < needed) {
+    next *= 2;
+  }
+  char *grown = realloc(state->msg_buf, next);
+  if (!grown) {
+    return 0;
+  }
+  state->msg_buf = grown;
+  state->msg_cap = next;
+  return 1;
 }
 
 static int send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t len) {
@@ -293,15 +319,6 @@ ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t c
     return -1;
   }
   errno = 0;
-
-  if (!state->msg_buf) {
-    state->msg_buf = buf;
-    state->msg_cap = cap;
-  } else if (state->msg_buf != buf || state->msg_cap != cap) {
-    reset_all_state(state);
-    errno = EINVAL;
-    return -1;
-  }
 
   for (;;) {
     if (state->frame_state == SFU_WS_STATE_HEADER) {
@@ -437,10 +454,17 @@ ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t c
 
       if (!control) {
         uint64_t remaining_in_frame = state->payload_len - state->payload_read;
-        if (remaining_in_frame > (uint64_t)(state->msg_cap - 1 - state->msg_len)) {
-          SFU_LOG_WARN("WS: message payload exceeds buffer capacity (%zu)", state->msg_cap);
+        if (state->msg_len >= cap || remaining_in_frame > (uint64_t)(cap - 1 - state->msg_len)) {
+          SFU_LOG_WARN("WS: message payload exceeds buffer capacity (%zu)", cap);
           reset_all_state(state);
           errno = EPROTO;
+          return -1;
+        }
+        size_t needed = state->msg_len + (size_t)remaining_in_frame + 1;
+        if (!ensure_msg_capacity(state, needed)) {
+          SFU_LOG_WARN("WS: message buffer allocation failed (%zu bytes)", needed);
+          reset_all_state(state);
+          errno = ENOMEM;
           return -1;
         }
       }
@@ -512,7 +536,8 @@ ssize_t sfu_ws_recv_text(int fd, sfu_ws_read_state_t *state, char *buf, size_t c
 
         if (is_fin) {
           size_t final_len = state->msg_len;
-          state->msg_buf[final_len] = '\0';
+          memcpy(buf, state->msg_buf, final_len);
+          buf[final_len] = '\0';
           reset_all_state(state);
           return (ssize_t)final_len;
         } else {

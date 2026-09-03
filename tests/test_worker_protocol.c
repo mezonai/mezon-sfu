@@ -566,17 +566,16 @@ static void test_audience_pli_routes_to_source_publisher(void) {
   kf_fixture_init(&f);
 
   /* Rebuild the graph exactly like production: audience is marked before add,
-   * so it subscribes to the speaker and owns a dormant audio-only PTT source slot. */
+   * so it subscribes to the speaker and publisher fanout reaches audience.
+   * Speaker does not allocate reverse slots for audience until PTT / promotion. */
   room_remove_peer(&f.room, f.base.session);
   atomic_store_explicit(&f.base.session->is_audience, true, memory_order_release);
   room_add_peer(&f.room, f.base.session);
   sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(f.publisher);
-  assert(subscriptions != NULL && subscriptions->count == 1);
-  assert((*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).subscriber == f.base.session);
-  assert((*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).has_audio);
-  assert(!(*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).has_video);
-  assert(!(*sfu_receiver_snapshot_nth(subscriptions, 0, NULL)).has_screen);
-  sfu_subscriptions_snapshot_release(subscriptions);
+  assert(subscriptions == NULL || subscriptions->count == 0);
+  if (subscriptions != NULL) {
+    sfu_subscriptions_snapshot_release(subscriptions);
+  }
   sfu_fanout_bundle_t *fanout = sfu_session_fanout_acquire(f.publisher);
   assert(fanout != NULL && fanout->count == 1 && sfu_fanout_bundle_find_peer(fanout, f.base.session, NULL) != NULL);
   sfu_fanout_bundle_release(fanout);
