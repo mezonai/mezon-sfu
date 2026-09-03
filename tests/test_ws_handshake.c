@@ -490,6 +490,35 @@ int main(void) {
   }
 
   {
+    int fds[2];
+    open_pair(fds);
+    set_nonblocking(fds[0]);
+    sfu_ws_read_state_free(&state);
+    memset(&state, 0, sizeof(state));
+
+    const uint8_t mask[4] = {0x55, 0x66, 0x77, 0x88};
+    char payload[101];
+    memset(payload, 'C', sizeof(payload) - 1);
+    payload[sizeof(payload) - 1] = '\0';
+    uint8_t frame[256];
+    size_t frame_len = build_masked_frame(frame, 1, 0x1, payload, strlen(payload), mask);
+    assert(write(fds[1], frame, 80) == 80);
+
+    char large_buf[128];
+    assert(sfu_ws_recv_text(fds[0], &state, large_buf, sizeof(large_buf)) == -1);
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+
+    assert(write(fds[1], frame + 80, frame_len - 80) == (ssize_t)(frame_len - 80));
+    char small_buf[64];
+    assert(sfu_ws_recv_text(fds[0], &state, small_buf, sizeof(small_buf)) == -1);
+    assert(errno == EPROTO);
+
+    sfu_ws_read_state_free(&state);
+    close(fds[0]);
+    close(fds[1]);
+  }
+
+  {
     int a[2];
     int b[2];
     open_pair(a);

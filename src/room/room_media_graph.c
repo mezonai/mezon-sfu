@@ -324,12 +324,19 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
     }
   }
 
+  bool peer_is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
   for (uint32_t i = 0; i < target_count; i++) {
-    if (!sfu_session_remote_slot_reserve(targets[i], peer->user_id, peer->peer_id, &target_slots[i], &target_generations[i])) {
-      result = SFU_ROOM_ADMISSION_CAPACITY;
-      goto out;
+    target_slots[i] = UINT32_MAX;
+    target_generations[i] = 0;
+    peer_slots[i] = UINT32_MAX;
+    peer_generations[i] = 0;
+    if (!peer_is_audience) {
+      if (!sfu_session_remote_slot_reserve(targets[i], peer->user_id, peer->peer_id, &target_slots[i], &target_generations[i])) {
+        result = SFU_ROOM_ADMISSION_CAPACITY;
+        goto out;
+      }
+      reservations[reservation_count++] = (sfu_slot_reservation_t){targets[i], target_slots[i], target_generations[i]};
     }
-    reservations[reservation_count++] = (sfu_slot_reservation_t){targets[i], target_slots[i], target_generations[i]};
     if (!sfu_session_remote_slot_reserve(peer, targets[i]->user_id, targets[i]->peer_id, &peer_slots[i], &peer_generations[i])) {
       result = SFU_ROOM_ADMISSION_CAPACITY;
       goto out;
@@ -356,9 +363,11 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
   }
 
   for (uint32_t i = 0; i < target_count; i++) {
-    target_receivers[i] = snapshot_build_at(targets[i], peer, target_slots[i], target_generations[i]);
-    if (!target_receivers[i]) {
-      goto out;
+    if (!peer_is_audience) {
+      target_receivers[i] = snapshot_build_at(targets[i], peer, target_slots[i], target_generations[i]);
+      if (!target_receivers[i]) {
+        goto out;
+      }
     }
     sfu_receiver_entry_t peer_entry = {0};
     peer_entry.remote_slot = peer_slots[i];
@@ -371,10 +380,12 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
     if (!target_fanouts[i]) {
       goto out;
     }
-    sfu_fanout_route_t route;
-    uint8_t eligibility;
-    if (!fanout_route_fill_from(&route, &eligibility, peer, targets[i], target_receivers[i]) || !sfu_fanout_bundle_set(peer_fanout, i, &route, eligibility)) {
-      goto out;
+    if (!peer_is_audience) {
+      sfu_fanout_route_t route;
+      uint8_t eligibility;
+      if (!fanout_route_fill_from(&route, &eligibility, peer, targets[i], target_receivers[i]) || !sfu_fanout_bundle_set(peer_fanout, i, &route, eligibility)) {
+        goto out;
+      }
     }
   }
 
@@ -388,7 +399,6 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
     }
   }
 
-  bool peer_is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
   event->member_count = target_count + 1;
   membership_capture_member(&event->members[0], peer, NULL);
   event->recipient_count = target_count + 1;
@@ -397,16 +407,16 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
       (sfu_membership_recipient_t){.session = peer, .fd = peer->fd, .remote_slot = UINT32_MAX, .send_snapshot = true, .renegotiate = target_count > 0};
   for (uint32_t i = 0; i < target_count; i++) {
     const sfu_receiver_entry_t *joiner_entry = sfu_receiver_snapshot_at(peer_receivers, peer_slots[i]);
-    const sfu_receiver_entry_t *recipient_entry = sfu_receiver_snapshot_at(target_receivers[i], target_slots[i]);
+    const sfu_receiver_entry_t *recipient_entry = target_receivers[i] ? sfu_receiver_snapshot_at(target_receivers[i], target_slots[i]) : NULL;
     membership_capture_member(&event->members[i + 1], targets[i], joiner_entry);
     atomic_fetch_add_explicit(&targets[i]->refcount, 1, memory_order_relaxed);
     event->recipients[i + 1] = (sfu_membership_recipient_t){.session = targets[i],
                                                             .fd = targets[i]->fd,
-                                                            .mid_audio = sfu_remote_slot_first_mid(recipient_entry->remote_slot),
-                                                            .mid_video = sfu_remote_slot_first_mid(recipient_entry->remote_slot) + 1,
-                                                            .mid_screen = sfu_remote_slot_first_mid(recipient_entry->remote_slot) + 2,
-                                                            .remote_slot = recipient_entry->remote_slot,
-                                                            .assignment_generation = recipient_entry->assignment_generation,
+                                                            .mid_audio = recipient_entry ? sfu_remote_slot_first_mid(recipient_entry->remote_slot) : 0,
+                                                            .mid_video = recipient_entry ? sfu_remote_slot_first_mid(recipient_entry->remote_slot) + 1 : 0,
+                                                            .mid_screen = recipient_entry ? sfu_remote_slot_first_mid(recipient_entry->remote_slot) + 2 : 0,
+                                                            .remote_slot = recipient_entry ? recipient_entry->remote_slot : UINT32_MAX,
+                                                            .assignment_generation = recipient_entry ? recipient_entry->assignment_generation : 0,
                                                             .send_delta = true,
                                                             .renegotiate = !peer_is_audience};
   }
@@ -418,8 +428,10 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
   prepared = true;
   uint32_t room_slot = room->free_slots[room->free_count - 1];
   for (uint32_t i = 0; i < target_count; i++) {
-    snapshot_replace(targets[i], target_receivers[i], &deferred);
-    target_receivers[i] = NULL;
+    if (target_receivers[i]) {
+      snapshot_replace(targets[i], target_receivers[i], &deferred);
+      target_receivers[i] = NULL;
+    }
     fanout_replace(targets[i], target_fanouts[i], &deferred);
     target_fanouts[i] = NULL;
   }
@@ -487,6 +499,33 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     return false;
   }
 
+  sfu_slot_reservation_t lazy_reservations[SFU_ROOM_MAX_PEERS];
+  uint32_t lazy_res_count = 0;
+
+  if (!is_audience) {
+    for (uint32_t i = 0; i < room->peer_capacity; i++) {
+      sfu_peer_session_t *other = room->peers[i];
+      if (!other || other == peer || !sfu_session_accepts_work(other)) {
+        continue;
+      }
+      sfu_receiver_snapshot_t *before = sfu_session_subscriptions_acquire(other);
+      uint32_t slot = snapshot_find(before, peer);
+      sfu_subscriptions_snapshot_release(before);
+      if (slot == UINT32_MAX) {
+        uint32_t new_slot;
+        uint64_t new_gen;
+        if (!sfu_session_remote_slot_reserve(other, peer->user_id, peer->peer_id, &new_slot, &new_gen)) {
+          for (uint32_t r = lazy_res_count; r > 0; r--) {
+            sfu_session_remote_slot_retire(lazy_reservations[r - 1].owner, lazy_reservations[r - 1].slot, lazy_reservations[r - 1].generation);
+          }
+          pthread_mutex_unlock(&room->lock);
+          return false;
+        }
+        lazy_reservations[lazy_res_count++] = (sfu_slot_reservation_t){other, new_slot, new_gen};
+      }
+    }
+  }
+
   atomic_store_explicit(&peer->is_audience, is_audience, memory_order_release);
   atomic_store_explicit(&peer->media.ptt_active, false, memory_order_release);
   if (is_audience) {
@@ -529,16 +568,29 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
       if (snap) {
         snapshot_replace(other, snap, &deferred);
       }
-      sfu_fanout_bundle_t *fanout = fanout_change(peer, other, false);
+      sfu_fanout_bundle_t *fanout = fanout_change_from(peer, other, false, snap);
       if (fanout) {
         fanout_replace(peer, fanout, &deferred);
       }
     } else {
-      sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, peer);
+      sfu_receiver_snapshot_t *snap = NULL;
+      sfu_receiver_snapshot_t *before = sfu_session_subscriptions_acquire(other);
+      uint32_t slot = snapshot_find(before, peer);
+      sfu_subscriptions_snapshot_release(before);
+      if (slot != UINT32_MAX) {
+        snap = snapshot_refresh_entry(other, peer);
+      } else {
+        for (uint32_t r = 0; r < lazy_res_count; r++) {
+          if (lazy_reservations[r].owner == other) {
+            snap = snapshot_build_at(other, peer, lazy_reservations[r].slot, lazy_reservations[r].generation);
+            break;
+          }
+        }
+      }
       if (snap) {
         snapshot_replace(other, snap, &deferred);
       }
-      sfu_fanout_bundle_t *fanout = fanout_change(peer, other, false);
+      sfu_fanout_bundle_t *fanout = fanout_change_from(peer, other, false, snap);
       if (fanout) {
         fanout_replace(peer, fanout, &deferred);
       }
@@ -630,15 +682,13 @@ void room_remove_peer_membership_locked(sfu_room_t *room, sfu_peer_session_t *pe
     uint32_t retired_slot = UINT32_MAX;
     uint64_t retired_generation = 0;
     sfu_receiver_snapshot_t *snap = snapshot_build_without(other, peer, &retired_slot, &retired_generation);
-    if (!snap) {
-      SFU_LOG_ERROR("room %" PRIu64 ": failed to remove peer %u from peer %u receivers; clearing root", room->room_id, peer->peer_id, other->peer_id);
+    if (snap) {
+      snapshot_replace(other, snap, &deferred);
     }
-    snapshot_replace(other, snap, &deferred);
     sfu_fanout_bundle_t *fanout = fanout_change(other, peer, true);
-    if (!fanout) {
-      SFU_LOG_ERROR("room %" PRIu64 ": failed to remove peer %u from peer %u fanout; clearing root", room->room_id, peer->peer_id, other->peer_id);
+    if (fanout) {
+      fanout_replace(other, fanout, &deferred);
     }
-    fanout_replace(other, fanout, &deferred);
     if (retired_slot != UINT32_MAX && !sfu_session_remote_slot_retire(other, retired_slot, retired_generation)) {
       SFU_LOG_ERROR("room %" PRIu64 ": failed to retire peer %u slot %u on peer %u", room->room_id, peer->peer_id, retired_slot, other->peer_id);
     }
@@ -703,47 +753,163 @@ void room_remove_peer(sfu_room_t *room, sfu_peer_session_t *peer) {
   pthread_mutex_unlock(&peer->membership_lock);
 }
 
+static bool room_refresh_peer_streams_locked(sfu_room_t *room, sfu_peer_session_t *updated_peer, sfu_deferred_reclaim_t *deferred,
+                                             sfu_peer_session_t **renegotiate, uint32_t *renegotiate_count) {
+  uint32_t updated_slot = updated_peer->room_slot;
+  if (updated_peer->room != room || !sfu_session_accepts_work(updated_peer) || updated_slot >= room->peer_capacity || !room->occupied[updated_slot] ||
+      room->peers[updated_slot] != updated_peer) {
+    return false;
+  }
+
+  sfu_slot_reservation_t lazy_reservations[SFU_ROOM_MAX_PEERS];
+  uint32_t lazy_res_count = 0;
+  bool is_aud = atomic_load_explicit(&updated_peer->is_audience, memory_order_acquire);
+  bool ptt = atomic_load_explicit(&updated_peer->media.ptt_active, memory_order_acquire);
+  bool should_publish = !is_aud || ptt;
+
+  if (should_publish) {
+    for (uint32_t i = 0; i < room->peer_capacity; i++) {
+      sfu_peer_session_t *other = room->peers[i];
+      if (!other || other == updated_peer || !sfu_session_accepts_work(other)) {
+        continue;
+      }
+      sfu_receiver_snapshot_t *before = sfu_session_subscriptions_acquire(other);
+      uint32_t slot = snapshot_find(before, updated_peer);
+      sfu_subscriptions_snapshot_release(before);
+      if (slot == UINT32_MAX) {
+        uint32_t new_slot;
+        uint64_t new_gen;
+        if (!sfu_session_remote_slot_reserve(other, updated_peer->user_id, updated_peer->peer_id, &new_slot, &new_gen)) {
+          for (uint32_t r = lazy_res_count; r > 0; r--) {
+            sfu_session_remote_slot_retire(lazy_reservations[r - 1].owner, lazy_reservations[r - 1].slot, lazy_reservations[r - 1].generation);
+          }
+          return false;
+        }
+        lazy_reservations[lazy_res_count++] = (sfu_slot_reservation_t){other, new_slot, new_gen};
+      }
+    }
+  }
+
+  for (uint32_t i = 0; i < room->peer_capacity; i++) {
+    sfu_peer_session_t *other = room->peers[i];
+    if (!other || other == updated_peer || !sfu_session_accepts_work(other)) {
+      continue;
+    }
+    sfu_receiver_snapshot_t *before = sfu_session_subscriptions_acquire(other);
+    uint32_t slot = snapshot_find(before, updated_peer);
+    const sfu_receiver_entry_t *old_entry = slot == UINT32_MAX ? NULL : sfu_receiver_snapshot_at(before, slot);
+    sfu_receiver_entry_t old_copy = {0};
+    if (old_entry) {
+      old_copy = *old_entry;
+    }
+
+    sfu_receiver_snapshot_t *snap = NULL;
+    if (slot != UINT32_MAX) {
+      snap = snapshot_refresh_entry(other, updated_peer);
+    } else if (should_publish) {
+      for (uint32_t r = 0; r < lazy_res_count; r++) {
+        if (lazy_reservations[r].owner == other) {
+          snap = snapshot_build_at(other, updated_peer, lazy_reservations[r].slot, lazy_reservations[r].generation);
+          break;
+        }
+      }
+    }
+
+    if (snap) {
+      snapshot_replace(other, snap, deferred);
+    }
+    sfu_fanout_bundle_t *fanout = fanout_change_from(updated_peer, other, false, snap);
+    if (fanout) {
+      fanout_replace(updated_peer, fanout, deferred);
+    }
+    if (old_entry) {
+      const sfu_receiver_entry_t *new_entry = snap ? sfu_receiver_snapshot_find_peer(snap, updated_peer, NULL) : NULL;
+      if (new_entry && receiver_entry_sdp_changed(&old_copy, new_entry) && *renegotiate_count < SFU_ROOM_MAX_PEERS) {
+        atomic_fetch_add_explicit(&other->refcount, 1, memory_order_relaxed);
+        renegotiate[(*renegotiate_count)++] = other;
+      }
+    } else if (snap) {
+      if (*renegotiate_count < SFU_ROOM_MAX_PEERS) {
+        atomic_fetch_add_explicit(&other->refcount, 1, memory_order_relaxed);
+        renegotiate[(*renegotiate_count)++] = other;
+      }
+    }
+    sfu_subscriptions_snapshot_release(before);
+  }
+#ifndef NDEBUG
+  sfu_session_graph_assert_invariants(updated_peer);
+  for (uint32_t i = 0; i < room->peer_capacity; i++) {
+    if (room->occupied[i] && room->peers[i]) {
+      sfu_session_graph_assert_invariants(room->peers[i]);
+    }
+  }
+#endif
+  return true;
+}
+
 bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool active) {
   if (!room || !peer) {
     return false;
   }
 
+  sfu_deferred_reclaim_t deferred;
+  deferred_init(&deferred);
+  sfu_peer_session_t *renegotiate[SFU_ROOM_MAX_PEERS];
+  uint32_t renegotiate_count = 0;
+
   pthread_mutex_lock(&room->lock);
   bool in_room = peer->room == room;
   bool is_audience = atomic_load_explicit(&peer->is_audience, memory_order_acquire);
   bool allowed = in_room && is_audience;
-  pthread_mutex_unlock(&room->lock);
   if (!allowed) {
+    pthread_mutex_unlock(&room->lock);
 #ifdef SFU_DIAG_LOG
     SFU_LOG_WARN("ptt: rejected peer=%u user_id=%" PRId64 " ufrag=%s active=%d in_room=%d is_audience=%d", peer->peer_id,
                  peer->user_id, peer->cold ? peer->cold->ufrag : "", active, in_room, is_audience);
 #endif
-
     return false;
   }
 
-  bool old_active = atomic_exchange_explicit(&peer->media.ptt_active, active, memory_order_acq_rel);
+  bool old_active = atomic_load_explicit(&peer->media.ptt_active, memory_order_acquire);
+  atomic_store_explicit(&peer->media.ptt_active, active, memory_order_release);
   pthread_mutex_lock(&peer->media.lock);
+  bool old_audio_active = peer->media.uplink_audio.active;
   bool audio_active = active && peer->media.uplink_audio.ssrc != 0;
-  bool media_changed = peer->media.uplink_audio.active != audio_active;
   peer->media.uplink_audio.active = audio_active;
 
 #ifdef SFU_DIAG_LOG
   uint32_t uplink_ssrc = peer->media.uplink_audio.ssrc;
 #endif
 
-  if (media_changed) {
+  if (old_audio_active != audio_active) {
     sfu_session_publish_media(peer);
   }
   pthread_mutex_unlock(&peer->media.lock);
 
+  if (!room_refresh_peer_streams_locked(room, peer, &deferred, renegotiate, &renegotiate_count)) {
+    atomic_store_explicit(&peer->media.ptt_active, old_active, memory_order_release);
+    pthread_mutex_lock(&peer->media.lock);
+    peer->media.uplink_audio.active = old_audio_active;
+    if (old_audio_active != audio_active) {
+      sfu_session_publish_media(peer);
+    }
+    pthread_mutex_unlock(&peer->media.lock);
+    pthread_mutex_unlock(&room->lock);
+    deferred_flush(&deferred);
+    return false;
+  }
+
+  pthread_mutex_unlock(&room->lock);
+  deferred_flush(&deferred);
+
 #ifdef SFU_DIAG_LOG
-  SFU_LOG_INFO("ptt: applied peer=%u user_id=%" PRId64 " ufrag=%s active=%d old_active=%d uplink_ssrc=%u audio_active=%d media_changed=%d", peer->peer_id,
-               peer->user_id, peer->cold ? peer->cold->ufrag : "", active, old_active, uplink_ssrc, audio_active, media_changed);
+  SFU_LOG_INFO("ptt: applied peer=%u user_id=%" PRId64 " ufrag=%s active=%d old_active=%d uplink_ssrc=%u audio_active=%d", peer->peer_id,
+               peer->user_id, peer->cold ? peer->cold->ufrag : "", active, old_active, uplink_ssrc, audio_active);
 #endif
 
-  if (old_active != active || media_changed) {
-    room_refresh_peer_streams(room, peer);
+  for (uint32_t i = 0; i < renegotiate_count; i++) {
+    sfu_signaling_trigger_peer_renegotiation(renegotiate[i]);
+    sfu_session_release(renegotiate[i]);
   }
   return true;
 }
@@ -760,49 +926,7 @@ void room_refresh_peer_streams(sfu_room_t *room, sfu_peer_session_t *updated_pee
   uint32_t renegotiate_count = 0;
 
   pthread_mutex_lock(&room->lock);
-  uint32_t updated_slot = updated_peer->room_slot;
-  if (updated_peer->room != room || !sfu_session_accepts_work(updated_peer) || updated_slot >= room->peer_capacity || !room->occupied[updated_slot] ||
-      room->peers[updated_slot] != updated_peer) {
-    pthread_mutex_unlock(&room->lock);
-    return;
-  }
-  for (uint32_t i = 0; i < room->peer_capacity; i++) {
-    sfu_peer_session_t *other = room->peers[i];
-    if (!other || other == updated_peer || !sfu_session_accepts_work(other)) {
-      continue;
-    }
-    sfu_receiver_snapshot_t *before = sfu_session_subscriptions_acquire(other);
-    uint32_t slot = snapshot_find(before, updated_peer);
-    const sfu_receiver_entry_t *old_entry = slot == UINT32_MAX ? NULL : sfu_receiver_snapshot_at(before, slot);
-    sfu_receiver_entry_t old_copy = {0};
-    if (old_entry) {
-      old_copy = *old_entry;
-    }
-    sfu_receiver_snapshot_t *snap = snapshot_refresh_entry(other, updated_peer);
-    if (snap) {
-      snapshot_replace(other, snap, &deferred);
-    }
-    sfu_fanout_bundle_t *fanout = fanout_change(updated_peer, other, false);
-    if (fanout) {
-      fanout_replace(updated_peer, fanout, &deferred);
-    }
-    if (old_entry) {
-      const sfu_receiver_entry_t *new_entry = snap ? sfu_receiver_snapshot_find_peer(snap, updated_peer, NULL) : NULL;
-      if (new_entry && receiver_entry_sdp_changed(&old_copy, new_entry) && renegotiate_count < SFU_ROOM_MAX_PEERS) {
-        atomic_fetch_add_explicit(&other->refcount, 1, memory_order_relaxed);
-        renegotiate[renegotiate_count++] = other;
-      }
-    }
-    sfu_subscriptions_snapshot_release(before);
-  }
-#ifndef NDEBUG
-  sfu_session_graph_assert_invariants(updated_peer);
-  for (uint32_t i = 0; i < room->peer_capacity; i++) {
-    if (room->occupied[i] && room->peers[i]) {
-      sfu_session_graph_assert_invariants(room->peers[i]);
-    }
-  }
-#endif
+  (void)room_refresh_peer_streams_locked(room, updated_peer, &deferred, renegotiate, &renegotiate_count);
   pthread_mutex_unlock(&room->lock);
   deferred_flush(&deferred);
 
