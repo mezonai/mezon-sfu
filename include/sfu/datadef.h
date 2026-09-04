@@ -361,6 +361,7 @@ typedef enum {
   SFU_PTT_DIAG_SRTP_FAIL,
   SFU_PTT_DIAG_GATE_DROP,
   SFU_PTT_DIAG_EMPTY_FANOUT,
+  SFU_PTT_DIAG_GEN_PENDING,
   SFU_PTT_DIAG_ROUTED,
 } sfu_ptt_diag_class_t;
 
@@ -373,6 +374,7 @@ typedef struct sfu_ptt_diag {
   _Atomic uint64_t router_admissions;
   _Atomic uint64_t empty_fanout;
   _Atomic uint64_t route_dispatches;
+  _Atomic uint64_t router_pending_skips;
   _Atomic uint32_t generation;
   _Atomic int64_t activation_ts_us;
   uint64_t baseline_datagrams;
@@ -383,6 +385,7 @@ typedef struct sfu_ptt_diag {
   uint64_t baseline_router_admissions;
   uint64_t baseline_empty_fanout;
   uint64_t baseline_route_dispatches;
+  uint64_t baseline_router_pending_skips;
 } sfu_ptt_diag_t;
 
 static inline sfu_ptt_diag_class_t sfu_ptt_diag_classify(const sfu_ptt_diag_t *d) {
@@ -394,6 +397,8 @@ static inline sfu_ptt_diag_class_t sfu_ptt_diag_classify(const sfu_ptt_diag_t *d
   uint64_t admitted = atomic_load_explicit(&d->router_admissions, memory_order_relaxed) - d->baseline_router_admissions;
   uint64_t dispatched = atomic_load_explicit(&d->route_dispatches, memory_order_relaxed) - d->baseline_route_dispatches;
   if (dispatched > 0) return SFU_PTT_DIAG_ROUTED;
+  uint64_t pending_skips = atomic_load_explicit(&d->router_pending_skips, memory_order_relaxed) - d->baseline_router_pending_skips;
+  if (pending_skips > 0) return SFU_PTT_DIAG_GEN_PENDING;
   uint64_t empty = atomic_load_explicit(&d->empty_fanout, memory_order_relaxed) - d->baseline_empty_fanout;
   if (admitted > 0 || empty > 0) return SFU_PTT_DIAG_EMPTY_FANOUT;
   if (gate > 0) return SFU_PTT_DIAG_GATE_DROP;
@@ -409,6 +414,7 @@ static inline const char *sfu_ptt_diag_class_name(sfu_ptt_diag_class_t c) {
     case SFU_PTT_DIAG_SRTP_FAIL: return "srtp_failure";
     case SFU_PTT_DIAG_GATE_DROP: return "ingress_gate";
     case SFU_PTT_DIAG_EMPTY_FANOUT: return "empty_fanout";
+    case SFU_PTT_DIAG_GEN_PENDING: return "gen_pending";
     case SFU_PTT_DIAG_ROUTED: return "routed";
     default: return "unknown";
   }
@@ -437,6 +443,8 @@ typedef struct {
   _Atomic bool audio_send_negotiated;
   _Atomic bool video_send_negotiated;
   _Atomic bool screen_send_negotiated;
+  _Atomic bool screen_send_negotiated_pending;
+  _Atomic bool screen_keyframe_recovery_pending;
   _Atomic bool visible;
   _Atomic bool is_mute;
   _Atomic bool uplink_ssrc_dirty;

@@ -224,6 +224,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   const sfu_fanout_route_t *entry;
 #ifdef SFU_DIAG_LOG
   uint32_t audio_dispatched = 0;
+  uint32_t audio_skipped_pending = 0;
   uint32_t routed = 0;
   static _Atomic uint32_t dispatch_logs;
   uint32_t dispatch_n = 0;
@@ -237,6 +238,20 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   while ((entry = sfu_fanout_iter_next(&iter, NULL)) != NULL) {
 #ifdef SFU_DIAG_LOG
     routed++;
+#endif
+    if (!sfu_session_remote_slot_authorized(entry->subscriber, entry->remote_slot, entry->assignment_generation)) {
+      sfu_metric_inc("router_assignment_pending");
+#ifdef SFU_DIAG_LOG
+      if (kind == SFU_MEDIA_AUDIO) {
+        audio_skipped_pending++;
+      }
+      if (log_dispatch) {
+        diag.generation_zero++;
+      }
+#endif
+      continue;
+    }
+#ifdef SFU_DIAG_LOG
     if (kind == SFU_MEDIA_AUDIO) {
       audio_dispatched++;
     }
@@ -303,6 +318,8 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   if (kind == SFU_MEDIA_AUDIO) {
     if (audio_dispatched > 0) {
       atomic_fetch_add_explicit(&sender_session->media.ptt_diag.route_dispatches, 1, memory_order_relaxed);
+    } else if (audio_skipped_pending > 0) {
+      atomic_fetch_add_explicit(&sender_session->media.ptt_diag.router_pending_skips, 1, memory_order_relaxed);
     } else {
       atomic_fetch_add_explicit(&sender_session->media.ptt_diag.empty_fanout, 1, memory_order_relaxed);
     }

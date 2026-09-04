@@ -915,6 +915,28 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
                                                         : atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire);
   bool learned = false;
   if (!send_negotiated) {
+    if (m.source == SFU_MEDIA_SCREEN &&
+        !is_audience &&
+        atomic_load_explicit(&sender_session->media.screen_enabled, memory_order_acquire) &&
+        atomic_load_explicit(&sender_session->media.screen_send_negotiated_pending, memory_order_acquire)) {
+      pthread_mutex_lock(&sender_session->media.lock);
+      if (m.rtp.ssrc != 0 && sender_session->media.screen.ssrc != m.rtp.ssrc) {
+        sender_session->media.screen.ssrc = m.rtp.ssrc;
+        learned = true;
+      }
+      if (!atomic_load_explicit(&sender_session->media.screen_rtp_observed, memory_order_acquire)) {
+        atomic_store_explicit(&sender_session->media.screen_rtp_observed, true, memory_order_release);
+        learned = true;
+      }
+      if (learned) {
+        sfu_session_publish_media(sender_session);
+      }
+      pthread_mutex_unlock(&sender_session->media.lock);
+      pthread_mutex_unlock(&sender_session->ingress_lock);
+      sfu_worker_release_packet(w, pkt);
+      sfu_session_release(sender_session);
+      return;
+    }
     sfu_metric_inc("unnegotiated_rtp_drop");
 #ifdef SFU_DIAG_LOG
     if (m.is_audio) {
@@ -1033,6 +1055,11 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (learned) {
     atomic_store_explicit(&sender_session->media.uplink_ssrc_dirty, true, memory_order_release);
+  }
+  if (m.source == SFU_MEDIA_SCREEN && !is_rtx &&
+      atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) &&
+      atomic_exchange_explicit(&sender_session->media.screen_keyframe_recovery_pending, true, memory_order_acq_rel) == false) {
+    sfu_worker_request_keyframe_throttled_for_source(w, sender_session, m.source);
   }
 #ifdef SFU_DIAG_LOG
   if (m.source == SFU_MEDIA_SCREEN && !is_rtx) {

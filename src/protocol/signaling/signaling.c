@@ -1712,7 +1712,10 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
   }
   if (requested && requested_changed && !screen_negotiated) {
     SFU_LOG_INFO("signaling: screen share requires sender negotiation ufrag=%s peer_id=%u", c->client_ufrag, session->peer_id);
+    atomic_store_explicit(&session->media.screen_send_negotiated_pending, true, memory_order_release);
     sfu_signaling_trigger_peer_renegotiation(session);
+  } else if (!requested) {
+    atomic_store_explicit(&session->media.screen_send_negotiated_pending, false, memory_order_release);
   }
 
   sfu_session_release(session);

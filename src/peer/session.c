@@ -1474,6 +1474,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->media.audio_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.video_send_negotiated, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.screen_send_negotiated, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.screen_send_negotiated_pending, false, memory_order_relaxed);
+  atomic_store_explicit(&s->media.screen_keyframe_recovery_pending, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.visible, true, memory_order_relaxed);
 
   /* Initialize the seqlock-protected media snapshot to match the zeroed transceivers. */
@@ -1679,6 +1681,7 @@ bool sfu_session_begin_close(sfu_session_table_t *t, sfu_peer_session_t *s) {
 
   atomic_store_explicit(&s->lifecycle, SFU_SESSION_LIFECYCLE_CLOSING, memory_order_release);
   atomic_store_explicit(&s->accepts_work, false, memory_order_release);
+  atomic_store_explicit(&s->media.screen_send_negotiated_pending, false, memory_order_release);
 
   uint32_t idx = table_member_index(t, s);
   if (idx != UINT32_MAX) {
@@ -1870,7 +1873,13 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
     atomic_store_explicit(&session->media.video_send_negotiated, answer->video_sends && !answer->is_audience, memory_order_release);
   }
   if (answer->screen_section_present) {
-    atomic_store_explicit(&session->media.screen_send_negotiated, answer->screen_sends && !answer->is_audience, memory_order_release);
+    bool new_screen_neg = answer->screen_sends && !answer->is_audience;
+    atomic_store_explicit(&session->media.screen_send_negotiated, new_screen_neg, memory_order_release);
+    if (new_screen_neg) {
+      atomic_store_explicit(&session->media.screen_send_negotiated_pending, false, memory_order_release);
+    } else if (answer->is_audience) {
+      atomic_store_explicit(&session->media.screen_send_negotiated_pending, false, memory_order_release);
+    }
   }
 
   uint32_t audio_ssrc = 0;

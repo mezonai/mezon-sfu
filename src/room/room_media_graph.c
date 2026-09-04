@@ -921,6 +921,7 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
     d->baseline_router_admissions = atomic_load_explicit(&d->router_admissions, memory_order_relaxed);
     d->baseline_empty_fanout = atomic_load_explicit(&d->empty_fanout, memory_order_relaxed);
     d->baseline_route_dispatches = atomic_load_explicit(&d->route_dispatches, memory_order_relaxed);
+    d->baseline_router_pending_skips = atomic_load_explicit(&d->router_pending_skips, memory_order_relaxed);
   } else if (!active && old_active) {
     sfu_ptt_diag_t *d = &peer->media.ptt_diag;
     int64_t activation_ts = atomic_load_explicit(&d->activation_ts_us, memory_order_relaxed);
@@ -934,15 +935,16 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
     uint64_t delta_admitted = atomic_load_explicit(&d->router_admissions, memory_order_relaxed) - d->baseline_router_admissions;
     uint64_t delta_empty = atomic_load_explicit(&d->empty_fanout, memory_order_relaxed) - d->baseline_empty_fanout;
     uint64_t delta_dispatched = atomic_load_explicit(&d->route_dispatches, memory_order_relaxed) - d->baseline_route_dispatches;
+    uint64_t delta_pending = atomic_load_explicit(&d->router_pending_skips, memory_order_relaxed) - d->baseline_router_pending_skips;
     sfu_ptt_diag_class_t cls = sfu_ptt_diag_classify(d);
     uint32_t gen = atomic_load_explicit(&d->generation, memory_order_relaxed);
     bool audio_negotiated = atomic_load_explicit(&peer->media.audio_send_negotiated, memory_order_relaxed);
     SFU_LOG_WARN("ptt_diag: peer=%u user_id=%" PRId64 " ufrag=%s gen=%u elapsed_us=%" PRId64
                  " audio_negotiated=%d class=%s"
                  " datagrams=%" PRIu64 " srtp_ok=%" PRIu64 " srtp_fail=%" PRIu64 " audio=%" PRIu64 " gate_drops=%" PRIu64 " admitted=%" PRIu64
-                 " empty_fanout=%" PRIu64 " dispatched=%" PRIu64,
+                 " empty_fanout=%" PRIu64 " dispatched=%" PRIu64 " pending_skips=%" PRIu64,
                  peer->peer_id, peer->user_id, peer->cold ? peer->cold->ufrag : "", gen, elapsed_us, audio_negotiated, sfu_ptt_diag_class_name(cls),
-                 delta_datagrams, delta_srtp_ok, delta_srtp_fail, delta_audio, delta_gate, delta_admitted, delta_empty, delta_dispatched);
+                 delta_datagrams, delta_srtp_ok, delta_srtp_fail, delta_audio, delta_gate, delta_admitted, delta_empty, delta_dispatched, delta_pending);
   }
 #endif
 
