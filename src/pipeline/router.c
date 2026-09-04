@@ -223,6 +223,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   sfu_fanout_iter_init(&iter, bundle, kind);
   const sfu_fanout_route_t *entry;
 #ifdef SFU_DIAG_LOG
+  uint32_t audio_dispatched = 0;
   uint32_t routed = 0;
   static _Atomic uint32_t dispatch_logs;
   uint32_t dispatch_n = 0;
@@ -236,6 +237,9 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   while ((entry = sfu_fanout_iter_next(&iter, NULL)) != NULL) {
 #ifdef SFU_DIAG_LOG
     routed++;
+    if (kind == SFU_MEDIA_AUDIO) {
+      audio_dispatched++;
+    }
     if (log_dispatch) {
       diag.recipients++;
     }
@@ -293,6 +297,14 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     if (n == 0 || (n & 127u) == 0) {
       uint32_t stored = bundle ? bundle->count : 0;
       SFU_LOG_WARN("router: empty fanout n=%u peer=%u kind=%d stored=%u", n + 1, sender_session->peer_id, (int)kind, stored);
+    }
+  }
+
+  if (kind == SFU_MEDIA_AUDIO) {
+    if (audio_dispatched > 0) {
+      atomic_fetch_add_explicit(&sender_session->media.ptt_diag.route_dispatches, 1, memory_order_relaxed);
+    } else {
+      atomic_fetch_add_explicit(&sender_session->media.ptt_diag.empty_fanout, 1, memory_order_relaxed);
     }
   }
 #endif

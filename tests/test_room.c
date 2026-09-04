@@ -3,6 +3,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room.h"
@@ -1273,6 +1274,113 @@ static void test_audience_join_renegotiation_suppression(void) {
   sfu_room_destroy(&room);
 }
 
+#ifdef SFU_DIAG_LOG
+static void test_ptt_diag_generation_baselines_and_classification(void) {
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 4) == 0);
+
+  sfu_peer_session_t *speaker = mock_session("spk-diag");
+  speaker->media.uplink_audio.ssrc = 1111;
+  sfu_peer_session_t *audience = mock_session("aud-diag");
+  audience->media.uplink_audio.ssrc = 7777;
+  audience->media.uplink_audio.active = false;
+  audience->media.uplink_video.active = false;
+  atomic_store(&audience->media.audio_send_negotiated, true);
+  atomic_store(&audience->is_audience, true);
+
+  room_add_peer(&room, speaker);
+  room_add_peer(&room, audience);
+
+  sfu_ptt_diag_t *d = &audience->media.ptt_diag;
+
+  /* Before any PTT activation, generation is 0 and classification is NO_INGRESS */
+  assert(atomic_load_explicit(&d->generation, memory_order_relaxed) == 0);
+  assert(sfu_ptt_diag_classify(d) == SFU_PTT_DIAG_NO_INGRESS);
+
+  /* Activate PTT: false→true */
+  assert(room_set_peer_ptt_active(&room, audience, true));
+  assert(atomic_load_explicit(&d->generation, memory_order_relaxed) == 1);
+  int64_t ts1 = atomic_load_explicit(&d->activation_ts_us, memory_order_relaxed);
+  assert(ts1 > 0);
+
+  /* Baselines should match current (zero) counters */
+  assert(d->baseline_datagrams == 0);
+  assert(d->baseline_srtp_ok == 0);
+  assert(d->baseline_route_dispatches == 0);
+
+  /* Simulate ingress incrementing counters (as media worker would) */
+  atomic_fetch_add_explicit(&d->datagrams, 10, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->srtp_ok, 8, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->srtp_fail, 2, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->audio_packets, 8, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->router_admissions, 8, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->route_dispatches, 8, memory_order_relaxed);
+
+  /* With route_dispatches > 0, classification should be ROUTED */
+  assert(sfu_ptt_diag_classify(d) == SFU_PTT_DIAG_ROUTED);
+
+  /* Deactivate PTT: true→false (emits summary log) */
+  assert(room_set_peer_ptt_active(&room, audience, false));
+
+  /* Repeated deactivation is no-op (old_active==false already) */
+  assert(room_set_peer_ptt_active(&room, audience, false));
+
+  /* Re-activate: generation increments to 2, baselines capture current values */
+  assert(room_set_peer_ptt_active(&room, audience, true));
+  assert(atomic_load_explicit(&d->generation, memory_order_relaxed) == 2);
+  assert(d->baseline_datagrams == 10);
+  assert(d->baseline_srtp_ok == 8);
+  assert(d->baseline_route_dispatches == 8);
+
+  /* No new activity since re-activation → classification should be NO_INGRESS */
+  assert(sfu_ptt_diag_classify(d) == SFU_PTT_DIAG_NO_INGRESS);
+
+  /* Simulate only SRTP failures in this window */
+  atomic_fetch_add_explicit(&d->datagrams, 5, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->srtp_fail, 5, memory_order_relaxed);
+  assert(sfu_ptt_diag_classify(d) == SFU_PTT_DIAG_SRTP_FAIL);
+
+  /* Deactivate */
+  assert(room_set_peer_ptt_active(&room, audience, false));
+
+  /* Re-activate for gate-drop test */
+  assert(room_set_peer_ptt_active(&room, audience, true));
+  assert(atomic_load_explicit(&d->generation, memory_order_relaxed) == 3);
+  atomic_fetch_add_explicit(&d->datagrams, 4, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->srtp_ok, 4, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->audio_packets, 4, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->audio_gate_drops, 4, memory_order_relaxed);
+  assert(sfu_ptt_diag_classify(d) == SFU_PTT_DIAG_GATE_DROP);
+
+  assert(room_set_peer_ptt_active(&room, audience, false));
+
+  /* Re-activate for empty-fanout test */
+  assert(room_set_peer_ptt_active(&room, audience, true));
+  assert(atomic_load_explicit(&d->generation, memory_order_relaxed) == 4);
+  atomic_fetch_add_explicit(&d->datagrams, 3, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->srtp_ok, 3, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->audio_packets, 3, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->router_admissions, 3, memory_order_relaxed);
+  atomic_fetch_add_explicit(&d->empty_fanout, 3, memory_order_relaxed);
+  assert(sfu_ptt_diag_classify(d) == SFU_PTT_DIAG_EMPTY_FANOUT);
+
+  assert(room_set_peer_ptt_active(&room, audience, false));
+
+  /* Verify class name strings */
+  assert(strcmp(sfu_ptt_diag_class_name(SFU_PTT_DIAG_NO_INGRESS), "no_matched_ingress") == 0);
+  assert(strcmp(sfu_ptt_diag_class_name(SFU_PTT_DIAG_SRTP_FAIL), "srtp_failure") == 0);
+  assert(strcmp(sfu_ptt_diag_class_name(SFU_PTT_DIAG_GATE_DROP), "ingress_gate") == 0);
+  assert(strcmp(sfu_ptt_diag_class_name(SFU_PTT_DIAG_EMPTY_FANOUT), "empty_fanout") == 0);
+  assert(strcmp(sfu_ptt_diag_class_name(SFU_PTT_DIAG_ROUTED), "routed") == 0);
+
+  room_remove_peer(&room, speaker);
+  room_remove_peer(&room, audience);
+  sfu_session_release(speaker);
+  sfu_session_release(audience);
+  sfu_room_destroy(&room);
+}
+#endif
+
 int main(void) {
   sfu_signaling_membership_test_server_init(&signaling_test_server);
   signaling_test_server.test_auto_drain = true;
@@ -1294,6 +1402,9 @@ int main(void) {
   test_join_rejects_unavailable_signaling_transactionally();
   test_remote_slot_reuse_over_1000_churn();
   test_ptt_and_promotion_rollback_on_capacity_exhaustion();
+#ifdef SFU_DIAG_LOG
+  test_ptt_diag_generation_baselines_and_classification();
+#endif
 
   sfu_signaling_membership_test_server_stop(&signaling_test_server);
   printf("test_room: OK\n");
