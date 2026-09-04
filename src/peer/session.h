@@ -97,7 +97,6 @@ bool sfu_session_remote_slot_reserve(sfu_peer_session_t *session, int64_t publis
 bool sfu_session_remote_slot_retire(sfu_peer_session_t *session, uint32_t slot, uint64_t assignment_generation);
 sfu_remote_offer_manifest_t *sfu_session_remote_offer_capture(sfu_peer_session_t *session);
 bool sfu_session_remote_offer_install(sfu_peer_session_t *session, sfu_remote_offer_manifest_t *manifest);
-sfu_remote_offer_manifest_t *sfu_session_remote_offer_acquire_current(sfu_peer_session_t *session);
 void sfu_remote_offer_manifest_retain(sfu_remote_offer_manifest_t *manifest);
 void sfu_remote_offer_manifest_release(sfu_remote_offer_manifest_t *manifest);
 bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sfu_remote_offer_manifest_t *manifest);

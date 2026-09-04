@@ -3,7 +3,6 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
-#include <string.h>
 #include <time.h>
 
 static _Atomic int g_min_level = SFU_LOG_LEVEL_INFO;

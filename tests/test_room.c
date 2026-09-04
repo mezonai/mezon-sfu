@@ -3,7 +3,6 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room.h"
@@ -70,9 +69,14 @@ static bool fanout_has_peer(sfu_peer_session_t *peer, sfu_peer_session_t *dest) 
 
 static uint32_t route_count(sfu_peer_session_t *peer, sfu_media_kind_t kind) {
   sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(peer);
-  sfu_fanout_iter_t iter; sfu_fanout_iter_init(&iter, bundle, kind);
-  uint32_t n = 0; while (sfu_fanout_iter_next(&iter, NULL)) n++;
-  sfu_fanout_bundle_release(bundle); return n;
+  sfu_fanout_iter_t iter;
+  sfu_fanout_iter_init(&iter, bundle, kind);
+  uint32_t n = 0;
+  while (sfu_fanout_iter_next(&iter, NULL)) {
+    n++;
+  }
+  sfu_fanout_bundle_release(bundle);
+  return n;
 }
 static uint32_t audio_route_count(sfu_peer_session_t *peer) { return route_count(peer, SFU_MEDIA_AUDIO); }
 static uint32_t video_route_count(sfu_peer_session_t *peer) { return route_count(peer, SFU_MEDIA_VIDEO); }
@@ -723,7 +727,9 @@ static void assert_fanout_mids_match_subscriptions(sfu_peer_session_t *publisher
   assert(fanout != NULL && fanout->count == expected_targets);
   for (uint32_t slot = 0; slot < SFU_MAX_REMOTE_SLOTS; slot++) {
     const sfu_fanout_route_t *route = sfu_fanout_bundle_at(fanout, slot);
-    if (!route) continue;
+    if (!route) {
+      continue;
+    }
     sfu_receiver_snapshot_t *subscriptions = sfu_session_subscriptions_acquire(route->subscriber);
     sfu_receiver_snapshot_iter_t subscription_iter;
     sfu_receiver_snapshot_iter_init(&subscription_iter, subscriptions);
@@ -1075,7 +1081,8 @@ static void test_ptt_and_promotion_rollback_on_capacity_exhaustion(void) {
   assert(receiver_count(audience) == 2);
   assert(fanout_target_count(audience) == 0);
   for (uint32_t i = 1; i < SFU_MAX_REMOTE_SLOTS; i++) {
-    uint32_t slot; uint64_t gen;
+    uint32_t slot;
+    uint64_t gen;
     assert(sfu_session_remote_slot_reserve(speaker2, 200000 + i, 200000 + i, &slot, &gen));
   }
   assert(sfu_session_remote_slot_high_water(speaker2) == SFU_MAX_REMOTE_SLOTS);
@@ -1243,13 +1250,19 @@ static void test_audience_join_renegotiation_suppression(void) {
 
   room_remove_peer(&room, speaker_c);
   sfu_membership_event_t *leave_c = sfu_signaling_membership_test_pop(&signaling_test_server);
-  if (leave_c) sfu_membership_event_release(leave_c);
+  if (leave_c) {
+    sfu_membership_event_release(leave_c);
+  }
   room_remove_peer(&room, audience_b);
   sfu_membership_event_t *leave_b = sfu_signaling_membership_test_pop(&signaling_test_server);
-  if (leave_b) sfu_membership_event_release(leave_b);
+  if (leave_b) {
+    sfu_membership_event_release(leave_b);
+  }
   room_remove_peer(&room, speaker_a);
   sfu_membership_event_t *leave_a = sfu_signaling_membership_test_pop(&signaling_test_server);
-  if (leave_a) sfu_membership_event_release(leave_a);
+  if (leave_a) {
+    sfu_membership_event_release(leave_a);
+  }
 
   assert(sfu_signaling_membership_test_pop(&signaling_test_server) == NULL);
   signaling_test_server.test_auto_drain = true;

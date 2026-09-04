@@ -211,6 +211,7 @@ void sfu_signaling_renegotiation_test_server_init(sfu_signaling_server_t *s);
 void sfu_signaling_renegotiation_test_server_stop(sfu_signaling_server_t *s);
 sfu_peer_session_t *sfu_signaling_renegotiation_test_pop(sfu_signaling_server_t *s);
 uint32_t sfu_signaling_renegotiation_test_count(sfu_signaling_server_t *s);
+sfu_remote_offer_manifest_t *sfu_signaling_capture_offer_manifest(sfu_peer_session_t *session);
 void sfu_signaling_notify_media_state(sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);

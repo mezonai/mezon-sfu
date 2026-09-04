@@ -917,17 +917,6 @@ bool sfu_session_remote_offer_install(sfu_peer_session_t *session, sfu_remote_of
   return true;
 }
 
-sfu_remote_offer_manifest_t *sfu_session_remote_offer_acquire_current(sfu_peer_session_t *session) {
-  if (!session) {
-    return NULL;
-  }
-  pthread_mutex_lock(&session->graph.lock);
-  sfu_remote_offer_manifest_t *manifest = session->graph.remote_slots.offered_manifest;
-  sfu_remote_offer_manifest_retain(manifest);
-  pthread_mutex_unlock(&session->graph.lock);
-  return manifest;
-}
-
 bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sfu_remote_offer_manifest_t *manifest) {
   if (!session || !manifest || manifest->offer_generation == 0) {
     return false;
