@@ -177,6 +177,40 @@ static void test_remote_slot_reconciliation_is_idempotent(void) {
   sfu_signaling_renegotiation_test_server_stop(&server);
 }
 
+static void test_remote_slot_follow_up_captures_fresh_manifest(void) {
+  sfu_peer_session_t peer;
+  init_renegotiation_peer(&peer);
+
+  uint32_t old_slot;
+  uint64_t old_generation;
+  assert(sfu_session_remote_slot_reserve(&peer, 4001, 41, &old_slot, &old_generation));
+  sfu_remote_offer_manifest_t *first = sfu_signaling_capture_offer_manifest(&peer);
+  assert(first != NULL);
+  uint64_t first_offer_generation = first->offer_generation;
+  assert(first_offer_generation != 0);
+  assert(first->assignment_generations[old_slot] == old_generation);
+  assert(sfu_session_remote_offer_install(&peer, first));
+
+  uint32_t replacement_slot;
+  uint64_t replacement_generation;
+  assert(sfu_session_remote_slot_reserve(&peer, 4002, 42, &replacement_slot, &replacement_generation));
+  assert(!sfu_session_remote_slot_authorized(&peer, replacement_slot, replacement_generation));
+  assert(sfu_session_remote_offer_apply_answer(&peer, first));
+  sfu_remote_offer_manifest_release(first);
+
+  sfu_remote_offer_manifest_t *follow_up = sfu_signaling_capture_offer_manifest(&peer);
+  assert(follow_up != NULL);
+  assert(follow_up->offer_generation > first_offer_generation);
+  assert(follow_up->assignment_generations[replacement_slot] == replacement_generation);
+  assert(sfu_session_remote_offer_install(&peer, follow_up));
+  assert(sfu_session_remote_offer_apply_answer(&peer, follow_up));
+  sfu_remote_offer_manifest_release(follow_up);
+  assert(sfu_session_remote_slot_authorized(&peer, replacement_slot, replacement_generation));
+  assert(!sfu_session_remote_slots_pending(&peer, NULL, NULL));
+
+  destroy_renegotiation_peer(&peer);
+}
+
 static void test_renegotiation_queue_reclaims_closing_sessions(void) {
   sfu_signaling_server_t server;
   sfu_signaling_renegotiation_test_server_init(&server);
@@ -287,6 +321,7 @@ int main(void) {
   test_membership_queue_blocks_until_capacity_returns();
   test_shutdown_wakes_blocked_membership_producer();
   test_remote_slot_reconciliation_is_idempotent();
+  test_remote_slot_follow_up_captures_fresh_manifest();
   test_renegotiation_queue_reclaims_closing_sessions();
   test_concurrent_schedule_and_pop_preserves_single_identity();
   printf("test_signaling_membership: OK\n");

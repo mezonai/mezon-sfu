@@ -902,7 +902,7 @@ static void test_egress_rejects_new_generation_before_answer(void) {
   sub->media.uplink_video.rtx_payload_type = 0;
   sfu_session_publish_media(sub);
 
-  uint64_t gated_before = sfu_metric_get("egress_mid_not_negotiated");
+  uint64_t gated_before = sfu_metric_get("router_assignment_pending");
 
   uint8_t plain[512];
   size_t plain_len;
@@ -920,10 +920,10 @@ static void test_egress_rejects_new_generation_before_answer(void) {
   pkt->peer_addr_len = f.publisher->cold->addr_len;
   sfu_ingress_process(&f.base.w, pkt);
 
-  /* Nothing forwarded, and the drop is attributed to the negotiation gate. */
+  /* Nothing forwarded; drop caught at router generation gate. */
   gcc_packet_info_t info = {0};
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
-  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+  assert(sfu_metric_get("router_assignment_pending") > gated_before);
 
   kf_fixture_destroy(&f);
 }
@@ -980,10 +980,10 @@ static void test_egress_rejects_old_assignment_generation(void) {
 
   atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[remote_slot], old_generation + 1, memory_order_release);
   gcc_packet_info_t info = {0};
-  uint64_t gated_before = sfu_metric_get("egress_mid_not_negotiated");
+  uint64_t gated_before = sfu_metric_get("router_assignment_pending");
   feed_plain_video(&f, 1100);
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
-  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+  assert(sfu_metric_get("router_assignment_pending") > gated_before);
   atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[remote_slot], old_generation, memory_order_release);
 
   kf_fixture_destroy(&f);
@@ -1010,10 +1010,10 @@ static void test_egress_rejects_new_assignment_before_answer(void) {
   sfu_session_publish_fanout(f.publisher, updated);
 
   gcc_packet_info_t info = {0};
-  uint64_t gated_before = sfu_metric_get("egress_mid_not_negotiated");
+  uint64_t gated_before = sfu_metric_get("router_assignment_pending");
   feed_plain_video(&f, 1101);
   assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
-  assert(sfu_metric_get("egress_mid_not_negotiated") > gated_before);
+  assert(sfu_metric_get("router_assignment_pending") > gated_before);
 
   kf_fixture_destroy(&f);
 }

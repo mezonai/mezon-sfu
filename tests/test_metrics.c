@@ -9,12 +9,12 @@
 #define INCS_PER_THREAD 10000
 #define COUNTER_NAME "msg_trunc_drop"
 
-#define EXPECT(cond)                                                     \
-  do {                                                                   \
-    if (!(cond)) {                                                       \
-      fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);    \
-      exit(1);                                                           \
-    }                                                                    \
+#define EXPECT(cond)                                                  \
+  do {                                                                \
+    if (!(cond)) {                                                    \
+      fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+      exit(1);                                                        \
+    }                                                                 \
   } while (0)
 
 static void *inc_worker(void *arg) {
@@ -40,7 +40,7 @@ static void test_inc_get(void) {
   sfu_metric_inc("msg_trunc_drop");
   sfu_metric_inc("json_reject");
   sfu_metric_inc("not_a_real_counter"); /* no-op */
-  sfu_metric_inc(NULL);                  /* no-op */
+  sfu_metric_inc(NULL);                 /* no-op */
 
   EXPECT(sfu_metric_get("msg_trunc_drop") == 2);
   EXPECT(sfu_metric_get("json_reject") == 1);
@@ -123,11 +123,42 @@ static void test_multithreaded_inc(void) {
   EXPECT(sfu_metric_get("json_reject") == 0);
 }
 
+static void test_previously_missing_metrics_registered(void) {
+  sfu_metrics_init();
+
+  static const char *const formerly_missing[] = {
+      "camera_disabled_rtp_drop", "screen_disabled_rtp_drop", "ingress_roc_recovered", "mid_write_fail", "ptt_inactive_audio_drop",
+  };
+  enum { N = sizeof(formerly_missing) / sizeof(formerly_missing[0]) };
+
+  for (int i = 0; i < N; i++) {
+    EXPECT(sfu_metric_get(formerly_missing[i]) == 0);
+    sfu_metric_inc(formerly_missing[i]);
+    EXPECT(sfu_metric_get(formerly_missing[i]) == 1);
+  }
+
+  /* Verify they appear in snapshots. */
+  char buf[16384];
+  size_t n = sfu_metrics_snapshot(buf, sizeof(buf));
+  EXPECT(n > 0);
+  EXPECT(n < sizeof(buf));
+  for (int i = 0; i < N; i++) {
+    char expected[128];
+    snprintf(expected, sizeof(expected), "%s 1\n", formerly_missing[i]);
+    EXPECT(strstr(buf, expected) != NULL);
+  }
+
+  /* Unknown names remain no-ops. */
+  sfu_metric_inc("totally_fake_counter");
+  EXPECT(sfu_metric_get("totally_fake_counter") == 0);
+}
+
 int main(void) {
   test_init_and_get();
   test_inc_get();
   test_snapshot_format();
   test_multithreaded_inc();
+  test_previously_missing_metrics_registered();
 
   printf("test_metrics: OK\n");
   return 0;
