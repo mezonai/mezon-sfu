@@ -617,6 +617,10 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
+#ifdef SFU_DIAG_LOG
+  atomic_fetch_add_explicit(&sender_session->media.ptt_diag.datagrams, 1, memory_order_relaxed);
+#endif
+
   bool is_rtcp = sfu_rtp_is_rtcp(pkt->data, pkt->len);
 
   int plain_len = (int)pkt->len;
@@ -758,6 +762,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   if (unprotect_status != srtp_err_status_ok) {
+#ifdef SFU_DIAG_LOG
+    atomic_fetch_add_explicit(&sender_session->media.ptt_diag.srtp_fail, 1, memory_order_relaxed);
+#endif
     sfu_metric_inc(is_rtcp ? "ingress_unprotect_fail_rtcp" : "ingress_unprotect_fail_rtp");
     if (unprotect_status == srtp_err_status_auth_fail) {
       sfu_metric_inc("ingress_unprotect_auth_fail");
@@ -827,6 +834,10 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
+#ifdef SFU_DIAG_LOG
+  atomic_fetch_add_explicit(&sender_session->media.ptt_diag.srtp_ok, 1, memory_order_relaxed);
+#endif
+
   if (is_rtcp) {
     handle_rtcp(w, sender_session, pkt);
     pthread_mutex_unlock(&sender_session->ingress_lock);
@@ -849,10 +860,20 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint8_t in_pt = m.rtp.payload_type;
   m.source = classify_media_source(&pt_msnap, &m.rtp);
   m.is_audio = m.source == SFU_MEDIA_AUDIO;
+#ifdef SFU_DIAG_LOG
+  if (m.is_audio) {
+    atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_packets, 1, memory_order_relaxed);
+  }
+#endif
   bool is_audience = atomic_load_explicit(&sender_session->is_audience, memory_order_acquire);
   bool ptt_active = atomic_load_explicit(&sender_session->media.ptt_active, memory_order_acquire);
   if (is_audience && (!m.is_audio || !ptt_active)) {
     sfu_metric_inc(m.is_audio ? "ptt_inactive_audio_drop" : "audience_rtp_drop");
+#ifdef SFU_DIAG_LOG
+    if (m.is_audio) {
+      atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
+    }
+#endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
@@ -860,6 +881,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (m.is_audio && atomic_load_explicit(&sender_session->media.is_mute, memory_order_acquire)) {
     sfu_metric_inc("muted_audio_drop");
+#ifdef SFU_DIAG_LOG
+    atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
+#endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
@@ -891,16 +915,43 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
                                                         : atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire);
   bool learned = false;
   if (!send_negotiated) {
+    if (m.source == SFU_MEDIA_SCREEN &&
+        !is_audience &&
+        atomic_load_explicit(&sender_session->media.screen_enabled, memory_order_acquire) &&
+        atomic_load_explicit(&sender_session->media.screen_send_negotiated_pending, memory_order_acquire)) {
+      pthread_mutex_lock(&sender_session->media.lock);
+      if (m.rtp.ssrc != 0 && sender_session->media.screen.ssrc != m.rtp.ssrc) {
+        sender_session->media.screen.ssrc = m.rtp.ssrc;
+        learned = true;
+      }
+      if (!atomic_load_explicit(&sender_session->media.screen_rtp_observed, memory_order_acquire)) {
+        atomic_store_explicit(&sender_session->media.screen_rtp_observed, true, memory_order_release);
+        learned = true;
+      }
+      if (learned) {
+        sfu_session_publish_media(sender_session);
+      }
+      pthread_mutex_unlock(&sender_session->media.lock);
+      pthread_mutex_unlock(&sender_session->ingress_lock);
+      sfu_worker_release_packet(w, pkt);
+      sfu_session_release(sender_session);
+      return;
+    }
     sfu_metric_inc("unnegotiated_rtp_drop");
 #ifdef SFU_DIAG_LOG
-    static _Atomic uint32_t unnegotiated_drop_logs;
-    uint32_t n = atomic_fetch_add_explicit(&unnegotiated_drop_logs, 1, memory_order_relaxed);
-    if (n == 0 || (n & 127u) == 0) {
-      SFU_LOG_WARN("ingress: unnegotiated_rtp_drop n=%u peer=%u ufrag=%s source=%d pt=%u ssrc=%" PRIu32 " audio_neg=%d video_neg=%d screen_neg=%d audience=%d",
-                   n + 1, sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, in_pt, m.rtp.ssrc,
-                   atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire) ? 1 : 0,
-                   atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire) ? 1 : 0,
-                   atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) ? 1 : 0, is_audience ? 1 : 0);
+    if (m.is_audio) {
+      atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
+    }
+    {
+      static _Atomic uint32_t unnegotiated_drop_logs;
+      uint32_t n = atomic_fetch_add_explicit(&unnegotiated_drop_logs, 1, memory_order_relaxed);
+      if (n == 0 || (n & 127u) == 0) {
+        SFU_LOG_WARN("ingress: unnegotiated_rtp_drop n=%u peer=%u ufrag=%s source=%d pt=%u ssrc=%" PRIu32 " audio_neg=%d video_neg=%d screen_neg=%d audience=%d",
+                     n + 1, sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, in_pt, m.rtp.ssrc,
+                     atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire) ? 1 : 0,
+                     atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire) ? 1 : 0,
+                     atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) ? 1 : 0, is_audience ? 1 : 0);
+      }
     }
 #endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
@@ -932,6 +983,9 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (is_audience && !atomic_load_explicit(&sender_session->media.ptt_active, memory_order_acquire)) {
     sfu_metric_inc("ptt_inactive_audio_drop");
+#ifdef SFU_DIAG_LOG
+    atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
+#endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
     sfu_worker_release_packet(w, pkt);
     sfu_session_release(sender_session);
@@ -1002,6 +1056,11 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (learned) {
     atomic_store_explicit(&sender_session->media.uplink_ssrc_dirty, true, memory_order_release);
   }
+  if (m.source == SFU_MEDIA_SCREEN && !is_rtx &&
+      atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) &&
+      atomic_exchange_explicit(&sender_session->media.screen_keyframe_recovery_pending, true, memory_order_acq_rel) == false) {
+    sfu_worker_request_keyframe_throttled_for_source(w, sender_session, m.source);
+  }
 #ifdef SFU_DIAG_LOG
   if (m.source == SFU_MEDIA_SCREEN && !is_rtx) {
     record_screen_ingress_packet(sender_session, pkt, &m.rtp);
@@ -1017,6 +1076,11 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
+  if (m.is_audio) {
+#ifdef SFU_DIAG_LOG
+    atomic_fetch_add_explicit(&sender_session->media.ptt_diag.router_admissions, 1, memory_order_relaxed);
+#endif
+  }
   sfu_router_forward(w, sender_session, &m);
 
   if (atomic_exchange_explicit(&sender_session->media.uplink_ssrc_dirty, false, memory_order_acq_rel) && sender_session->room) {

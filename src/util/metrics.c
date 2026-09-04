@@ -135,6 +135,12 @@ static const char *const k_metric_names[] = {
     "io_uring_send_queued",
     "af_xdp_pending_full",
     "af_xdp_send_queued",
+    "camera_disabled_rtp_drop",
+    "screen_disabled_rtp_drop",
+    "ingress_roc_recovered",
+    "mid_write_fail",
+    "ptt_inactive_audio_drop",
+    "router_assignment_pending",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

@@ -341,13 +341,12 @@ static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_video_cod
   return true;
 }
 
+sfu_remote_offer_manifest_t *sfu_signaling_capture_offer_manifest(sfu_peer_session_t *session) {
+  return sfu_session_remote_offer_capture(session);
+}
+
 static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s, uint64_t *offer_generation) {
-  bool captured = false;
-  sfu_remote_offer_manifest_t *manifest = sfu_session_remote_offer_acquire_current(session);
-  if (!manifest) {
-    manifest = sfu_session_remote_offer_capture(session);
-    captured = true;
-  }
+  sfu_remote_offer_manifest_t *manifest = sfu_signaling_capture_offer_manifest(session);
   if (!manifest) {
     SFU_LOG_WARN("signaling: failed to capture immutable offer manifest (fd=%d)", fd);
     return false;
@@ -364,7 +363,7 @@ static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signal
     sfu_remote_offer_manifest_release(manifest);
     return false;
   }
-  if (captured && !sfu_session_remote_offer_install(session, manifest)) {
+  if (!sfu_session_remote_offer_install(session, manifest)) {
     SFU_LOG_WARN("signaling: failed to install sent offer manifest (fd=%d generation=%" PRIu64 ")", fd, manifest->offer_generation);
     sfu_remote_offer_manifest_release(manifest);
     return false;
@@ -1713,7 +1712,10 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
   }
   if (requested && requested_changed && !screen_negotiated) {
     SFU_LOG_INFO("signaling: screen share requires sender negotiation ufrag=%s peer_id=%u", c->client_ufrag, session->peer_id);
+    atomic_store_explicit(&session->media.screen_send_negotiated_pending, true, memory_order_release);
     sfu_signaling_trigger_peer_renegotiation(session);
+  } else if (!requested) {
+    atomic_store_explicit(&session->media.screen_send_negotiated_pending, false, memory_order_release);
   }
 
   sfu_session_release(session);
