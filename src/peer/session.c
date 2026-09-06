@@ -901,6 +901,14 @@ bool sfu_session_remote_offer_install(sfu_peer_session_t *session, sfu_remote_of
     pthread_mutex_unlock(&session->graph.lock);
     return false;
   }
+  for (uint32_t i = 0; i < manifest->high_water_slots; i++) {
+    uint64_t offered = manifest->assignment_generations[i];
+    if (offered != 0 &&
+        (table->slots[i].state != SFU_REMOTE_SLOT_ACTIVE || table->slots[i].assignment_generation != offered)) {
+      pthread_mutex_unlock(&session->graph.lock);
+      return false;
+    }
+  }
   for (uint32_t i = 0; i < table->high_water_slots; i++) {
     if (table->slots[i].state == SFU_REMOTE_SLOT_RETIRING && (i >= manifest->high_water_slots || manifest->assignment_generations[i] == 0)) {
       table->slots[i].state = SFU_REMOTE_SLOT_RETIRING_OFFERED;
@@ -1874,6 +1882,10 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   }
   if (answer->screen_section_present) {
     bool new_screen_neg = answer->screen_sends && !answer->is_audience;
+    bool old_screen_neg = atomic_load_explicit(&session->media.screen_send_negotiated, memory_order_acquire);
+    if (new_screen_neg && !old_screen_neg) {
+      atomic_store_explicit(&session->media.screen_keyframe_recovery_pending, false, memory_order_release);
+    }
     atomic_store_explicit(&session->media.screen_send_negotiated, new_screen_neg, memory_order_release);
     if (new_screen_neg) {
       atomic_store_explicit(&session->media.screen_send_negotiated_pending, false, memory_order_release);
