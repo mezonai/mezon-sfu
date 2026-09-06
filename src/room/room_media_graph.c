@@ -533,6 +533,7 @@ bool room_update_peer_role(sfu_room_t *room, sfu_peer_session_t *peer, bool is_a
     atomic_store_explicit(&peer->media.audio_send_negotiated, false, memory_order_release);
     atomic_store_explicit(&peer->media.video_send_negotiated, false, memory_order_release);
     atomic_store_explicit(&peer->media.screen_send_negotiated, false, memory_order_release);
+    atomic_store_explicit(&peer->media.screen_keyframe_recovery_pending, false, memory_order_release);
     atomic_store_explicit(&peer->media.camera_enabled, false, memory_order_release);
     atomic_store_explicit(&peer->media.screen_enabled, false, memory_order_release);
     atomic_store_explicit(&peer->media.camera_rtp_observed, false, memory_order_release);

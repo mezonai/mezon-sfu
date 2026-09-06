@@ -358,13 +358,14 @@ static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signal
     sfu_remote_offer_manifest_release(manifest);
     return false;
   }
-  if (!send_offer_json(fd, s, (size_t)offer_len, manifest->offer_generation)) {
-    SFU_LOG_WARN("signaling: failed to send server-initiated offer over WebSocket (fd=%d)", fd);
+  if (!sfu_session_remote_offer_install(session, manifest)) {
+    SFU_LOG_WARN("signaling: failed to install offer manifest (fd=%d generation=%" PRIu64 ")", fd, manifest->offer_generation);
     sfu_remote_offer_manifest_release(manifest);
     return false;
   }
-  if (!sfu_session_remote_offer_install(session, manifest)) {
-    SFU_LOG_WARN("signaling: failed to install sent offer manifest (fd=%d generation=%" PRIu64 ")", fd, manifest->offer_generation);
+  if (!send_offer_json(fd, s, (size_t)offer_len, manifest->offer_generation)) {
+    SFU_LOG_WARN("signaling: failed to send server-initiated offer over WebSocket (fd=%d)", fd);
+    /* Keep the table reference protecting assignments until retry or teardown. */
     sfu_remote_offer_manifest_release(manifest);
     return false;
   }
@@ -1691,6 +1692,7 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
   bool requested_changed = previous_requested != requested;
   pthread_mutex_lock(&session->media.lock);
   if (!requested) {
+    atomic_store_explicit(&session->media.screen_keyframe_recovery_pending, false, memory_order_release);
     atomic_store_explicit(&session->media.screen_rtp_observed, false, memory_order_release);
   }
   bool effective_changed = sfu_session_recompute_video_activity_locked(session);
