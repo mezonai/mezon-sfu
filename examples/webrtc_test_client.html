@@ -798,6 +798,48 @@
                 for (const mid of mids) peerIdByMid.set(mid, peerId);
             }
 
+            /* The SFU announces a remote publisher's mid ONLY in the SDP offer
+             * (a=mid:N + a=msid:u<user>-p<peer> audio-u<user>-p<peer>).
+             * peer_joined for a PTT-off audience carries mid_audio=0 and
+             * assignment_generation=0, and peer_updated never carries mids, so
+             * the offer is the authoritative source of mid -> peer mapping.
+             * This runs BEFORE setRemoteDescription so that ontrack/resync can
+             * resolve every remote mid to its peer. */
+            function learnMidsFromOffer(sdp) {
+                if (typeof sdp !== "string" || !sdp) return;
+                let curMid = null;
+                for (const raw of sdp.split(/\r?\n/)) {
+                    const line = raw.trim();
+                    const midMatch = line.match(/^a=mid:(\S+)/);
+                    if (midMatch) {
+                        curMid = midMatch[1];
+                        continue;
+                    }
+                    if (curMid == null || isLocalUplinkMid(curMid)) continue;
+                    const msidMatch = line.match(/^a=msid:u(\d+)-p(\d+)(\s|$)/);
+                    if (!msidMatch) continue;
+                    const userId = msidMatch[1];
+                    const peerId = msidMatch[2];
+                    const midNum = Number(curMid);
+                    if (!Number.isInteger(midNum) || midNum < 3) continue;
+                    const slot = Math.floor((midNum - 3) / 3);
+                    const kindInSlot = (midNum - 3) % 3; // 0 audio, 1 camera, 2 screen
+
+                    // Offer is the source of truth: overwrite any stale mapping
+                    // inherited from a previous occupant of this mid.
+                    peerIdByMid.set(String(curMid), peerId);
+
+                    const member = membersByPeerId.get(peerId);
+                    if (!member) continue;
+                    const next = { ...member };
+                    if (kindInSlot === 0) next.mid_audio = midNum;
+                    else if (kindInSlot === 1) next.mid_video = midNum;
+                    else next.mid_screen = midNum;
+                    next.remote_slot = slot;
+                    membersByPeerId.set(peerId, next);
+                }
+            }
+
             function mediaTileId(baseId, mid, trackKind = null, isScreen = false) {
                 const kind = remoteKindFromMid(mid);
                 if (trackKind === "audio" || kind === "audio") return baseId;
@@ -892,7 +934,24 @@
                 const existingMember = membersByPeerId.get(peerId);
                 isSelf = isSelf || !!(existingMember && existingMember.isSelf);
                 const role = member.role || "audience";
-                const mergedMember = { ...existingMember, ...member, role, isSelf };
+
+                // A membership message for a PTT-off audience carries mid_*=0 and
+                // generation=0. Never let those zeros clobber mids we already
+                // learned from an SDP offer (a=msid) — the offer is authoritative.
+                // (remote_slot is intentionally left alone: a valid slot of 0 is a
+                // real publisher slot, and the "unassigned" sentinel the SFU sends is
+                // 4294967295 / UINT32_MAX, not 0.)
+                const restored = { ...member };
+                if (existingMember) {
+                    for (const k of ["mid_audio", "mid_video", "mid_screen"]) {
+                        const incoming = member[k];
+                        const have = existingMember[k];
+                        if ((incoming == null || incoming === 0 || String(incoming) === "0") && have != null && have !== 0 && String(have) !== "0") {
+                            restored[k] = have;
+                        }
+                    }
+                }
+                const mergedMember = { ...existingMember, ...restored, role, isSelf };
                 const oldAssignment = memberAssignment(existingMember);
                 const newAssignment = memberAssignment(mergedMember);
                 if (oldAssignment && (!newAssignment ||
@@ -975,27 +1034,55 @@
              * assignment being retired. Ignore a delayed leave after that slot has
              * been recycled with a newer assignment_generation. */
             function handlePeerLeft(msg) {
-                const assignment = memberAssignment(msg);
                 const peerId = msg.peer_id != null ? String(msg.peer_id) : null;
+                if (!peerId) return;
+
+                // A leaving audience that was mapped from the SDP offer (not from a
+                // membership message) has assignment_generation=0 and no entry in
+                // remoteAssignmentsBySlot. Match on the slot carried by peer_left;
+                // the offending peer still occupies that slot if it was the source
+                // of a live msid, so the tiles and <audio> elements must be removed.
+                const rawSlot = memberSlot(msg);
+                const slot =
+                    rawSlot != null && Number.isInteger(Number(rawSlot)) && Number(rawSlot) >= 0
+                        ? Number(rawSlot)
+                        : null;
+
+                const assignment = memberAssignment(msg);
                 const current = assignment ? remoteAssignmentsBySlot.get(assignment.slot) : null;
                 const assignmentMatches = !!(
-                    assignment && peerId && current &&
+                    assignment && current &&
                     current.peerId === peerId &&
                     current.generation === assignment.generation
                 );
-                if (!assignmentMatches) {
-                    console.log("Ignoring stale/unmapped peer_left", {
-                        peer_id: peerId,
-                        slot: memberSlot(msg),
-                        assignment_generation: msg.assignment_generation,
-                    });
-                    return;
+
+                const mappedMids = new Set();
+                // Mids still owned by this peer, from whichever source taught us them.
+                if (assignmentMatches) {
+                    for (const mid of current.mids) mappedMids.add(String(mid));
+                } else {
+                    for (const [mid, owner] of peerIdByMid.entries()) {
+                        if (owner === peerId) mappedMids.add(String(mid));
+                    }
+                }
+                // If nothing maps this peer to a mid but it does own a slot (SDP path),
+                // reconstruct the mid trio so a ghost tile is still cleaned up.
+                if (mappedMids.size === 0 && slot != null) {
+                    const base = 3 + slot * 3;
+                    mappedMids.add(String(base));
+                    mappedMids.add(String(base + 1));
+                    mappedMids.add(String(base + 2));
                 }
 
                 const member = membersByPeerId.get(peerId);
                 if (member && member.ufrag) peerIdByUfrag.delete(String(member.ufrag));
                 const tileId = member ? memberTileId(member) : "peer-" + peerId;
-                clearMemberMapping(msg);
+                if (assignmentMatches) clearMemberMapping(msg);
+                // Release only the mids that still point at the leaving peer so a
+                // recycled mid already remapped to a new publisher is preserved.
+                for (const mid of mappedMids) {
+                    if (peerIdByMid.get(mid) === peerId) peerIdByMid.delete(mid);
+                }
                 membersByPeerId.delete(peerId);
                 const tileStillUsed = [...membersByPeerId.values()].some((other) => memberTileId(other) === tileId);
                 if (!tileStillUsed) {
@@ -1003,7 +1090,7 @@
                     removeTile(tileId + "-camera");
                     removeTile(tileId + "-screen");
                 }
-                for (const mid of current.mids) {
+                for (const mid of mappedMids) {
                     removeTile("mid-" + mid);
                     document
                         .querySelectorAll(`audio[data-owner="${CSS.escape("mid-" + mid)}"]`)
@@ -1013,9 +1100,10 @@
                 updateParticipantCount(msg.participant_count);
                 console.log("peer_left applied", {
                     peer_id: peerId,
-                    remote_slot: assignment.slot,
-                    assignment_generation: assignment.generation,
-                    mids: current.mids,
+                    remote_slot: slot,
+                    assignment_generation: msg.assignment_generation,
+                    mids: [...mappedMids],
+                    matched_generation: assignmentMatches,
                 });
             }
 
@@ -1086,7 +1174,12 @@
                     const mappedMember = membersByPeerId.get(String(mappedPeerId));
                     if (!mappedMember) continue;
                     const track = t.receiver && t.receiver.track;
-                    if (!track || track.readyState === "ended") continue;
+                    // For video, an ended track means the stream is gone (skip to
+                    // avoid inventing tiles). For audio, the same track object is
+                    // reused across renegotiations and may revive after "ended", so
+                    // still bind it — bindRemoteAudio is idempotent by track.id.
+                    if (!track) continue;
+                    if (track.readyState === "ended" && track.kind !== "audio") continue;
                     const baseId = memberTileId(mappedMember);
                     const id = mediaTileId(baseId, t.mid, track.kind);
                     if (track.kind === "video") {
@@ -1114,25 +1207,41 @@
                             p.avatar.style.display = live ? "none" : "flex";
                         }
                     } else if (track.kind === "audio") {
-                        let audioEl = document.querySelector(
-                            `audio[data-owner="${CSS.escape(id)}"]`
-                        );
-                        if (!audioEl) {
-                            audioEl = document.createElement("audio");
-                            audioEl.autoplay = true;
-                            audioEl.dataset.owner = id;
-                            document.body.appendChild(audioEl);
-                        }
-                        const cur =
-                            audioEl.srcObject && audioEl.srcObject.getAudioTracks
-                                ? audioEl.srcObject.getAudioTracks()[0]
-                                : null;
-                        if (cur !== track) {
-                            audioEl.srcObject = new MediaStream([track]);
-                        }
-                        const ap = audioEl.play();
-                        if (ap && typeof ap.catch === "function") ap.catch(() => {});
+                        // receiver.track is the same object across renegotiations
+                        // (only ssrc changes), so keyed by track.id we reuse the one
+                        // persistent <audio> element and never treat ended as detach.
+                        bindRemoteAudio(id, track);
                     }
+                }
+            }
+
+            /* One persistent <audio> per owner id. Both ontrack and resyncRemoteMedia
+             * funnel through here so a repeated offer can never duplicate the element.
+             * play() rejections are surfaced (autoplay policy is a real symptom, and we
+             * must not swallow it). */
+            function bindRemoteAudio(id, track) {
+                if (!track) return;
+                let audioEl = document.querySelector(
+                    `audio[data-owner="${CSS.escape(id)}"]`
+                );
+                if (!audioEl) {
+                    audioEl = document.createElement("audio");
+                    audioEl.autoplay = true;
+                    audioEl.dataset.owner = id;
+                    document.body.appendChild(audioEl);
+                }
+                const cur =
+                    audioEl.srcObject && audioEl.srcObject.getAudioTracks
+                        ? audioEl.srcObject.getAudioTracks()[0]
+                        : null;
+                if (cur !== track) {
+                    audioEl.srcObject = new MediaStream([track]);
+                }
+                const ap = audioEl.play();
+                if (ap && typeof ap.catch === "function") {
+                    ap.catch((e) => {
+                        console.warn("remote audio play() rejected for owner=" + id, e && e.name);
+                    });
                 }
             }
 
@@ -1148,6 +1257,12 @@
                 isNegotiating = true;
                 while (offer) {
                 try {
+                    // The offer's a=msid is the authoritative mid -> peer mapping;
+                    // learn it BEFORE setRemoteDescription so ontrack can resolve
+                    // every remote mid even for peers whose peer_joined carried
+                    // mid=0 (PTT-off audience) or that we never saw in a snapshot.
+                    learnMidsFromOffer(offer.sdp);
+
                     await pc.setRemoteDescription(
                         new RTCSessionDescription({ type: "offer", sdp: offer.sdp })
                     );
@@ -2178,17 +2293,9 @@ async function applyVideoEncodingParams(pc) {
                                 removeTile(id);
                             });
                         } else if (track.kind === "audio") {
-                            const audioEl = document.createElement("audio");
-                            audioEl.autoplay = true;
-                            audioEl.srcObject = new MediaStream([track]);
-                            audioEl.dataset.owner = id;
-                            document.body.appendChild(audioEl);
-                            const ap = audioEl.play();
-                            if (ap && typeof ap.catch === "function") ap.catch(() => {});
-
-                            track.addEventListener("ended", () => {
-                                audioEl.remove();
-                            });
+                            // Route through the single persistent-element binder so a
+                            // repeated renegotiation can't duplicate the <audio>.
+                            bindRemoteAudio(id, track);
                         }
                     };
 
