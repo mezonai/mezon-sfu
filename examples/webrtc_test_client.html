@@ -371,6 +371,18 @@
                 color: var(--accent);
             }
 
+            #enableAudioBtn {
+                display: none;
+                width: auto;
+                margin-right: 10px;
+                padding: 5px 10px;
+                border-radius: 7px;
+                font-size: 12px;
+                background: var(--warn);
+                color: #11111b;
+            }
+            #enableAudioBtn.show { display: inline-block; }
+
             #statsBtn {
                 background: var(--tile);
                 color: var(--text);
@@ -498,6 +510,13 @@
                     <span id="participantCount"></span>
                 </div>
                 <div id="connState">
+                    <button
+                        id="enableAudioBtn"
+                        onclick="enableRemoteAudio()"
+                        title="Allow remote audio playback"
+                    >
+                        Enable audio
+                    </button>
                     <button
                         id="statsBtn"
                         onclick="toggleStats()"
@@ -1215,6 +1234,42 @@
                 }
             }
 
+            const pendingAudioElements = new Set();
+
+            function setEnableAudioVisible(visible) {
+                const btn = document.getElementById("enableAudioBtn");
+                if (btn) btn.classList.toggle("show", visible);
+            }
+
+            async function playRemoteAudio(audioEl) {
+                try {
+                    await audioEl.play();
+                    pendingAudioElements.delete(audioEl);
+                    if (pendingAudioElements.size === 0) setEnableAudioVisible(false);
+                    return true;
+                } catch (e) {
+                    pendingAudioElements.add(audioEl);
+                    setEnableAudioVisible(true);
+                    console.warn(
+                        "remote audio play() rejected for owner=" + audioEl.dataset.owner,
+                        e && e.name,
+                    );
+                    return false;
+                }
+            }
+
+            async function enableRemoteAudio() {
+                if (audioCtx && audioCtx.state === "suspended") {
+                    try {
+                        await audioCtx.resume();
+                    } catch (e) {
+                        console.warn("AudioContext resume failed", e);
+                    }
+                }
+                const audioElements = document.querySelectorAll("audio[data-owner]");
+                await Promise.all([...audioElements].map(playRemoteAudio));
+            }
+
             /* One persistent <audio> per owner id. Both ontrack and resyncRemoteMedia
              * funnel through here so a repeated offer can never duplicate the element.
              * play() rejections are surfaced (autoplay policy is a real symptom, and we
@@ -1237,12 +1292,7 @@
                 if (cur !== track) {
                     audioEl.srcObject = new MediaStream([track]);
                 }
-                const ap = audioEl.play();
-                if (ap && typeof ap.catch === "function") {
-                    ap.catch((e) => {
-                        console.warn("remote audio play() rejected for owner=" + id, e && e.name);
-                    });
-                }
+                playRemoteAudio(audioEl);
             }
 
             async function handleServerOffer(offer) {
@@ -1704,6 +1754,8 @@
                     pc.close();
                     pc = null;
                 }
+                pendingAudioElements.clear();
+                setEnableAudioVisible(false);
                 remoteAssignmentsBySlot.clear();
                 peerIdByMid.clear();
                 participants.forEach((_, id) => removeTile(id));

@@ -6,6 +6,10 @@ The SFU core is built around a lock-free room execution model. Each room is proc
 
 AF_XDP is the default network backend; io_uring is available as a fallback for environments where AF_XDP isn't supported.
 
+## Live demo
+
+Try a live meeting at [mezon.ai/meet](https://mezon.ai/meet). You must log in to create a meeting.
+
 ## Why mezon-sfu?
 
 Existing SFUs options are capable, but heavy — large dependency trees, runtime overhead, and general-purpose designs that aren't tuned for any one use case. mezon-sfu exists because we needed something different:
