@@ -12,6 +12,7 @@
 #include "net/net.h"
 #include "peer/session.h"
 #include "pipeline/ingress.h"
+#include "pipeline/paced_send.h"
 #include "pipeline/router.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room.h"
@@ -1213,6 +1214,63 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
   kf_fixture_destroy(&f);
 }
 
+static void test_screen_drain_charges_shared_pacer_once(void) {
+  fixture_t f;
+  fixture_init(&f);
+  sfu_peer_session_t *sub = f.session;
+  sfu_pacer_set_rate(&sub->egress.pacer, 1000000, 1000000);
+
+  uint8_t payload[1200] = {0};
+  struct sockaddr_storage dst = sub->cold->addr;
+  sfu_paced_send_metadata_t metadata = {
+      .assignment_generation = 1,
+      .owner_value = sfu_session_owner_value(sub),
+      .transport_generation = atomic_load_explicit(&sub->cold->transport_generation, memory_order_acquire),
+      .address_generation = atomic_load_explicit(&sub->cold->address_generation, memory_order_acquire),
+      .remote_slot = 0,
+  };
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[0], metadata.assignment_generation, memory_order_release);
+  sfu_pacer_reservation_t reservation = {0};
+  assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &reservation));
+  assert(sfu_paced_send_enqueue(&sub->egress.paced_screen, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_BASE, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &reservation, &metadata, 1000000, NULL));
+  int64_t before = sub->egress.pacer.balance_bytes;
+  uint64_t sent_before = sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE];
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000));
+  assert(sub->egress.paced_screen.count == 0);
+  assert(sub->egress.pacer.balance_bytes == before - (int64_t)sizeof(payload));
+  assert(sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE] == sent_before + 1);
+  fixture_destroy(&f);
+}
+
+static void test_screen_base_drains_under_camera_debt(void) {
+  fixture_t f;
+  fixture_init(&f);
+  sfu_peer_session_t *sub = f.session;
+  sfu_pacer_set_rate(&sub->egress.pacer, 1000000, 1000000);
+  sub->egress.pacer.balance_bytes = -sub->egress.pacer.bucket_cap_bytes * 2;
+
+  uint8_t payload[1200] = {0};
+  struct sockaddr_storage dst = sub->cold->addr;
+  sfu_paced_send_metadata_t metadata = {
+      .assignment_generation = 1,
+      .owner_value = sfu_session_owner_value(sub),
+      .transport_generation = atomic_load_explicit(&sub->cold->transport_generation, memory_order_acquire),
+      .address_generation = atomic_load_explicit(&sub->cold->address_generation, memory_order_acquire),
+      .remote_slot = 0,
+  };
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[0], metadata.assignment_generation, memory_order_release);
+  sfu_pacer_reservation_t reservation = {0};
+  assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_TRANSITION, sizeof(payload), false, 1000000, &reservation));
+  assert(sfu_paced_send_enqueue(&sub->egress.paced_screen, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_TRANSITION, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &reservation, &metadata, 1000000, NULL));
+  int64_t before = sub->egress.pacer.balance_bytes;
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000));
+  assert(sub->egress.paced_screen.count == 0);
+  assert(sub->egress.pacer.balance_bytes == before - (int64_t)sizeof(payload));
+  fixture_destroy(&f);
+}
+
 /* CC-16: a subscriber with an armed pacer NACKing at line rate gets only
  * the time-window RTX budget worth of retransmissions; the rest are dropped
  * with the rtx_dropped_budget metric. Without a pacer (no estimate), every
@@ -1686,6 +1744,8 @@ int main(void) {
   test_nack_wrong_stream_misses_cache();
   test_generation_bump_invalidates_cache();
   test_egress_pacer_drops_enhancement_not_audio();
+  test_screen_drain_charges_shared_pacer_once();
+  test_screen_base_drains_under_camera_debt();
   test_nack_line_rate_throttled_by_rtx_budget();
   test_forward_churn_subscriber_disconnect();
   test_visibility_false_stops_forward();

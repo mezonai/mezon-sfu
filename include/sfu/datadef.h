@@ -257,6 +257,7 @@ typedef struct sfu_pacer {
   uint64_t sent[SFU_PACER_CLASS_COUNT];
   int64_t balance_bytes;
   int64_t bucket_cap_bytes;
+  int64_t reserved_bytes;
   int64_t last_refill_us;
   uint64_t dropped_enh;
   uint64_t rtx_dropped_budget;
@@ -279,6 +280,7 @@ typedef struct {
   uint64_t pending_dtls_started_ms;
   uint64_t last_srtp_failure_log_ms;
   _Atomic uint32_t transport_generation;
+  _Atomic uint32_t address_generation;
   uint32_t suppressed_srtp_failures;
   int last_srtp_failure_status;
   bool active_client_random_valid;

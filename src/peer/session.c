@@ -1749,6 +1749,7 @@ bool sfu_session_table_rebind_addr(sfu_session_table_t *t, sfu_peer_session_t *s
   table_remove_addr_hash(t, s, idx);
   memcpy(&s->cold->addr, addr, addr_len);
   s->cold->addr_len = addr_len;
+  atomic_fetch_add_explicit(&s->cold->address_generation, 1, memory_order_release);
   t->addr_index[insert_slot].hash = new_hash;
   t->addr_index[insert_slot].index = idx;
 

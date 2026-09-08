@@ -223,6 +223,63 @@ static void test_rtx_budget_unpaced_when_inactive(void) {
   assert(p.rtx_dropped_budget == 0);
 }
 
+static void test_reservation_commit_and_cancel(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
+  int64_t before = p.balance_bytes;
+  sfu_pacer_reservation_t reservation = {0};
+
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_BASE, 1200, false, 1000000, &reservation));
+  assert(p.balance_bytes == before);
+  assert(p.reserved_bytes == 1200);
+  assert(p.sent[SFU_PACER_CLASS_VIDEO_BASE] == 0);
+  sfu_pacer_cancel(&p, &reservation);
+  assert(p.reserved_bytes == 0);
+  assert(p.balance_bytes == before);
+
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_BASE, 1200, false, 1000000, &reservation));
+  sfu_pacer_commit(&p, &reservation);
+  assert(p.reserved_bytes == 0);
+  assert(p.balance_bytes == before - 1200);
+  assert(p.sent[SFU_PACER_CLASS_VIDEO_BASE] == 1);
+  sfu_pacer_commit(&p, &reservation);
+  assert(p.balance_bytes == before - 1200);
+}
+
+static void test_screen_reservation_makes_camera_enh_yield(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
+  int64_t now = 1000000;
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 16000, false, &now));
+
+  sfu_pacer_reservation_t screen = {0};
+  sfu_pacer_reservation_t camera = {0};
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_BASE, 6000, false, now, &screen));
+  assert(!sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_ENH, 4000, true, now, &camera));
+  sfu_pacer_cancel(&p, &screen);
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_ENH, 4000, true, now, &camera));
+  sfu_pacer_cancel(&p, &camera);
+}
+
+static void test_audio_and_inactive_reservations_bypass_bucket(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_reservation_t reservation = {0};
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, true, 1000000, &reservation));
+  assert(p.reserved_bytes == 0);
+  sfu_pacer_commit(&p, &reservation);
+  assert(p.sent[SFU_PACER_CLASS_VIDEO_ENH] == 1);
+
+  sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
+  int64_t before = p.balance_bytes;
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_AUDIO, 300, false, 1000000, &reservation));
+  sfu_pacer_commit(&p, &reservation);
+  assert(p.balance_bytes == before);
+  assert(p.sent[SFU_PACER_CLASS_AUDIO] == 1);
+}
+
 int main(void) {
   test_inactive_admits_everything();
   test_zero_rate_disables();
@@ -236,6 +293,9 @@ int main(void) {
   test_vp9_l1t1_10fps_burst_cadence();
   test_rtx_budget_window();
   test_rtx_budget_unpaced_when_inactive();
+  test_reservation_commit_and_cancel();
+  test_screen_reservation_makes_camera_enh_yield();
+  test_audio_and_inactive_reservations_bypass_bucket();
   printf("test_pacer: OK\n");
   return 0;
 }

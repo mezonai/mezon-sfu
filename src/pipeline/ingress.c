@@ -388,15 +388,14 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       continue;
     }
 
-    int64_t send_time_us = (int64_t)sfu_now_us();
+    bool twcc_written = false;
+    uint16_t twcc_seq = 0;
     if (sender_session->media.twcc_send_extmap_id != 0) {
-      uint16_t twcc_seq = atomic_fetch_add_explicit(&sender_session->egress.next_twcc_seq, 1, memory_order_relaxed);
+      twcc_seq = atomic_fetch_add_explicit(&sender_session->egress.next_twcc_seq, 1, memory_order_relaxed);
       size_t rewritten_len = rtx_built_len;
       if (sfu_rtp_ext_write_twcc(rtx_enc->data, rtx_built_len, rtx_enc->cap, sender_session->media.twcc_send_extmap_id, twcc_seq, &rewritten_len)) {
         rtx_built_len = rewritten_len;
-        if (sender_session->egress.twcc_history) {
-          sfu_twcc_history_record(sender_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)rtx_built_len);
-        }
+        twcc_written = true;
       } else {
         sfu_metric_inc("twcc_write_fail");
       }
@@ -409,6 +408,9 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     if (protect_status == srtp_err_status_ok) {
       rtx_enc->len = (uint32_t)rtx_enc_len;
       if (sfu_net_send(w->send_net, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len) == 0) {
+        if (twcc_written && sender_session->egress.twcc_history) {
+          sfu_twcc_history_record(sender_session->egress.twcc_history, twcc_seq, (int64_t)sfu_now_us(), (uint32_t)rtx_enc_len);
+        }
         sender_session->egress.diag.rtx_sent++;
         sfu_metric_inc("congestion_rtx_sent");
       }

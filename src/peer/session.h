@@ -166,9 +166,11 @@ static inline void sfu_session_publish_media(sfu_peer_session_t *s) {
 
 #define SFU_SESSION_OWNER_NONE UINT16_MAX
 
-static inline uint16_t sfu_session_owner_worker(const sfu_peer_session_t *s) { return (uint16_t)atomic_load_explicit(&s->worker_owner, memory_order_acquire); }
+static inline uint64_t sfu_session_owner_value(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->worker_owner, memory_order_acquire); }
 
-static inline uint64_t sfu_session_owner_generation(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->worker_owner, memory_order_acquire) >> 16; }
+static inline uint16_t sfu_session_owner_worker(const sfu_peer_session_t *s) { return (uint16_t)sfu_session_owner_value(s); }
+
+static inline uint64_t sfu_session_owner_generation(const sfu_peer_session_t *s) { return sfu_session_owner_value(s) >> 16; }
 
 static inline uint64_t sfu_session_set_owner_worker(sfu_peer_session_t *s, uint16_t worker_id) {
   uint64_t old = atomic_load_explicit(&s->worker_owner, memory_order_relaxed);

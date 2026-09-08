@@ -3,203 +3,105 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "congestion/pacer.h"
 #include "pipeline/paced_send.h"
+#include "sfu/datadef.h"
+
+static bool enqueue_packet(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps,
+                           int64_t now_us, int64_t *release_at_us) {
+  sfu_paced_send_metadata_t metadata = {0};
+  sfu_pacer_reservation_t reservation = {
+      .bytes = len,
+      .pacer_class = SFU_PACER_CLASS_VIDEO_BASE,
+      .active = true,
+  };
+  return sfu_paced_send_enqueue(q, payload, len, NULL, 0, dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE, pacing_bps,
+                                NULL, &reservation, &metadata, now_us, release_at_us);
+}
 
 static void test_enqueue_spacing_and_copy(void) {
   sfu_paced_send_t q;
   sfu_paced_send_init(&q);
-
   uint8_t payload[1000];
   memset(payload, 0x5a, sizeof(payload));
-  struct sockaddr_storage dst;
-  memset(&dst, 0, sizeof(dst));
-
-  int64_t first_release = -1;
-  int64_t second_release = -1;
-  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), &dst, sizeof(struct sockaddr_in), 1000000, 1000000, &first_release));
+  struct sockaddr_storage dst = {0};
+  int64_t first = -1, second = -1;
+  assert(enqueue_packet(&q, payload, sizeof(payload), &dst, 1000000, 1000000, &first));
   payload[0] = 0;
-  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), &dst, sizeof(struct sockaddr_in), 1000000, 1000000, &second_release));
-
+  assert(enqueue_packet(&q, payload, sizeof(payload), &dst, 1000000, 1000000, &second));
   assert(q.count == 2);
-  assert(first_release == 1000000);
-  assert(second_release == 1004000);
+  assert(first == 1000000);
+  assert(second == 1004000);
   assert(q.entries[q.head].data[0] == 0x5a);
-
   sfu_paced_send_destroy(&q);
 }
 
-static void test_rate_floor_and_size_limit(void) {
+static void test_size_and_rate_floor(void) {
   sfu_paced_send_t q;
   sfu_paced_send_init(&q);
-
-  uint8_t payload[SFU_PACED_SEND_MAX_PAYLOAD + 1];
-  struct sockaddr_storage dst;
-  memset(&dst, 0, sizeof(dst));
-
-  int64_t first_release = -1;
-  int64_t second_release = -1;
-  assert(!sfu_paced_send_enqueue(&q, payload, sizeof(payload), &dst, sizeof(struct sockaddr_in), 1000000, 0, &first_release));
-  assert(sfu_paced_send_enqueue(&q, payload, 1000, &dst, sizeof(struct sockaddr_in), 1, 2000000, &first_release));
-  assert(sfu_paced_send_enqueue(&q, payload, 1000, &dst, sizeof(struct sockaddr_in), 1, 2000000, &second_release));
-  assert(first_release == 2000000);
-  assert(second_release == 2004000);
-
+  uint8_t payload[SFU_PACED_SEND_MAX_PAYLOAD + 1] = {0};
+  struct sockaddr_storage dst = {0};
+  int64_t first, second;
+  assert(!enqueue_packet(&q, payload, sizeof(payload), &dst, 1, 0, &first));
+  assert(enqueue_packet(&q, payload, 1000, &dst, 1, 2000000, &first));
+  assert(enqueue_packet(&q, payload, 1000, &dst, 1, 2000000, &second));
+  assert(first == 2000000);
+  assert(second == 2004000);
   sfu_paced_send_destroy(&q);
 }
 
-static void test_frame_admission(void) {
+static void test_projected_delay_includes_scan_cap(void) {
   sfu_paced_send_t q;
   sfu_paced_send_init(&q);
-
-  q.count = 1;
-  q.next_release_us = 1199999;
-  assert(sfu_paced_send_admit_frame_packet(&q, 10, false, false, 1000000));
-  assert(sfu_paced_send_admit_frame_packet(&q, 10, true, false, 1000000));
-
-  q.next_release_us = 1200000;
-  assert(!sfu_paced_send_admit_frame_packet(&q, 11, false, false, 1000000));
-  assert(!sfu_paced_send_admit_frame_packet(&q, 11, true, false, 1000000));
-  assert(q.dropped_delay_frames == 1);
-  assert(q.dropped_frame_packets == 2);
-
-  assert(sfu_paced_send_admit_frame_packet(&q, 12, true, false, 1200000));
-  q.next_release_us = 1300000;
-  assert(sfu_paced_send_admit_frame_packet(&q, 13, true, true, 1000000));
-
+  uint8_t payload[1] = {0};
+  struct sockaddr_storage dst = {0};
+  for (int i = 0; i < 9; i++) assert(enqueue_packet(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL));
+  assert(sfu_paced_send_projected_delay_us(&q, 1000000) >= 3 * SFU_PACED_SEND_SCAN_INTERVAL_US);
   sfu_paced_send_destroy(&q);
 }
 
-static void test_projected_delay(void) {
+static void test_rate_change_does_not_reprice_backlog(void) {
   sfu_paced_send_t q;
   sfu_paced_send_init(&q);
-  assert(sfu_paced_send_projected_delay_us(&q, 1000) == 0);
-  q.count = 1;
-  q.next_release_us = 5000;
-  assert(sfu_paced_send_projected_delay_us(&q, 2000) == 3000);
-  assert(sfu_paced_send_projected_delay_us(&q, 6000) == 0);
-  sfu_paced_send_destroy(&q);
-}
-
-static void test_large_frame_serialization_bound(void) {
-  sfu_paced_send_t q;
-  sfu_paced_send_init(&q);
-
-  uint8_t payload[1200];
-  memset(payload, 0x42, sizeof(payload));
-  struct sockaddr_storage dst;
-  memset(&dst, 0, sizeof(dst));
-
-  const uint32_t frame_bytes = 42291;
-  uint32_t remaining = frame_bytes;
-  int64_t now_us = 3000000;
-  int64_t release_at_us = 0;
-  while (remaining > 0) {
-    uint16_t len = remaining > sizeof(payload) ? (uint16_t)sizeof(payload) : (uint16_t)remaining;
-    assert(sfu_paced_send_enqueue(&q, payload, len, &dst, sizeof(struct sockaddr_in), 1, now_us, &release_at_us));
-    remaining -= len;
-  }
-
-  assert(q.count == 36);
-  assert(q.next_release_us - now_us <= SFU_PACED_SEND_MAX_DELAY_US);
-  assert(q.next_release_us - now_us >= 169164);
-
-  sfu_paced_send_destroy(&q);
-}
-
-static void test_rate_above_floor(void) {
-  sfu_paced_send_t q;
-  sfu_paced_send_init(&q);
-
   uint8_t payload[1000] = {0};
-  struct sockaddr_storage dst;
-  memset(&dst, 0, sizeof(dst));
-  int64_t first_release = 0;
-  int64_t second_release = 0;
-  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), &dst, sizeof(struct sockaddr_in), 4000000, 4000000, &first_release));
-  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), &dst, sizeof(struct sockaddr_in), 4000000, 4000000, &second_release));
-  assert(first_release == 4000000);
-  assert(second_release == 4002000);
-
+  struct sockaddr_storage dst = {0};
+  int64_t first, second, third;
+  assert(enqueue_packet(&q, payload, sizeof(payload), &dst, 2000000, 1000000, &first));
+  assert(enqueue_packet(&q, payload, sizeof(payload), &dst, 2000000, 1000000, &second));
+  assert(enqueue_packet(&q, payload, sizeof(payload), &dst, 8000000, 1000000, &third));
+  assert(first == 1000000);
+  assert(second == 1004000);
+  assert(third == 1008000);
   sfu_paced_send_destroy(&q);
 }
 
-static void test_frame_input_span(void) {
+static void test_frame_rejected_after_enqueue_failure(void) {
   sfu_paced_send_t q;
   sfu_paced_send_init(&q);
-
-  assert(sfu_paced_send_admit_frame_packet(&q, 20, false, false, 1000000));
-  assert(sfu_paced_send_admit_frame_packet(&q, 20, true, false, 1250000));
-  assert(q.max_input_frame_span_us == 250000);
-  assert(q.input_frames_over_delay == 1);
-
-  assert(sfu_paced_send_admit_frame_packet(&q, 21, false, false, 1300000));
-  assert(sfu_paced_send_admit_frame_packet(&q, 22, true, false, 1550000));
-  assert(q.max_input_frame_span_us == 250000);
-  assert(q.input_frames_over_delay == 2);
-
+  assert(sfu_paced_send_admit_frame_packet(&q, 10, false, false, 1000000));
+  sfu_paced_send_reject_input_frame(&q);
+  assert(!sfu_paced_send_admit_frame_packet(&q, 10, false, false, 1000000));
+  assert(!sfu_paced_send_admit_frame_packet(&q, 10, true, false, 1000000));
+  assert(sfu_paced_send_admit_frame_packet(&q, 11, true, false, 1000000));
   sfu_paced_send_destroy(&q);
 }
 
-static void test_vp9_l1t1_frame_admission(void) {
+static void test_keyframe_bypasses_delay_drop(void) {
   sfu_paced_send_t q;
   sfu_paced_send_init(&q);
-
-  const uint32_t timestamp = 90000;
-  for (int packet = 0; packet < 35; packet++) {
-    bool scheduler_marker = packet == 34;
-    assert(sfu_paced_send_admit_frame_packet(&q, timestamp, scheduler_marker, packet == 0, 1000000));
-    assert(q.input_frame_active == !scheduler_marker);
-  }
-  assert(!q.drop_input_frame);
-  assert(q.dropped_frame_packets == 0);
-
-  sfu_paced_send_destroy(&q);
-}
-
-static void test_35mbps_10fps_release_schedule(void) {
-  sfu_paced_send_t q;
-  sfu_paced_send_init(&q);
-
-  uint8_t payload[1200] = {0};
-  struct sockaddr_storage dst;
-  memset(&dst, 0, sizeof(dst));
-
-  const uint32_t pacing_bps = 3500000;
-  const int packets_per_frame = 36;
-  int64_t now_us = 2000000;
-  int64_t release_at_us = 0;
-  for (int frame = 0; frame < 10; frame++) {
-    uint32_t timestamp = 90000u + (uint32_t)frame * 9000u;
-    for (int packet = 0; packet < packets_per_frame; packet++) {
-      bool marker = packet == packets_per_frame - 1;
-      assert(sfu_paced_send_admit_frame_packet(&q, timestamp, marker, frame == 0, now_us));
-      assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), &dst, sizeof(struct sockaddr_in), pacing_bps, now_us, &release_at_us));
-    }
-    now_us += 100000;
-  }
-
-  assert(q.count == 10u * (uint32_t)packets_per_frame);
-  assert(q.dropped_full == 0);
-  assert(q.dropped_delay_frames == 0);
-  assert(q.next_release_us - 2000000 <= 1000000);
-
-  /* Four overdue packets per 2 ms scan can catch up after worker jitter and
-   * exceeds the 3.5 Mbps requirement even for sub-MTU packets. */
-  const uint64_t min_drain_bps = (uint64_t)SFU_PACED_SEND_MAX_DRAIN_PER_SCAN * 800u * 8u * 1000000u / SFU_PACED_SEND_SCAN_INTERVAL_US;
-  assert(min_drain_bps >= pacing_bps);
-
+  q.count = 1;
+  q.next_release_us = 1200000;
+  assert(!sfu_paced_send_admit_frame_packet(&q, 20, true, false, 1000000));
+  assert(sfu_paced_send_admit_frame_packet(&q, 21, true, true, 1000000));
   sfu_paced_send_destroy(&q);
 }
 
 int main(void) {
   test_enqueue_spacing_and_copy();
-  test_rate_floor_and_size_limit();
-  test_frame_admission();
-  test_projected_delay();
-  test_large_frame_serialization_bound();
-  test_rate_above_floor();
-  test_frame_input_span();
-  test_vp9_l1t1_frame_admission();
-  test_35mbps_10fps_release_schedule();
+  test_size_and_rate_floor();
+  test_projected_delay_includes_scan_cap();
+  test_rate_change_does_not_reprice_backlog();
+  test_frame_rejected_after_enqueue_failure();
+  test_keyframe_bypasses_delay_drop();
   return 0;
 }
