@@ -7,8 +7,7 @@
 
 void sfu_pacer_init(sfu_pacer_t *p);
 void sfu_pacer_set_rate(sfu_pacer_t *p, uint32_t bps, int64_t now_us);
-bool sfu_pacer_reserve(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bool allow_congestion_drop, int64_t now_us,
-                       sfu_pacer_reservation_t *reservation);
+bool sfu_pacer_reserve(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bool allow_congestion_drop, int64_t now_us, sfu_pacer_reservation_t *reservation);
 void sfu_pacer_commit(sfu_pacer_t *p, sfu_pacer_reservation_t *reservation);
 void sfu_pacer_cancel(sfu_pacer_t *p, sfu_pacer_reservation_t *reservation);
 bool sfu_pacer_should_send(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bool allow_congestion_drop, int64_t *inout_now_us);

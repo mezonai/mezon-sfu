@@ -398,27 +398,48 @@ static inline sfu_ptt_diag_class_t sfu_ptt_diag_classify(const sfu_ptt_diag_t *d
   uint64_t gate = atomic_load_explicit(&d->audio_gate_drops, memory_order_relaxed) - d->baseline_audio_gate_drops;
   uint64_t admitted = atomic_load_explicit(&d->router_admissions, memory_order_relaxed) - d->baseline_router_admissions;
   uint64_t dispatched = atomic_load_explicit(&d->route_dispatches, memory_order_relaxed) - d->baseline_route_dispatches;
-  if (dispatched > 0) return SFU_PTT_DIAG_ROUTED;
+  if (dispatched > 0) {
+    return SFU_PTT_DIAG_ROUTED;
+  }
   uint64_t pending_skips = atomic_load_explicit(&d->router_pending_skips, memory_order_relaxed) - d->baseline_router_pending_skips;
-  if (pending_skips > 0) return SFU_PTT_DIAG_GEN_PENDING;
+  if (pending_skips > 0) {
+    return SFU_PTT_DIAG_GEN_PENDING;
+  }
   uint64_t empty = atomic_load_explicit(&d->empty_fanout, memory_order_relaxed) - d->baseline_empty_fanout;
-  if (admitted > 0 || empty > 0) return SFU_PTT_DIAG_EMPTY_FANOUT;
-  if (gate > 0) return SFU_PTT_DIAG_GATE_DROP;
-  if (audio > 0 || srtp_ok > 0) return SFU_PTT_DIAG_GATE_DROP;
-  if (srtp_fail > 0) return SFU_PTT_DIAG_SRTP_FAIL;
-  if (datagrams > 0) return SFU_PTT_DIAG_SRTP_FAIL;
+  if (admitted > 0 || empty > 0) {
+    return SFU_PTT_DIAG_EMPTY_FANOUT;
+  }
+  if (gate > 0) {
+    return SFU_PTT_DIAG_GATE_DROP;
+  }
+  if (audio > 0 || srtp_ok > 0) {
+    return SFU_PTT_DIAG_GATE_DROP;
+  }
+  if (srtp_fail > 0) {
+    return SFU_PTT_DIAG_SRTP_FAIL;
+  }
+  if (datagrams > 0) {
+    return SFU_PTT_DIAG_SRTP_FAIL;
+  }
   return SFU_PTT_DIAG_NO_INGRESS;
 }
 
 static inline const char *sfu_ptt_diag_class_name(sfu_ptt_diag_class_t c) {
   switch (c) {
-    case SFU_PTT_DIAG_NO_INGRESS: return "no_matched_ingress";
-    case SFU_PTT_DIAG_SRTP_FAIL: return "srtp_failure";
-    case SFU_PTT_DIAG_GATE_DROP: return "ingress_gate";
-    case SFU_PTT_DIAG_EMPTY_FANOUT: return "empty_fanout";
-    case SFU_PTT_DIAG_GEN_PENDING: return "gen_pending";
-    case SFU_PTT_DIAG_ROUTED: return "routed";
-    default: return "unknown";
+    case SFU_PTT_DIAG_NO_INGRESS:
+      return "no_matched_ingress";
+    case SFU_PTT_DIAG_SRTP_FAIL:
+      return "srtp_failure";
+    case SFU_PTT_DIAG_GATE_DROP:
+      return "ingress_gate";
+    case SFU_PTT_DIAG_EMPTY_FANOUT:
+      return "empty_fanout";
+    case SFU_PTT_DIAG_GEN_PENDING:
+      return "gen_pending";
+    case SFU_PTT_DIAG_ROUTED:
+      return "routed";
+    default:
+      return "unknown";
   }
 }
 #endif /* SFU_DIAG_LOG */

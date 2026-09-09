@@ -917,9 +917,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
                                                         : atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire);
   bool learned = false;
   if (!send_negotiated) {
-    if (m.source == SFU_MEDIA_SCREEN &&
-        !is_audience &&
-        atomic_load_explicit(&sender_session->media.screen_enabled, memory_order_acquire) &&
+    if (m.source == SFU_MEDIA_SCREEN && !is_audience && atomic_load_explicit(&sender_session->media.screen_enabled, memory_order_acquire) &&
         atomic_load_explicit(&sender_session->media.screen_send_negotiated_pending, memory_order_acquire)) {
       pthread_mutex_lock(&sender_session->media.lock);
       if (m.rtp.ssrc != 0 && sender_session->media.screen.ssrc != m.rtp.ssrc) {
@@ -948,7 +946,8 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       static _Atomic uint32_t unnegotiated_drop_logs;
       uint32_t n = atomic_fetch_add_explicit(&unnegotiated_drop_logs, 1, memory_order_relaxed);
       if (n == 0 || (n & 127u) == 0) {
-        SFU_LOG_WARN("ingress: unnegotiated_rtp_drop n=%u peer=%u ufrag=%s source=%d pt=%u ssrc=%" PRIu32 " audio_neg=%d video_neg=%d screen_neg=%d audience=%d",
+        SFU_LOG_WARN("ingress: unnegotiated_rtp_drop n=%u peer=%u ufrag=%s source=%d pt=%u ssrc=%" PRIu32
+                     " audio_neg=%d video_neg=%d screen_neg=%d audience=%d",
                      n + 1, sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, in_pt, m.rtp.ssrc,
                      atomic_load_explicit(&sender_session->media.audio_send_negotiated, memory_order_acquire) ? 1 : 0,
                      atomic_load_explicit(&sender_session->media.video_send_negotiated, memory_order_acquire) ? 1 : 0,
@@ -1058,8 +1057,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (learned) {
     atomic_store_explicit(&sender_session->media.uplink_ssrc_dirty, true, memory_order_release);
   }
-  if (m.source == SFU_MEDIA_SCREEN && !is_rtx &&
-      atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) &&
+  if (m.source == SFU_MEDIA_SCREEN && !is_rtx && atomic_load_explicit(&sender_session->media.screen_send_negotiated, memory_order_acquire) &&
       atomic_exchange_explicit(&sender_session->media.screen_keyframe_recovery_pending, true, memory_order_acq_rel) == false) {
     sfu_worker_request_keyframe_throttled_for_source(w, sender_session, m.source);
   }

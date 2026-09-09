@@ -90,9 +90,8 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
 void sfu_paced_send_reject_input_frame(sfu_paced_send_t *q);
 void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q);
 bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t len, const uint8_t *rtx_plaintext, uint16_t rtx_plaintext_len,
-                            const struct sockaddr_storage *dst, socklen_t dst_len, uint8_t pacer_class, uint32_t pacing_bps,
-                            sfu_pacer_t *pacer, sfu_pacer_reservation_t *reservation, const sfu_paced_send_metadata_t *metadata,
-                            int64_t now_us, int64_t *release_at_us);
+                            const struct sockaddr_storage *dst, socklen_t dst_len, uint8_t pacer_class, uint32_t pacing_bps, sfu_pacer_t *pacer,
+                            sfu_pacer_reservation_t *reservation, const sfu_paced_send_metadata_t *metadata, int64_t now_us, int64_t *release_at_us);
 bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session_t *session, int64_t now_us);
 
 #endif /* SFU_PIPELINE_PACED_SEND_H */
