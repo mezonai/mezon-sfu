@@ -1126,6 +1126,40 @@ sfu_video_codec_t sfu_signaling_parse_screen_codec_preference(const char *json, 
   return SFU_VIDEO_CODEC_NONE;
 }
 
+int sfu_signaling_build_room_message(const char *raw_msg, size_t raw_len, int64_t user_id, uint32_t peer_id, char *out, size_t out_cap) {
+  if (out == NULL || out_cap == 0 || raw_msg == NULL || raw_len == 0) {
+    return -1;
+  }
+  const char header[] = "{\"type\":\"room_message\",\"message\":\"";
+  const size_t header_len = sizeof(header) - 1;
+  char trailer[96];
+  int trailer_len = snprintf(trailer, sizeof(trailer), "\",\"user_id\":\"%" PRId64 "\",\"peer_id\":%u}", user_id, peer_id);
+  if (trailer_len < 0 || (size_t)trailer_len >= sizeof(trailer)) {
+    return -1;
+  }
+
+  size_t pos = 0;
+  if (header_len >= out_cap) {
+    return -1;
+  }
+  memcpy(out, header, header_len);
+  pos = header_len;
+
+  int escaped_len = sfu_json_escape(raw_msg, raw_len, out + pos, out_cap - pos);
+  if (escaped_len < 0) {
+    return -1;
+  }
+  pos += (size_t)escaped_len;
+
+  if ((size_t)trailer_len > out_cap - pos) {
+    return -1;
+  }
+  memcpy(out + pos, trailer, (size_t)trailer_len);
+  pos += (size_t)trailer_len;
+  out[pos] = '\0';
+  return (int)pos;
+}
+
 static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
   char role_str[16] = {0};
   char token[4096];
@@ -1862,6 +1896,59 @@ static void handle_self_mute(sfu_client_conn_t *c, const char *buf, size_t n) {
   SFU_LOG_INFO("signaling: mute user_id=%" PRId64 " is_mute=%s (fd=%d)", c->user_id, is_mute ? "true" : "false", c->fd);
 }
 
+#define SFU_ROOM_MESSAGE_MAX_LEN 2048u
+
+static void handle_send_message(sfu_client_conn_t *c, const char *buf, size_t n) {
+  if (!c->joined_room || c->client_ufrag[0] == '\0') {
+    static const char must_join[] = "{\"type\":\"error\",\"message\":\"must_join_room_first\"}";
+    sfu_ws_send_text(c->fd, must_join, sizeof(must_join) - 1);
+    return;
+  }
+
+  char message[SFU_ROOM_MESSAGE_MAX_LEN];
+  int message_len = sfu_json_extract_string(buf, n, "message", message, sizeof(message));
+  if (message_len <= 0) {
+    static const char invalid_message[] = "{\"type\":\"error\",\"message\":\"invalid_message\"}";
+    sfu_ws_send_text(c->fd, invalid_message, sizeof(invalid_message) - 1);
+    return;
+  }
+
+  sfu_peer_session_t *session = sfu_session_table_find_by_ufrag(c->server->sessions, c->client_ufrag);
+  uint32_t peer_id = 0;
+  if (session) {
+    peer_id = session->peer_id;
+    sfu_session_release(session);
+  }
+
+  char frame[SFU_ROOM_MESSAGE_MAX_LEN * 2 + 128];
+  int frame_len = sfu_signaling_build_room_message(message, (size_t)message_len, c->user_id, peer_id, frame, sizeof(frame));
+  if (frame_len <= 0) {
+    static const char invalid_message[] = "{\"type\":\"error\",\"message\":\"invalid_message\"}";
+    sfu_ws_send_text(c->fd, invalid_message, sizeof(invalid_message) - 1);
+    return;
+  }
+
+  int fds[SFU_ROOM_MAX_PEERS];
+  uint32_t count = 0;
+  pthread_mutex_lock(&c->joined_room->lock);
+  for (uint32_t i = 0; i < c->joined_room->peer_capacity && count < SFU_ROOM_MAX_PEERS; i++) {
+    sfu_peer_session_t *peer = c->joined_room->peers[i];
+    if (peer && peer->fd >= 0 && peer->fd != c->fd && sfu_session_accepts_work(peer)) {
+      fds[count++] = peer->fd;
+    }
+  }
+  pthread_mutex_unlock(&c->joined_room->lock);
+
+  for (uint32_t i = 0; i < count; i++) {
+    (void)sfu_ws_send_text(fds[i], frame, (size_t)frame_len);
+  }
+
+  static const char ack[] = "{\"type\":\"message_sent\"}";
+  sfu_ws_send_text(c->fd, ack, sizeof(ack) - 1);
+  SFU_LOG_INFO("signaling: room_message user_id=%" PRId64 " room=%" PRIu64 " len=%d recipients=%u (fd=%d)", c->user_id, c->joined_room_id, message_len, count,
+               c->fd);
+}
+
 static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t *s, const char *buf, size_t n) {
   char type[32];
   if (sfu_json_extract_string(buf, n, "type", type, sizeof(type)) < 0) {
@@ -1888,6 +1975,8 @@ static void dispatch_client_message(sfu_client_conn_t *c, sfu_signaling_server_t
     handle_camera(c, buf, n);
   } else if (strcmp(type, "share_screen") == 0) {
     handle_screen_share(c, buf, n);
+  } else if (strcmp(type, "send_message") == 0) {
+    handle_send_message(c, buf, n);
   } else {
     SFU_LOG_DEBUG("signaling: unrecognized message type \"%s\" from peer %s", type, c->peer_ip);
   }
