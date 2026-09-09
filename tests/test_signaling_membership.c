@@ -369,8 +369,33 @@ static void test_concurrent_schedule_and_pop_preserves_single_identity(void) {
   sfu_signaling_renegotiation_test_server_stop(&server);
 }
 
+static void test_room_message_frame_building(void) {
+  char out[256];
+
+  int len = sfu_signaling_build_room_message("hello", 5, 1001, 7, out, sizeof(out));
+  assert(len > 0);
+  assert(len == (int)strlen(out));
+  assert(strcmp(out, "{\"type\":\"room_message\",\"message\":\"hello\",\"user_id\":\"1001\",\"peer_id\":7}") == 0);
+
+  const char *tricky = "a\"b\\c\nd";
+  len = sfu_signaling_build_room_message(tricky, strlen(tricky), -5, 4294967295u, out, sizeof(out));
+  assert(len > 0);
+  assert(len == (int)strlen(out));
+  assert(strcmp(out, "{\"type\":\"room_message\",\"message\":\"a\\\"b\\\\c\\nd\",\"user_id\":\"-5\",\"peer_id\":4294967295}") == 0);
+
+  assert(sfu_signaling_build_room_message("", 0, 1, 2, out, sizeof(out)) == -1);
+  assert(sfu_signaling_build_room_message(NULL, 0, 1, 2, out, sizeof(out)) == -1);
+
+  char tiny[16];
+  assert(sfu_signaling_build_room_message("hello", 5, 1, 2, tiny, sizeof(tiny)) == -1);
+
+  char exact[64];
+  assert(sfu_signaling_build_room_message("hello", 5, 1001, 7, exact, sizeof(exact)) == -1);
+}
+
 int main(void) {
   test_screen_codec_preference_parsing();
+  test_room_message_frame_building();
   test_join_capture_failure_is_reported();
   test_queue_releases_when_signaling_is_stopped();
   test_preallocated_leave_event_released_on_stopped_queue();

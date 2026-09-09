@@ -218,6 +218,7 @@ void sfu_signaling_notify_media_state(sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,
                                              size_t pass_sz, uint32_t ttl_seconds);
 sfu_video_codec_t sfu_signaling_parse_screen_codec_preference(const char *json, size_t json_len);
+int sfu_signaling_build_room_message(const char *raw_msg, size_t raw_len, int64_t user_id, uint32_t peer_id, char *out, size_t out_cap);
 uint32_t generate_unique_id(void);
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */
