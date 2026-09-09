@@ -1098,6 +1098,8 @@ static void test_svc_filter_rewrites_sequence_and_cache_identity(void) {
   feed_publisher_vp9(&f, 100, 9000, keyframe, sizeof(keyframe));
   feed_publisher_vp9(&f, 101, 9001, upper, sizeof(upper));
   feed_publisher_vp9(&f, 102, 9002, base_delta, sizeof(base_delta));
+  uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&f.base.session->egress.paced_camera, &f.base.w, f.base.session, INT64_MAX, &remaining));
 
   uint8_t cached[512];
   uint32_t cached_len = sizeof(cached);
@@ -1234,9 +1236,11 @@ static void test_screen_drain_charges_shared_pacer_once(void) {
   assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &reservation));
   assert(sfu_paced_send_enqueue(&sub->egress.paced_screen, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
                                 SFU_PACER_CLASS_VIDEO_BASE, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &reservation, &metadata, 1000000, NULL));
+  sub->egress.paced_screen.ready_count++;
   int64_t before = sub->egress.pacer.balance_bytes;
   uint64_t sent_before = sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE];
-  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000));
+  uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000, &remaining));
   assert(sub->egress.paced_screen.count == 0);
   assert(sub->egress.pacer.balance_bytes == before - (int64_t)sizeof(payload));
   assert(sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE] == sent_before + 1);
@@ -1264,8 +1268,10 @@ static void test_screen_base_drains_under_camera_debt(void) {
   assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_TRANSITION, sizeof(payload), false, 1000000, &reservation));
   assert(sfu_paced_send_enqueue(&sub->egress.paced_screen, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
                                 SFU_PACER_CLASS_VIDEO_TRANSITION, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &reservation, &metadata, 1000000, NULL));
+  sub->egress.paced_screen.ready_count++;
   int64_t before = sub->egress.pacer.balance_bytes;
-  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000));
+  uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000, &remaining));
   assert(sub->egress.paced_screen.count == 0);
   assert(sub->egress.pacer.balance_bytes == before - (int64_t)sizeof(payload));
   fixture_destroy(&f);
@@ -1417,6 +1423,7 @@ static void test_visibility_false_stops_forward(void) {
     uint8_t plain[512];
     size_t plain_len;
     build_rtp_video(plain, 2000, 60, &plain_len);
+    plain[1] |= 0x80u;
     uint8_t wire[1024];
     memcpy(wire, plain, plain_len);
     int wire_len = (int)plain_len;
@@ -1431,6 +1438,9 @@ static void test_visibility_false_stops_forward(void) {
     sfu_ingress_process(&f.base.w, pkt);
 
     gcc_packet_info_t info = {0};
+    assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
+    uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+    assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.base.w, sub, INT64_MAX, &remaining));
     assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   }
 
@@ -1487,6 +1497,7 @@ static void test_visibility_false_stops_forward(void) {
     uint8_t plain[512];
     size_t plain_len;
     build_rtp_video(plain, 2002, 60, &plain_len);
+    plain[1] |= 0x80u;
     uint8_t wire[1024];
     memcpy(wire, plain, plain_len);
     int wire_len = (int)plain_len;
@@ -1501,6 +1512,9 @@ static void test_visibility_false_stops_forward(void) {
     sfu_ingress_process(&f.base.w, pkt);
 
     gcc_packet_info_t info = {0};
+    assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 2, &info));
+    uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+    assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.base.w, sub, INT64_MAX, &remaining));
     assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 2, &info));
   }
 

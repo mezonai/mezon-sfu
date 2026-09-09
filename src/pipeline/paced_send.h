@@ -20,7 +20,8 @@ typedef struct sfu_pacer_reservation {
 #define SFU_PACED_SEND_MAX_DRAIN_PER_SCAN 4u
 #define SFU_PACED_SEND_SCAN_INTERVAL_US 2000LL
 #define SFU_PACED_SEND_MIN_BPS 2000000u
-#define SFU_PACED_SEND_MAX_DELAY_US 200000LL
+#define SFU_PACED_SEND_CAMERA_MAX_DELAY_US 200000LL
+#define SFU_PACED_SEND_SCREEN_MAX_DELAY_US 750000LL
 
 typedef struct sfu_paced_send_metadata {
   uint64_t assignment_generation;
@@ -36,11 +37,13 @@ typedef struct sfu_paced_send_metadata {
   uint8_t rtx_pt;
   bool twcc_written;
   bool cache_rtx;
+  bool frame_end;
 } sfu_paced_send_metadata_t;
 
 typedef struct sfu_paced_send_entry {
   int64_t release_at_us;
   int64_t enqueued_at_us;
+  int64_t span_us;
   struct sockaddr_storage dst;
   socklen_t dst_len;
   uint16_t len;
@@ -59,6 +62,7 @@ typedef struct sfu_paced_send {
   uint32_t head;
   uint32_t tail;
   uint32_t count;
+  uint32_t ready_count;
   int64_t next_release_us;
   uint32_t input_timestamp;
   uint32_t high_water;
@@ -86,12 +90,15 @@ typedef struct sfu_paced_send {
 void sfu_paced_send_init(sfu_paced_send_t *q);
 void sfu_paced_send_destroy(sfu_paced_send_t *q);
 int64_t sfu_paced_send_projected_delay_us(const sfu_paced_send_t *q, int64_t now_us);
-bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timestamp, bool marker, bool keyframe, int64_t now_us);
+bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timestamp, bool marker, bool keyframe, bool drop_on_delay, int64_t max_delay_us,
+                                       int64_t now_us);
 void sfu_paced_send_reject_input_frame(sfu_paced_send_t *q);
+void sfu_paced_send_finish_input_frame(sfu_paced_send_t *q);
 void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q);
+bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int64_t now_us);
 bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t len, const uint8_t *rtx_plaintext, uint16_t rtx_plaintext_len,
                             const struct sockaddr_storage *dst, socklen_t dst_len, uint8_t pacer_class, uint32_t pacing_bps, sfu_pacer_t *pacer,
                             sfu_pacer_reservation_t *reservation, const sfu_paced_send_metadata_t *metadata, int64_t now_us, int64_t *release_at_us);
-bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session_t *session, int64_t now_us);
+bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session_t *session, int64_t now_us, uint32_t *remaining);
 
 #endif /* SFU_PIPELINE_PACED_SEND_H */

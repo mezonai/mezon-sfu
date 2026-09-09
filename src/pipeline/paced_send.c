@@ -39,23 +39,30 @@ int64_t sfu_paced_send_projected_delay_us(const sfu_paced_send_t *q, int64_t now
     return 0;
   }
   int64_t serialization = q->next_release_us > now_us ? q->next_release_us - now_us : 0;
-  uint64_t scans = ((uint64_t)q->count + SFU_PACED_SEND_MAX_DRAIN_PER_SCAN - 1u) / SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  uint64_t scans = ((uint64_t)q->ready_count + SFU_PACED_SEND_MAX_DRAIN_PER_SCAN - 1u) / SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
   int64_t scan_delay = (int64_t)scans * SFU_PACED_SEND_SCAN_INTERVAL_US;
   return serialization > scan_delay ? serialization : scan_delay;
 }
 
-bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timestamp, bool marker, bool keyframe, int64_t now_us) {
+bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timestamp, bool marker, bool keyframe, bool drop_on_delay, int64_t max_delay_us,
+                                       int64_t now_us) {
   if (!q) {
     return false;
   }
   bool new_frame = !q->input_frame_active || q->input_timestamp != rtp_timestamp;
   if (new_frame) {
+    if (q->input_frame_active && q->input_timestamp != rtp_timestamp) {
+      sfu_paced_send_rollback_input_frame(q);
+      q->input_frame_active = false;
+      q->drop_input_frame = false;
+      sfu_metric_inc("paced_send_incomplete_frame_drop");
+    }
     if (q->input_frame_active && now_us >= q->input_frame_started_us) {
       int64_t span = now_us - q->input_frame_started_us;
       if (span > q->max_input_frame_span_us) {
         q->max_input_frame_span_us = span;
       }
-      if (span > SFU_PACED_SEND_MAX_DELAY_US) {
+      if (span > max_delay_us) {
         q->input_frames_over_delay++;
         sfu_metric_inc("paced_send_input_frame_slow");
       }
@@ -65,7 +72,7 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
     q->input_frame_base_next_release_us = q->next_release_us;
     q->input_frame_queued_packets = 0;
     q->input_frame_active = true;
-    q->drop_input_frame = !keyframe && sfu_paced_send_projected_delay_us(q, now_us) >= SFU_PACED_SEND_MAX_DELAY_US;
+    q->drop_input_frame = drop_on_delay && !keyframe && sfu_paced_send_projected_delay_us(q, now_us) >= max_delay_us;
     if (q->drop_input_frame) {
       q->dropped_delay_frames++;
       sfu_metric_inc("paced_send_delay_frame_drop");
@@ -76,11 +83,25 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
     q->dropped_frame_packets++;
     sfu_metric_inc("paced_send_frame_packet_drop");
   }
-  if (marker) {
+  if (marker && !admitted) {
     q->input_frame_active = false;
     q->drop_input_frame = false;
   }
   return admitted;
+}
+
+void sfu_paced_send_finish_input_frame(sfu_paced_send_t *q) {
+  if (!q || !q->input_frame_active) {
+    return;
+  }
+  if (q->input_frame_queued_packets) {
+    uint32_t last = q->tail == 0 ? q->capacity - 1u : q->tail - 1u;
+    q->entries[last].metadata.frame_end = true;
+  }
+  q->ready_count += q->input_frame_queued_packets;
+  q->input_frame_queued_packets = 0;
+  q->input_frame_active = false;
+  q->drop_input_frame = false;
 }
 
 void sfu_paced_send_reject_input_frame(sfu_paced_send_t *q) {
@@ -106,6 +127,47 @@ void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q) {
     q->head = q->tail = 0;
     q->next_release_us = 0;
   }
+}
+
+static void rebase_backlog(sfu_paced_send_t *q, int64_t now_us) {
+  int64_t base = now_us;
+  for (uint32_t i = 0, index = q->head; i < q->count; i++, index = (index + 1u) % q->capacity) {
+    q->entries[index].release_at_us = base;
+    base += q->entries[index].span_us;
+  }
+  q->next_release_us = q->count ? base : 0;
+  if (q->input_frame_active) {
+    int64_t unpublished_span = 0;
+    for (uint32_t i = 0, index = q->head; i < q->ready_count; i++, index = (index + 1u) % q->capacity) {
+      unpublished_span += q->entries[index].span_us;
+    }
+    q->input_frame_base_next_release_us = now_us + unpublished_span;
+  }
+}
+
+bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int64_t now_us) {
+  if (!q || max_delay_us <= 0 || q->input_frame_active) {
+    return false;
+  }
+  while (q->ready_count && sfu_paced_send_projected_delay_us(q, now_us) >= max_delay_us) {
+    bool frame_end = false;
+    while (q->ready_count && !frame_end) {
+      sfu_paced_send_entry_t *e = &q->entries[q->head];
+      frame_end = e->metadata.frame_end;
+      sfu_pacer_cancel(e->pacer, &e->reservation);
+      memset(e, 0, sizeof(*e));
+      q->head = (q->head + 1u) % q->capacity;
+      q->count--;
+      q->ready_count--;
+    }
+    q->dropped_delay_frames++;
+    sfu_metric_inc("paced_send_delay_frame_drop");
+    rebase_backlog(q, now_us);
+  }
+  if (!q->count) {
+    q->head = q->tail = 0;
+  }
+  return sfu_paced_send_projected_delay_us(q, now_us) < max_delay_us;
 }
 
 bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t len, const uint8_t *rtx_plaintext, uint16_t rtx_plaintext_len,
@@ -134,6 +196,7 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
   memset(e, 0, sizeof(*e));
   e->release_at_us = base;
   e->enqueued_at_us = now_us;
+  e->span_us = span;
   e->dst = *dst;
   e->dst_len = dst_len;
   e->len = len;
@@ -166,6 +229,7 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
 static void pop_entry(sfu_paced_send_t *q) {
   q->head = (q->head + 1u) % q->capacity;
   q->count--;
+  q->ready_count--;
 }
 
 static void cancel_and_pop_entry(sfu_paced_send_t *q) {
@@ -173,6 +237,7 @@ static void cancel_and_pop_entry(sfu_paced_send_t *q) {
   sfu_pacer_cancel(e->pacer, &e->reservation);
   q->head = (q->head + 1u) % q->capacity;
   q->count--;
+  q->ready_count--;
 }
 
 static bool entry_valid(const sfu_paced_send_entry_t *e, const sfu_peer_session_t *s) {
@@ -183,14 +248,15 @@ static bool entry_valid(const sfu_paced_send_entry_t *e, const sfu_peer_session_
          memcmp(&s->cold->addr, &e->dst, e->dst_len) == 0;
 }
 
-bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session_t *s, int64_t now_us) {
-  if (!q || !w || !s || !q->entries || q->count == 0) {
+bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session_t *s, int64_t now_us, uint32_t *remaining) {
+  if (!q || !w || !s || !remaining || *remaining == 0 || !q->entries || q->count == 0) {
     return false;
   }
+  uint32_t limit = *remaining;
   bool did_work = false;
   uint32_t processed = 0, sent = 0;
   q->drain_invocations++;
-  while (q->count && processed < SFU_PACED_SEND_MAX_DRAIN_PER_SCAN) {
+  while (q->ready_count && processed < limit) {
     sfu_paced_send_entry_t *e = &q->entries[q->head];
     if (!entry_valid(e, s)) {
       cancel_and_pop_entry(q);
@@ -249,7 +315,8 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session
   if (sent > q->max_drain_packets) {
     q->max_drain_packets = sent;
   }
-  if (processed == SFU_PACED_SEND_MAX_DRAIN_PER_SCAN && q->count && q->entries[q->head].release_at_us <= now_us) {
+  *remaining -= processed;
+  if (processed == limit && q->ready_count && q->entries[q->head].release_at_us <= now_us) {
     q->drain_cap_hits++;
     sfu_metric_inc("paced_send_drain_cap_hit");
   }

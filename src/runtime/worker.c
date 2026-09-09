@@ -308,9 +308,16 @@ static void *worker_thread_main(void *arg) {
       for (uint32_t li = 0; li < twcc_count; li++) {
         sfu_peer_session_t *ls = w->twcc_scratch[li];
         if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
-          if (paced_due && sfu_paced_send_drain(&ls->egress.paced_screen, w, ls, now_us)) {
-            paced_sent = true;
-            did_work = true;
+          if (paced_due) {
+            uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+            if (sfu_paced_send_drain(&ls->egress.paced_screen, w, ls, now_us, &remaining)) {
+              paced_sent = true;
+              did_work = true;
+            }
+            if (sfu_paced_send_drain(&ls->egress.paced_camera, w, ls, now_us, &remaining)) {
+              paced_sent = true;
+              did_work = true;
+            }
           }
           if (twcc_due) {
             sfu_session_maybe_send_twcc_feedback(w, ls);

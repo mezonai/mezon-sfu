@@ -161,16 +161,24 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
 
   bool screen_packet = media->source == SFU_MEDIA_SCREEN && media->has_video && !media->is_audio;
+  bool camera_packet = media->source == SFU_MEDIA_VIDEO && media->has_video && !media->is_audio;
+  sfu_paced_send_t *paced_queue = screen_packet ? &sub_session->egress.paced_screen : camera_packet ? &sub_session->egress.paced_camera : NULL;
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
-  if (screen_packet &&
-      !sfu_paced_send_admit_frame_packet(&sub_session->egress.paced_screen, source_timestamp, source_marker, media->is_keyframe, (int64_t)sfu_now_us())) {
+  int64_t frame_now_us = (int64_t)sfu_now_us();
+  if (screen_packet && !paced_queue->input_frame_active && !sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us)) {
+    sfu_metric_inc("paced_send_screen_backlog_drop");
+    return false;
+  }
+  if (paced_queue &&
+      !sfu_paced_send_admit_frame_packet(paced_queue, source_timestamp, source_marker, media->is_keyframe, camera_packet,
+                                         camera_packet ? SFU_PACED_SEND_CAMERA_MAX_DELAY_US : SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us)) {
     return false;
   }
 
   int64_t send_time_us = (int64_t)sfu_now_us();
   sfu_pacer_class_t cls = media->is_audio ? SFU_PACER_CLASS_AUDIO : (media->has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
-  bool allow_congestion_drop = decision && decision->pacer_frame_start;
+  bool allow_congestion_drop = camera_packet && decision && decision->pacer_frame_start;
 
   uint16_t source_seq = sfu_read_be16(pkt->data + 2);
   uint32_t outbound_ssrc = sfu_read_be32(pkt->data + 8);
@@ -219,7 +227,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     memcpy(rtx_plaintext, pkt->data, (size_t)enc_len);
     rtx_plaintext_len = (uint16_t)enc_len;
   }
-  if (!screen_packet && cache_rtx) {
+  if (cache_rtx && !paced_queue) {
     sfu_rtx_cache_put_stream(sub_session->egress.rtx_cache, subscriber_seq, pkt->data, (uint32_t)enc_len, media->video_rtx_ssrc, media->video_rtx_pt,
                              media->video_ssrc, atomic_load_explicit(&sub_session->egress.generation, memory_order_acquire));
   }
@@ -283,7 +291,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return false;
   }
 
-  if (screen_packet) {
+  if (paced_queue) {
     int64_t enqueue_now = (int64_t)sfu_now_us();
     int64_t release_at_us = 0;
     sfu_paced_send_metadata_t paced_metadata = {
@@ -302,13 +310,19 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
         .cache_rtx = cache_rtx && rtx_plaintext_len > 0,
     };
     if (enc_len <= 0 || (uint32_t)enc_len > SFU_PACED_SEND_MAX_PAYLOAD ||
-        !sfu_paced_send_enqueue(&sub_session->egress.paced_screen, pkt->data, (uint16_t)enc_len, rtx_plaintext, rtx_plaintext_len, dst, dst_len, cls,
+        !sfu_paced_send_enqueue(paced_queue, pkt->data, (uint16_t)enc_len, rtx_plaintext, rtx_plaintext_len, dst, dst_len, cls,
                                 sub_session->egress.pacer.pacing_bps, &sub_session->egress.pacer, &reservation, &paced_metadata, enqueue_now, &release_at_us)) {
       sfu_pacer_cancel(&sub_session->egress.pacer, &reservation);
-      sfu_paced_send_rollback_input_frame(&sub_session->egress.paced_screen);
-      sfu_paced_send_reject_input_frame(&sub_session->egress.paced_screen);
+      sfu_paced_send_rollback_input_frame(paced_queue);
+      sfu_paced_send_reject_input_frame(paced_queue);
       sfu_metric_inc("paced_send_enqueue_drop");
       return false;
+    }
+    if (source_marker) {
+      sfu_paced_send_finish_input_frame(paced_queue);
+      if (screen_packet) {
+        (void)sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, enqueue_now);
+      }
     }
     w->hot.output_queued++;
     return true;
