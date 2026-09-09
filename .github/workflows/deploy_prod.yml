@@ -17,7 +17,7 @@ jobs:
         run: |
           rm -rf build
           mkdir build && cd build
-          cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DSFU_DIAG_LOG=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake .. -DCMAKE_PREFIX_PATH=/usr/local -DSFU_DIAG_LOG=ON -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
           if [ -f /opt/mezon-sfu/mezon-sfu ]; then
             cp /opt/mezon-sfu/mezon-sfu /opt/mezon-sfu/mezon-sfu.bk
