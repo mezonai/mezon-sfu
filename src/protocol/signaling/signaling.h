@@ -16,6 +16,7 @@
 #define SFU_RENEGOTIATION_DEBOUNCE_MS 15u
 #define SFU_RENEGOTIATION_MAX_DELAY_MS 50u
 #define SFU_RENEGOTIATION_RETRY_MAX_MS 500u
+#define SFU_RENEGOTIATION_OFFER_TIMEOUT_MS 5000u
 #define SFU_MEMBERSHIP_QUEUE_CAP 2048u
 
 typedef enum sfu_membership_event_kind {
@@ -211,6 +212,7 @@ void sfu_signaling_renegotiation_test_server_init(sfu_signaling_server_t *s);
 void sfu_signaling_renegotiation_test_server_stop(sfu_signaling_server_t *s);
 sfu_peer_session_t *sfu_signaling_renegotiation_test_pop(sfu_signaling_server_t *s);
 uint32_t sfu_signaling_renegotiation_test_count(sfu_signaling_server_t *s);
+bool sfu_signaling_renegotiation_test_expire_offer(sfu_peer_session_t *session, uint64_t now_ms);
 sfu_remote_offer_manifest_t *sfu_signaling_capture_offer_manifest(sfu_peer_session_t *session);
 void sfu_signaling_notify_media_state(sfu_peer_session_t *peer);
 void sfu_signaling_generate_turn_credentials(const char *secret, const char *username_suffix, char *out_username, size_t user_sz, char *out_password,

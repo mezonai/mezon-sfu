@@ -278,6 +278,62 @@ static void *schedule_pending_thread(void *arg) {
   return NULL;
 }
 
+static void test_unanswered_offer_timeout_requeues_negotiation(void) {
+  sfu_signaling_server_t server;
+  sfu_signaling_renegotiation_test_server_init(&server);
+  sfu_peer_session_t peer;
+  init_renegotiation_peer(&peer);
+
+  peer.negotiation.desired_offer_revision = 4;
+  peer.negotiation.offered_revision = 4;
+  peer.negotiation.answered_revision = 3;
+  peer.negotiation.offer_outstanding = true;
+  peer.negotiation.renegotiation_pending = true;
+  peer.negotiation.offer_sent_ms = 1000;
+  assert(!sfu_signaling_renegotiation_test_expire_offer(&peer, 1000 + SFU_RENEGOTIATION_OFFER_TIMEOUT_MS - 1));
+  assert(peer.negotiation.offer_outstanding);
+  assert(peer.negotiation.offer_sent_ms == 1000);
+
+  assert(sfu_signaling_renegotiation_test_expire_offer(&peer, 1000 + SFU_RENEGOTIATION_OFFER_TIMEOUT_MS));
+  assert(!peer.negotiation.offer_outstanding);
+  assert(peer.negotiation.offer_sent_ms == 0);
+  assert(peer.negotiation.desired_offer_revision == 5);
+  assert(peer.negotiation.renegotiation_pending);
+  assert(peer.negotiation.negotiation_needed);
+  assert(peer.negotiation.negotiation_due_ms == 1000 + SFU_RENEGOTIATION_OFFER_TIMEOUT_MS);
+
+  sfu_signaling_schedule_pending_peer(&peer);
+  assert(sfu_signaling_renegotiation_test_count(&server) == 1);
+  assert(sfu_signaling_renegotiation_test_pop(&server) == &peer);
+  release_test_queue_reference(&peer);
+  peer.negotiation.negotiation_needed = false;
+
+  destroy_renegotiation_peer(&peer);
+  sfu_signaling_renegotiation_test_server_stop(&server);
+}
+
+static void test_unanswered_offer_watch_stays_queue_eligible(void) {
+  sfu_signaling_server_t server;
+  sfu_signaling_renegotiation_test_server_init(&server);
+  sfu_peer_session_t peer;
+  init_renegotiation_peer(&peer);
+
+  peer.negotiation.desired_offer_revision = 1;
+  peer.negotiation.offered_revision = 1;
+  peer.negotiation.answered_revision = 1;
+  peer.negotiation.offer_outstanding = true;
+  peer.negotiation.renegotiation_pending = false;
+  peer.negotiation.negotiation_needed = false;
+  peer.negotiation.offer_sent_ms = 1000;
+  sfu_signaling_schedule_pending_peer(&peer);
+  assert(sfu_signaling_renegotiation_test_count(&server) == 1);
+  assert(sfu_signaling_renegotiation_test_pop(&server) == &peer);
+  release_test_queue_reference(&peer);
+
+  destroy_renegotiation_peer(&peer);
+  sfu_signaling_renegotiation_test_server_stop(&server);
+}
+
 static void test_concurrent_schedule_and_pop_preserves_single_identity(void) {
   sfu_signaling_server_t server;
   sfu_signaling_renegotiation_test_server_init(&server);
@@ -323,6 +379,8 @@ int main(void) {
   test_remote_slot_reconciliation_is_idempotent();
   test_remote_slot_follow_up_captures_fresh_manifest();
   test_renegotiation_queue_reclaims_closing_sessions();
+  test_unanswered_offer_timeout_requeues_negotiation();
+  test_unanswered_offer_watch_stays_queue_eligible();
   test_concurrent_schedule_and_pop_preserves_single_identity();
   printf("test_signaling_membership: OK\n");
   return 0;

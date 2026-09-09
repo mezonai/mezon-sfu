@@ -71,26 +71,64 @@ int64_t sfu_pacer_debt_after(const sfu_pacer_t *p, uint32_t bytes, int64_t now_u
   return after < 0 ? -after : 0;
 }
 
-bool sfu_pacer_should_send(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bool allow_congestion_drop, int64_t *inout_now_us) {
-  if (cls == SFU_PACER_CLASS_AUDIO) {
-    p->sent[cls]++;
-    return true;
-  }
-  if (!p->active) {
-    return true;
-  }
-  int64_t now_us = *inout_now_us;
-  sfu_pacer_refill(p, now_us);
-
-  int64_t after = p->balance_bytes - (int64_t)bytes;
-  if (after < 0 && allow_congestion_drop && sfu_pacer_class_droppable(cls) && -after > p->bucket_cap_bytes) {
-    p->dropped_enh++;
+bool sfu_pacer_reserve(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bool allow_congestion_drop, int64_t now_us,
+                       sfu_pacer_reservation_t *reservation) {
+  if (!p || !reservation || cls >= SFU_PACER_CLASS_COUNT || reservation->active) {
     return false;
   }
 
-  p->balance_bytes = after;
-  p->sent[cls]++;
-  *inout_now_us = now_us;
+  bool charged = cls != SFU_PACER_CLASS_AUDIO && p->active;
+  if (charged) {
+    sfu_pacer_refill(p, now_us);
+    int64_t after = p->balance_bytes - p->reserved_bytes - (int64_t)bytes;
+    if (after < 0 && allow_congestion_drop && sfu_pacer_class_droppable(cls) && -after > p->bucket_cap_bytes) {
+      p->dropped_enh++;
+      return false;
+    }
+    p->reserved_bytes += bytes;
+  }
+
+  reservation->bytes = bytes;
+  reservation->pacer_class = (uint8_t)cls;
+  reservation->charged = charged;
+  reservation->active = true;
+  return true;
+}
+
+void sfu_pacer_commit(sfu_pacer_t *p, sfu_pacer_reservation_t *reservation) {
+  if (!p || !reservation || !reservation->active) {
+    return;
+  }
+  sfu_pacer_class_t cls = (sfu_pacer_class_t)reservation->pacer_class;
+  if (reservation->charged) {
+    p->reserved_bytes -= reservation->bytes;
+    p->balance_bytes -= reservation->bytes;
+  }
+  if (cls < SFU_PACER_CLASS_COUNT) {
+    p->sent[cls]++;
+  }
+  reservation->active = false;
+}
+
+void sfu_pacer_cancel(sfu_pacer_t *p, sfu_pacer_reservation_t *reservation) {
+  if (!p || !reservation || !reservation->active) {
+    return;
+  }
+  if (reservation->charged) {
+    p->reserved_bytes -= reservation->bytes;
+  }
+  reservation->active = false;
+}
+
+bool sfu_pacer_should_send(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bool allow_congestion_drop, int64_t *inout_now_us) {
+  if (!p || !inout_now_us) {
+    return false;
+  }
+  sfu_pacer_reservation_t reservation = {0};
+  if (!sfu_pacer_reserve(p, cls, bytes, allow_congestion_drop, *inout_now_us, &reservation)) {
+    return false;
+  }
+  sfu_pacer_commit(p, &reservation);
   return true;
 }
 
