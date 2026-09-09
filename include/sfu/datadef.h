@@ -257,6 +257,7 @@ typedef struct sfu_pacer {
   uint64_t sent[SFU_PACER_CLASS_COUNT];
   int64_t balance_bytes;
   int64_t bucket_cap_bytes;
+  int64_t reserved_bytes;
   int64_t last_refill_us;
   uint64_t dropped_enh;
   uint64_t rtx_dropped_budget;
@@ -279,6 +280,7 @@ typedef struct {
   uint64_t pending_dtls_started_ms;
   uint64_t last_srtp_failure_log_ms;
   _Atomic uint32_t transport_generation;
+  _Atomic uint32_t address_generation;
   uint32_t suppressed_srtp_failures;
   int last_srtp_failure_status;
   bool active_client_random_valid;
@@ -300,6 +302,7 @@ typedef struct {
   uint64_t offered_revision;
   uint64_t answered_revision;
   uint64_t last_answered_offer_generation;
+  uint64_t offer_sent_ms;
   uint64_t negotiation_first_dirty_ms;
   uint64_t negotiation_due_ms;
 } sfu_session_negotiation_t;
@@ -396,27 +399,48 @@ static inline sfu_ptt_diag_class_t sfu_ptt_diag_classify(const sfu_ptt_diag_t *d
   uint64_t gate = atomic_load_explicit(&d->audio_gate_drops, memory_order_relaxed) - d->baseline_audio_gate_drops;
   uint64_t admitted = atomic_load_explicit(&d->router_admissions, memory_order_relaxed) - d->baseline_router_admissions;
   uint64_t dispatched = atomic_load_explicit(&d->route_dispatches, memory_order_relaxed) - d->baseline_route_dispatches;
-  if (dispatched > 0) return SFU_PTT_DIAG_ROUTED;
+  if (dispatched > 0) {
+    return SFU_PTT_DIAG_ROUTED;
+  }
   uint64_t pending_skips = atomic_load_explicit(&d->router_pending_skips, memory_order_relaxed) - d->baseline_router_pending_skips;
-  if (pending_skips > 0) return SFU_PTT_DIAG_GEN_PENDING;
+  if (pending_skips > 0) {
+    return SFU_PTT_DIAG_GEN_PENDING;
+  }
   uint64_t empty = atomic_load_explicit(&d->empty_fanout, memory_order_relaxed) - d->baseline_empty_fanout;
-  if (admitted > 0 || empty > 0) return SFU_PTT_DIAG_EMPTY_FANOUT;
-  if (gate > 0) return SFU_PTT_DIAG_GATE_DROP;
-  if (audio > 0 || srtp_ok > 0) return SFU_PTT_DIAG_GATE_DROP;
-  if (srtp_fail > 0) return SFU_PTT_DIAG_SRTP_FAIL;
-  if (datagrams > 0) return SFU_PTT_DIAG_SRTP_FAIL;
+  if (admitted > 0 || empty > 0) {
+    return SFU_PTT_DIAG_EMPTY_FANOUT;
+  }
+  if (gate > 0) {
+    return SFU_PTT_DIAG_GATE_DROP;
+  }
+  if (audio > 0 || srtp_ok > 0) {
+    return SFU_PTT_DIAG_GATE_DROP;
+  }
+  if (srtp_fail > 0) {
+    return SFU_PTT_DIAG_SRTP_FAIL;
+  }
+  if (datagrams > 0) {
+    return SFU_PTT_DIAG_SRTP_FAIL;
+  }
   return SFU_PTT_DIAG_NO_INGRESS;
 }
 
 static inline const char *sfu_ptt_diag_class_name(sfu_ptt_diag_class_t c) {
   switch (c) {
-    case SFU_PTT_DIAG_NO_INGRESS: return "no_matched_ingress";
-    case SFU_PTT_DIAG_SRTP_FAIL: return "srtp_failure";
-    case SFU_PTT_DIAG_GATE_DROP: return "ingress_gate";
-    case SFU_PTT_DIAG_EMPTY_FANOUT: return "empty_fanout";
-    case SFU_PTT_DIAG_GEN_PENDING: return "gen_pending";
-    case SFU_PTT_DIAG_ROUTED: return "routed";
-    default: return "unknown";
+    case SFU_PTT_DIAG_NO_INGRESS:
+      return "no_matched_ingress";
+    case SFU_PTT_DIAG_SRTP_FAIL:
+      return "srtp_failure";
+    case SFU_PTT_DIAG_GATE_DROP:
+      return "ingress_gate";
+    case SFU_PTT_DIAG_EMPTY_FANOUT:
+      return "empty_fanout";
+    case SFU_PTT_DIAG_GEN_PENDING:
+      return "gen_pending";
+    case SFU_PTT_DIAG_ROUTED:
+      return "routed";
+    default:
+      return "unknown";
   }
 }
 #endif /* SFU_DIAG_LOG */
@@ -540,6 +564,7 @@ typedef struct {
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;
   uint8_t fir_seq;
+  sfu_paced_send_t paced_camera;
   sfu_paced_send_t paced_screen;
 } sfu_session_egress_t;
 

@@ -11,7 +11,9 @@
 #include "memory/packet_pool.h"
 #include "net/net.h"
 #include "peer/session.h"
+#include "pipeline/egress.h"
 #include "pipeline/ingress.h"
+#include "pipeline/paced_send.h"
 #include "pipeline/router.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room.h"
@@ -1097,6 +1099,8 @@ static void test_svc_filter_rewrites_sequence_and_cache_identity(void) {
   feed_publisher_vp9(&f, 100, 9000, keyframe, sizeof(keyframe));
   feed_publisher_vp9(&f, 101, 9001, upper, sizeof(upper));
   feed_publisher_vp9(&f, 102, 9002, base_delta, sizeof(base_delta));
+  uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&f.base.session->egress.paced_camera, &f.base.w, f.base.session, INT64_MAX, &remaining));
 
   uint8_t cached[512];
   uint32_t cached_len = sizeof(cached);
@@ -1211,6 +1215,109 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
   assert(sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE] == sent_before + 3);
 
   kf_fixture_destroy(&f);
+}
+
+static void test_screen_timestamp_rollover_recovers_through_egress(void) {
+  fixture_t f;
+  fixture_init(&f);
+  sfu_peer_session_t *sub = f.session;
+  const uint64_t assignment_generation = 7;
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[0], assignment_generation, memory_order_release);
+
+  sfu_egress_media_t media = {
+      .source = SFU_MEDIA_SCREEN,
+      .video_ssrc = MEDIA_SSRC,
+      .video_rtx_ssrc = RTX_SSRC,
+      .assignment_generation = assignment_generation,
+      .remote_slot = 0,
+      .video_pt = RTP_PT,
+      .video_rtx_pt = RTX_PT,
+      .has_video = true,
+  };
+  uint8_t first_data[128];
+  size_t first_len;
+  build_rtp_video(first_data, 100, 40, &first_len);
+  sfu_write_be32(first_data + 4, 1000);
+  sfu_packet_t first = {.data = first_data, .len = (uint32_t)first_len, .cap = sizeof(first_data)};
+  assert(sfu_egress_process_plaintext(&f.w, sub, &first, &sub->cold->addr, sub->cold->addr_len, &media));
+  assert(sub->egress.paced_screen.count == 1);
+  assert(sub->egress.paced_screen.ready_count == 0);
+  assert(sub->egress.paced_screen.input_frame_active);
+
+  uint8_t replacement_data[128];
+  size_t replacement_len;
+  build_rtp_video(replacement_data, 101, 40, &replacement_len);
+  replacement_data[1] |= 0x80u;
+  sfu_write_be32(replacement_data + 4, 2000);
+  sfu_packet_t replacement = {.data = replacement_data, .len = (uint32_t)replacement_len, .cap = sizeof(replacement_data)};
+  assert(sfu_egress_process_plaintext(&f.w, sub, &replacement, &sub->cold->addr, sub->cold->addr_len, &media));
+  assert(sub->egress.paced_screen.count == 1);
+  assert(sub->egress.paced_screen.ready_count == 1);
+  assert(!sub->egress.paced_screen.input_frame_active);
+  assert(sub->egress.paced_screen.entries[sub->egress.paced_screen.head].metadata.frame_end);
+
+  fixture_destroy(&f);
+}
+
+static void test_screen_drain_charges_shared_pacer_once(void) {
+  fixture_t f;
+  fixture_init(&f);
+  sfu_peer_session_t *sub = f.session;
+  sfu_pacer_set_rate(&sub->egress.pacer, 1000000, 1000000);
+
+  uint8_t payload[1200] = {0};
+  struct sockaddr_storage dst = sub->cold->addr;
+  sfu_paced_send_metadata_t metadata = {
+      .assignment_generation = 1,
+      .owner_value = sfu_session_owner_value(sub),
+      .transport_generation = atomic_load_explicit(&sub->cold->transport_generation, memory_order_acquire),
+      .address_generation = atomic_load_explicit(&sub->cold->address_generation, memory_order_acquire),
+      .remote_slot = 0,
+  };
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[0], metadata.assignment_generation, memory_order_release);
+  sfu_pacer_reservation_t reservation = {0};
+  assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &reservation));
+  assert(sfu_paced_send_enqueue(&sub->egress.paced_screen, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_BASE, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &reservation, &metadata, 1000000, NULL));
+  sub->egress.paced_screen.ready_count++;
+  int64_t before = sub->egress.pacer.balance_bytes;
+  uint64_t sent_before = sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE];
+  uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000, &remaining));
+  assert(sub->egress.paced_screen.count == 0);
+  assert(sub->egress.pacer.balance_bytes == before - (int64_t)sizeof(payload));
+  assert(sub->egress.pacer.sent[SFU_PACER_CLASS_VIDEO_BASE] == sent_before + 1);
+  fixture_destroy(&f);
+}
+
+static void test_screen_base_drains_under_camera_debt(void) {
+  fixture_t f;
+  fixture_init(&f);
+  sfu_peer_session_t *sub = f.session;
+  sfu_pacer_set_rate(&sub->egress.pacer, 1000000, 1000000);
+  sub->egress.pacer.balance_bytes = -sub->egress.pacer.bucket_cap_bytes * 2;
+
+  uint8_t payload[1200] = {0};
+  struct sockaddr_storage dst = sub->cold->addr;
+  sfu_paced_send_metadata_t metadata = {
+      .assignment_generation = 1,
+      .owner_value = sfu_session_owner_value(sub),
+      .transport_generation = atomic_load_explicit(&sub->cold->transport_generation, memory_order_acquire),
+      .address_generation = atomic_load_explicit(&sub->cold->address_generation, memory_order_acquire),
+      .remote_slot = 0,
+  };
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[0], metadata.assignment_generation, memory_order_release);
+  sfu_pacer_reservation_t reservation = {0};
+  assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_TRANSITION, sizeof(payload), false, 1000000, &reservation));
+  assert(sfu_paced_send_enqueue(&sub->egress.paced_screen, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_TRANSITION, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &reservation, &metadata, 1000000, NULL));
+  sub->egress.paced_screen.ready_count++;
+  int64_t before = sub->egress.pacer.balance_bytes;
+  uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen, &f.w, sub, 1000000, &remaining));
+  assert(sub->egress.paced_screen.count == 0);
+  assert(sub->egress.pacer.balance_bytes == before - (int64_t)sizeof(payload));
+  fixture_destroy(&f);
 }
 
 /* CC-16: a subscriber with an armed pacer NACKing at line rate gets only
@@ -1359,6 +1466,7 @@ static void test_visibility_false_stops_forward(void) {
     uint8_t plain[512];
     size_t plain_len;
     build_rtp_video(plain, 2000, 60, &plain_len);
+    plain[1] |= 0x80u;
     uint8_t wire[1024];
     memcpy(wire, plain, plain_len);
     int wire_len = (int)plain_len;
@@ -1373,6 +1481,9 @@ static void test_visibility_false_stops_forward(void) {
     sfu_ingress_process(&f.base.w, pkt);
 
     gcc_packet_info_t info = {0};
+    assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
+    uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+    assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.base.w, sub, INT64_MAX, &remaining));
     assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   }
 
@@ -1429,6 +1540,7 @@ static void test_visibility_false_stops_forward(void) {
     uint8_t plain[512];
     size_t plain_len;
     build_rtp_video(plain, 2002, 60, &plain_len);
+    plain[1] |= 0x80u;
     uint8_t wire[1024];
     memcpy(wire, plain, plain_len);
     int wire_len = (int)plain_len;
@@ -1443,6 +1555,9 @@ static void test_visibility_false_stops_forward(void) {
     sfu_ingress_process(&f.base.w, pkt);
 
     gcc_packet_info_t info = {0};
+    assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 2, &info));
+    uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+    assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.base.w, sub, INT64_MAX, &remaining));
     assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 2, &info));
   }
 
@@ -1686,6 +1801,9 @@ int main(void) {
   test_nack_wrong_stream_misses_cache();
   test_generation_bump_invalidates_cache();
   test_egress_pacer_drops_enhancement_not_audio();
+  test_screen_timestamp_rollover_recovers_through_egress();
+  test_screen_drain_charges_shared_pacer_once();
+  test_screen_base_drains_under_camera_debt();
   test_nack_line_rate_throttled_by_rtx_budget();
   test_forward_churn_subscriber_disconnect();
   test_visibility_false_stops_forward();

@@ -42,11 +42,10 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
 void sfu_session_request_keyframe(sfu_worker_t *w, sfu_peer_session_t *publisher, bool use_fir);
 void sfu_session_maybe_send_twcc_feedback(sfu_worker_t *w, sfu_peer_session_t *publisher);
 bool sfu_session_send_remb_for_source(sfu_worker_t *w, sfu_peer_session_t *publisher, sfu_media_kind_t source, uint32_t bitrate_bps);
-void sfu_session_write_remb_contribution(sfu_peer_session_t *subscriber, uint32_t remote_slot, uint64_t assignment_generation,
-                                         uint32_t camera_bitrate_bps, uint32_t screen_bitrate_bps, uint64_t now_us);
-bool sfu_session_read_remb_contribution(const sfu_peer_session_t *subscriber, uint32_t remote_slot, uint64_t assignment_generation,
-                                        uint64_t now_us, uint64_t max_age_us, uint32_t *camera_bitrate_bps,
-                                        uint32_t *screen_bitrate_bps);
+void sfu_session_write_remb_contribution(sfu_peer_session_t *subscriber, uint32_t remote_slot, uint64_t assignment_generation, uint32_t camera_bitrate_bps,
+                                         uint32_t screen_bitrate_bps, uint64_t now_us);
+bool sfu_session_read_remb_contribution(const sfu_peer_session_t *subscriber, uint32_t remote_slot, uint64_t assignment_generation, uint64_t now_us,
+                                        uint64_t max_age_us, uint32_t *camera_bitrate_bps, uint32_t *screen_bitrate_bps);
 bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *publisher, int64_t now_us);
 #ifdef SFU_DIAG_LOG
 bool sfu_session_congestion_diag_due(const sfu_peer_session_t *session, uint64_t now_us);
@@ -166,9 +165,11 @@ static inline void sfu_session_publish_media(sfu_peer_session_t *s) {
 
 #define SFU_SESSION_OWNER_NONE UINT16_MAX
 
-static inline uint16_t sfu_session_owner_worker(const sfu_peer_session_t *s) { return (uint16_t)atomic_load_explicit(&s->worker_owner, memory_order_acquire); }
+static inline uint64_t sfu_session_owner_value(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->worker_owner, memory_order_acquire); }
 
-static inline uint64_t sfu_session_owner_generation(const sfu_peer_session_t *s) { return atomic_load_explicit(&s->worker_owner, memory_order_acquire) >> 16; }
+static inline uint16_t sfu_session_owner_worker(const sfu_peer_session_t *s) { return (uint16_t)sfu_session_owner_value(s); }
+
+static inline uint64_t sfu_session_owner_generation(const sfu_peer_session_t *s) { return sfu_session_owner_value(s) >> 16; }
 
 static inline uint64_t sfu_session_set_owner_worker(sfu_peer_session_t *s, uint16_t worker_id) {
   uint64_t old = atomic_load_explicit(&s->worker_owner, memory_order_relaxed);
