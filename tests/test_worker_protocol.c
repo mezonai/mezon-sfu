@@ -11,6 +11,7 @@
 #include "memory/packet_pool.h"
 #include "net/net.h"
 #include "peer/session.h"
+#include "pipeline/egress.h"
 #include "pipeline/ingress.h"
 #include "pipeline/paced_send.h"
 #include "pipeline/router.h"
@@ -1216,6 +1217,48 @@ static void test_egress_pacer_drops_enhancement_not_audio(void) {
   kf_fixture_destroy(&f);
 }
 
+static void test_screen_timestamp_rollover_recovers_through_egress(void) {
+  fixture_t f;
+  fixture_init(&f);
+  sfu_peer_session_t *sub = f.session;
+  const uint64_t assignment_generation = 7;
+  atomic_store_explicit(&sub->graph.remote_slots.applied_assignment_generations[0], assignment_generation, memory_order_release);
+
+  sfu_egress_media_t media = {
+      .source = SFU_MEDIA_SCREEN,
+      .video_ssrc = MEDIA_SSRC,
+      .video_rtx_ssrc = RTX_SSRC,
+      .assignment_generation = assignment_generation,
+      .remote_slot = 0,
+      .video_pt = RTP_PT,
+      .video_rtx_pt = RTX_PT,
+      .has_video = true,
+  };
+  uint8_t first_data[128];
+  size_t first_len;
+  build_rtp_video(first_data, 100, 40, &first_len);
+  sfu_write_be32(first_data + 4, 1000);
+  sfu_packet_t first = {.data = first_data, .len = (uint32_t)first_len, .cap = sizeof(first_data)};
+  assert(sfu_egress_process_plaintext(&f.w, sub, &first, &sub->cold->addr, sub->cold->addr_len, &media));
+  assert(sub->egress.paced_screen.count == 1);
+  assert(sub->egress.paced_screen.ready_count == 0);
+  assert(sub->egress.paced_screen.input_frame_active);
+
+  uint8_t replacement_data[128];
+  size_t replacement_len;
+  build_rtp_video(replacement_data, 101, 40, &replacement_len);
+  replacement_data[1] |= 0x80u;
+  sfu_write_be32(replacement_data + 4, 2000);
+  sfu_packet_t replacement = {.data = replacement_data, .len = (uint32_t)replacement_len, .cap = sizeof(replacement_data)};
+  assert(sfu_egress_process_plaintext(&f.w, sub, &replacement, &sub->cold->addr, sub->cold->addr_len, &media));
+  assert(sub->egress.paced_screen.count == 1);
+  assert(sub->egress.paced_screen.ready_count == 1);
+  assert(!sub->egress.paced_screen.input_frame_active);
+  assert(sub->egress.paced_screen.entries[sub->egress.paced_screen.head].metadata.frame_end);
+
+  fixture_destroy(&f);
+}
+
 static void test_screen_drain_charges_shared_pacer_once(void) {
   fixture_t f;
   fixture_init(&f);
@@ -1758,6 +1801,7 @@ int main(void) {
   test_nack_wrong_stream_misses_cache();
   test_generation_bump_invalidates_cache();
   test_egress_pacer_drops_enhancement_not_audio();
+  test_screen_timestamp_rollover_recovers_through_egress();
   test_screen_drain_charges_shared_pacer_once();
   test_screen_base_drains_under_camera_debt();
   test_nack_line_rate_throttled_by_rtx_budget();

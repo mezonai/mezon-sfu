@@ -341,9 +341,7 @@ static bool build_and_send_initial_offer(int fd, bool is_audience, sfu_video_cod
   return true;
 }
 
-sfu_remote_offer_manifest_t *sfu_signaling_capture_offer_manifest(sfu_peer_session_t *session) {
-  return sfu_session_remote_offer_capture(session);
-}
+sfu_remote_offer_manifest_t *sfu_signaling_capture_offer_manifest(sfu_peer_session_t *session) { return sfu_session_remote_offer_capture(session); }
 
 static bool build_and_send_offer(int fd, sfu_peer_session_t *session, sfu_signaling_server_t *s, uint64_t *offer_generation) {
   sfu_remote_offer_manifest_t *manifest = sfu_signaling_capture_offer_manifest(session);
@@ -1383,6 +1381,7 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
   pthread_mutex_lock(&session->negotiation.lock);
   if (session->negotiation.offer_outstanding) {
     session->negotiation.offer_outstanding = false;
+    session->negotiation.offer_sent_ms = 0;
     answered_offer_generation = session->negotiation.offer_generation;
     answered_offer_revision = session->negotiation.offered_revision;
     session->negotiation.answered_revision = answered_offer_revision;
@@ -2275,8 +2274,9 @@ static bool renegotiation_queue_enqueue_owned(sfu_renegotiation_queue_t *queue, 
   }
 
   pthread_mutex_lock(&session->negotiation.lock);
-  bool eligible = session->state == SFU_SESSION_ESTABLISHED && !session->negotiation.offer_outstanding && session->negotiation.negotiation_needed &&
-                  session->negotiation.renegotiation_pending && sfu_session_accepts_work(session);
+  bool retry_due = !session->negotiation.offer_outstanding && session->negotiation.negotiation_needed && session->negotiation.renegotiation_pending;
+  bool answer_watch = session->negotiation.offer_outstanding && session->negotiation.offer_sent_ms != 0;
+  bool eligible = session->state == SFU_SESSION_ESTABLISHED && (retry_due || answer_watch) && sfu_session_accepts_work(session);
   if (!session->negotiation.renegotiation_queued && eligible) {
     if (queue->count < SFU_RENEGOTIATION_QUEUE_CAP) {
       queue->items[queue->tail] = session;
@@ -2369,6 +2369,35 @@ static void arm_renegotiation_timer(sfu_signaling_server_t *s, uint64_t due_ms) 
   uv_timer_start(&s->renegotiation_timer, on_renegotiation_timer, delay_ms, 0);
 }
 
+static bool expire_unanswered_offer_locked(sfu_peer_session_t *session, uint64_t now_ms) {
+  if (!session->negotiation.offer_outstanding || session->negotiation.offer_sent_ms == 0 || now_ms < session->negotiation.offer_sent_ms ||
+      now_ms - session->negotiation.offer_sent_ms < SFU_RENEGOTIATION_OFFER_TIMEOUT_MS) {
+    return false;
+  }
+  session->negotiation.offer_outstanding = false;
+  session->negotiation.offer_sent_ms = 0;
+  if (session->negotiation.desired_offer_revision <= session->negotiation.offered_revision) {
+    session->negotiation.desired_offer_revision = session->negotiation.offered_revision + 1;
+    if (session->negotiation.desired_offer_revision == 0) {
+      session->negotiation.desired_offer_revision = 1;
+    }
+  }
+  session->negotiation.renegotiation_pending = true;
+  session->negotiation.negotiation_needed = true;
+  session->negotiation.negotiation_due_ms = now_ms;
+  return true;
+}
+
+bool sfu_signaling_renegotiation_test_expire_offer(sfu_peer_session_t *session, uint64_t now_ms) {
+  if (!session) {
+    return false;
+  }
+  pthread_mutex_lock(&session->negotiation.lock);
+  bool expired = expire_unanswered_offer_locked(session, now_ms);
+  pthread_mutex_unlock(&session->negotiation.lock);
+  return expired;
+}
+
 static void flush_pending_offers(sfu_signaling_server_t *s) {
   uint64_t earliest_due_ms = 0;
   uint32_t pending_count = renegotiation_queue_count(&s->renegotiation_queue);
@@ -2384,9 +2413,18 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
     bool requeue = false;
     uint64_t now_ms = sfu_now_ms();
     pthread_mutex_lock(&session->negotiation.lock);
-    if (s->renegotiation_timer_inited && session->negotiation.negotiation_due_ms > now_ms) {
+    if (session->negotiation.offer_outstanding && session->negotiation.offer_sent_ms != 0) {
+      uint64_t answer_due_ms = session->negotiation.offer_sent_ms + SFU_RENEGOTIATION_OFFER_TIMEOUT_MS;
+      if (!expire_unanswered_offer_locked(session, now_ms)) {
+        session->negotiation.negotiation_due_ms = answer_due_ms;
+        requeue = true;
+      } else {
+        SFU_LOG_WARN("signaling: unanswered offer timed out for peer %u; reissuing", session->peer_id);
+      }
+    }
+    if (!requeue && s->renegotiation_timer_inited && session->negotiation.negotiation_due_ms > now_ms) {
       requeue = true;
-    } else {
+    } else if (!requeue) {
       session->negotiation.negotiation_needed = false;
       if (session->state == SFU_SESSION_ESTABLISHED && !session->negotiation.offer_outstanding && sfu_session_accepts_work(session) && session->fd >= 0 &&
           session->negotiation.desired_offer_revision > session->negotiation.offered_revision) {
@@ -2417,14 +2455,25 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
         pthread_mutex_lock(&session->negotiation.lock);
         session->negotiation.offered_revision = attempt_revision;
         session->negotiation.offer_generation = manifest_generation;
+        session->negotiation.offer_sent_ms = now_ms;
+        session->negotiation.negotiation_due_ms = now_ms + SFU_RENEGOTIATION_OFFER_TIMEOUT_MS;
         session->negotiation.negotiation_retry_count = 0;
+        due_ms = session->negotiation.negotiation_due_ms;
         pthread_mutex_unlock(&session->negotiation.lock);
         SFU_LOG_INFO("signaling: sent renegotiation offer ufrag=%s fd=%d peer_id=%u generation=%" PRIu64 " revision=%" PRIu64, session->cold->ufrag, fd,
                      session->peer_id, manifest_generation, attempt_revision);
+        if (renegotiation_queue_enqueue_owned(&s->renegotiation_queue, session)) {
+          if (earliest_due_ms == 0 || due_ms < earliest_due_ms) {
+            earliest_due_ms = due_ms;
+          }
+          continue;
+        }
+        SFU_LOG_WARN("signaling: unanswered offer watch for peer %u was concurrently queued or became ineligible", session->peer_id);
       } else if (send) {
         pthread_mutex_lock(&session->negotiation.lock);
         if (session->negotiation.offer_outstanding) {
           session->negotiation.offer_outstanding = false;
+          session->negotiation.offer_sent_ms = 0;
           session->negotiation.renegotiation_pending = true;
           session->negotiation.negotiation_retry_count++;
           uint32_t shift = session->negotiation.negotiation_retry_count > 5 ? 5 : session->negotiation.negotiation_retry_count;

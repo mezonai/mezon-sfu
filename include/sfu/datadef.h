@@ -302,6 +302,7 @@ typedef struct {
   uint64_t offered_revision;
   uint64_t answered_revision;
   uint64_t last_answered_offer_generation;
+  uint64_t offer_sent_ms;
   uint64_t negotiation_first_dirty_ms;
   uint64_t negotiation_due_ms;
 } sfu_session_negotiation_t;
