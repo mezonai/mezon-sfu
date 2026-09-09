@@ -445,7 +445,7 @@
         <div id="joinScreen">
             <div id="joinCard">
                 <h1>Mezon SFU</h1>
-                <p class="sub">VP8 camera + selectable VP9 L1T1 / VP8 screen (720p)</p>
+                <p class="sub">VP8 camera + selectable VP9 L1T1 / VP8 screen (1080p)</p>
                 <div class="form-group">
                     <label for="wsUrl">Signaling WebSocket URL</label>
                     <input
@@ -1547,7 +1547,7 @@
                 }
             }
 
-            /* Screen share: preserve native 720p text detail at 10 FPS. */
+            /* Screen share: preserve native 1080p text detail at 10 FPS. */
             async function applyScreenEncodingParams(sender) {
                 if (!sender || typeof sender.getParameters !== "function") return;
                 try {
@@ -1588,8 +1588,8 @@
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             cursor: "always",
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
                             frameRate: { ideal: 5, max: 10 },
                         },
                         audio: false,
@@ -1874,14 +1874,14 @@
 
 /* Codec configuration:
  *   - Camera (mid:1): VP8, single encoding, 320x480.
- *   - Screen  (mid:2): selectable VP9 L1T1 or VP8 single-layer, 1280x720.
+ *   - Screen  (mid:2): selectable VP9 L1T1 or VP8 single-layer, 1920x1080.
  * The screen codec is selected before joining and fixed for the connection.
  */
 const CAMERA_CODEC = "VP8";
 let screenCodec = "VP9";
 const SCREEN_SVC_MODE = "L1T1";
 const CAMERA_RESOLUTION = { width: 320, height: 480 };
-const SCREEN_RESOLUTION = { width: 1280, height: 720 };
+const SCREEN_RESOLUTION = { width: 1920, height: 1080 };
 const CAMERA_MAX_BITRATE_BPS = 1_000_000;
 const CAMERA_MAX_FRAMERATE = 30;
 const SCREEN_MAX_BITRATE_BPS = 3_500_000;
