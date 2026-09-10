@@ -136,6 +136,7 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   sfu_bandwidth_allocation_t allocation;
   sfu_bandwidth_allocate(inputs, input_count, bitrate_bps, &allocation);
   uint64_t now_us = sfu_now_us();
+#ifdef SFU_DIAG_LOG
   session->egress.diag.last_allocation_us = now_us;
   session->egress.diag.allocation_streams = (uint32_t)allocation.stream_count;
   session->egress.diag.allocation_pool_bps = allocation.video_pool_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.video_pool_bps;
@@ -143,6 +144,7 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
   session->egress.diag.allocation_allocated_bps = allocation.allocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.allocated_bps;
   session->egress.diag.allocation_unallocated_bps = allocation.unallocated_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.unallocated_bps;
   session->egress.diag.remb_contribution_bps = session->egress.diag.allocation_allocated_bps;
+#endif
   if (snapshot) {
     sfu_receiver_snapshot_iter_t contribution_iter;
     sfu_receiver_snapshot_iter_init(&contribution_iter, snapshot);
@@ -343,6 +345,7 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     estimated_bps = sender_session->egress.gcc_ctx->aimd.current_bitrate_bps;
   }
 
+#ifdef SFU_DIAG_LOG
   sender_session->egress.diag.last_twcc_us = sfu_now_us();
   sender_session->egress.diag.latest_twcc_lost = fresh_lost;
   sender_session->egress.diag.latest_twcc_total = fresh_total;
@@ -351,6 +354,7 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     sender_session->egress.diag.latest_ack_bps = sender_session->egress.gcc_ctx->aimd.ack_bitrate_bps;
     sender_session->egress.diag.latest_overuse = (uint8_t)sender_session->egress.gcc_ctx->trendline.usage_state;
   }
+#endif
   sfu_metric_inc("congestion_twcc_feedback");
   sfu_metric_add("congestion_twcc_lost", fresh_lost);
 
@@ -395,7 +399,9 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       break;
     }
     requested[requested_count++] = lost_seq;
+#ifdef SFU_DIAG_LOG
     sender_session->egress.diag.nack_requests++;
+#endif
     sfu_metric_inc("congestion_nack_requested");
 
     uint8_t orig_pkt[SFU_MAX_PAYLOAD_SIZE];
@@ -404,12 +410,16 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     uint8_t rtx_pt = 0;
 
     if (!sfu_rtx_cache_get_stream(sender_session->egress.rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
+#ifdef SFU_DIAG_LOG
       sender_session->egress.diag.cache_misses++;
+#endif
       sfu_metric_inc("congestion_rtx_cache_miss");
       unrecoverable_loss = true;
       continue;
     }
+#ifdef SFU_DIAG_LOG
     sender_session->egress.diag.cache_hits++;
+#endif
     sfu_metric_inc("congestion_rtx_cache_hit");
 
     if (!sfu_pacer_rtx_allow(&sender_session->egress.pacer, orig_len + 2, (int64_t)sfu_now_us())) {
@@ -462,7 +472,9 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
         if (twcc_written && sender_session->egress.twcc_history) {
           sfu_twcc_history_record(sender_session->egress.twcc_history, twcc_seq, (int64_t)sfu_now_us(), (uint32_t)rtx_enc_len);
         }
+#ifdef SFU_DIAG_LOG
         sender_session->egress.diag.rtx_sent++;
+#endif
         sfu_metric_inc("congestion_rtx_sent");
       }
     } else {
@@ -493,7 +505,9 @@ static void handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessio
     return;
   }
 
+#ifdef SFU_DIAG_LOG
   sender_session->egress.diag.pli_received++;
+#endif
   sfu_metric_inc("congestion_pli_received");
   request_source_keyframe(w, sender_session, pli.media_ssrc);
 }
@@ -504,7 +518,9 @@ static void handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessio
     sfu_metric_inc("rtcp_fir_bad");
     return;
   }
+#ifdef SFU_DIAG_LOG
   sender_session->egress.diag.fir_received++;
+#endif
   sfu_metric_inc("rtcp_fir_received");
   /* RFC 5104: the media SSRC field is unused, so the SSRCs that need a keyframe
    * are the FCI targets. Resolving against fir.media_ssrc would miss and fall

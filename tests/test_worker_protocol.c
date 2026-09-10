@@ -259,10 +259,12 @@ static void test_compound_nack_rtx_dispatch(void) {
   feed_rtcp(&f, nack, nack_len);
 
   assert(f.cache->next_rtx_seq == 1);
+#ifdef SFU_DIAG_LOG
   assert(f.session->egress.diag.nack_requests == 1);
   assert(f.session->egress.diag.cache_hits == 1);
   assert(f.session->egress.diag.cache_misses == 0);
   assert(f.session->egress.diag.rtx_sent == 1);
+#endif
   assert(sfu_metric_get("congestion_nack_requested") == 1);
   assert(sfu_metric_get("congestion_rtx_cache_hit") == 1);
   assert(sfu_metric_get("congestion_rtx_sent") == 1);
@@ -402,7 +404,9 @@ static void test_fir_requests_keyframe(void) {
   assert(sfu_metric_get("rtcp_fir_bad") == 0);
   assert(sfu_metric_get("rtcp_pli_bad") == 0);       /* no longer mislabeled */
   assert(sfu_metric_get("rtcp_kf_unresolved") == 1); /* honored, target not in a room */
+#ifdef SFU_DIAG_LOG
   assert(f.session->egress.diag.fir_received == 1);
+#endif
   assert(f.session->egress.last_pli_time == 0); /* not misrouted to the asker */
   fixture_destroy(&f);
 }

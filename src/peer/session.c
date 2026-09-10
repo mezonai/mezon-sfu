@@ -2047,7 +2047,9 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
   int64_t now = (int64_t)sfu_now_ms();
   int64_t *last_pli = source == SFU_MEDIA_SCREEN ? &publisher->egress.last_screen_pli_time : &publisher->egress.last_pli_time;
   if (*last_pli != 0 && now - *last_pli < SFU_SESSION_KF_THROTTLE_MS) {
+#ifdef SFU_DIAG_LOG
     publisher->egress.diag.pli_coalesced++;
+#endif
     sfu_metric_inc("congestion_pli_coalesced");
     SFU_LOG_DEBUG("worker %u: KF request for publisher %u source %u coalesced (last PLI %" PRId64 " ms ago)", w->worker_index, publisher->peer_id,
                   (unsigned)source, now - *last_pli);
@@ -2094,7 +2096,9 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
          * coalesced away — for screen share that is a full second of smear
          * because the publisher never re-keys. */
         *last_pli = now;
+#ifdef SFU_DIAG_LOG
         publisher->egress.diag.pli_sent++;
+#endif
         sfu_metric_inc("congestion_pli_sent");
       }
     } else {
@@ -2219,11 +2223,13 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
   }
 
   uint32_t targets[2] = {0, 0};
+#ifdef SFU_DIAG_LOG
   uint32_t fresh_by_source[2] = {0, 0};
   uint32_t stale_by_source[2] = {0, 0};
   uint32_t winner_peer_id[2] = {0, 0};
   uint32_t winner_remote_slot[2] = {0, 0};
   uint64_t winner_generation[2] = {0, 0};
+#endif
   uint32_t fresh = 0;
   uint32_t stale = 0;
   bool saw_route = false;
@@ -2242,20 +2248,27 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
         uint32_t contribution_bps = source == SFU_MEDIA_SCREEN ? screen_bps : camera_bps;
         if (contribution_bps > targets[pass]) {
           targets[pass] = contribution_bps;
+#ifdef SFU_DIAG_LOG
           winner_peer_id[pass] = route->subscriber->peer_id;
           winner_remote_slot[pass] = route->remote_slot;
           winner_generation[pass] = route->assignment_generation;
+#endif
         }
+#ifdef SFU_DIAG_LOG
         fresh_by_source[pass]++;
+#endif
         fresh++;
       } else {
+#ifdef SFU_DIAG_LOG
         stale_by_source[pass]++;
+#endif
         stale++;
       }
     }
   }
   sfu_fanout_bundle_release(bundle);
 
+#ifdef SFU_DIAG_LOG
   sfu_media_snapshot_t media = sfu_session_load_media(publisher);
   sfu_remb_source_diag_t *source_diag[2] = {&publisher->egress.diag.remb_camera, &publisher->egress.diag.remb_screen};
   for (unsigned pass = 0; pass < 2; pass++) {
@@ -2267,13 +2280,17 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
     source_diag[pass]->fresh_routes = fresh_by_source[pass];
     source_diag[pass]->stale_routes = stale_by_source[pass];
   }
+#endif
 
-  uint32_t previous_target_bps = publisher->egress.diag.remb_target_bps;
+  uint32_t previous_target_bps = publisher->egress.last_remb_target_bps;
   uint32_t aggregate_target_bps = targets[0] > targets[1] ? targets[0] : targets[1];
+  publisher->egress.last_remb_target_bps = aggregate_target_bps;
+#ifdef SFU_DIAG_LOG
   publisher->egress.diag.remb_fresh = fresh;
   publisher->egress.diag.remb_stale = stale;
   publisher->egress.diag.remb_target_bps = aggregate_target_bps;
   publisher->egress.diag.remb_sent = false;
+#endif
   if (aggregate_target_bps != previous_target_bps) {
     sfu_metric_inc("remb_aggregate_target_changed");
   }
@@ -2292,17 +2309,23 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_VIDEO, targets[0])) {
         publisher->egress.last_camera_remb_bps = targets[0];
         publisher->egress.last_camera_remb_time_us = now_us;
+#ifdef SFU_DIAG_LOG
         source_diag[0]->last_sent_bps = targets[0];
         source_diag[0]->last_sent_us = now_us;
         source_diag[0]->sent_count++;
+#endif
         sfu_metric_inc("remb_camera_sent");
         sent = true;
       } else {
+#ifdef SFU_DIAG_LOG
         source_diag[0]->rejected_count++;
+#endif
         sfu_metric_inc("remb_camera_rejected");
       }
     } else {
+#ifdef SFU_DIAG_LOG
       source_diag[0]->throttled_count++;
+#endif
       sfu_metric_inc("remb_camera_throttled");
       sfu_metric_inc("remb_aggregate_throttled");
     }
@@ -2312,23 +2335,31 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_SCREEN, targets[1])) {
         publisher->egress.last_screen_remb_bps = targets[1];
         publisher->egress.last_screen_remb_time_us = now_us;
+#ifdef SFU_DIAG_LOG
         source_diag[1]->last_sent_bps = targets[1];
         source_diag[1]->last_sent_us = now_us;
         source_diag[1]->sent_count++;
+#endif
         sfu_metric_inc("remb_screen_sent");
         sent = true;
       } else {
+#ifdef SFU_DIAG_LOG
         source_diag[1]->rejected_count++;
+#endif
         sfu_metric_inc("remb_screen_rejected");
       }
     } else {
+#ifdef SFU_DIAG_LOG
       source_diag[1]->throttled_count++;
+#endif
       sfu_metric_inc("remb_screen_throttled");
       sfu_metric_inc("remb_aggregate_throttled");
     }
   }
   if (sent) {
+#ifdef SFU_DIAG_LOG
     publisher->egress.diag.remb_sent = true;
+#endif
     sfu_metric_inc("remb_aggregate_sent");
   }
   return sent;
