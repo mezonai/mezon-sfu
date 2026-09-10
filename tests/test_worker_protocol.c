@@ -259,10 +259,12 @@ static void test_compound_nack_rtx_dispatch(void) {
   feed_rtcp(&f, nack, nack_len);
 
   assert(f.cache->next_rtx_seq == 1);
+#ifdef SFU_DIAG_LOG
   assert(f.session->egress.diag.nack_requests == 1);
   assert(f.session->egress.diag.cache_hits == 1);
   assert(f.session->egress.diag.cache_misses == 0);
   assert(f.session->egress.diag.rtx_sent == 1);
+#endif
   assert(sfu_metric_get("congestion_nack_requested") == 1);
   assert(sfu_metric_get("congestion_rtx_cache_hit") == 1);
   assert(sfu_metric_get("congestion_rtx_sent") == 1);
@@ -282,10 +284,12 @@ static void test_compound_nack_then_pli(void) {
   size_t pli_len = build_pli(compound + nack_len);
   feed_rtcp(&f, compound, nack_len + pli_len);
 
-  /* NACK cache miss marks unrecoverable loss -> throttled keyframe request;
-   * the PLI member then finds last_pli_time already set and is a no-op. Both
-   * members parsed cleanly, so nothing was flagged bad or malformed. */
-  assert(f.session->egress.last_pli_time != 0);
+  /* NACK cache miss marks unrecoverable loss and the PLI member each ask the
+   * source publisher to re-key. This fixture has no room, so neither resolves
+   * and both are dropped as unresolved (one bump each) rather than misrouted
+   * back to the asker. Both members parsed cleanly: nothing bad or malformed. */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 2);
+  assert(f.session->egress.last_pli_time == 0);
   assert(sfu_metric_get("rtcp_compound_malformed") == 0);
   assert(sfu_metric_get("rtcp_nack_bad") == 0);
   assert(sfu_metric_get("rtcp_pli_bad") == 0);
@@ -307,8 +311,14 @@ static void test_compound_pli_then_nack(void) {
   size_t nack_len = build_nack(compound + pli_len, (uint16_t[]){7, 0x0000}, 2);
   feed_rtcp(&f, compound, pli_len + nack_len);
 
-  assert(f.session->egress.last_pli_time != 0); /* PLI dispatched */
-  assert(f.cache->next_rtx_seq == 1);           /* NACK dispatched and serviced */
+  /* PLI names MEDIA_SSRC, which no publisher owns in this roomless fixture, so
+   * Fix A drops it as unresolved rather than misrouting to the asker. The NACK
+   * for seq 7 is cached, so it is serviced from the cache and requests nothing.
+   * The unresolved bump proves the PLI member was dispatched and reached the
+   * resolver. */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 1); /* PLI dispatched, unresolved */
+  assert(f.session->egress.last_pli_time == 0);      /* not misrouted to the asker */
+  assert(f.cache->next_rtx_seq == 1);                /* NACK dispatched and serviced */
   fixture_destroy(&f);
 }
 
@@ -375,8 +385,13 @@ static void test_bad_pli(void) {
   fixture_destroy(&f);
 }
 
-/* FIR member is parsed and ignored (no keyframe side effects, no metrics). */
-static void test_fir_ignored(void) {
+/* A valid FIR resolves each FCI target SSRC to a keyframe request. With no room
+ * in this fixture the target is unresolved, so the request is dropped (Fix A no
+ * longer misroutes it back to the asker) and rtcp_kf_unresolved bumps — proving
+ * the FIR was honored and reached the resolver. The FIR itself is counted; the
+ * old copy-paste bug that bumped rtcp_pli_bad on a malformed FIR must not fire
+ * on a well-formed one. */
+static void test_fir_requests_keyframe(void) {
   fixture_t f;
   fixture_init(&f);
 
@@ -385,14 +400,39 @@ static void test_fir_ignored(void) {
   feed_rtcp(&f, fir, fir_len);
 
   assert(sfu_metric_get("rtcp_compound_malformed") == 0);
+  assert(sfu_metric_get("rtcp_fir_received") == 1);
+  assert(sfu_metric_get("rtcp_fir_bad") == 0);
+  assert(sfu_metric_get("rtcp_pli_bad") == 0);       /* no longer mislabeled */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 1); /* honored, target not in a room */
+#ifdef SFU_DIAG_LOG
+  assert(f.session->egress.diag.fir_received == 1);
+#endif
+  assert(f.session->egress.last_pli_time == 0); /* not misrouted to the asker */
+  fixture_destroy(&f);
+}
+
+/* A malformed FIR (bad body length) bumps rtcp_fir_bad, not rtcp_pli_bad. */
+static void test_bad_fir(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t fir[64];
+  size_t fir_len = rtcp_member_header(fir, 4, 206, MEDIA_SSRC, 16); /* (16-4)%8 != 0 */
+  sfu_write_be32(fir + 8, MEDIA_SSRC);
+  feed_rtcp(&f, fir, fir_len);
+
+  assert(sfu_metric_get("rtcp_fir_bad") == 1);
   assert(sfu_metric_get("rtcp_pli_bad") == 0);
-  assert(f.session->egress.last_pli_time == 0);
+  assert(f.session->egress.last_pli_time == 0); /* no keyframe side effect */
   fixture_destroy(&f);
 }
 
 /* Every packet fed through the worker must be released exactly once; only
  * send-completed packets return to the pool (queued ZC sends retain a ref
- * until their CQE is reaped, and this test never submits). */
+ * until their CQE is reaped, and this test never submits). The keyframe send
+ * path is driven directly: Fix A drops unresolved RTCP feedback before it
+ * reaches the builder in a roomless fixture, so feedback can no longer exercise
+ * the builder here. */
 static void test_packet_release_ownership(void) {
   fixture_t f;
   fixture_init(&f);
@@ -401,30 +441,31 @@ static void test_packet_release_ownership(void) {
   /* Malformed compound: dropped without any keyframe/RTX side effects. */
   uint8_t garbage[16] = {0xC1, 206, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   feed_rtcp(&f, garbage, sizeof(garbage));
+  assert(pool_free_count(&f.pp) == POOL_CAPACITY);
 
-  /* No uplink video SSRC: the keyframe request bail-out path must not
-   * allocate (nor leak) any packet. */
-  uint8_t pli[64];
-  size_t pli_len = build_pli(pli);
-  feed_rtcp(&f, pli, pli_len);
-  assert(f.session->egress.last_pli_time != 0);    /* request throttled/coalesced... */
-  assert(pool_free_count(&f.pp) == POOL_CAPACITY); /* ...but no packet held */
+  /* No uplink video SSRC: the keyframe builder bails before allocating, and
+   * (Fix B) before stamping the throttle — nothing was sent, so the window must
+   * stay open for a later genuine request. */
+  assert(f.session->media.uplink_video.ssrc == 0);
+  sfu_session_request_keyframe(&f.w, f.session, false);
+  assert(pool_free_count(&f.pp) == POOL_CAPACITY); /* no packet held */
+  assert(f.session->egress.last_pli_time == 0);    /* not stamped on SSRC==0 */
 
-  /* With a video SSRC the PLI is actually built: one packet is allocated,
-   * queued on the send ring (retained ref, never submitted here), and the
-   * builder's own ref is dropped. */
-  f.session->egress.last_pli_time = 0;
+  /* With a video SSRC the PLI is actually built and queued: one packet is
+   * allocated, retained by the send ring (never submitted here), and the
+   * builder's own ref is dropped. The throttle stamps only now (Fix B). */
   f.session->media.uplink_video.ssrc = MEDIA_SSRC;
-  feed_rtcp(&f, pli, pli_len);
+  sfu_session_request_keyframe(&f.w, f.session, false);
   assert(pool_free_count(&f.pp) == POOL_CAPACITY - 1);
+  assert(f.session->egress.last_pli_time != 0); /* stamped on successful send */
 
   /* Inside the throttle window: coalesced, no second packet. */
-  feed_rtcp(&f, pli, pli_len);
+  sfu_session_request_keyframe(&f.w, f.session, false);
   assert(pool_free_count(&f.pp) == POOL_CAPACITY - 1);
 
-  /* Outside the window: a new request allocates again. */
+  /* Outside the window: a new request allocates and queues again. */
   f.session->egress.last_pli_time -= 2000;
-  feed_rtcp(&f, pli, pli_len);
+  sfu_session_request_keyframe(&f.w, f.session, false);
   assert(pool_free_count(&f.pp) == POOL_CAPACITY - 2);
   fixture_destroy(&f);
 }
@@ -612,9 +653,11 @@ static void test_nack_miss_routes_to_source_publisher(void) {
   kf_fixture_destroy(&f);
 }
 
-/* PLI naming an SSRC nobody forwards to this subscriber falls back to the
- * feedback session and bumps rtcp_kf_unresolved. */
-static void test_pli_unknown_ssrc_falls_back(void) {
+/* PLI naming an SSRC nobody forwards to this subscriber resolves to no
+ * publisher: both the fanout-routed pass and the unrouted snapshot pass miss,
+ * so Fix A drops it (rtcp_kf_unresolved) instead of misrouting it back to the
+ * feedback session. */
+static void test_pli_unknown_ssrc_dropped(void) {
   kf_fixture_t f;
   kf_fixture_init(&f);
 
@@ -624,7 +667,7 @@ static void test_pli_unknown_ssrc_falls_back(void) {
   feed_rtcp(&f.base, pli, pli_len);
 
   assert(f.publisher->egress.last_pli_time == 0);
-  assert(f.base.session->egress.last_pli_time != 0); /* fallback behavior */
+  assert(f.base.session->egress.last_pli_time == 0); /* not misrouted to the asker */
   assert(sfu_metric_get("rtcp_kf_unresolved") == 1);
   kf_fixture_destroy(&f);
 }
@@ -1145,7 +1188,8 @@ static void test_nack_wrong_stream_misses_cache(void) {
   feed_rtcp(&f, nack, hdr);
 
   assert(f.cache->next_rtx_seq == 0);           /* no retransmission */
-  assert(f.session->egress.last_pli_time != 0); /* miss -> keyframe fallback */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 1); /* miss -> keyframe requested (unresolved in roomless fixture) */
+  assert(f.session->egress.last_pli_time == 0); /* not misrouted to the asker */
   fixture_destroy(&f);
 }
 
@@ -1168,7 +1212,8 @@ static void test_generation_bump_invalidates_cache(void) {
   feed_rtcp(&f, nack, nack_len);
 
   assert(f.cache->next_rtx_seq == 0);           /* stale entry not served */
-  assert(f.session->egress.last_pli_time != 0); /* miss -> keyframe fallback */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 1); /* miss -> keyframe requested (unresolved in roomless fixture) */
+  assert(f.session->egress.last_pli_time == 0); /* not misrouted to the asker */
   fixture_destroy(&f);
 }
 
@@ -1593,7 +1638,8 @@ static void test_source_switch_colliding_seq_delayed_nack(void) {
   size_t nack_len = build_nack(nack, (uint16_t[]){42, 0x0000}, 2);
   feed_rtcp(&f, nack, nack_len);
   assert(f.cache->next_rtx_seq == 0);           /* nothing served from stale gen */
-  assert(f.session->egress.last_pli_time != 0); /* miss -> keyframe requested */
+  assert(sfu_metric_get("rtcp_kf_unresolved") == 1); /* miss -> keyframe requested (unresolved in roomless fixture) */
+  assert(f.session->egress.last_pli_time == 0); /* not misrouted to the asker */
 
   /* New source's seq 42 arrives (colliding sequence number) and is cached
    * at generation 1 with a different payload. */
@@ -1783,12 +1829,13 @@ int main(void) {
   test_malformed_tail_drops_remainder();
   test_bad_nack_fci();
   test_bad_pli();
-  test_fir_ignored();
+  test_fir_requests_keyframe();
+  test_bad_fir();
   test_packet_release_ownership();
   test_pli_routes_to_source_publisher();
   test_audience_pli_routes_to_source_publisher();
   test_nack_miss_routes_to_source_publisher();
-  test_pli_unknown_ssrc_falls_back();
+  test_pli_unknown_ssrc_dropped();
   test_gcc_estimate_reaches_scheduler();
   test_publisher_remb_aggregates_fresh_maximum_and_throttles();
   test_egress_writes_twcc_extension();

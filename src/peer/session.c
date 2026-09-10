@@ -2047,14 +2047,14 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
   int64_t now = (int64_t)sfu_now_ms();
   int64_t *last_pli = source == SFU_MEDIA_SCREEN ? &publisher->egress.last_screen_pli_time : &publisher->egress.last_pli_time;
   if (*last_pli != 0 && now - *last_pli < SFU_SESSION_KF_THROTTLE_MS) {
+#ifdef SFU_DIAG_LOG
     publisher->egress.diag.pli_coalesced++;
+#endif
     sfu_metric_inc("congestion_pli_coalesced");
     SFU_LOG_DEBUG("worker %u: KF request for publisher %u source %u coalesced (last PLI %" PRId64 " ms ago)", w->worker_index, publisher->peer_id,
                   (unsigned)source, now - *last_pli);
     return;
   }
-
-  *last_pli = now;
 
   if (media_ssrc == 0) {
     SFU_LOG_WARN("[KF-DBG] Cannot send PLI/FIR: Publisher %u video SSRC is 0", publisher->peer_id);
@@ -2089,7 +2089,16 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
       if (sent != 0) {
         SFU_LOG_ERROR("Failed to enqueue PLI to send_ring for peer %u", publisher->peer_id);
       } else {
+        /* Stamp the throttle only once the request actually left. Stamping
+         * before this point consumed the full SFU_SESSION_KF_THROTTLE_MS window
+         * even when nothing was sent (SSRC 0, alloc failure, protect failure,
+         * send-ring full), so a genuinely-needed retry a moment later was
+         * coalesced away — for screen share that is a full second of smear
+         * because the publisher never re-keys. */
+        *last_pli = now;
+#ifdef SFU_DIAG_LOG
         publisher->egress.diag.pli_sent++;
+#endif
         sfu_metric_inc("congestion_pli_sent");
       }
     } else {
@@ -2214,11 +2223,13 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
   }
 
   uint32_t targets[2] = {0, 0};
+#ifdef SFU_DIAG_LOG
   uint32_t fresh_by_source[2] = {0, 0};
   uint32_t stale_by_source[2] = {0, 0};
   uint32_t winner_peer_id[2] = {0, 0};
   uint32_t winner_remote_slot[2] = {0, 0};
   uint64_t winner_generation[2] = {0, 0};
+#endif
   uint32_t fresh = 0;
   uint32_t stale = 0;
   bool saw_route = false;
@@ -2237,20 +2248,27 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
         uint32_t contribution_bps = source == SFU_MEDIA_SCREEN ? screen_bps : camera_bps;
         if (contribution_bps > targets[pass]) {
           targets[pass] = contribution_bps;
+#ifdef SFU_DIAG_LOG
           winner_peer_id[pass] = route->subscriber->peer_id;
           winner_remote_slot[pass] = route->remote_slot;
           winner_generation[pass] = route->assignment_generation;
+#endif
         }
+#ifdef SFU_DIAG_LOG
         fresh_by_source[pass]++;
+#endif
         fresh++;
       } else {
+#ifdef SFU_DIAG_LOG
         stale_by_source[pass]++;
+#endif
         stale++;
       }
     }
   }
   sfu_fanout_bundle_release(bundle);
 
+#ifdef SFU_DIAG_LOG
   sfu_media_snapshot_t media = sfu_session_load_media(publisher);
   sfu_remb_source_diag_t *source_diag[2] = {&publisher->egress.diag.remb_camera, &publisher->egress.diag.remb_screen};
   for (unsigned pass = 0; pass < 2; pass++) {
@@ -2262,13 +2280,17 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
     source_diag[pass]->fresh_routes = fresh_by_source[pass];
     source_diag[pass]->stale_routes = stale_by_source[pass];
   }
+#endif
 
-  uint32_t previous_target_bps = publisher->egress.diag.remb_target_bps;
+  uint32_t previous_target_bps = publisher->egress.last_remb_target_bps;
   uint32_t aggregate_target_bps = targets[0] > targets[1] ? targets[0] : targets[1];
+  publisher->egress.last_remb_target_bps = aggregate_target_bps;
+#ifdef SFU_DIAG_LOG
   publisher->egress.diag.remb_fresh = fresh;
   publisher->egress.diag.remb_stale = stale;
   publisher->egress.diag.remb_target_bps = aggregate_target_bps;
   publisher->egress.diag.remb_sent = false;
+#endif
   if (aggregate_target_bps != previous_target_bps) {
     sfu_metric_inc("remb_aggregate_target_changed");
   }
@@ -2287,17 +2309,23 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_VIDEO, targets[0])) {
         publisher->egress.last_camera_remb_bps = targets[0];
         publisher->egress.last_camera_remb_time_us = now_us;
+#ifdef SFU_DIAG_LOG
         source_diag[0]->last_sent_bps = targets[0];
         source_diag[0]->last_sent_us = now_us;
         source_diag[0]->sent_count++;
+#endif
         sfu_metric_inc("remb_camera_sent");
         sent = true;
       } else {
+#ifdef SFU_DIAG_LOG
         source_diag[0]->rejected_count++;
+#endif
         sfu_metric_inc("remb_camera_rejected");
       }
     } else {
+#ifdef SFU_DIAG_LOG
       source_diag[0]->throttled_count++;
+#endif
       sfu_metric_inc("remb_camera_throttled");
       sfu_metric_inc("remb_aggregate_throttled");
     }
@@ -2307,23 +2335,31 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_SCREEN, targets[1])) {
         publisher->egress.last_screen_remb_bps = targets[1];
         publisher->egress.last_screen_remb_time_us = now_us;
+#ifdef SFU_DIAG_LOG
         source_diag[1]->last_sent_bps = targets[1];
         source_diag[1]->last_sent_us = now_us;
         source_diag[1]->sent_count++;
+#endif
         sfu_metric_inc("remb_screen_sent");
         sent = true;
       } else {
+#ifdef SFU_DIAG_LOG
         source_diag[1]->rejected_count++;
+#endif
         sfu_metric_inc("remb_screen_rejected");
       }
     } else {
+#ifdef SFU_DIAG_LOG
       source_diag[1]->throttled_count++;
+#endif
       sfu_metric_inc("remb_screen_throttled");
       sfu_metric_inc("remb_aggregate_throttled");
     }
   }
   if (sent) {
+#ifdef SFU_DIAG_LOG
     publisher->egress.diag.remb_sent = true;
+#endif
     sfu_metric_inc("remb_aggregate_sent");
   }
   return sent;
@@ -2405,12 +2441,13 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
   uint64_t pli_received_delta = diag_counter_delta(diag->pli_received, diag->last_logged_pli_received);
   uint64_t pli_sent_delta = diag_counter_delta(diag->pli_sent, diag->last_logged_pli_sent);
   uint64_t pli_coalesced_delta = diag_counter_delta(diag->pli_coalesced, diag->last_logged_pli_coalesced);
+  uint64_t fir_received_delta = diag_counter_delta(diag->fir_received, diag->last_logged_fir_received);
   int64_t debt = session->egress.pacer.balance_bytes < 0 ? -session->egress.pacer.balance_bytes : 0;
   SFU_LOG_INFO(
       "congestion session=%u worker=%u gcc=%u ack=%u overuse=%u twcc_loss=%u/%u pool=%u reserve=%u "
       "alloc=%u unalloc=%u streams=[%s] alloc_truncated=%u pacer_bps=%u debt=%" PRId64 " drop_delta=%" PRIu64 " rtx_drop_delta=%" PRIu64 " nack_delta=%" PRIu64
-      " cache_delta=%" PRIu64 "/%" PRIu64 " rtx_delta=%" PRIu64 " pli_delta=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " paced=count:%u,high:%u,delay:%" PRId64
-      ",cap:%" PRIu64 ",late:%" PRId64 ",queue:%" PRId64 ",input:%" PRId64
+      " cache_delta=%" PRIu64 "/%" PRIu64 " rtx_delta=%" PRIu64 " pli_delta=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " fir_delta=%" PRIu64
+      " paced=count:%u,high:%u,delay:%" PRId64 ",cap:%" PRIu64 ",late:%" PRId64 ",queue:%" PRId64 ",input:%" PRId64
       " remb=contrib:%u,target:%u,last_camera:%u,last_screen:%u,sent:%u,fresh:%u,stale:%u"
       " remb_camera=target:%u,ssrc:%u,last_sent:%u@%" PRId64 ",fresh:%u,stale:%u,winner:%u/%u/%" PRIu64 ",sent:%" PRIu64 ",throttled:%" PRIu64
       ",rejected:%" PRIu64 " remb_screen=target:%u,ssrc:%u,last_sent:%u@%" PRId64 ",fresh:%u,stale:%u,winner:%u/%u/%" PRIu64 ",sent:%" PRIu64
@@ -2418,9 +2455,9 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       session->peer_id, w->worker_index, diag->latest_gcc_bps, diag->latest_ack_bps, diag->latest_overuse, diag->latest_twcc_lost, diag->latest_twcc_total,
       diag->allocation_pool_bps, diag->allocation_reserve_bps, diag->allocation_allocated_bps, diag->allocation_unallocated_bps, allocations,
       allocations_truncated ? 1u : 0u, session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta, nack_delta, cache_hit_delta, cache_miss_delta,
-      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, session->egress.paced_screen.count, session->egress.paced_screen.high_water,
-      sfu_paced_send_projected_delay_us(&session->egress.paced_screen, (int64_t)now_us), session->egress.paced_screen.drain_cap_hits,
-      session->egress.paced_screen.max_release_late_us, session->egress.paced_screen.max_enqueue_to_send_us,
+      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, fir_received_delta, session->egress.paced_screen.count,
+      session->egress.paced_screen.high_water, sfu_paced_send_projected_delay_us(&session->egress.paced_screen, (int64_t)now_us),
+      session->egress.paced_screen.drain_cap_hits, session->egress.paced_screen.max_release_late_us, session->egress.paced_screen.max_enqueue_to_send_us,
       session->egress.paced_screen.max_input_frame_span_us, diag->remb_contribution_bps, diag->remb_target_bps, session->egress.last_camera_remb_bps,
       session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale, diag->remb_camera.target_bps,
       diag->remb_camera.media_ssrc, diag->remb_camera.last_sent_bps, diag->remb_camera.last_sent_us, diag->remb_camera.fresh_routes,
@@ -2438,6 +2475,7 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
   diag->last_logged_pli_received = diag->pli_received;
   diag->last_logged_pli_sent = diag->pli_sent;
   diag->last_logged_pli_coalesced = diag->pli_coalesced;
+  diag->last_logged_fir_received = diag->fir_received;
   diag->last_logged_pacer_drops = pacer_drops;
   diag->last_logged_rtx_budget_drops = rtx_budget_drops;
   diag->last_log_us = now_us;

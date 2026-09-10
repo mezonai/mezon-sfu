@@ -477,6 +477,7 @@ typedef struct {
 #endif
 } sfu_session_media_t;
 
+#ifdef SFU_DIAG_LOG
 typedef struct sfu_remb_source_diag {
   uint32_t target_bps;
   uint32_t media_ssrc;
@@ -515,6 +516,7 @@ typedef struct sfu_congestion_diag {
   uint64_t pli_received;
   uint64_t pli_sent;
   uint64_t pli_coalesced;
+  uint64_t fir_received;
   uint64_t last_logged_nack_requests;
   uint64_t last_logged_cache_hits;
   uint64_t last_logged_cache_misses;
@@ -522,6 +524,7 @@ typedef struct sfu_congestion_diag {
   uint64_t last_logged_pli_received;
   uint64_t last_logged_pli_sent;
   uint64_t last_logged_pli_coalesced;
+  uint64_t last_logged_fir_received;
   uint64_t last_logged_pacer_drops;
   uint64_t last_logged_rtx_budget_drops;
   uint32_t latest_gcc_bps;
@@ -543,6 +546,7 @@ typedef struct sfu_congestion_diag {
   uint8_t latest_overuse;
   bool remb_sent;
 } sfu_congestion_diag_t;
+#endif
 
 typedef struct {
   gcc_bwe_context_t *gcc_ctx;
@@ -551,7 +555,9 @@ typedef struct {
   sfu_layer_scheduler_slot_t *schedulers;
   sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
+#ifdef SFU_DIAG_LOG
   sfu_congestion_diag_t diag;
+#endif
   int64_t last_pli_time;
   int64_t last_screen_pli_time;
   int64_t last_fir_time;
@@ -560,6 +566,7 @@ typedef struct {
   int64_t last_screen_remb_time_us;
   uint32_t last_camera_remb_bps;
   uint32_t last_screen_remb_bps;
+  uint32_t last_remb_target_bps;
   _Atomic uint32_t generation;
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;

@@ -124,9 +124,66 @@ static void sfu_log_vp9_egress_event(const char *event, const char *path, const 
 }
 #endif
 
+/* Backlog trims discard frames that sfu_layer_scheduler_commit_packet() already
+ * accounted for, so each affected scheduler still believes those pictures were
+ * delivered and keeps forwarding frames that reference them. Mark them as
+ * needing a keyframe; prepare_packet() then refuses every non-keyframe picture
+ * until a complete one arrives, which is what stops the smearing. */
+static void sfu_egress_invalidate_backlog_drops(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_media_kind_t source,
+                                                const sfu_paced_send_drop_report_t *report, const sfu_egress_media_t *media) {
+  if (!w || !sub_session || !report || report->frames == 0) {
+    return;
+  }
+  sfu_metric_add("paced_send_backlog_drop_frames", report->frames);
+  /* publisher_count is 0 when the publisher identity was unknown, in which case
+   * there is no layer scheduler to invalidate either. */
+  if (report->publisher_count == 0) {
+    return;
+  }
+  if (!sfu_session_video_runtime_ready(sub_session) || !sub_session->egress.schedulers) {
+    return;
+  }
+  bool invalidate_all = report->truncated;
+  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+    sfu_layer_scheduler_slot_t *slot = &sub_session->egress.schedulers[i];
+    if (slot->publisher_id == 0 || (uint8_t)slot->publisher_id != (uint8_t)source) {
+      continue;
+    }
+    if (!invalidate_all) {
+      uint32_t peer_id = (uint32_t)(slot->publisher_id >> 8);
+      bool owned = false;
+      for (uint32_t j = 0; j < report->publisher_count; j++) {
+        if (report->publisher_peer_ids[j] == peer_id) {
+          owned = true;
+          break;
+        }
+      }
+      if (!owned) {
+        continue;
+      }
+    }
+    slot->sched.needs_keyframe = true;
+    slot->sched.keyframe_active = false;
+    slot->sched.keyframe_failed = false;
+    slot->sched.transition_active = false;
+    slot->sched.transition_failed = false;
+    slot->sched.temporal_transition_active = false;
+    slot->sched.temporal_transition_failed = false;
+    slot->sched.pacer_frame_active = false;
+  }
+  /* The scheduler flag alone defers the PLI to the publisher's next packet,
+   * which a mostly-static screen share may not send promptly. Ask now; the
+   * per-source throttle collapses the repeated asks of a congested steady
+   * state into one request per second. Publishers other than the current one
+   * are covered by their own next packet, which now sees needs_keyframe. */
+  if (media && media->publisher && media->publisher->peer_id != 0) {
+    sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, source);
+  }
+}
+
 static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_packet_t *pkt, const struct sockaddr_storage *dst, socklen_t dst_len,
                                      const sfu_egress_media_t *media, sfu_pacer_class_t video_class, sfu_layer_scheduler_t *sched,
-                                     const sfu_layer_scheduler_decision_t *decision, bool profile) {
+                                     const sfu_layer_scheduler_decision_t *decision, bool profile, sfu_paced_send_drop_report_t *drop_report) {
   int enc_len = (int)pkt->len;
 
   if (!sfu_session_remote_slot_authorized(sub_session, media->remote_slot, media->assignment_generation)) {
@@ -166,7 +223,8 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
   int64_t frame_now_us = (int64_t)sfu_now_us();
-  if (screen_packet && !paced_queue->input_frame_active && !sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us)) {
+  if (screen_packet && !paced_queue->input_frame_active &&
+      !sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us, drop_report)) {
     sfu_metric_inc("paced_send_screen_backlog_drop");
     return false;
   }
@@ -300,6 +358,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
         .transport_generation = atomic_load_explicit(&sub_session->cold->transport_generation, memory_order_acquire),
         .address_generation = atomic_load_explicit(&sub_session->cold->address_generation, memory_order_acquire),
         .remote_slot = media->remote_slot,
+        .publisher_peer_id = media->publisher ? media->publisher->peer_id : 0,
         .twcc_seq = twcc_seq,
         .subscriber_seq = subscriber_seq,
         .media_ssrc = media->video_ssrc,
@@ -321,7 +380,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     if (source_marker) {
       sfu_paced_send_finish_input_frame(paced_queue);
       if (screen_packet) {
-        (void)sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, enqueue_now);
+        (void)sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, enqueue_now, drop_report);
       }
     }
     w->hot.output_queued++;
@@ -456,7 +515,10 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
   sfu_metric_inc("egress_output_alloc");
   sfu_metric_add("egress_copied_bytes", output->len);
 
-  bool admitted = sfu_egress_process_local(w, sub_session, output, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL, profile);
+  sfu_paced_send_drop_report_t local_drop_report;
+  sfu_paced_send_drop_report_init(&local_drop_report);
+  bool admitted =
+      sfu_egress_process_local(w, sub_session, output, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL, profile, &local_drop_report);
   if (has_decision) {
     if (admitted) {
       sfu_layer_scheduler_commit_packet(sched, &decision);
@@ -464,6 +526,9 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
       sfu_layer_scheduler_reject_packet(sched, &decision);
     }
   }
+  /* Runs after commit_packet: a completed keyframe clears needs_keyframe, so the
+   * trim that may have discarded it has to re-arm afterwards, not before. */
+  sfu_egress_invalidate_backlog_drops(w, sub_session, media->source, &local_drop_report, media);
   sfu_worker_release_packet(w, output);
   return admitted;
 }
@@ -541,7 +606,10 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
     }
   }
 
-  bool admitted = sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL, false);
+  sfu_paced_send_drop_report_t local_drop_report;
+  sfu_paced_send_drop_report_init(&local_drop_report);
+  bool admitted =
+      sfu_egress_process_local(w, sub_session, pkt, dst, dst_len, media, video_class, sched, has_decision ? &decision : NULL, false, &local_drop_report);
   if (has_decision) {
     if (admitted) {
       sfu_layer_scheduler_commit_packet(sched, &decision);
@@ -549,6 +617,9 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
       sfu_layer_scheduler_reject_packet(sched, &decision);
     }
   }
+  /* Runs after commit_packet: a completed keyframe clears needs_keyframe, so the
+   * trim that may have discarded it has to re-arm afterwards, not before. */
+  sfu_egress_invalidate_backlog_drops(w, sub_session, media->source, &local_drop_report, media);
   sfu_worker_release_packet(w, pkt);
   return admitted;
 }
