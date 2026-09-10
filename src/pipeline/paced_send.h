@@ -23,12 +23,31 @@ typedef struct sfu_pacer_reservation {
 #define SFU_PACED_SEND_CAMERA_MAX_DELAY_US 200000LL
 #define SFU_PACED_SEND_SCREEN_MAX_DELAY_US 750000LL
 
+/* Distinct publishers whose frames a single backlog trim may discard. A screen
+ * queue is per subscriber, not per publisher, so one trim can span several. */
+#define SFU_PACED_SEND_MAX_DROPPED_PUBLISHERS 8u
+
+/* Which publishers lost frames to a backlog trim. The caller uses these to
+ * invalidate exactly the layer schedulers whose decode state broke; packets
+ * dropped here were already committed, so the scheduler otherwise believes
+ * they were delivered and keeps forwarding frames that reference them. */
+typedef struct sfu_paced_send_drop_report {
+  uint32_t frames;
+  uint32_t publisher_count;
+  bool truncated; /* more publishers than the array holds */
+  uint32_t publisher_peer_ids[SFU_PACED_SEND_MAX_DROPPED_PUBLISHERS];
+} sfu_paced_send_drop_report_t;
+
+void sfu_paced_send_drop_report_init(sfu_paced_send_drop_report_t *report);
+void sfu_paced_send_drop_report_add(sfu_paced_send_drop_report_t *report, uint32_t publisher_peer_id);
+
 typedef struct sfu_paced_send_metadata {
   uint64_t assignment_generation;
   uint64_t owner_value;
   uint32_t transport_generation;
   uint32_t address_generation;
   uint32_t remote_slot;
+  uint32_t publisher_peer_id;
   uint16_t twcc_seq;
   uint16_t subscriber_seq;
   uint32_t media_ssrc;
@@ -95,7 +114,12 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
 void sfu_paced_send_reject_input_frame(sfu_paced_send_t *q);
 void sfu_paced_send_finish_input_frame(sfu_paced_send_t *q);
 void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q);
-bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int64_t now_us);
+/* Drops whole queued frames until the projected delay falls under max_delay_us.
+ * report, when non-NULL, receives the frames discarded and the publishers that
+ * owned them. Those frames were already admitted by the layer scheduler, so the
+ * caller must treat each affected subscriber's decode state as broken and force
+ * a keyframe. */
+bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int64_t now_us, sfu_paced_send_drop_report_t *report);
 bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t len, const uint8_t *rtx_plaintext, uint16_t rtx_plaintext_len,
                             const struct sockaddr_storage *dst, socklen_t dst_len, uint8_t pacer_class, uint32_t pacing_bps, sfu_pacer_t *pacer,
                             sfu_pacer_reservation_t *reservation, const sfu_paced_send_metadata_t *metadata, int64_t now_us, int64_t *release_at_us);

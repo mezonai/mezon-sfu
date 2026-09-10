@@ -515,6 +515,7 @@ typedef struct sfu_congestion_diag {
   uint64_t pli_received;
   uint64_t pli_sent;
   uint64_t pli_coalesced;
+  uint64_t fir_received;
   uint64_t last_logged_nack_requests;
   uint64_t last_logged_cache_hits;
   uint64_t last_logged_cache_misses;
@@ -522,6 +523,7 @@ typedef struct sfu_congestion_diag {
   uint64_t last_logged_pli_received;
   uint64_t last_logged_pli_sent;
   uint64_t last_logged_pli_coalesced;
+  uint64_t last_logged_fir_received;
   uint64_t last_logged_pacer_drops;
   uint64_t last_logged_rtx_budget_drops;
   uint32_t latest_gcc_bps;
@@ -551,7 +553,9 @@ typedef struct {
   sfu_layer_scheduler_slot_t *schedulers;
   sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
+#ifdef SFU_DIAG_LOG
   sfu_congestion_diag_t diag;
+#endif
   int64_t last_pli_time;
   int64_t last_screen_pli_time;
   int64_t last_fir_time;

@@ -218,13 +218,64 @@ static sfu_peer_session_t *find_publisher_by_media_ssrc(sfu_peer_session_t *subs
   return result;
 }
 
+/* Pass 2: match the SSRC against every room publisher's media snapshot without
+ * requiring a fanout route back to this subscriber. Pass 1 needs that route, so
+ * it fails during the windows where the route is absent or not yet screen
+ * eligible — a fresh join, renegotiation, an SSRC change — which is exactly when
+ * a subscriber is likeliest to be missing a keyframe. The SSRC is the stream's
+ * authoritative identity, so matching it is enough to know who must re-key.
+ * Self is skipped: feedback names a received (remote) stream, and the SFU does
+ * not rewrite SSRCs, so the asker is never the correct target. */
+static sfu_peer_session_t *find_publisher_by_media_ssrc_unrouted(sfu_peer_session_t *subscriber, uint32_t media_ssrc, sfu_media_kind_t *out_source) {
+  sfu_room_t *room = subscriber->room;
+  if (!room || media_ssrc == 0) {
+    return NULL;
+  }
+
+  pthread_mutex_lock(&room->lock);
+  sfu_peer_session_t *result = NULL;
+  for (uint32_t i = 0; i < room->peer_capacity; i++) {
+    sfu_peer_session_t *publisher = room->peers[i];
+    if (!publisher || publisher == subscriber) {
+      continue;
+    }
+    sfu_media_snapshot_t pub_msnap = sfu_session_load_media(publisher);
+    sfu_media_kind_t source = SFU_MEDIA_VIDEO;
+    bool media_matches = pub_msnap.video_ssrc == media_ssrc || pub_msnap.video_rtx_ssrc == media_ssrc;
+    if (!media_matches && (pub_msnap.screen_ssrc == media_ssrc || pub_msnap.screen_rtx_ssrc == media_ssrc)) {
+      media_matches = true;
+      source = SFU_MEDIA_SCREEN;
+    }
+    if (!media_matches) {
+      continue;
+    }
+    atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+    if (out_source) {
+      *out_source = source;
+    }
+    result = publisher;
+    break;
+  }
+  pthread_mutex_unlock(&room->lock);
+  return result;
+}
+
 static void request_source_keyframe(sfu_worker_t *w, sfu_peer_session_t *feedback_session, uint32_t media_ssrc) {
   sfu_media_kind_t source = SFU_MEDIA_VIDEO;
   sfu_peer_session_t *publisher = find_publisher_by_media_ssrc(feedback_session, media_ssrc, &source);
   if (!publisher) {
+    publisher = find_publisher_by_media_ssrc_unrouted(feedback_session, media_ssrc, &source);
+  }
+  if (!publisher) {
+    /* Never fall back to feedback_session. The peer that sent the PLI or the
+     * uncached NACK is the one whose decode is broken, so asking it to re-key
+     * cannot repair anything while the real publisher stays uninformed: the
+     * subscriber keeps decoding pictures that reference lost data and smears
+     * until feedback that does resolve happens to arrive. */
     sfu_metric_inc("rtcp_kf_unresolved");
-    publisher = feedback_session;
-    atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
+    SFU_LOG_WARN("worker %u: keyframe request from peer %u for ssrc=%u resolved to no publisher, dropped", w->worker_index, feedback_session->peer_id,
+                 media_ssrc);
+    return;
   }
   sfu_worker_request_keyframe_throttled_for_source(w, publisher, source);
   sfu_session_release(publisher);
@@ -450,11 +501,22 @@ static void handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessio
 static void handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *sender_session, const sfu_rtcp_member_view *view) {
   sfu_rtcp_fir fir;
   if (!sfu_rtcp_parse_fir(view, &fir)) {
-    sfu_metric_inc("rtcp_pli_bad");
+    sfu_metric_inc("rtcp_fir_bad");
     return;
   }
-  SFU_LOG_DEBUG("worker %u: RTCP FIR from peer %u (media_ssrc=%u, %zu entries) ignored", w->worker_index, sender_session->peer_id, fir.media_ssrc,
-                fir.entry_count);
+  sender_session->egress.diag.fir_received++;
+  sfu_metric_inc("rtcp_fir_received");
+  /* RFC 5104: the media SSRC field is unused, so the SSRCs that need a keyframe
+   * are the FCI targets. Resolving against fir.media_ssrc would miss and fall
+   * back to the requesting subscriber. */
+  sfu_rtcp_fir_entry entry;
+  for (size_t i = 0; i < fir.entry_count; i++) {
+    if (!sfu_rtcp_fir_entry_at(&fir, i, &entry) || entry.target_ssrc == 0) {
+      continue;
+    }
+    SFU_LOG_DEBUG("worker %u: RTCP FIR from peer %u requesting keyframe for media_ssrc=%u", w->worker_index, sender_session->peer_id, entry.target_ssrc);
+    request_source_keyframe(w, sender_session, entry.target_ssrc);
+  }
 }
 
 static void handle_rtcp(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_packet_t *pkt) {

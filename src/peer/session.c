@@ -2054,8 +2054,6 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
     return;
   }
 
-  *last_pli = now;
-
   if (media_ssrc == 0) {
     SFU_LOG_WARN("[KF-DBG] Cannot send PLI/FIR: Publisher %u video SSRC is 0", publisher->peer_id);
     return;
@@ -2089,6 +2087,13 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
       if (sent != 0) {
         SFU_LOG_ERROR("Failed to enqueue PLI to send_ring for peer %u", publisher->peer_id);
       } else {
+        /* Stamp the throttle only once the request actually left. Stamping
+         * before this point consumed the full SFU_SESSION_KF_THROTTLE_MS window
+         * even when nothing was sent (SSRC 0, alloc failure, protect failure,
+         * send-ring full), so a genuinely-needed retry a moment later was
+         * coalesced away — for screen share that is a full second of smear
+         * because the publisher never re-keys. */
+        *last_pli = now;
         publisher->egress.diag.pli_sent++;
         sfu_metric_inc("congestion_pli_sent");
       }
@@ -2405,12 +2410,13 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
   uint64_t pli_received_delta = diag_counter_delta(diag->pli_received, diag->last_logged_pli_received);
   uint64_t pli_sent_delta = diag_counter_delta(diag->pli_sent, diag->last_logged_pli_sent);
   uint64_t pli_coalesced_delta = diag_counter_delta(diag->pli_coalesced, diag->last_logged_pli_coalesced);
+  uint64_t fir_received_delta = diag_counter_delta(diag->fir_received, diag->last_logged_fir_received);
   int64_t debt = session->egress.pacer.balance_bytes < 0 ? -session->egress.pacer.balance_bytes : 0;
   SFU_LOG_INFO(
       "congestion session=%u worker=%u gcc=%u ack=%u overuse=%u twcc_loss=%u/%u pool=%u reserve=%u "
       "alloc=%u unalloc=%u streams=[%s] alloc_truncated=%u pacer_bps=%u debt=%" PRId64 " drop_delta=%" PRIu64 " rtx_drop_delta=%" PRIu64 " nack_delta=%" PRIu64
-      " cache_delta=%" PRIu64 "/%" PRIu64 " rtx_delta=%" PRIu64 " pli_delta=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " paced=count:%u,high:%u,delay:%" PRId64
-      ",cap:%" PRIu64 ",late:%" PRId64 ",queue:%" PRId64 ",input:%" PRId64
+      " cache_delta=%" PRIu64 "/%" PRIu64 " rtx_delta=%" PRIu64 " pli_delta=%" PRIu64 "/%" PRIu64 "/%" PRIu64 " fir_delta=%" PRIu64
+      " paced=count:%u,high:%u,delay:%" PRId64 ",cap:%" PRIu64 ",late:%" PRId64 ",queue:%" PRId64 ",input:%" PRId64
       " remb=contrib:%u,target:%u,last_camera:%u,last_screen:%u,sent:%u,fresh:%u,stale:%u"
       " remb_camera=target:%u,ssrc:%u,last_sent:%u@%" PRId64 ",fresh:%u,stale:%u,winner:%u/%u/%" PRIu64 ",sent:%" PRIu64 ",throttled:%" PRIu64
       ",rejected:%" PRIu64 " remb_screen=target:%u,ssrc:%u,last_sent:%u@%" PRId64 ",fresh:%u,stale:%u,winner:%u/%u/%" PRIu64 ",sent:%" PRIu64
@@ -2418,9 +2424,9 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       session->peer_id, w->worker_index, diag->latest_gcc_bps, diag->latest_ack_bps, diag->latest_overuse, diag->latest_twcc_lost, diag->latest_twcc_total,
       diag->allocation_pool_bps, diag->allocation_reserve_bps, diag->allocation_allocated_bps, diag->allocation_unallocated_bps, allocations,
       allocations_truncated ? 1u : 0u, session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta, nack_delta, cache_hit_delta, cache_miss_delta,
-      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, session->egress.paced_screen.count, session->egress.paced_screen.high_water,
-      sfu_paced_send_projected_delay_us(&session->egress.paced_screen, (int64_t)now_us), session->egress.paced_screen.drain_cap_hits,
-      session->egress.paced_screen.max_release_late_us, session->egress.paced_screen.max_enqueue_to_send_us,
+      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, fir_received_delta, session->egress.paced_screen.count,
+      session->egress.paced_screen.high_water, sfu_paced_send_projected_delay_us(&session->egress.paced_screen, (int64_t)now_us),
+      session->egress.paced_screen.drain_cap_hits, session->egress.paced_screen.max_release_late_us, session->egress.paced_screen.max_enqueue_to_send_us,
       session->egress.paced_screen.max_input_frame_span_us, diag->remb_contribution_bps, diag->remb_target_bps, session->egress.last_camera_remb_bps,
       session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale, diag->remb_camera.target_bps,
       diag->remb_camera.media_ssrc, diag->remb_camera.last_sent_bps, diag->remb_camera.last_sent_us, diag->remb_camera.fresh_routes,
@@ -2438,6 +2444,7 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
   diag->last_logged_pli_received = diag->pli_received;
   diag->last_logged_pli_sent = diag->pli_sent;
   diag->last_logged_pli_coalesced = diag->pli_coalesced;
+  diag->last_logged_fir_received = diag->fir_received;
   diag->last_logged_pacer_drops = pacer_drops;
   diag->last_logged_rtx_budget_drops = rtx_budget_drops;
   diag->last_log_us = now_us;
