@@ -553,9 +553,7 @@ typedef struct {
   sfu_layer_scheduler_slot_t *schedulers;
   sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
-#ifdef SFU_DIAG_LOG
   sfu_congestion_diag_t diag;
-#endif
   int64_t last_pli_time;
   int64_t last_screen_pli_time;
   int64_t last_fir_time;
