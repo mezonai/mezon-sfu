@@ -439,6 +439,262 @@
             #statsPanel .bad { color: var(--err); font-weight: 700; }
             #statsPanel .warn { color: var(--warn); font-weight: 700; }
             #statsPanel .ok { color: var(--ok); }
+
+            #chatBtn {
+                background: var(--tile);
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                padding: 5px 10px;
+                font-size: 12px;
+                cursor: pointer;
+                margin-right: 10px;
+                width: auto;
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+            }
+            #chatBtn:hover { background: var(--border); }
+            #chatBtn.on { background: var(--accent); color: #11111b; }
+
+            .chat-badge {
+                position: absolute;
+                top: -3px;
+                right: -3px;
+                background: var(--err);
+                color: #11111b;
+                font-size: 10px;
+                font-weight: 700;
+                border-radius: 9px;
+                min-width: 18px;
+                height: 18px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 0 4px;
+                box-shadow: 0 2px 5px rgba(0, 0, 0, 0.4);
+            }
+
+            #messagePanel {
+                position: fixed;
+                top: 48px;
+                right: 12px;
+                width: 390px;
+                max-width: calc(100vw - 24px);
+                height: 540px;
+                max-height: calc(100vh - 140px);
+                background: rgba(24, 24, 37, 0.98);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 12px;
+                display: none;
+                flex-direction: column;
+                z-index: 2001;
+                box-shadow: 0 10px 36px rgba(0, 0, 0, 0.65);
+            }
+            #messagePanel.show { display: flex; }
+
+            .msg-panel-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding-bottom: 8px;
+                border-bottom: 1px solid var(--border);
+                flex-shrink: 0;
+            }
+            .msg-panel-title {
+                color: var(--accent);
+                font-weight: 700;
+                font-size: 13px;
+            }
+            .msg-count-badge {
+                background: var(--border);
+                color: var(--muted);
+                font-size: 11px;
+                border-radius: 10px;
+                padding: 1px 6px;
+                font-weight: 600;
+            }
+            .msg-small-btn {
+                background: var(--tile);
+                color: var(--muted);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                padding: 3px 8px;
+                font-size: 11px;
+                cursor: pointer;
+                width: auto;
+            }
+            .msg-small-btn:hover { background: var(--border); color: var(--text); }
+            .msg-close-btn {
+                background: transparent;
+                color: var(--muted);
+                border: none;
+                font-size: 14px;
+                cursor: pointer;
+                padding: 3px 6px;
+                border-radius: 4px;
+                width: auto;
+                line-height: 1;
+            }
+            .msg-close-btn:hover { color: var(--text); background: var(--border); }
+
+            .msg-test-section {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 8px 10px;
+                margin-top: 8px;
+                margin-bottom: 8px;
+                flex-shrink: 0;
+            }
+            .msg-test-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .msg-test-title {
+                font-size: 11px;
+                font-weight: 700;
+                color: var(--text);
+            }
+            .msg-test-btn {
+                background: var(--accent);
+                color: #11111b;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 9px;
+                font-size: 11px;
+                font-weight: 700;
+                cursor: pointer;
+                width: auto;
+            }
+            .msg-test-btn:hover { background: var(--accent-hover); }
+            .msg-test-btn.secondary {
+                background: var(--tile);
+                color: var(--text);
+                border: 1px solid var(--border);
+            }
+            .msg-test-btn.secondary:hover { background: var(--border); }
+            .msg-test-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+            .msg-test-results {
+                margin-top: 6px;
+                padding-top: 6px;
+                border-top: 1px solid var(--border);
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 11px;
+            }
+            .msg-test-status {
+                font-weight: 700;
+                margin-bottom: 4px;
+            }
+            .msg-test-status.pass { color: var(--ok); }
+            .msg-test-status.fail { color: var(--err); }
+            .msg-test-status.running { color: var(--warn); }
+            .msg-test-details {
+                color: var(--muted);
+                font-size: 10px;
+                line-height: 1.4;
+                max-height: 90px;
+                overflow-y: auto;
+                white-space: pre-wrap;
+                word-break: break-all;
+            }
+
+            .room-msg-list {
+                flex: 1;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                padding: 6px 2px;
+                min-height: 120px;
+            }
+            .room-msg-empty {
+                color: var(--muted);
+                font-size: 12px;
+                text-align: center;
+                margin: auto 0;
+                padding: 20px;
+            }
+            .room-msg-item {
+                display: flex;
+                flex-direction: column;
+                gap: 2px;
+                padding: 6px 10px;
+                border-radius: 8px;
+                background: var(--panel);
+                border: 1px solid var(--border);
+                font-size: 12px;
+                word-break: break-word;
+            }
+            .room-msg-item.outgoing {
+                background: rgba(137, 180, 250, 0.12);
+                border-color: rgba(137, 180, 250, 0.35);
+                margin-left: 20px;
+            }
+            .room-msg-item.incoming {
+                background: var(--tile);
+                border-color: var(--border);
+                margin-right: 20px;
+            }
+            .room-msg-item.system {
+                background: rgba(249, 226, 175, 0.08);
+                border-color: rgba(249, 226, 175, 0.25);
+                font-size: 11px;
+            }
+            .room-msg-item.system.err {
+                background: rgba(243, 139, 168, 0.08);
+                border-color: rgba(243, 139, 168, 0.25);
+            }
+            .room-msg-meta {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 10px;
+                color: var(--muted);
+            }
+            .room-msg-author {
+                font-weight: 700;
+                color: var(--accent);
+            }
+            .room-msg-item.outgoing .room-msg-author {
+                color: var(--ok);
+            }
+            .room-msg-body {
+                line-height: 1.4;
+                color: var(--text);
+            }
+            .room-msg-status {
+                font-size: 10px;
+            }
+            .room-msg-status.sent { color: var(--ok); }
+            .room-msg-status.pending { color: var(--warn); }
+            .room-msg-status.error { color: var(--err); }
+
+            .room-msg-form {
+                display: flex;
+                gap: 6px;
+                margin-top: 8px;
+                flex-shrink: 0;
+            }
+            .room-msg-form input {
+                flex: 1;
+                padding: 8px 10px;
+                font-size: 12px;
+                background: var(--tile);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                color: var(--text);
+            }
+            .room-msg-send-btn {
+                width: auto;
+                padding: 8px 14px;
+                font-size: 12px;
+                font-weight: 700;
+                border-radius: 6px;
+            }
         </style>
     </head>
     <body>
@@ -518,6 +774,13 @@
                         Enable audio
                     </button>
                     <button
+                        id="chatBtn"
+                        onclick="toggleChat()"
+                        title="Show/hide room messages and test"
+                    >
+                        💬 Messages <span id="chatTopBadge" style="display:none" class="msg-count-badge">0</span>
+                    </button>
+                    <button
                         id="statsBtn"
                         onclick="toggleStats()"
                         title="Show/hide WebRTC stats"
@@ -569,6 +832,15 @@
                 >
                     🎙️
                 </button>
+                <button
+                    class="ctrl-btn"
+                    id="chatCtrlBtn"
+                    onclick="toggleChat()"
+                    title="Room messages & test"
+                >
+                    💬
+                    <span id="chatBadge" class="chat-badge" style="display: none;">0</span>
+                </button>
                 <button class="ctrl-btn leave" onclick="leaveMeeting()">
                     Leave
                 </button>
@@ -581,6 +853,48 @@
                 <span id="statsClock" class="meta"></span>
             </div>
             <div id="statsBody"><div class="meta">Waiting for first sample…</div></div>
+        </div>
+
+        <div id="messagePanel">
+            <div class="msg-panel-head">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="msg-panel-title">💬 Room Messages</span>
+                    <span id="msgCountBadge" class="msg-count-badge">0</span>
+                </div>
+                <div style="display: flex; gap: 6px; align-items: center;">
+                    <button id="msgClearBtn" onclick="clearMessageHistory()" title="Clear messages" class="msg-small-btn">Clear</button>
+                    <button onclick="toggleChat()" title="Close" class="msg-close-btn">✕</button>
+                </div>
+            </div>
+
+            <div class="msg-test-section">
+                <div class="msg-test-header">
+                    <span class="msg-test-title">🧪 room_message Test Suite</span>
+                    <div style="display: flex; gap: 4px;">
+                        <button id="runMsgTestBtn" class="msg-test-btn" onclick="runRoomMessageTestSuite()">▶ Run Test</button>
+                        <button id="runInvalidTestBtn" class="msg-test-btn secondary" onclick="testInvalidRoomMessage()" title="Test server validation on empty message">Test Invalid</button>
+                    </div>
+                </div>
+                <div id="msgTestResults" class="msg-test-results" style="display: none;">
+                    <div id="msgTestStatus" class="msg-test-status">Ready</div>
+                    <div id="msgTestDetails" class="msg-test-details"></div>
+                </div>
+            </div>
+
+            <div id="roomMessageList" class="room-msg-list">
+                <div class="room-msg-empty">No messages yet. Send a message or click "Run Test" above.</div>
+            </div>
+
+            <form id="roomMsgForm" class="room-msg-form" onsubmit="handleMessageFormSubmit(event)">
+                <input
+                    type="text"
+                    id="roomMsgInput"
+                    placeholder="Type a message to room..."
+                    autocomplete="off"
+                    maxlength="2000"
+                />
+                <button type="submit" id="roomMsgSendBtn" class="room-msg-send-btn">Send</button>
+            </form>
         </div>
 
         <script>
@@ -1759,6 +2073,9 @@
                 remoteAssignmentsBySlot.clear();
                 peerIdByMid.clear();
                 participants.forEach((_, id) => removeTile(id));
+                unreadMessageCount = 0;
+                updateUnreadBadge();
+                rejectPendingMessageResolvers("Left meeting");
                 document.getElementById("meetingRoom").style.display = "none";
                 document.getElementById("joinScreen").style.display = "flex";
                 joinBtn.disabled = false;
@@ -1978,6 +2295,368 @@ async function applyVideoEncodingParams(pc) {
                 btn.classList.toggle("on", show);
                 btn.textContent = show ? "📊 Hide Stats" : "📊 Stats";
             }
+
+            // ---- Room message (chat & test) logic ----
+            let unreadMessageCount = 0;
+            const roomMessages = [];
+            window.roomMessages = roomMessages;
+            window.lastRoomMessage = null;
+
+            const pendingMessageSentResolvers = [];
+            const pendingInvalidMessageResolvers = [];
+
+            function rejectPendingMessageResolvers(reason) {
+                while (pendingMessageSentResolvers.length > 0) {
+                    const r = pendingMessageSentResolvers.shift();
+                    if (r && r.reject) r.reject(new Error(reason));
+                }
+                while (pendingInvalidMessageResolvers.length > 0) {
+                    const r = pendingInvalidMessageResolvers.shift();
+                    if (r && r.reject) r.reject(new Error(reason));
+                }
+            }
+
+            function toggleChat() {
+                const panel = document.getElementById("messagePanel");
+                const btn = document.getElementById("chatBtn");
+                const ctrlBtn = document.getElementById("chatCtrlBtn");
+                const show = !panel.classList.contains("show");
+                panel.classList.toggle("show", show);
+                if (btn) btn.classList.toggle("on", show);
+                if (ctrlBtn) ctrlBtn.classList.toggle("on", show);
+                if (show) {
+                    unreadMessageCount = 0;
+                    updateUnreadBadge();
+                    const input = document.getElementById("roomMsgInput");
+                    if (input) input.focus();
+                }
+            }
+
+            function updateUnreadBadge() {
+                const topBadge = document.getElementById("chatTopBadge");
+                const ctrlBadge = document.getElementById("chatBadge");
+                if (topBadge) {
+                    topBadge.textContent = unreadMessageCount;
+                    topBadge.style.display = unreadMessageCount > 0 ? "inline-block" : "none";
+                }
+                if (ctrlBadge) {
+                    ctrlBadge.textContent = unreadMessageCount;
+                    ctrlBadge.style.display = unreadMessageCount > 0 ? "flex" : "none";
+                }
+            }
+
+            function formatTime(d) {
+                return d.toTimeString().split(" ")[0];
+            }
+
+            function appendMessageToUI(entry) {
+                const list = document.getElementById("roomMessageList");
+                if (!list) return;
+                const empty = list.querySelector(".room-msg-empty");
+                if (empty) empty.remove();
+
+                const item = document.createElement("div");
+                item.className = "room-msg-item " + (entry.type || "incoming");
+                item.id = "ui-" + entry.id;
+
+                const meta = document.createElement("div");
+                meta.className = "room-msg-meta";
+
+                const author = document.createElement("span");
+                author.className = "room-msg-author";
+                author.textContent = entry.author || (entry.type === "outgoing" ? "You" : "Room");
+
+                const time = document.createElement("span");
+                time.textContent = formatTime(entry.timestamp);
+
+                meta.appendChild(author);
+                meta.appendChild(time);
+                item.appendChild(meta);
+
+                const body = document.createElement("div");
+                body.className = "room-msg-body";
+                body.textContent = entry.message;
+                item.appendChild(body);
+
+                if (entry.type === "outgoing") {
+                    const status = document.createElement("div");
+                    status.className = "room-msg-status " + (entry.status || "pending");
+                    status.textContent = entry.status === "sent" ? "✓ sent" : "⏳ sending...";
+                    item.appendChild(status);
+                }
+
+                list.appendChild(item);
+                list.scrollTop = list.scrollHeight;
+
+                const countBadge = document.getElementById("msgCountBadge");
+                if (countBadge) countBadge.textContent = roomMessages.length;
+            }
+
+            function appendSystemMessage(text, kind = "info") {
+                const list = document.getElementById("roomMessageList");
+                if (!list) return;
+                const empty = list.querySelector(".room-msg-empty");
+                if (empty) empty.remove();
+
+                const item = document.createElement("div");
+                item.className = "room-msg-item system" + (kind === "error" ? " err" : "");
+                const body = document.createElement("div");
+                body.className = "room-msg-body";
+                body.textContent = (kind === "error" ? "⚠️ " : "ℹ️ ") + text;
+                item.appendChild(body);
+
+                list.appendChild(item);
+                list.scrollTop = list.scrollHeight;
+            }
+
+            function updateMessageStatusInUI(msgId, newStatus) {
+                const item = document.getElementById("ui-" + msgId);
+                if (!item) return;
+                let statusEl = item.querySelector(".room-msg-status");
+                if (statusEl) {
+                    statusEl.className = "room-msg-status " + newStatus;
+                    statusEl.textContent = newStatus === "sent" ? "✓ sent" : newStatus;
+                }
+            }
+
+            function clearMessageHistory() {
+                roomMessages.length = 0;
+                window.lastRoomMessage = null;
+                const list = document.getElementById("roomMessageList");
+                if (list) {
+                    list.innerHTML = '<div class="room-msg-empty">No messages yet. Send a message or click "Run Test" above.</div>';
+                }
+                const countBadge = document.getElementById("msgCountBadge");
+                if (countBadge) countBadge.textContent = "0";
+                unreadMessageCount = 0;
+                updateUnreadBadge();
+            }
+
+            function sendRoomMessage(messageText) {
+                if (typeof messageText !== "string" || messageText.length === 0) {
+                    console.warn("sendRoomMessage: message must be a non-empty string");
+                    return false;
+                }
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    appendSystemMessage("Cannot send message: WebSocket is not connected.", "error");
+                    return false;
+                }
+                const msgId = "msg-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
+                const entry = {
+                    id: msgId,
+                    type: "outgoing",
+                    message: messageText,
+                    author: "You",
+                    timestamp: new Date(),
+                    status: "pending",
+                };
+                roomMessages.push(entry);
+                appendMessageToUI(entry);
+
+                ws.send(JSON.stringify({
+                    type: "send_message",
+                    message: messageText,
+                }));
+                return true;
+            }
+            window.sendRoomMessage = sendRoomMessage;
+
+            function handleMessageFormSubmit(e) {
+                if (e) e.preventDefault();
+                const input = document.getElementById("roomMsgInput");
+                if (!input) return;
+                const text = input.value.trim();
+                if (!text) return;
+                if (sendRoomMessage(text)) {
+                    input.value = "";
+                }
+            }
+
+            function handleMessageSent(msg) {
+                console.log("Signaling message_sent ack received:", msg);
+                for (let i = roomMessages.length - 1; i >= 0; i--) {
+                    if (roomMessages[i].type === "outgoing" && roomMessages[i].status === "pending") {
+                        roomMessages[i].status = "sent";
+                        updateMessageStatusInUI(roomMessages[i].id, "sent");
+                        break;
+                    }
+                }
+                const now = performance.now();
+                while (pendingMessageSentResolvers.length > 0) {
+                    const resolver = pendingMessageSentResolvers.shift();
+                    resolver.resolve({
+                        success: true,
+                        rttMs: Math.round(now - resolver.startTime),
+                        msg,
+                    });
+                }
+            }
+
+            function handleRoomMessage(msg) {
+                console.log("Signaling room_message received:", msg);
+                window.lastRoomMessage = msg;
+                const peerIdStr = msg.peer_id != null ? String(msg.peer_id) : "";
+                const member = membersByPeerId.get(peerIdStr);
+                const senderName = member && member.name
+                    ? member.name
+                    : msg.user_id && msg.user_id !== "0"
+                        ? `User ${msg.user_id} (Peer ${msg.peer_id})`
+                        : `Peer ${msg.peer_id}`;
+
+                const entry = {
+                    id: "rm-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+                    type: "incoming",
+                    message: msg.message,
+                    userId: msg.user_id,
+                    peerId: msg.peer_id,
+                    author: senderName,
+                    timestamp: new Date(),
+                };
+                roomMessages.push(entry);
+                appendMessageToUI(entry);
+
+                const panel = document.getElementById("messagePanel");
+                if (!panel || !panel.classList.contains("show")) {
+                    unreadMessageCount++;
+                    updateUnreadBadge();
+                }
+            }
+
+            function handleRoomMessageError(detail) {
+                console.warn("Signaling room_message error received:", detail);
+                if (detail === "invalid_message") {
+                    while (pendingInvalidMessageResolvers.length > 0) {
+                        const resolver = pendingInvalidMessageResolvers.shift();
+                        resolver.resolve({ success: true, error: detail });
+                    }
+                }
+                appendSystemMessage(`Server error: ${detail}`, "error");
+            }
+
+            async function testRoomMessage(customText) {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    throw new Error("WebSocket is not connected. Join a room first.");
+                }
+                const text = customText || ("room_message test @" + new Date().toLocaleTimeString());
+                const startTime = performance.now();
+                return new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        const idx = pendingMessageSentResolvers.findIndex(r => r.resolve === resolve);
+                        if (idx !== -1) pendingMessageSentResolvers.splice(idx, 1);
+                        reject(new Error("Timeout (5000ms) waiting for message_sent ack"));
+                    }, 5000);
+
+                    pendingMessageSentResolvers.push({
+                        startTime,
+                        resolve: (val) => {
+                            clearTimeout(timer);
+                            resolve(val);
+                        },
+                        reject: (err) => {
+                            clearTimeout(timer);
+                            reject(err);
+                        }
+                    });
+
+                    sendRoomMessage(text);
+                });
+            }
+            window.testRoomMessage = testRoomMessage;
+
+            async function testInvalidRoomMessage() {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    appendSystemMessage("WebSocket is not connected. Join a room first.", "error");
+                    throw new Error("WebSocket is not connected. Join a room first.");
+                }
+                const startTime = performance.now();
+                const resultsEl = document.getElementById("msgTestResults");
+                const statusEl = document.getElementById("msgTestStatus");
+                const detailsEl = document.getElementById("msgTestDetails");
+                if (resultsEl) resultsEl.style.display = "block";
+                if (statusEl) {
+                    statusEl.className = "msg-test-status running";
+                    statusEl.textContent = "⏳ Testing invalid_message validation...";
+                }
+
+                return new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        const idx = pendingInvalidMessageResolvers.findIndex(r => r.resolve === resolve);
+                        if (idx !== -1) pendingInvalidMessageResolvers.splice(idx, 1);
+                        if (statusEl) {
+                            statusEl.className = "msg-test-status fail";
+                            statusEl.textContent = "✗ FAIL: Timeout waiting for invalid_message error";
+                        }
+                        reject(new Error("Timeout (5000ms) waiting for invalid_message error"));
+                    }, 5000);
+
+                    pendingInvalidMessageResolvers.push({
+                        startTime,
+                        resolve: (val) => {
+                            clearTimeout(timer);
+                            if (statusEl) {
+                                statusEl.className = "msg-test-status pass";
+                                statusEl.textContent = "✓ PASS: Server correctly rejected invalid message";
+                            }
+                            if (detailsEl) {
+                                detailsEl.textContent = `Sent empty message -> Server responded: {"type":"error","message":"${val.error}"}`;
+                            }
+                            resolve(val);
+                        },
+                        reject: (err) => {
+                            clearTimeout(timer);
+                            reject(err);
+                        }
+                    });
+
+                    appendSystemMessage("Testing invalid message (sending empty string)...", "info");
+                    ws.send(JSON.stringify({
+                        type: "send_message",
+                        message: "",
+                    }));
+                });
+            }
+            window.testInvalidRoomMessage = testInvalidRoomMessage;
+
+            async function runRoomMessageTestSuite() {
+                const resultsEl = document.getElementById("msgTestResults");
+                const statusEl = document.getElementById("msgTestStatus");
+                const detailsEl = document.getElementById("msgTestDetails");
+                const runBtn = document.getElementById("runMsgTestBtn");
+
+                if (!resultsEl || !statusEl || !detailsEl) return;
+                resultsEl.style.display = "block";
+                statusEl.className = "msg-test-status running";
+                statusEl.textContent = "⏳ Running room_message test suite...";
+                detailsEl.textContent = "";
+                if (runBtn) runBtn.disabled = true;
+
+                const log = (msg) => {
+                    detailsEl.textContent += (detailsEl.textContent ? "\n" : "") + msg;
+                    detailsEl.scrollTop = detailsEl.scrollHeight;
+                };
+
+                try {
+                    log("[1/2] Testing valid send_message + message_sent ack...");
+                    const payload = "test room_message payload " + Date.now();
+                    const ackResult = await testRoomMessage(payload);
+                    log(`  ✓ PASS: Received message_sent in ${ackResult.rttMs}ms`);
+
+                    log("[2/2] Testing validation on empty message (expecting invalid_message error)...");
+                    const invalidResult = await testInvalidRoomMessage();
+                    log(`  ✓ PASS: Received expected error "${invalidResult.error}"`);
+
+                    statusEl.className = "msg-test-status pass";
+                    statusEl.textContent = "✓ PASS: All room_message tests passed (2/2)";
+                    log("✓ All tests completed successfully.");
+                } catch (err) {
+                    statusEl.className = "msg-test-status fail";
+                    statusEl.textContent = "✗ FAIL: " + err.message;
+                    log(`  ✗ ERROR: ${err.message}`);
+                } finally {
+                    if (runBtn) runBtn.disabled = false;
+                }
+            }
+            window.runRoomMessageTestSuite = runRoomMessageTestSuite;
 
             function statRow(label, value, cls = "") {
                 return `<div><span class="meta">${label}</span> <span class="${cls}">${value}</span></div>`;
@@ -2227,6 +2906,9 @@ async function applyVideoEncodingParams(pc) {
                 document.getElementById("joinScreen").style.display = "flex";
                 joinBtn.disabled = false;
                 setScreenCodecSelectionDisabled(false);
+                unreadMessageCount = 0;
+                updateUnreadBadge();
+                rejectPendingMessageResolvers(reason || "Join aborted");
                 if (ws) {
                     try { ws.close(); } catch (_) {}
                     ws = null;
@@ -2419,6 +3101,10 @@ async function applyVideoEncodingParams(pc) {
                                 console.warn("PTT rejected:", detail);
                                 return;
                             }
+                            if (detail === "invalid_message" || detail === "must_join_room_first") {
+                                handleRoomMessageError(detail);
+                                return;
+                            }
                             const friendly = detail === "missing_token"
                                 ? "Join failed: missing token"
                                 : detail === "invalid_token"
@@ -2427,6 +3113,16 @@ async function applyVideoEncodingParams(pc) {
                                         ? "Join failed: server jwt_secret is not configured"
                                         : "Join failed: " + detail;
                             abortJoin(friendly);
+                            return;
+                        }
+
+                        if (msg.type === "room_message") {
+                            handleRoomMessage(msg);
+                            return;
+                        }
+
+                        if (msg.type === "message_sent") {
+                            handleMessageSent(msg);
                             return;
                         }
 

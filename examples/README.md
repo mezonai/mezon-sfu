@@ -38,6 +38,7 @@ Use the dropdown next to **Join** to choose a join mode:
 ### In the room
 
 * Toggle mic/camera and start/stop screen share from the control bar.
+* Test room message broadcasting and chat via the 💬 Messages button (supports automated send/ack test suite, validation tests, and interactive chat).
 * Speaking peers are highlighted with a colored border (driven by the SFU's active-speaker signaling).
 * Click a screen-share tile to expand it full-screen.
 * The connection-state dot in the top bar reflects signaling/ICE health (green = ok, yellow = warning, red = error).
