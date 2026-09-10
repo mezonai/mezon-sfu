@@ -145,15 +145,41 @@ static void rebase_backlog(sfu_paced_send_t *q, int64_t now_us) {
   }
 }
 
-bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int64_t now_us) {
+void sfu_paced_send_drop_report_init(sfu_paced_send_drop_report_t *report) {
+  if (report) {
+    memset(report, 0, sizeof(*report));
+  }
+}
+
+void sfu_paced_send_drop_report_add(sfu_paced_send_drop_report_t *report, uint32_t publisher_peer_id) {
+  if (!report || publisher_peer_id == 0) {
+    return;
+  }
+  for (uint32_t i = 0; i < report->publisher_count; i++) {
+    if (report->publisher_peer_ids[i] == publisher_peer_id) {
+      return;
+    }
+  }
+  if (report->publisher_count >= SFU_PACED_SEND_MAX_DROPPED_PUBLISHERS) {
+    report->truncated = true;
+    return;
+  }
+  report->publisher_peer_ids[report->publisher_count++] = publisher_peer_id;
+}
+
+bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int64_t now_us, sfu_paced_send_drop_report_t *report) {
   if (!q || max_delay_us <= 0 || q->input_frame_active) {
     return false;
   }
   while (q->ready_count && sfu_paced_send_projected_delay_us(q, now_us) >= max_delay_us) {
     bool frame_end = false;
+    /* One pass over the head frame: count it once and record its publisher so
+     * the caller can invalidate that subscriber's layer scheduler. */
+    uint32_t frame_publisher = 0;
     while (q->ready_count && !frame_end) {
       sfu_paced_send_entry_t *e = &q->entries[q->head];
       frame_end = e->metadata.frame_end;
+      frame_publisher = e->metadata.publisher_peer_id;
       sfu_pacer_cancel(e->pacer, &e->reservation);
       memset(e, 0, sizeof(*e));
       q->head = (q->head + 1u) % q->capacity;
@@ -162,6 +188,10 @@ bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int
     }
     q->dropped_delay_frames++;
     sfu_metric_inc("paced_send_delay_frame_drop");
+    if (report) {
+      report->frames++;
+      sfu_paced_send_drop_report_add(report, frame_publisher);
+    }
     rebase_backlog(q, now_us);
   }
   if (!q->count) {
