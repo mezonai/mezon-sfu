@@ -219,11 +219,13 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   bool screen_packet = media->source == SFU_MEDIA_SCREEN && media->has_video && !media->is_audio;
   bool camera_packet = media->source == SFU_MEDIA_VIDEO && media->has_video && !media->is_audio;
-  sfu_paced_send_t *paced_queue = screen_packet ? &sub_session->egress.paced_screen : camera_packet ? &sub_session->egress.paced_camera : NULL;
+  sfu_paced_send_t *paced_queue = screen_packet ? (media->remote_slot < SFU_MAX_REMOTE_SLOTS ? &sub_session->egress.paced_screen[media->remote_slot] : NULL)
+                                                : camera_packet ? &sub_session->egress.paced_camera
+                                                                : NULL;
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
   int64_t frame_now_us = (int64_t)sfu_now_us();
-  if (screen_packet && !paced_queue->input_frame_active) {
+  if (screen_packet && paced_queue && !paced_queue->input_frame_active) {
     bool under_delay = sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us, drop_report);
     if (!under_delay && !media->is_keyframe) {
       sfu_metric_inc("paced_send_screen_backlog_drop");
