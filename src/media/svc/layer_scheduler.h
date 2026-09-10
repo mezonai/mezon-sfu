@@ -29,6 +29,7 @@ typedef struct sfu_layer_scheduler {
   uint8_t temporal_transition_tid;
   uint8_t pacer_frame_sid;
   uint8_t pacer_frame_tid;
+  sfu_media_kind_t source;
   bool needs_keyframe;
   bool is_pinned;
   bool picture_valid;

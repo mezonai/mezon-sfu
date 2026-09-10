@@ -25,6 +25,11 @@ sfu_layer_scheduler_t *sfu_layer_scheduler_for_stream(sfu_peer_session_t *sessio
   for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
     sfu_layer_scheduler_slot_t *slot = &session->egress.schedulers[i];
     if (slot->publisher_id == stream_key) {
+      slot->sched.source = source;
+      if (source == SFU_MEDIA_SCREEN) {
+        slot->sched.target_tid = 2;
+        slot->sched.current_tid = 2;
+      }
       return &slot->sched;
     }
     if (!free_slot && slot->publisher_id == 0) {
@@ -40,6 +45,11 @@ sfu_layer_scheduler_t *sfu_layer_scheduler_for_stream(sfu_peer_session_t *sessio
 
   free_slot->publisher_id = stream_key;
   sfu_layer_scheduler_init(&free_slot->sched, publisher_id);
+  free_slot->sched.source = source;
+  if (source == SFU_MEDIA_SCREEN) {
+    free_slot->sched.target_tid = 2;
+    free_slot->sched.current_tid = 2;
+  }
   return &free_slot->sched;
 }
 
@@ -108,6 +118,11 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
 
   layer_scheduler_begin_picture(sched, desc->rtp_timestamp);
 
+  if (sched->source == SFU_MEDIA_SCREEN) {
+    sched->target_tid = 2;
+    sched->current_tid = 2;
+  }
+
   if (sched->target_sid < sched->current_sid) {
     sched->current_sid = sched->target_sid;
   }
@@ -159,7 +174,7 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
     decision->transition_packet = true;
   }
 
-  if (desc->tid > sched->current_tid) {
+  if (sched->source != SFU_MEDIA_SCREEN && desc->tid > sched->current_tid) {
     if (sched->temporal_transition_active) {
       if (sched->temporal_transition_timestamp != desc->rtp_timestamp || sched->temporal_transition_tid != desc->tid || sched->temporal_transition_failed) {
         return layer_scheduler_reject(decision, SFU_LAYER_REJECT_TEMPORAL_TRANSITION);
@@ -268,6 +283,10 @@ void sfu_layer_scheduler_commit_packet(sfu_layer_scheduler_t *sched, const sfu_l
     sched->needs_keyframe = !complete;
     sched->keyframe_active = false;
     sched->keyframe_failed = !complete;
+    if (complete && sched->source == SFU_MEDIA_SCREEN) {
+      sched->target_tid = 2;
+      sched->current_tid = 2;
+    }
   }
 
   if (sched->transition_active && sched->transition_timestamp == decision->rtp_timestamp && sched->transition_sid == decision->sid && decision->e_bit != 0) {
@@ -385,7 +404,10 @@ void sfu_layer_scheduler_switch_source(sfu_peer_session_t *session, uint32_t new
 
   sched->active_publisher_id = new_publisher_id;
   sched->current_sid = 0;
-  sched->current_tid = 0;
+  sched->current_tid = sched->source == SFU_MEDIA_SCREEN ? 2 : 0;
+  if (sched->source == SFU_MEDIA_SCREEN) {
+    sched->target_tid = 2;
+  }
   sched->needs_keyframe = true;
   sched->picture_valid = false;
   sched->started_sid_mask = 0;

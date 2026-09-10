@@ -165,6 +165,7 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
       sfu_layer_scheduler_set_bitrate(sched, stream->allocated_bps);
       if (source == SFU_MEDIA_SCREEN && sched) {
         sched->target_tid = 2;
+        sched->current_tid = 2;
       }
     }
     for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
@@ -1186,6 +1187,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       sfu_signaling_notify_media_state(sender_session);
     }
   }
+
   pthread_mutex_unlock(&sender_session->ingress_lock);
   sfu_session_release(sender_session);
 }
