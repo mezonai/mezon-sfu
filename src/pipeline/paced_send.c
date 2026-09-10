@@ -172,6 +172,9 @@ bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int
     return false;
   }
   while (q->ready_count && sfu_paced_send_projected_delay_us(q, now_us) >= max_delay_us) {
+    if (q->entries[q->head].metadata.is_keyframe) {
+      break;
+    }
     bool frame_end = false;
     /* One pass over the head frame: count it once and record its publisher so
      * the caller can invalidate that subscriber's layer scheduler. */
@@ -219,7 +222,8 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
     sfu_metric_inc("paced_send_full_drop");
     return false;
   }
-  uint32_t rate = pacing_bps < SFU_PACED_SEND_MIN_BPS ? SFU_PACED_SEND_MIN_BPS : pacing_bps;
+  uint32_t min_rate = (metadata && metadata->is_keyframe) ? 4000000u : SFU_PACED_SEND_MIN_BPS;
+  uint32_t rate = pacing_bps < min_rate ? min_rate : pacing_bps;
   int64_t span = ((int64_t)len * 8LL * 1000000LL + rate - 1) / rate;
   int64_t base = q->next_release_us > now_us ? q->next_release_us : now_us;
   sfu_paced_send_entry_t *e = &q->entries[q->tail];

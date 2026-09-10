@@ -223,10 +223,12 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
   int64_t frame_now_us = (int64_t)sfu_now_us();
-  if (screen_packet && !paced_queue->input_frame_active &&
-      !sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us, drop_report)) {
-    sfu_metric_inc("paced_send_screen_backlog_drop");
-    return false;
+  if (screen_packet && !paced_queue->input_frame_active) {
+    bool under_delay = sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us, drop_report);
+    if (!under_delay && !media->is_keyframe) {
+      sfu_metric_inc("paced_send_screen_backlog_drop");
+      return false;
+    }
   }
   if (paced_queue &&
       !sfu_paced_send_admit_frame_packet(paced_queue, source_timestamp, source_marker, media->is_keyframe, camera_packet,
@@ -367,6 +369,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
         .rtx_pt = media->video_rtx_pt,
         .twcc_written = twcc_written,
         .cache_rtx = cache_rtx && rtx_plaintext_len > 0,
+        .is_keyframe = media->is_keyframe,
     };
     if (enc_len <= 0 || (uint32_t)enc_len > SFU_PACED_SEND_MAX_PAYLOAD ||
         !sfu_paced_send_enqueue(paced_queue, pkt->data, (uint16_t)enc_len, rtx_plaintext, rtx_plaintext_len, dst, dst_len, cls,

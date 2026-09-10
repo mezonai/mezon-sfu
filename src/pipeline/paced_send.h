@@ -57,6 +57,7 @@ typedef struct sfu_paced_send_metadata {
   bool twcc_written;
   bool cache_rtx;
   bool frame_end;
+  bool is_keyframe;
 } sfu_paced_send_metadata_t;
 
 typedef struct sfu_paced_send_entry {
