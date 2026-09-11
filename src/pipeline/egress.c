@@ -292,11 +292,22 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     pthread_mutex_unlock(&sub_session->crypto_lock);
     return false;
   }
-  sfu_media_snapshot_t egress_msnap = sfu_session_load_media(sub_session);
-  uint8_t mid_send_extmap_id = egress_msnap.mid_recv_extmap_id;
+  uint8_t mid_send_extmap_id = sub_session->media.mid_recv_extmap_id;
   if (mid_send_extmap_id != 0) {
     char mid_text[12];
-    int mid_len = snprintf(mid_text, sizeof(mid_text), "%u", mid);
+    int mid_len;
+    if (mid < 10) {
+      mid_text[0] = (char)('0' + mid);
+      mid_text[1] = '\0';
+      mid_len = 1;
+    } else if (mid < 100) {
+      mid_text[0] = (char)('0' + (mid / 10));
+      mid_text[1] = (char)('0' + (mid % 10));
+      mid_text[2] = '\0';
+      mid_len = 2;
+    } else {
+      mid_len = snprintf(mid_text, sizeof(mid_text), "%u", mid);
+    }
     size_t new_len = (size_t)enc_len;
     if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid_text) ||
         !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid_text, &new_len)) {
@@ -327,7 +338,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
                              media->video_ssrc, atomic_load_explicit(&sub_session->egress.generation, memory_order_acquire));
   }
 
-  uint8_t twcc_send_extmap_id = egress_msnap.twcc_send_extmap_id;
+  uint8_t twcc_send_extmap_id = sub_session->media.twcc_send_extmap_id;
   uint16_t twcc_seq = 0;
   bool twcc_written = false;
   if (twcc_send_extmap_id != 0) {

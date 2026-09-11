@@ -2,6 +2,7 @@
 #define SFU_RUNTIME_EPOCH_RECLAIMER_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "sfu/config.h"
@@ -21,6 +22,7 @@ typedef struct sfu_epoch_retire_node {
 typedef struct sfu_epoch_reclaimer {
   pthread_mutex_t lock;
   sfu_epoch_retire_node_t *pending;
+  _Atomic uint32_t pending_count;
   sfu_epoch_retire_node_t *free_nodes;
   sfu_epoch_generation_fn generation;
   void *generation_context;
