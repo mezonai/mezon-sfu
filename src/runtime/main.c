@@ -27,6 +27,7 @@
 #include "transport/stun/stun.h"
 #include "util/alloc.h"
 #include "util/log.h"
+#include "util/metrics.h"
 
 static void print_usage(const char *argv0) {
   fprintf(stderr,
@@ -73,6 +74,7 @@ int main(int argc, char **argv) {
 
   sfu_config_load_ini(config_file);
   sfu_log_set_level(g_sfu_config.log_level);
+  sfu_metrics_init();
 
   if (sfu_config_validate(&g_sfu_config) != 0) {
     SFU_LOG_ERROR("invalid configuration in %s", config_file);
