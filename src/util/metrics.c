@@ -106,6 +106,8 @@ static const char *const k_metric_names[] = {
     "paced_send_sq_full",
     "paced_send_delay_frame_drop",
     "paced_send_frame_packet_drop",
+    "paced_send_incomplete_frame_drop",
+    "paced_send_incomplete_frame_invalidate",
     "paced_send_delay_crossing",
     "paced_send_screen_backlog_drop",
     "paced_send_backlog_drop_frames",

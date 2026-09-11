@@ -17,8 +17,8 @@ static bool enqueue_packet_full(sfu_paced_send_t *q, const uint8_t *payload, uin
       .pacer_class = SFU_PACER_CLASS_VIDEO_BASE,
       .active = true,
   };
-  bool enqueued = sfu_paced_send_enqueue(q, payload, len, NULL, 0, dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE, pacing_bps,
-                                         NULL, &reservation, &metadata, now_us, release_at_us);
+  bool enqueued = sfu_paced_send_enqueue(q, payload, len, NULL, 0, dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE, pacing_bps, NULL, &reservation,
+                                         &metadata, now_us, release_at_us);
   if (enqueued) {
     q->ready_count++;
   }
@@ -26,12 +26,12 @@ static bool enqueue_packet_full(sfu_paced_send_t *q, const uint8_t *payload, uin
 }
 
 static bool enqueue_packet_for_publisher(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps,
-                                        int64_t now_us, int64_t *release_at_us, uint32_t publisher_peer_id) {
+                                         int64_t now_us, int64_t *release_at_us, uint32_t publisher_peer_id) {
   return enqueue_packet_full(q, payload, len, dst, pacing_bps, now_us, release_at_us, publisher_peer_id, false);
 }
 
-static bool enqueue_packet(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps,
-                           int64_t now_us, int64_t *release_at_us) {
+static bool enqueue_packet(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps, int64_t now_us,
+                           int64_t *release_at_us) {
   return enqueue_packet_for_publisher(q, payload, len, dst, pacing_bps, now_us, release_at_us, 0);
 }
 
@@ -71,7 +71,9 @@ static void test_projected_delay_includes_scan_cap(void) {
   sfu_paced_send_init(&q);
   uint8_t payload[1] = {0};
   struct sockaddr_storage dst = {0};
-  for (int i = 0; i < 9; i++) assert(enqueue_packet(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL));
+  for (int i = 0; i < 9; i++) {
+    assert(enqueue_packet(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL));
+  }
   assert(sfu_paced_send_projected_delay_us(&q, 1000000) >= 3 * SFU_PACED_SEND_SCAN_INTERVAL_US);
   sfu_paced_send_destroy(&q);
 }
@@ -282,6 +284,32 @@ static void test_backlog_drops_delta_before_keyframe(void) {
   sfu_paced_send_destroy(&q);
 }
 
+/* When a timestamp change rolls back an in-flight frame, the discarded packets
+ * were already committed by the layer scheduler. The queue must surface the
+ * rolled-back publisher so egress can force a keyframe instead of forwarding
+ * frames that reference a picture that was never sent. */
+static void test_rollback_records_publisher(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+  uint8_t payload[100] = {0};
+  struct sockaddr_storage dst = {0};
+
+  /* Begin publisher 9's frame, leave it incomplete (no marker). */
+  assert(sfu_paced_send_admit_frame_packet(&q, 5000, false, false, false, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+  sfu_pacer_reservation_t r1 = {.bytes = sizeof(payload), .pacer_class = SFU_PACER_CLASS_VIDEO_BASE, .active = true};
+  sfu_paced_send_metadata_t m1 = {0};
+  m1.publisher_peer_id = 9;
+  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), NULL, 0, &dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE,
+                                SFU_PACED_SEND_MIN_BPS, NULL, &r1, &m1, 1000000, NULL));
+  q.input_frame_queued_packets = 1;
+
+  assert(q.rolled_back_publisher_peer_id == 0);
+  sfu_paced_send_rollback_input_frame(&q);
+  assert(q.rolled_back_publisher_peer_id == 9);
+  assert(q.count == 0);
+  sfu_paced_send_destroy(&q);
+}
+
 int main(void) {
   test_enqueue_spacing_and_copy();
   test_size_and_rate_floor();
@@ -295,5 +323,6 @@ int main(void) {
   test_backlog_drops_delta_before_keyframe();
   test_backlog_report_attributes_dropped_publishers();
   test_backlog_report_counts_frames_with_unknown_publisher();
+  test_rollback_records_publisher();
   return 0;
 }
