@@ -378,6 +378,34 @@ static void test_enhancement_frame_admission_latches_until_end(void) {
   assert(decision.pacer_frame_continuation);
 }
 
+static void test_screen_share_admits_higher_tid_without_u_bit(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.source = SFU_MEDIA_SCREEN;
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Keyframe at timestamp 1000 */
+  sfu_svc_descriptor_t kf = make_desc(1000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(sched.target_tid == 2 && sched.current_tid == 2);
+
+  /* Delta frame with TID=1 and u_bit=0 (standard WebRTC VP9 screen delta) */
+  sfu_svc_descriptor_t delta_tid1 = make_desc(2000, 0, 1, 1, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &delta_tid1, false, &decision));
+  assert(decision.should_forward);
+  assert(decision.reject_reason == SFU_LAYER_REJECT_NONE);
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+
+  /* Delta frame with TID=2 and u_bit=0 */
+  sfu_svc_descriptor_t delta_tid2 = make_desc(3000, 0, 2, 1, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &delta_tid2, false, &decision));
+  assert(decision.should_forward);
+  assert(decision.reject_reason == SFU_LAYER_REJECT_NONE);
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+}
+
 int main(void) {
   test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
@@ -394,6 +422,7 @@ int main(void) {
   test_keyframe_reject_keeps_gate_armed();
   test_temporal_transition_commits_on_end();
   test_enhancement_frame_admission_latches_until_end();
+  test_screen_share_admits_higher_tid_without_u_bit();
   printf("test_layer_selector: OK\n");
   return 0;
 }

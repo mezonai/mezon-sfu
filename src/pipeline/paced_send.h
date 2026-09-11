@@ -20,6 +20,7 @@ typedef struct sfu_pacer_reservation {
 #define SFU_PACED_SEND_MAX_DRAIN_PER_SCAN 4u
 #define SFU_PACED_SEND_SCAN_INTERVAL_US 2000LL
 #define SFU_PACED_SEND_MIN_BPS 2000000u
+#define SFU_PACED_SEND_KEYFRAME_MIN_BPS 5000000u
 #define SFU_PACED_SEND_CAMERA_MAX_DELAY_US 200000LL
 #define SFU_PACED_SEND_SCREEN_MAX_DELAY_US 750000LL
 
@@ -57,6 +58,7 @@ typedef struct sfu_paced_send_metadata {
   bool twcc_written;
   bool cache_rtx;
   bool frame_end;
+  bool is_keyframe;
 } sfu_paced_send_metadata_t;
 
 typedef struct sfu_paced_send_entry {

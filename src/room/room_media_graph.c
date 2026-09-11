@@ -188,6 +188,11 @@ static bool fanout_route_fill_from(sfu_fanout_route_t *route, uint8_t *eligibili
   route->screen_pt = publisher->media.screen.payload_type;
   route->screen_rtx_pt = publisher->media.screen.rtx_payload_type;
   bool audio = publisher->media.uplink_audio.active, video = publisher->media.uplink_video.active, screen = publisher->media.screen.active;
+  bool screen_negotiated = atomic_load_explicit(&publisher->media.screen_enabled, memory_order_acquire) &&
+                           atomic_load_explicit(&publisher->media.screen_send_negotiated, memory_order_acquire);
+  if (screen_negotiated) {
+    screen = true;
+  }
   pthread_mutex_unlock(&publisher->media.lock);
   bool audience = atomic_load_explicit(&publisher->is_audience, memory_order_acquire);
   *eligibility = audio ? SFU_FANOUT_AUDIO : 0;

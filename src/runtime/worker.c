@@ -310,11 +310,22 @@ static void *worker_thread_main(void *arg) {
         if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
           if (paced_due) {
             uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-            if (sfu_paced_send_drain(&ls->egress.paced_screen, w, ls, now_us, &remaining)) {
-              paced_sent = true;
-              did_work = true;
+            uint32_t slots = sfu_session_remote_slot_high_water(ls);
+            if (slots > SFU_MAX_REMOTE_SLOTS) {
+              slots = SFU_MAX_REMOTE_SLOTS;
             }
-            if (sfu_paced_send_drain(&ls->egress.paced_camera, w, ls, now_us, &remaining)) {
+            if (slots > 0) {
+              uint32_t start_slot = ls->egress.last_screen_drain_slot % slots;
+              for (uint32_t s = 0; s < slots && remaining > 0; s++) {
+                uint32_t slot = (start_slot + s) % slots;
+                if (sfu_paced_send_drain(&ls->egress.paced_screen[slot], w, ls, now_us, &remaining)) {
+                  paced_sent = true;
+                  did_work = true;
+                  ls->egress.last_screen_drain_slot = (slot + 1u) % slots;
+                }
+              }
+            }
+            if (remaining > 0 && sfu_paced_send_drain(&ls->egress.paced_camera, w, ls, now_us, &remaining)) {
               paced_sent = true;
               did_work = true;
             }

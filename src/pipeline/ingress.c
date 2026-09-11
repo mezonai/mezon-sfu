@@ -163,6 +163,10 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
       sfu_media_kind_t source = stream->kind == SFU_BANDWIDTH_STREAM_SCREEN ? SFU_MEDIA_SCREEN : SFU_MEDIA_VIDEO;
       sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for_stream(session, stream->publisher_peer_id, source);
       sfu_layer_scheduler_set_bitrate(sched, stream->allocated_bps);
+      if (source == SFU_MEDIA_SCREEN && sched) {
+        sched->target_tid = 2;
+        sched->current_tid = 2;
+      }
     }
     for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
       sfu_layer_scheduler_slot_t *slot = &session->egress.schedulers[i];
@@ -1183,6 +1187,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       sfu_signaling_notify_media_state(sender_session);
     }
   }
+
   pthread_mutex_unlock(&sender_session->ingress_lock);
   sfu_session_release(sender_session);
 }

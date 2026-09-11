@@ -1033,7 +1033,7 @@ int main(void) {
   pthread_attr_t attr;
   pthread_t thread;
   assert(pthread_attr_init(&attr) == 0);
-  assert(pthread_attr_setstacksize(&attr, 64u * 1024u * 1024u) == 0);
+  assert(pthread_attr_setstacksize(&attr, 128u * 1024u * 1024u) == 0);
   assert(pthread_create(&thread, &attr, run_sdp_tests, NULL) == 0);
   pthread_attr_destroy(&attr);
   assert(pthread_join(thread, NULL) == 0);
