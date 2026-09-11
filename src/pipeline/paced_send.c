@@ -323,7 +323,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session
       break;
     }
     sfu_worker_release_packet(w, out);
-    int64_t accepted_us = (int64_t)sfu_now_us();
+    int64_t accepted_us = (now_us > 0 && now_us <= 3000000000000000LL) ? now_us : (int64_t)sfu_now_us();
     if (e->metadata.twcc_written && sfu_session_video_runtime_ready(s) && s->egress.twcc_history) {
       sfu_twcc_history_record(s->egress.twcc_history, e->metadata.twcc_seq, accepted_us, e->len);
     }

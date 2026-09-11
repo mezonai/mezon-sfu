@@ -1692,6 +1692,10 @@
 
                     if (currentJoinMode === "speaker" && localTracksAdded) {
                         await applyVideoEncodingParams(pc);
+                        if (screenSharing) {
+                            const screenSender = findUplinkVideoSender("2");
+                            if (screenSender) await applyScreenEncodingParams(screenSender);
+                        }
                     }
 
                     // Do NOT removeTile on inactive remote mids: demote and leave
@@ -1881,7 +1885,15 @@
                     enc.scaleResolutionDownBy = 1;
                     enc.priority = "high";
                     enc.networkPriority = "high";
-                    await sender.setParameters(params);
+                    try {
+                        await sender.setParameters(params);
+                    } catch (err) {
+                        // Some browsers reject modifying scalabilityMode on an active sender;
+                        // retry without it so degradationPreference and bitrates still apply.
+                        console.warn("setParameters with scalabilityMode failed, retrying without it:", err);
+                        delete enc.scalabilityMode;
+                        await sender.setParameters(params);
+                    }
                 } catch (e) {
                     console.warn("applyScreenEncodingParams failed:", e);
                 }
@@ -1902,9 +1914,9 @@
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
                         video: {
                             cursor: "always",
-                            width: { ideal: 1920 },
-                            height: { ideal: 1080 },
-                            frameRate: { ideal: 5, max: 10 },
+                            width: { ideal: 1920, max: 1920 },
+                            height: { ideal: 1080, max: 1080 },
+                            frameRate: { ideal: 10, max: 10 },
                         },
                         audio: false,
                     });
@@ -1924,9 +1936,13 @@
 
                 if ("contentHint" in screenTrack) {
                     try {
-                        screenTrack.contentHint = "text";
+                        screenTrack.contentHint = "detail";
                     } catch (_) {
-                        /* older browsers */
+                        try {
+                            screenTrack.contentHint = "text";
+                        } catch (_) {
+                            /* older browsers */
+                        }
                     }
                 }
 
@@ -2205,8 +2221,8 @@ const SCREEN_MAX_BITRATE_BPS = 3_500_000;
 const CAMERA_MIN_BITRATE_KBPS = 250;
 const CAMERA_START_BITRATE_KBPS = 500;
 const CAMERA_MAX_BITRATE_KBPS = 1000;
-const SCREEN_MIN_BITRATE_KBPS = 400;
-const SCREEN_START_BITRATE_KBPS = 1000;
+const SCREEN_MIN_BITRATE_KBPS = 1000;
+const SCREEN_START_BITRATE_KBPS = 2500;
 const SCREEN_MAX_BITRATE_KBPS = 3500;
 
 async function applyVideoEncodingParams(pc) {
