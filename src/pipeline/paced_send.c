@@ -117,6 +117,9 @@ void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q) {
   for (uint32_t i = 0; i < q->input_frame_queued_packets; i++) {
     q->tail = q->tail == 0 ? q->capacity - 1u : q->tail - 1u;
     sfu_paced_send_entry_t *e = &q->entries[q->tail];
+    if (e->metadata.publisher_peer_id != 0) {
+      q->rolled_back_publisher_peer_id = e->metadata.publisher_peer_id;
+    }
     sfu_pacer_cancel(e->pacer, &e->reservation);
     memset(e, 0, sizeof(*e));
     q->count--;

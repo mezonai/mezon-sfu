@@ -129,6 +129,33 @@ static void sfu_log_vp9_egress_event(const char *event, const char *path, const 
  * delivered and keeps forwarding frames that reference them. Mark them as
  * needing a keyframe; prepare_packet() then refuses every non-keyframe picture
  * until a complete one arrives, which is what stops the smearing. */
+static void sfu_egress_reset_scheduler_for_keyframe(sfu_layer_scheduler_t *sched) {
+  sched->needs_keyframe = true;
+  sched->keyframe_active = false;
+  sched->keyframe_failed = false;
+  sched->transition_active = false;
+  sched->transition_failed = false;
+  sched->temporal_transition_active = false;
+  sched->temporal_transition_failed = false;
+  sched->pacer_frame_active = false;
+}
+
+static void sfu_egress_invalidate_publisher_scheduler(sfu_peer_session_t *sub_session, sfu_media_kind_t source, uint32_t publisher_peer_id) {
+  if (!sfu_session_video_runtime_ready(sub_session) || !sub_session->egress.schedulers) {
+    return;
+  }
+  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+    sfu_layer_scheduler_slot_t *slot = &sub_session->egress.schedulers[i];
+    if (slot->publisher_id == 0 || (uint8_t)slot->publisher_id != (uint8_t)source) {
+      continue;
+    }
+    if (publisher_peer_id != 0 && (uint32_t)(slot->publisher_id >> 8) != publisher_peer_id) {
+      continue;
+    }
+    sfu_egress_reset_scheduler_for_keyframe(&slot->sched);
+  }
+}
+
 static void sfu_egress_invalidate_backlog_drops(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_media_kind_t source,
                                                 const sfu_paced_send_drop_report_t *report, const sfu_egress_media_t *media) {
   if (!w || !sub_session || !report || report->frames == 0) {
@@ -140,36 +167,13 @@ static void sfu_egress_invalidate_backlog_drops(sfu_worker_t *w, sfu_peer_sessio
   if (report->publisher_count == 0) {
     return;
   }
-  if (!sfu_session_video_runtime_ready(sub_session) || !sub_session->egress.schedulers) {
-    return;
-  }
   bool invalidate_all = report->truncated;
-  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
-    sfu_layer_scheduler_slot_t *slot = &sub_session->egress.schedulers[i];
-    if (slot->publisher_id == 0 || (uint8_t)slot->publisher_id != (uint8_t)source) {
-      continue;
+  if (invalidate_all) {
+    sfu_egress_invalidate_publisher_scheduler(sub_session, source, 0);
+  } else {
+    for (uint32_t j = 0; j < report->publisher_count; j++) {
+      sfu_egress_invalidate_publisher_scheduler(sub_session, source, report->publisher_peer_ids[j]);
     }
-    if (!invalidate_all) {
-      uint32_t peer_id = (uint32_t)(slot->publisher_id >> 8);
-      bool owned = false;
-      for (uint32_t j = 0; j < report->publisher_count; j++) {
-        if (report->publisher_peer_ids[j] == peer_id) {
-          owned = true;
-          break;
-        }
-      }
-      if (!owned) {
-        continue;
-      }
-    }
-    slot->sched.needs_keyframe = true;
-    slot->sched.keyframe_active = false;
-    slot->sched.keyframe_failed = false;
-    slot->sched.transition_active = false;
-    slot->sched.transition_failed = false;
-    slot->sched.temporal_transition_active = false;
-    slot->sched.temporal_transition_failed = false;
-    slot->sched.pacer_frame_active = false;
   }
   /* The scheduler flag alone defers the PLI to the publisher's next packet,
    * which a mostly-static screen share may not send promptly. Ask now; the
@@ -177,6 +181,25 @@ static void sfu_egress_invalidate_backlog_drops(sfu_worker_t *w, sfu_peer_sessio
    * state into one request per second. Publishers other than the current one
    * are covered by their own next packet, which now sees needs_keyframe. */
   if (media && media->publisher && media->publisher->peer_id != 0) {
+    sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, source);
+  }
+}
+
+/* An incomplete-frame rollback (enqueue failure, or a timestamp change while a
+ * frame was mid-admission) silently discards packets the scheduler already
+ * committed. Without invalidation the scheduler forwards later frames whose
+ * references were never sent — the persistent tile-column corruption seen when
+ * a second screen's keyframe stalls and is rolled back. */
+static void sfu_egress_invalidate_rolled_back_frame(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_media_kind_t source, sfu_paced_send_t *q,
+                                                    const sfu_egress_media_t *media) {
+  if (!q || q->rolled_back_publisher_peer_id == 0) {
+    return;
+  }
+  uint32_t publisher_peer_id = q->rolled_back_publisher_peer_id;
+  q->rolled_back_publisher_peer_id = 0;
+  sfu_metric_inc("paced_send_incomplete_frame_invalidate");
+  sfu_egress_invalidate_publisher_scheduler(sub_session, source, publisher_peer_id);
+  if (w && media && media->publisher && media->publisher->peer_id == publisher_peer_id) {
     sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, source);
   }
 }
@@ -219,9 +242,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   bool screen_packet = media->source == SFU_MEDIA_SCREEN && media->has_video && !media->is_audio;
   bool camera_packet = media->source == SFU_MEDIA_VIDEO && media->has_video && !media->is_audio;
-  sfu_paced_send_t *paced_queue = screen_packet ? (media->remote_slot < SFU_MAX_REMOTE_SLOTS ? &sub_session->egress.paced_screen[media->remote_slot] : NULL)
-                                                : camera_packet ? &sub_session->egress.paced_camera
-                                                                : NULL;
+  sfu_paced_send_t *paced_queue = screen_packet   ? (media->remote_slot < SFU_MAX_REMOTE_SLOTS ? &sub_session->egress.paced_screen[media->remote_slot] : NULL)
+                                  : camera_packet ? &sub_session->egress.paced_camera
+                                                  : NULL;
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
   int64_t frame_now_us = (int64_t)sfu_now_us();
@@ -232,9 +255,17 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
       return false;
     }
   }
-  if (paced_queue &&
-      !sfu_paced_send_admit_frame_packet(paced_queue, source_timestamp, source_marker, media->is_keyframe, camera_packet,
-                                         camera_packet ? SFU_PACED_SEND_CAMERA_MAX_DELAY_US : SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us)) {
+  bool admitted = true;
+  if (paced_queue) {
+    admitted = sfu_paced_send_admit_frame_packet(paced_queue, source_timestamp, source_marker, media->is_keyframe, camera_packet,
+                                                 camera_packet ? SFU_PACED_SEND_CAMERA_MAX_DELAY_US : SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us);
+    /* admit_frame_packet rolls back a prior incomplete frame when the timestamp
+     * changes; that rollback discarded committed packets, so arm a keyframe.
+     * Run this on both outcomes — a delay-dropped new frame still rolled back
+     * the previous one. */
+    sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
+  }
+  if (!admitted) {
     return false;
   }
 
@@ -379,6 +410,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
       sfu_pacer_cancel(&sub_session->egress.pacer, &reservation);
       sfu_paced_send_rollback_input_frame(paced_queue);
       sfu_paced_send_reject_input_frame(paced_queue);
+      sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
       sfu_metric_inc("paced_send_enqueue_drop");
       return false;
     }
