@@ -247,9 +247,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
                                                   : NULL;
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
-  int64_t frame_now_us = (int64_t)sfu_now_us();
+  int64_t now_us = (int64_t)sfu_now_us();
   if (screen_packet && paced_queue && !paced_queue->input_frame_active) {
-    bool under_delay = sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us, drop_report);
+    bool under_delay = sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, now_us, drop_report);
     if (!under_delay && !media->is_keyframe) {
       sfu_metric_inc("paced_send_screen_backlog_drop");
       return false;
@@ -258,7 +258,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   bool admitted = true;
   if (paced_queue) {
     admitted = sfu_paced_send_admit_frame_packet(paced_queue, source_timestamp, source_marker, media->is_keyframe, camera_packet,
-                                                 camera_packet ? SFU_PACED_SEND_CAMERA_MAX_DELAY_US : SFU_PACED_SEND_SCREEN_MAX_DELAY_US, frame_now_us);
+                                                 camera_packet ? SFU_PACED_SEND_CAMERA_MAX_DELAY_US : SFU_PACED_SEND_SCREEN_MAX_DELAY_US, now_us);
     /* admit_frame_packet rolls back a prior incomplete frame when the timestamp
      * changes; that rollback discarded committed packets, so arm a keyframe.
      * Run this on both outcomes — a delay-dropped new frame still rolled back
@@ -269,7 +269,6 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return false;
   }
 
-  int64_t send_time_us = (int64_t)sfu_now_us();
   sfu_pacer_class_t cls = media->is_audio ? SFU_PACER_CLASS_AUDIO : (media->has_video ? video_class : SFU_PACER_CLASS_VIDEO_BASE);
   bool allow_congestion_drop = camera_packet && decision && decision->pacer_frame_start;
 
@@ -278,17 +277,19 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   uint16_t subscriber_seq = 0;
   pthread_mutex_lock(&sub_session->crypto_lock);
   bool translated = sfu_rtp_seq_translate(&sub_session->cold->rtp_seq_translator, outbound_ssrc, source_seq, &subscriber_seq);
-  pthread_mutex_unlock(&sub_session->crypto_lock);
   if (!translated) {
+    pthread_mutex_unlock(&sub_session->crypto_lock);
     sfu_metric_inc("egress_seq_translate_fail");
     sfu_metric_inc("egress_seq_translate_table_full");
     return false;
   }
   if (!sfu_rtp_packet_set_seq(pkt->data, pkt->len, subscriber_seq)) {
+    pthread_mutex_unlock(&sub_session->crypto_lock);
     sfu_metric_inc("egress_seq_translate_fail");
     return false;
   }
   if (sched && decision && !sfu_rtp_packet_set_marker(pkt->data, pkt->len, decision->set_marker)) {
+    pthread_mutex_unlock(&sub_session->crypto_lock);
     return false;
   }
   sfu_media_snapshot_t egress_msnap = sfu_session_load_media(sub_session);
@@ -299,6 +300,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     size_t new_len = (size_t)enc_len;
     if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid_text) ||
         !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid_text, &new_len)) {
+      pthread_mutex_unlock(&sub_session->crypto_lock);
       sfu_metric_inc("mid_write_fail");
 #ifdef SFU_DIAG_LOG
       static _Atomic uint32_t mid_write_fail_logs;
@@ -340,7 +342,6 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
 
   uint64_t crypto_start = profile ? sfu_egress_profile_cycles() : 0;
-  pthread_mutex_lock(&sub_session->crypto_lock);
   srtp_err_status_t protect_status = sfu_srtp_protect_rtp_status(&sub_session->srtp, pkt->data, &enc_len, pkt->cap);
   pthread_mutex_unlock(&sub_session->crypto_lock);
   if (profile) {
@@ -377,15 +378,13 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   pkt->len = (uint32_t)enc_len;
 
   sfu_pacer_reservation_t reservation = {0};
-  send_time_us = (int64_t)sfu_now_us();
-  if (!sfu_pacer_reserve(&sub_session->egress.pacer, cls, (uint32_t)enc_len, allow_congestion_drop, send_time_us, &reservation)) {
+  if (!sfu_pacer_reserve(&sub_session->egress.pacer, cls, (uint32_t)enc_len, allow_congestion_drop, now_us, &reservation)) {
     sfu_metric_inc("pacer_dropped_enh");
     sfu_metric_inc("pacer_dropped_enh_frames");
     return false;
   }
 
   if (paced_queue) {
-    int64_t enqueue_now = (int64_t)sfu_now_us();
     int64_t release_at_us = 0;
     sfu_paced_send_metadata_t paced_metadata = {
         .assignment_generation = media->assignment_generation,
@@ -406,7 +405,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     };
     if (enc_len <= 0 || (uint32_t)enc_len > SFU_PACED_SEND_MAX_PAYLOAD ||
         !sfu_paced_send_enqueue(paced_queue, pkt->data, (uint16_t)enc_len, rtx_plaintext, rtx_plaintext_len, dst, dst_len, cls,
-                                sub_session->egress.pacer.pacing_bps, &sub_session->egress.pacer, &reservation, &paced_metadata, enqueue_now, &release_at_us)) {
+                                sub_session->egress.pacer.pacing_bps, &sub_session->egress.pacer, &reservation, &paced_metadata, now_us, &release_at_us)) {
       sfu_pacer_cancel(&sub_session->egress.pacer, &reservation);
       sfu_paced_send_rollback_input_frame(paced_queue);
       sfu_paced_send_reject_input_frame(paced_queue);
@@ -417,7 +416,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     if (source_marker) {
       sfu_paced_send_finish_input_frame(paced_queue);
       if (screen_packet) {
-        (void)sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, enqueue_now, drop_report);
+        (void)sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, now_us, drop_report);
       }
     }
     w->hot.output_queued++;
@@ -435,9 +434,8 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
 
   sfu_pacer_commit(&sub_session->egress.pacer, &reservation);
-  send_time_us = (int64_t)sfu_now_us();
   if (twcc_written && sfu_session_video_runtime_ready(sub_session) && sub_session->egress.twcc_history) {
-    sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, send_time_us, (uint32_t)enc_len);
+    sfu_twcc_history_record(sub_session->egress.twcc_history, twcc_seq, now_us, (uint32_t)enc_len);
   }
   w->hot.output_queued++;
   return true;
