@@ -1173,7 +1173,9 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     s->egress.schedulers = NULL;
   }
   sfu_paced_send_destroy(&s->egress.paced_camera);
-  sfu_paced_send_destroy(&s->egress.paced_screen);
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_paced_send_destroy(&s->egress.paced_screen[i]);
+  }
   if (s->leave_event) {
     assert(!atomic_load_explicit(&s->leave_event_in_use, memory_order_acquire));
     SFU_FREE(s->leave_event);
@@ -1505,7 +1507,10 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->egress.video_runtime_state, SFU_VIDEO_RUNTIME_UNINITIALIZED, memory_order_relaxed);
   sfu_rtp_seq_translator_init(&s->cold->rtp_seq_translator);
   sfu_paced_send_init(&s->egress.paced_camera);
-  sfu_paced_send_init(&s->egress.paced_screen);
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_paced_send_init(&s->egress.paced_screen[i]);
+  }
+  s->egress.last_screen_drain_slot = 0;
   sfu_pacer_init(&s->egress.pacer);
   sfu_pacer_set_rate(&s->egress.pacer, SFU_BWE_START_BPS, (int64_t)sfu_now_us());
 
@@ -2046,7 +2051,8 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
 
   int64_t now = (int64_t)sfu_now_ms();
   int64_t *last_pli = source == SFU_MEDIA_SCREEN ? &publisher->egress.last_screen_pli_time : &publisher->egress.last_pli_time;
-  if (*last_pli != 0 && now - *last_pli < SFU_SESSION_KF_THROTTLE_MS) {
+  int64_t throttle_window_ms = SFU_SESSION_KF_THROTTLE_MS;
+  if (*last_pli != 0 && now - *last_pli < throttle_window_ms) {
 #ifdef SFU_DIAG_LOG
     publisher->egress.diag.pli_coalesced++;
 #endif
@@ -2443,6 +2449,35 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
   uint64_t pli_coalesced_delta = diag_counter_delta(diag->pli_coalesced, diag->last_logged_pli_coalesced);
   uint64_t fir_received_delta = diag_counter_delta(diag->fir_received, diag->last_logged_fir_received);
   int64_t debt = session->egress.pacer.balance_bytes < 0 ? -session->egress.pacer.balance_bytes : 0;
+  uint32_t screen_count = 0;
+  uint32_t screen_high_water = 0;
+  int64_t screen_projected_delay = 0;
+  uint64_t screen_drain_cap_hits = 0;
+  int64_t screen_max_release_late_us = 0;
+  int64_t screen_max_enqueue_to_send_us = 0;
+  int64_t screen_max_input_frame_span_us = 0;
+  uint32_t high_water_slots = sfu_session_remote_slot_high_water(session);
+  for (uint32_t i = 0; i < high_water_slots && i < SFU_MAX_REMOTE_SLOTS; i++) {
+    const sfu_paced_send_t *pq = &session->egress.paced_screen[i];
+    screen_count += pq->count;
+    if (pq->high_water > screen_high_water) {
+      screen_high_water = pq->high_water;
+    }
+    int64_t delay = sfu_paced_send_projected_delay_us(pq, (int64_t)now_us);
+    if (delay > screen_projected_delay) {
+      screen_projected_delay = delay;
+    }
+    screen_drain_cap_hits += pq->drain_cap_hits;
+    if (pq->max_release_late_us > screen_max_release_late_us) {
+      screen_max_release_late_us = pq->max_release_late_us;
+    }
+    if (pq->max_enqueue_to_send_us > screen_max_enqueue_to_send_us) {
+      screen_max_enqueue_to_send_us = pq->max_enqueue_to_send_us;
+    }
+    if (pq->max_input_frame_span_us > screen_max_input_frame_span_us) {
+      screen_max_input_frame_span_us = pq->max_input_frame_span_us;
+    }
+  }
   SFU_LOG_INFO(
       "congestion session=%u worker=%u gcc=%u ack=%u overuse=%u twcc_loss=%u/%u pool=%u reserve=%u "
       "alloc=%u unalloc=%u streams=[%s] alloc_truncated=%u pacer_bps=%u debt=%" PRId64 " drop_delta=%" PRIu64 " rtx_drop_delta=%" PRIu64 " nack_delta=%" PRIu64
@@ -2455,10 +2490,10 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       session->peer_id, w->worker_index, diag->latest_gcc_bps, diag->latest_ack_bps, diag->latest_overuse, diag->latest_twcc_lost, diag->latest_twcc_total,
       diag->allocation_pool_bps, diag->allocation_reserve_bps, diag->allocation_allocated_bps, diag->allocation_unallocated_bps, allocations,
       allocations_truncated ? 1u : 0u, session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta, nack_delta, cache_hit_delta, cache_miss_delta,
-      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, fir_received_delta, session->egress.paced_screen.count,
-      session->egress.paced_screen.high_water, sfu_paced_send_projected_delay_us(&session->egress.paced_screen, (int64_t)now_us),
-      session->egress.paced_screen.drain_cap_hits, session->egress.paced_screen.max_release_late_us, session->egress.paced_screen.max_enqueue_to_send_us,
-      session->egress.paced_screen.max_input_frame_span_us, diag->remb_contribution_bps, diag->remb_target_bps, session->egress.last_camera_remb_bps,
+      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, fir_received_delta, screen_count,
+      screen_high_water, screen_projected_delay,
+      screen_drain_cap_hits, screen_max_release_late_us, screen_max_enqueue_to_send_us,
+      screen_max_input_frame_span_us, diag->remb_contribution_bps, diag->remb_target_bps, session->egress.last_camera_remb_bps,
       session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale, diag->remb_camera.target_bps,
       diag->remb_camera.media_ssrc, diag->remb_camera.last_sent_bps, diag->remb_camera.last_sent_us, diag->remb_camera.fresh_routes,
       diag->remb_camera.stale_routes, diag->remb_camera.winner_peer_id, diag->remb_camera.winner_remote_slot, diag->remb_camera.winner_assignment_generation,

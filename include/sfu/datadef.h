@@ -572,7 +572,8 @@ typedef struct {
   _Atomic uint8_t video_runtime_state;
   uint8_t fir_seq;
   sfu_paced_send_t paced_camera;
-  sfu_paced_send_t paced_screen;
+  sfu_paced_send_t paced_screen[SFU_MAX_REMOTE_SLOTS];
+  uint32_t last_screen_drain_slot;
 } sfu_session_egress_t;
 
 typedef struct sfu_peer_session {

@@ -7,10 +7,11 @@
 #include "pipeline/paced_send.h"
 #include "sfu/datadef.h"
 
-static bool enqueue_packet_for_publisher(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps,
-                                        int64_t now_us, int64_t *release_at_us, uint32_t publisher_peer_id) {
+static bool enqueue_packet_full(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps,
+                                int64_t now_us, int64_t *release_at_us, uint32_t publisher_peer_id, bool is_keyframe) {
   sfu_paced_send_metadata_t metadata = {0};
   metadata.publisher_peer_id = publisher_peer_id;
+  metadata.is_keyframe = is_keyframe;
   sfu_pacer_reservation_t reservation = {
       .bytes = len,
       .pacer_class = SFU_PACER_CLASS_VIDEO_BASE,
@@ -22,6 +23,11 @@ static bool enqueue_packet_for_publisher(sfu_paced_send_t *q, const uint8_t *pay
     q->ready_count++;
   }
   return enqueued;
+}
+
+static bool enqueue_packet_for_publisher(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps,
+                                        int64_t now_us, int64_t *release_at_us, uint32_t publisher_peer_id) {
+  return enqueue_packet_full(q, payload, len, dst, pacing_bps, now_us, release_at_us, publisher_peer_id, false);
 }
 
 static bool enqueue_packet(sfu_paced_send_t *q, const uint8_t *payload, uint16_t len, const struct sockaddr_storage *dst, uint32_t pacing_bps,
@@ -205,14 +211,88 @@ static void test_backlog_report_counts_frames_with_unknown_publisher(void) {
   sfu_paced_send_destroy(&q);
 }
 
+static void test_keyframe_pacing_rate_floor(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+  uint8_t payload[1000] = {0};
+  struct sockaddr_storage dst = {0};
+  int64_t first = -1, second = -1;
+  assert(enqueue_packet_full(&q, payload, 1000, &dst, 1, 2000000, &first, 0, true));
+  assert(enqueue_packet_full(&q, payload, 1000, &dst, 1, 2000000, &second, 0, true));
+  assert(first == 2000000);
+  /* Floor for keyframe is 5 Mbps: span is (1000 * 8 * 1000000 + 5000000 - 1) / 5000000 = 1600 us */
+  assert(second == 2001600);
+  sfu_paced_send_destroy(&q);
+}
+
+static void test_backlog_preserves_keyframe(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+  uint8_t payload[1] = {0};
+  struct sockaddr_storage dst = {0};
+  assert(enqueue_packet_full(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL, 5, true));
+  assert(enqueue_packet_full(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL, 5, true));
+  q.entries[1].metadata.frame_end = true;
+  q.entries[0].span_us = 450000;
+  q.entries[1].span_us = 450000;
+  q.entries[0].release_at_us = 1000000;
+  q.entries[1].release_at_us = 1450000;
+  q.next_release_us = 1900000; /* 900ms delay, over SFU_PACED_SEND_SCREEN_MAX_DELAY_US (750ms) */
+
+  sfu_paced_send_drop_report_t report;
+  sfu_paced_send_drop_report_init(&report);
+  /* bound_backlog must NOT drop the keyframe */
+  bool under_delay = sfu_paced_send_bound_backlog(&q, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000, &report);
+  assert(!under_delay);
+  assert(report.frames == 0);
+  assert(q.count == 2);
+  assert(q.head == 0);
+  sfu_paced_send_destroy(&q);
+}
+
+static void test_backlog_drops_delta_before_keyframe(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+  uint8_t payload[1] = {0};
+  struct sockaddr_storage dst = {0};
+  /* Frame 1: delta frame (not keyframe) */
+  assert(enqueue_packet_full(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL, 3, false));
+  assert(enqueue_packet_full(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL, 3, false));
+  q.entries[1].metadata.frame_end = true;
+  /* Frame 2: keyframe */
+  assert(enqueue_packet_full(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL, 3, true));
+  assert(enqueue_packet_full(&q, payload, sizeof(payload), &dst, UINT32_MAX, 1000000, NULL, 3, true));
+  q.entries[3].metadata.frame_end = true;
+
+  for (uint32_t i = 0; i < 4; i++) {
+    q.entries[i].span_us = 200000;
+    q.entries[i].release_at_us = 1000000 + (int64_t)i * 200000;
+  }
+  q.next_release_us = 1800000; /* 800ms delay */
+
+  sfu_paced_send_drop_report_t report;
+  sfu_paced_send_drop_report_init(&report);
+  /* bound_backlog drops Frame 1 (delta), stops at Frame 2 (keyframe) */
+  assert(sfu_paced_send_bound_backlog(&q, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000, &report));
+  assert(report.frames == 1);
+  assert(report.publisher_peer_ids[0] == 3);
+  assert(q.count == 2);
+  assert(q.head == 2);
+  assert(q.entries[q.head].metadata.is_keyframe);
+  sfu_paced_send_destroy(&q);
+}
+
 int main(void) {
   test_enqueue_spacing_and_copy();
   test_size_and_rate_floor();
+  test_keyframe_pacing_rate_floor();
   test_projected_delay_includes_scan_cap();
   test_rate_change_does_not_reprice_backlog();
   test_frame_rejected_after_enqueue_failure();
   test_keyframe_bypasses_delay_drop();
   test_screen_backlog_evicts_whole_frames();
+  test_backlog_preserves_keyframe();
+  test_backlog_drops_delta_before_keyframe();
   test_backlog_report_attributes_dropped_publishers();
   test_backlog_report_counts_frames_with_unknown_publisher();
   return 0;
