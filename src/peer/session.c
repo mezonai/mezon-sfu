@@ -2051,7 +2051,7 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
 
   int64_t now = (int64_t)sfu_now_ms();
   int64_t *last_pli = source == SFU_MEDIA_SCREEN ? &publisher->egress.last_screen_pli_time : &publisher->egress.last_pli_time;
-  int64_t throttle_window_ms = source == SFU_MEDIA_SCREEN ? 500 : SFU_SESSION_KF_THROTTLE_MS;
+  int64_t throttle_window_ms = SFU_SESSION_KF_THROTTLE_MS;
   if (*last_pli != 0 && now - *last_pli < throttle_window_ms) {
 #ifdef SFU_DIAG_LOG
     publisher->egress.diag.pli_coalesced++;

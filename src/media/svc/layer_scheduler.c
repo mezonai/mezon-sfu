@@ -123,16 +123,25 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
     sched->current_tid = 2;
   }
 
-  if (sched->target_sid < sched->current_sid) {
-    sched->current_sid = sched->target_sid;
-  }
-  if (sched->target_tid < sched->current_tid) {
-    sched->current_tid = sched->target_tid;
+  if (sched->source != SFU_MEDIA_SCREEN) {
+    if (sched->target_sid < sched->current_sid) {
+      sched->current_sid = sched->target_sid;
+    }
+    if (sched->target_tid < sched->current_tid) {
+      sched->current_tid = sched->target_tid;
+    }
   }
 
   uint8_t sid_mask = (uint8_t)(1u << desc->sid);
-  if ((sched->failed_sid_mask & sid_mask) != 0 || desc->sid > sched->target_sid || desc->tid > sched->target_tid) {
-    return layer_scheduler_reject(decision, SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED);
+  if (sched->source == SFU_MEDIA_SCREEN) {
+    /* Screen share: accept all temporal layers to preserve reference structure */
+    if ((sched->failed_sid_mask & sid_mask) != 0 || desc->sid > sched->target_sid) {
+      return layer_scheduler_reject(decision, SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED);
+    }
+  } else {
+    if ((sched->failed_sid_mask & sid_mask) != 0 || desc->sid > sched->target_sid || desc->tid > sched->target_tid) {
+      return layer_scheduler_reject(decision, SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED);
+    }
   }
   if (desc->b_bit == 0 && (sched->started_sid_mask & sid_mask) == 0) {
     return layer_scheduler_reject(decision, SFU_LAYER_REJECT_MISSING_FRAME_START);

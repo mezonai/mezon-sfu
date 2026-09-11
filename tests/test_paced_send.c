@@ -220,8 +220,8 @@ static void test_keyframe_pacing_rate_floor(void) {
   assert(enqueue_packet_full(&q, payload, 1000, &dst, 1, 2000000, &first, 0, true));
   assert(enqueue_packet_full(&q, payload, 1000, &dst, 1, 2000000, &second, 0, true));
   assert(first == 2000000);
-  /* Floor for keyframe is 4 Mbps: span is (1000 * 8 * 1000000 + 4000000 - 1) / 4000000 = 2000 us */
-  assert(second == 2002000);
+  /* Floor for keyframe is 5 Mbps: span is (1000 * 8 * 1000000 + 5000000 - 1) / 5000000 = 1600 us */
+  assert(second == 2001600);
   sfu_paced_send_destroy(&q);
 }
 
