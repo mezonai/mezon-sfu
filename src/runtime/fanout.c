@@ -191,7 +191,7 @@ bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src
 unsigned sfu_fanout_mesh_drain(sfu_fanout_mesh_t *mesh, uint32_t dst_worker, unsigned max_count, sfu_fanout_job_fn on_job, void *user_data) {
   unsigned drained = 0;
   uint32_t n = mesh->worker_count;
-  uint32_t start = atomic_fetch_add_explicit(&mesh->drain_cursor, 1, memory_order_relaxed) % n;
+  uint32_t start = (dst_worker < SFU_MAX_WORKERS ? mesh->cursors[dst_worker].drain_cursor++ : 0) % n;
 
   for (uint32_t step = 0; step < n && drained < max_count; step++) {
     uint32_t src = (start + step) % n;
@@ -275,7 +275,7 @@ unsigned sfu_fanout_mesh_drain_returns(sfu_fanout_mesh_t *mesh, uint32_t dst_wor
   }
   unsigned drained = 0;
   uint32_t n = mesh->worker_count;
-  uint32_t start = atomic_fetch_add_explicit(&mesh->return_cursor, 1, memory_order_relaxed) % n;
+  uint32_t start = (dst_worker < SFU_MAX_WORKERS ? mesh->cursors[dst_worker].return_cursor++ : 0) % n;
   for (uint32_t step = 0; step < n && drained < max_count; step++) {
     uint32_t src = (start + step) % n;
     if (src == dst_worker) {

@@ -50,13 +50,14 @@ bool sfu_epoch_reclaimer_retire(sfu_epoch_reclaimer_t *reclaimer, void *ptr,
   }
   node->next = reclaimer->pending;
   reclaimer->pending = node;
+  atomic_fetch_add_explicit(&reclaimer->pending_count, 1, memory_order_release);
   pthread_mutex_unlock(&reclaimer->lock);
 
   return true;
 }
 
 uint32_t sfu_epoch_reclaimer_sweep(sfu_epoch_reclaimer_t *reclaimer) {
-  if (!reclaimer) {
+  if (!reclaimer || atomic_load_explicit(&reclaimer->pending_count, memory_order_acquire) == 0) {
     return 0;
   }
 
@@ -96,6 +97,10 @@ uint32_t sfu_epoch_reclaimer_sweep(sfu_epoch_reclaimer_t *reclaimer) {
     pthread_mutex_unlock(&reclaimer->lock);
   }
 
+  if (reclaimed > 0) {
+    atomic_fetch_sub_explicit(&reclaimer->pending_count, reclaimed, memory_order_release);
+  }
+
   return reclaimed;
 }
 
@@ -107,6 +112,7 @@ void sfu_epoch_reclaimer_destroy_after_quiescence(sfu_epoch_reclaimer_t *reclaim
   pthread_mutex_lock(&reclaimer->lock);
   sfu_epoch_retire_node_t *node = reclaimer->pending;
   reclaimer->pending = NULL;
+  atomic_store_explicit(&reclaimer->pending_count, 0, memory_order_relaxed);
   pthread_mutex_unlock(&reclaimer->lock);
 
   while (node) {

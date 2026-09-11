@@ -215,7 +215,9 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
 void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_ingress_media_t *m) {
   uint32_t worker_count = w->mesh ? w->mesh->worker_count : 1;
   sfu_route_batch_builder_t builders[SFU_MAX_WORKERS];
-  memset(builders, 0, sizeof(builders));
+  for (uint32_t i = 0; i < worker_count; i++) {
+    builders[i].count = 0;
+  }
   sfu_packet_t *remote_source = NULL;
   sfu_media_kind_t kind = m->is_audio ? SFU_MEDIA_AUDIO : m->source == SFU_MEDIA_SCREEN ? SFU_MEDIA_SCREEN : SFU_MEDIA_VIDEO;
   sfu_fanout_bundle_t *bundle = sfu_session_fanout_acquire(sender_session);

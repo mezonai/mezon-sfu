@@ -61,14 +61,19 @@ typedef struct sfu_fanout_job {
   uint8_t kind;
 } sfu_fanout_job_t;
 
+typedef struct {
+  uint32_t drain_cursor;
+  uint32_t return_cursor;
+  char pad[56];
+} sfu_fanout_worker_cursor_t;
+
 typedef struct sfu_fanout_mesh {
   sfu_pool_t *job_pools;
   sfu_spsc_ring_t *rings;
   sfu_spsc_ring_t *return_rings;
   uint32_t worker_count;
   uint32_t per_partition_capacity;
-  _Atomic uint32_t drain_cursor;
-  _Atomic uint32_t return_cursor;
+  sfu_fanout_worker_cursor_t cursors[SFU_MAX_WORKERS];
 } sfu_fanout_mesh_t;
 
 typedef void (*sfu_fanout_job_fn)(void *user_data, sfu_fanout_job_t *job);

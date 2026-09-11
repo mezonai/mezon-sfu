@@ -594,13 +594,13 @@ static sfu_media_kind_t classify_media_source(const sfu_media_snapshot_t *snap, 
   if (rtp->extension && snap->mid_recv_extmap_id != 0) {
     char mid[8];
     if (sfu_rtp_ext_read_mid(rtp->extension_profile, rtp->extension_data, rtp->extension_length, snap->mid_recv_extmap_id, mid, sizeof(mid))) {
-      if (strcmp(mid, "2") == 0) {
+      if (mid[0] == '2' && mid[1] == '\0') {
         return SFU_MEDIA_SCREEN;
       }
-      if (strcmp(mid, "1") == 0) {
+      if (mid[0] == '1' && mid[1] == '\0') {
         return SFU_MEDIA_VIDEO;
       }
-      if (strcmp(mid, "0") == 0) {
+      if (mid[0] == '0' && mid[1] == '\0') {
         return SFU_MEDIA_AUDIO;
       }
     }

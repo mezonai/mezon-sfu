@@ -18,11 +18,12 @@
 #define SFU_CONTROL_CAPACITY 64u
 #define SFU_CONTROL_BURST 4u
 
-typedef struct {
+typedef struct sfu_pending_send {
   sfu_packet_t *pkt;
   struct sockaddr_storage dst;
   socklen_t dst_len;
   sfu_net_send_priority_t priority;
+  struct sfu_pending_send *next_free;
 } sfu_pending_send_t;
 
 typedef struct {
@@ -44,10 +45,24 @@ struct sfu_net {
   _Atomic uint32_t outstanding_sends;
   sfu_send_lane_t normal;
   sfu_send_lane_t control;
+  sfu_pending_send_t *send_pool;
+  sfu_pending_send_t *send_free_list;
+  uint32_t send_pool_cap;
   uint32_t control_streak;
   int bgid;
   int fd;
 };
+
+static inline void free_pending_send(sfu_net_t *r, sfu_pending_send_t *send) {
+  if (!send) return;
+  if (r && r->send_pool && send >= r->send_pool && send < r->send_pool + r->send_pool_cap) {
+    send->pkt = NULL;
+    send->next_free = r->send_free_list;
+    r->send_free_list = send;
+  } else {
+    SFU_FREE(send);
+  }
+}
 
 uint32_t sfu_net_recv_overhead(void) {
   return (uint32_t)sizeof(struct io_uring_recvmsg_out) + (uint32_t)sizeof(struct sockaddr_storage) + SFU_RECV_CMSG_BUFSIZE;
@@ -104,6 +119,16 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
     return NULL;
   }
 
+  uint32_t pool_cap = r->normal.capacity + r->control.capacity + (sq_entries ? sq_entries : 1) + 64;
+  r->send_pool_cap = pool_cap;
+  r->send_pool = SFU_CALLOC(pool_cap, sizeof(sfu_pending_send_t));
+  if (r->send_pool) {
+    for (uint32_t i = 0; i < pool_cap; i++) {
+      r->send_pool[i].next_free = r->send_free_list;
+      r->send_free_list = &r->send_pool[i];
+    }
+  }
+
   struct io_uring_params params;
   memset(&params, 0, sizeof(params));
   params.flags = IORING_SETUP_CQSIZE;
@@ -112,6 +137,7 @@ sfu_net_t *sfu_net_create(const sfu_net_options_t *options) {
   int rc = io_uring_queue_init_params(sq_entries, &r->ring, &params);
   if (rc < 0) {
     SFU_LOG_ERROR("io_uring_queue_init_params failed: %s", strerror(-rc));
+    SFU_FREE(r->send_pool);
     SFU_FREE(r->normal.items);
     SFU_FREE(r->control.items);
     SFU_FREE(r);
@@ -180,8 +206,11 @@ void sfu_net_destroy(sfu_net_t *r) {
     return;
   }
   (void)sfu_net_cancel(r);
+  SFU_FREE(r->send_pool);
+  r->send_pool = NULL;
+  r->send_free_list = NULL;
   SFU_FREE(r->normal.items);
-    SFU_FREE(r->control.items);
+  SFU_FREE(r->control.items);
   r->normal.items = NULL;
   r->control.items = NULL;
   if (r->buf_ring) {
@@ -267,8 +296,15 @@ int sfu_net_send_ex(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst,
     sfu_metric_inc("io_uring_pending_full");
     return -1;
   }
-  sfu_pending_send_t *send = SFU_CALLOC(1, sizeof(*send));
-  if (!send) return -1;
+  sfu_pending_send_t *send;
+  if (r->send_free_list) {
+    send = r->send_free_list;
+    r->send_free_list = send->next_free;
+    send->next_free = NULL;
+  } else {
+    send = SFU_CALLOC(1, sizeof(*send));
+    if (!send) return -1;
+  }
   send->pkt = pkt;
   send->dst_len = dst_len;
   send->priority = priority;
@@ -494,7 +530,7 @@ unsigned sfu_net_poll(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, s
         } else {
           sfu_net_release_packet(r, pp, pkt);
         }
-        SFU_FREE(send);
+        free_pending_send(r, send);
       } else {
         if (cqe->res < 0) {
           SFU_LOG_WARN("send_zc error on fd=%d: %s", r->fd, strerror(-cqe->res));
@@ -508,7 +544,7 @@ unsigned sfu_net_poll(sfu_net_t *r, unsigned max_count, sfu_packet_pool_t *pp, s
           } else {
             sfu_net_release_packet(r, pp, pkt);
           }
-          SFU_FREE(send);
+          free_pending_send(r, send);
         }
       }
     }
@@ -560,7 +596,7 @@ unsigned sfu_net_cancel(sfu_net_t *send_net) {
       atomic_fetch_sub_explicit(&send_net->outstanding_sends, 1, memory_order_relaxed);
       (void)sfu_packet_release(send->pkt);
       sfu_metric_inc(i == 0 ? "send_control_canceled" : "send_normal_canceled");
-      SFU_FREE(send);
+      free_pending_send(send_net, send);
       canceled++;
     }
   }

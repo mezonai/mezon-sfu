@@ -1,6 +1,7 @@
 #include "util/metrics.h"
 
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -153,19 +154,62 @@ enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };
 
 static _Atomic uint64_t g_counters[SFU_METRIC_COUNT];
 
+#define SFU_METRICS_HASH_CAP 512
+#define SFU_METRICS_HASH_MASK (SFU_METRICS_HASH_CAP - 1)
+
+static int s_metric_hash[SFU_METRICS_HASH_CAP];
+static _Atomic bool s_metric_hash_inited = false;
+
+static uint32_t metric_hash_str(const char *s) {
+  uint32_t h = 2166136261u;
+  while (*s) {
+    h ^= (uint8_t)*s++;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static void init_metric_hash(void) {
+  for (int i = 0; i < SFU_METRICS_HASH_CAP; i++) {
+    s_metric_hash[i] = -1;
+  }
+  for (int i = 0; i < SFU_METRIC_COUNT; i++) {
+    uint32_t h = metric_hash_str(k_metric_names[i]);
+    uint32_t slot = h & SFU_METRICS_HASH_MASK;
+    while (s_metric_hash[slot] != -1) {
+      slot = (slot + 1) & SFU_METRICS_HASH_MASK;
+    }
+    s_metric_hash[slot] = i;
+  }
+  atomic_store_explicit(&s_metric_hash_inited, true, memory_order_release);
+}
+
 static int find_metric(const char *name) {
   if (!name) {
     return -1;
   }
-  for (int i = 0; i < SFU_METRIC_COUNT; i++) {
-    if (strcmp(k_metric_names[i], name) == 0) {
-      return i;
+  if (__builtin_expect(!atomic_load_explicit(&s_metric_hash_inited, memory_order_acquire), 0)) {
+    init_metric_hash();
+  }
+  uint32_t h = metric_hash_str(name);
+  uint32_t slot = h & SFU_METRICS_HASH_MASK;
+  for (int step = 0; step < SFU_METRICS_HASH_CAP; step++) {
+    int idx = s_metric_hash[slot];
+    if (idx == -1) {
+      return -1;
     }
+    if (strcmp(k_metric_names[idx], name) == 0) {
+      return idx;
+    }
+    slot = (slot + 1) & SFU_METRICS_HASH_MASK;
   }
   return -1;
 }
 
 void sfu_metrics_init(void) {
+  if (!atomic_load_explicit(&s_metric_hash_inited, memory_order_acquire)) {
+    init_metric_hash();
+  }
   for (int i = 0; i < SFU_METRIC_COUNT; i++) {
     atomic_store_explicit(&g_counters[i], 0, memory_order_relaxed);
   }
