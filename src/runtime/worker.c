@@ -309,23 +309,32 @@ static void *worker_thread_main(void *arg) {
         sfu_peer_session_t *ls = w->twcc_scratch[li];
         if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
           if (paced_due) {
-            uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+            /* Each active screen slot gets its own full drain budget. Sharing one
+             * budget across slots halved throughput for a second concurrent screen
+             * and starved its joining keyframe into persistent tile-column
+             * corruption. Idle slots (count == 0) short-circuit inside drain, so
+             * the cost tracks concurrent active screens, not SFU_MAX_REMOTE_SLOTS. */
             uint32_t slots = sfu_session_remote_slot_high_water(ls);
             if (slots > SFU_MAX_REMOTE_SLOTS) {
               slots = SFU_MAX_REMOTE_SLOTS;
             }
             if (slots > 0) {
               uint32_t start_slot = ls->egress.last_screen_drain_slot % slots;
-              for (uint32_t s = 0; s < slots && remaining > 0; s++) {
+              for (uint32_t s = 0; s < slots; s++) {
                 uint32_t slot = (start_slot + s) % slots;
-                if (sfu_paced_send_drain(&ls->egress.paced_screen[slot], w, ls, now_us, &remaining)) {
+                if (ls->egress.paced_screen[slot].count == 0) {
+                  continue;
+                }
+                uint32_t per_slot = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+                if (sfu_paced_send_drain(&ls->egress.paced_screen[slot], w, ls, now_us, &per_slot)) {
                   paced_sent = true;
                   did_work = true;
                   ls->egress.last_screen_drain_slot = (slot + 1u) % slots;
                 }
               }
             }
-            if (remaining > 0 && sfu_paced_send_drain(&ls->egress.paced_camera, w, ls, now_us, &remaining)) {
+            uint32_t camera_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+            if (sfu_paced_send_drain(&ls->egress.paced_camera, w, ls, now_us, &camera_budget)) {
               paced_sent = true;
               did_work = true;
             }

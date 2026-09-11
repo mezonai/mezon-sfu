@@ -2490,19 +2490,17 @@ void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *sessio
       session->peer_id, w->worker_index, diag->latest_gcc_bps, diag->latest_ack_bps, diag->latest_overuse, diag->latest_twcc_lost, diag->latest_twcc_total,
       diag->allocation_pool_bps, diag->allocation_reserve_bps, diag->allocation_allocated_bps, diag->allocation_unallocated_bps, allocations,
       allocations_truncated ? 1u : 0u, session->egress.pacer.pacing_bps, debt, pacer_delta, rtx_drop_delta, nack_delta, cache_hit_delta, cache_miss_delta,
-      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, fir_received_delta, screen_count,
-      screen_high_water, screen_projected_delay,
-      screen_drain_cap_hits, screen_max_release_late_us, screen_max_enqueue_to_send_us,
-      screen_max_input_frame_span_us, diag->remb_contribution_bps, diag->remb_target_bps, session->egress.last_camera_remb_bps,
-      session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh, diag->remb_stale, diag->remb_camera.target_bps,
-      diag->remb_camera.media_ssrc, diag->remb_camera.last_sent_bps, diag->remb_camera.last_sent_us, diag->remb_camera.fresh_routes,
-      diag->remb_camera.stale_routes, diag->remb_camera.winner_peer_id, diag->remb_camera.winner_remote_slot, diag->remb_camera.winner_assignment_generation,
-      diag->remb_camera.sent_count, diag->remb_camera.throttled_count, diag->remb_camera.rejected_count, diag->remb_screen.target_bps,
-      diag->remb_screen.media_ssrc, diag->remb_screen.last_sent_bps, diag->remb_screen.last_sent_us, diag->remb_screen.fresh_routes,
-      diag->remb_screen.stale_routes, diag->remb_screen.winner_peer_id, diag->remb_screen.winner_remote_slot, diag->remb_screen.winner_assignment_generation,
-      diag->remb_screen.sent_count, diag->remb_screen.throttled_count, diag->remb_screen.rejected_count, diag->screen_ingress.media_ssrc,
-      diag->screen_ingress.max_frame_span_us, diag->screen_ingress.max_inter_frame_gap_us, diag->screen_ingress.completed_frames,
-      diag->screen_ingress.missing_marker_frames);
+      rtx_delta, pli_received_delta, pli_sent_delta, pli_coalesced_delta, fir_received_delta, screen_count, screen_high_water, screen_projected_delay,
+      screen_drain_cap_hits, screen_max_release_late_us, screen_max_enqueue_to_send_us, screen_max_input_frame_span_us, diag->remb_contribution_bps,
+      diag->remb_target_bps, session->egress.last_camera_remb_bps, session->egress.last_screen_remb_bps, diag->remb_sent ? 1u : 0u, diag->remb_fresh,
+      diag->remb_stale, diag->remb_camera.target_bps, diag->remb_camera.media_ssrc, diag->remb_camera.last_sent_bps, diag->remb_camera.last_sent_us,
+      diag->remb_camera.fresh_routes, diag->remb_camera.stale_routes, diag->remb_camera.winner_peer_id, diag->remb_camera.winner_remote_slot,
+      diag->remb_camera.winner_assignment_generation, diag->remb_camera.sent_count, diag->remb_camera.throttled_count, diag->remb_camera.rejected_count,
+      diag->remb_screen.target_bps, diag->remb_screen.media_ssrc, diag->remb_screen.last_sent_bps, diag->remb_screen.last_sent_us,
+      diag->remb_screen.fresh_routes, diag->remb_screen.stale_routes, diag->remb_screen.winner_peer_id, diag->remb_screen.winner_remote_slot,
+      diag->remb_screen.winner_assignment_generation, diag->remb_screen.sent_count, diag->remb_screen.throttled_count, diag->remb_screen.rejected_count,
+      diag->screen_ingress.media_ssrc, diag->screen_ingress.max_frame_span_us, diag->screen_ingress.max_inter_frame_gap_us,
+      diag->screen_ingress.completed_frames, diag->screen_ingress.missing_marker_frames);
   diag->last_logged_nack_requests = diag->nack_requests;
   diag->last_logged_cache_hits = diag->cache_hits;
   diag->last_logged_cache_misses = diag->cache_misses;

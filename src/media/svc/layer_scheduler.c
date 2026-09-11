@@ -38,8 +38,8 @@ sfu_layer_scheduler_t *sfu_layer_scheduler_for_stream(sfu_peer_session_t *sessio
   }
 
   if (!free_slot) {
-    SFU_LOG_WARN("session %u: scheduler table full (%d streams); cannot track publisher %u source %u", session->peer_id, SFU_LAYER_SCHEDULER_CAP,
-                 publisher_id, (unsigned)source);
+    SFU_LOG_WARN("session %u: scheduler table full (%d streams); cannot track publisher %u source %u", session->peer_id, SFU_LAYER_SCHEDULER_CAP, publisher_id,
+                 (unsigned)source);
     return NULL;
   }
 
@@ -205,7 +205,7 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
     decision->transition_packet = true;
   }
   bool admitted_enh_continuation = desc->b_bit == 0 && sched->pacer_frame_active && sched->pacer_frame_timestamp == desc->rtp_timestamp &&
-                                       sched->pacer_frame_sid == desc->sid && sched->pacer_frame_tid == desc->tid;
+                                   sched->pacer_frame_sid == desc->sid && sched->pacer_frame_tid == desc->tid;
   if (decision->transition_packet && !admitted_enh_continuation) {
     decision->pacer_class = SFU_PACER_CLASS_VIDEO_TRANSITION;
     decision->pacer_frame_continuation = false;

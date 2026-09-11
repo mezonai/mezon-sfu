@@ -1455,14 +1455,18 @@ static void test_concurrent_multi_screen_pacing_isolation(void) {
   assert(sub->egress.paced_screen[1].ready_count == 2);
   assert(!sub->egress.paced_screen[1].input_frame_active);
 
-  /* Both slots have full 2-packet frames ready to be drained. */
-  uint32_t remaining = 4;
-  assert(sfu_paced_send_drain(&sub->egress.paced_screen[0], &f.w, sub, INT64_MAX, &remaining));
-  assert(remaining == 2);
+  /* Both slots have full 2-packet frames ready to be drained. The worker loop
+   * now gives each active slot its own full budget, so neither screen starves
+   * the other — a regression guard for the shared-budget starvation that broke
+   * a second concurrent screen's joining keyframe. */
+  uint32_t slot0_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen[0], &f.w, sub, INT64_MAX, &slot0_budget));
+  assert(slot0_budget == SFU_PACED_SEND_MAX_DRAIN_PER_SCAN - 2u);
   assert(sub->egress.paced_screen[0].count == 0);
 
-  assert(sfu_paced_send_drain(&sub->egress.paced_screen[1], &f.w, sub, INT64_MAX, &remaining));
-  assert(remaining == 0);
+  uint32_t slot1_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&sub->egress.paced_screen[1], &f.w, sub, INT64_MAX, &slot1_budget));
+  assert(slot1_budget == SFU_PACED_SEND_MAX_DRAIN_PER_SCAN - 2u);
   assert(sub->egress.paced_screen[1].count == 0);
 
   fixture_destroy(&f);
