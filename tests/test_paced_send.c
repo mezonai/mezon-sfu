@@ -310,6 +310,56 @@ static void test_rollback_records_publisher(void) {
   sfu_paced_send_destroy(&q);
 }
 
+static void test_priority_queue_enqueue_and_bounds(void) {
+  sfu_paced_priority_queue_t q;
+  sfu_paced_priority_queue_init(&q, false, SFU_PACED_RTX_MAX_RESIDENCE_US, SFU_PACED_RTX_MAX_BYTES);
+  uint8_t payload[1000];
+  memset(payload, 0x33, sizeof(payload));
+  struct sockaddr_storage dst = {0};
+  socklen_t dst_len = sizeof(struct sockaddr_in);
+
+  for (uint32_t i = 0; i < SFU_PACED_PRIORITY_QUEUE_CAPACITY; i++) {
+    assert(sfu_paced_priority_queue_enqueue(&q, payload, sizeof(payload), &dst, dst_len, 10, 1, 1, false, 0, 1000, 1000000));
+  }
+  assert(q.count == SFU_PACED_PRIORITY_QUEUE_CAPACITY);
+  assert(q.byte_count == SFU_PACED_PRIORITY_QUEUE_CAPACITY * 1000);
+
+  /* Next enqueue must fail due to capacity */
+  assert(!sfu_paced_priority_queue_enqueue(&q, payload, sizeof(payload), &dst, dst_len, 10, 1, 1, false, 0, 1000, 1000000));
+  assert(q.dropped_full == 1);
+
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_set_rate(&p, 1000000, 1000000);
+  int64_t init_budget = p.rtx_budget_bytes;
+  sfu_paced_priority_queue_destroy(&q, &p);
+  /* Verify tokens were refunded on destroy */
+  assert(p.rtx_budget_bytes > init_budget || p.rtx_budget_bytes == p.rtx_budget_cap_bytes);
+}
+
+static void test_priority_queue_clear_and_refund(void) {
+  sfu_paced_priority_queue_t q;
+  sfu_paced_priority_queue_init(&q, false, SFU_PACED_RTX_MAX_RESIDENCE_US, 0);
+  uint8_t payload[500];
+  struct sockaddr_storage dst = {0};
+  socklen_t dst_len = sizeof(struct sockaddr_in);
+
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_set_rate(&p, 4000000, 1000000);
+  p.rtx_budget_bytes = 5000;
+
+  assert(sfu_paced_priority_queue_enqueue(&q, payload, sizeof(payload), &dst, dst_len, 1, 1, 1, false, 0, 500, 1000000));
+  assert(sfu_paced_priority_queue_enqueue(&q, payload, sizeof(payload), &dst, dst_len, 1, 1, 1, false, 0, 500, 1000000));
+  assert(q.count == 2);
+
+  sfu_paced_priority_queue_clear(&q, &p);
+  assert(q.count == 0);
+  assert(p.rtx_budget_bytes == 6000);
+
+  sfu_paced_priority_queue_destroy(&q, &p);
+}
+
 int main(void) {
   test_enqueue_spacing_and_copy();
   test_size_and_rate_floor();
@@ -324,5 +374,7 @@ int main(void) {
   test_backlog_report_attributes_dropped_publishers();
   test_backlog_report_counts_frames_with_unknown_publisher();
   test_rollback_records_publisher();
+  test_priority_queue_enqueue_and_bounds();
+  test_priority_queue_clear_and_refund();
   return 0;
 }

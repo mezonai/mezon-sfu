@@ -190,6 +190,39 @@ static void test_low_cardinality_metrics(void) {
   assert(sfu_metric_get("bandwidth_allocator_unallocated_bps") >= a.unallocated_bps);
 }
 
+static void test_unmet_demand(void) {
+  assert(!sfu_bandwidth_has_unmet_demand(NULL));
+
+  sfu_bandwidth_allocation_t a;
+  sfu_bandwidth_allocate(NULL, 0, 1000000, &a);
+  assert(!sfu_bandwidth_has_unmet_demand(&a));
+
+  sfu_bandwidth_stream_input_t streams[] = {
+      input(10, 0, 1, SFU_BANDWIDTH_STREAM_CAMERA),
+      input(20, 1, 1, SFU_BANDWIDTH_STREAM_SCREEN),
+  };
+
+  /* Screen below cap (e.g. at 240k or 2M) has unmet demand */
+  sfu_bandwidth_allocate(streams, 2, estimate_for_pool(240000), &a);
+  assert(sfu_bandwidth_has_unmet_demand(&a));
+
+  sfu_bandwidth_allocate(streams, 2, estimate_for_pool(2240000), &a);
+  assert(sfu_bandwidth_has_unmet_demand(&a));
+
+  /* When screen reaches cap (3.5M) and camera is at admission cap (240k), demand is fully met */
+  sfu_bandwidth_allocate(streams, 2, estimate_for_pool(3740000), &a);
+  assert(!sfu_bandwidth_has_unmet_demand(&a));
+
+  /* Camera-only below 1M cap has unmet demand */
+  sfu_bandwidth_stream_input_t camera = input(10, 0, 1, SFU_BANDWIDTH_STREAM_CAMERA);
+  sfu_bandwidth_allocate(&camera, 1, estimate_for_pool(240000), &a);
+  assert(sfu_bandwidth_has_unmet_demand(&a));
+
+  /* Camera-only at 1M cap has demand met */
+  sfu_bandwidth_allocate(&camera, 1, estimate_for_pool(1000000), &a);
+  assert(!sfu_bandwidth_has_unmet_demand(&a));
+}
+
 int main(void) {
   test_empty_and_inactive();
   test_threshold_boundaries_and_screen_priority();
@@ -198,6 +231,7 @@ int main(void) {
   test_publisher_aggregation_duplicates_and_generation();
   test_caps_safe_pool_and_overflow();
   test_low_cardinality_metrics();
+  test_unmet_demand();
   printf("test_bandwidth_allocator: OK\n");
   return 0;
 }

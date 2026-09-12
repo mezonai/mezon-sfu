@@ -148,6 +148,21 @@ static const char *const k_metric_names[] = {
     "mid_write_fail",
     "ptt_inactive_audio_drop",
     "router_assignment_pending",
+    "congestion_rtx_queued",
+    "congestion_rtx_bytes",
+    "congestion_rtx_full_drop",
+    "congestion_rtx_expired_drop",
+    "congestion_rtx_stale_drop",
+    "congestion_probe_started",
+    "congestion_probe_succeeded",
+    "congestion_probe_failed",
+    "congestion_probe_aborted",
+    "congestion_probe_queued",
+    "congestion_probe_sent",
+    "congestion_probe_bytes",
+    "congestion_probe_full_drop",
+    "congestion_probe_expired_drop",
+    "congestion_probe_stale_drop",
 };
 
 enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };

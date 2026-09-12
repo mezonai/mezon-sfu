@@ -115,6 +115,10 @@ add_executable(test_rtp_ext test_rtp_ext.c)
 target_link_libraries(test_rtp_ext PRIVATE sfu_core)
 add_test(NAME rtp_ext COMMAND test_rtp_ext)
 
+add_executable(test_rtp_padding test_rtp_padding.c)
+target_link_libraries(test_rtp_padding PRIVATE sfu_core)
+add_test(NAME rtp_padding COMMAND test_rtp_padding)
+
 add_executable(test_twcc_parser test_twcc_parser.c)
 target_link_libraries(test_twcc_parser PRIVATE sfu_core)
 add_test(NAME twcc_parser COMMAND test_twcc_parser)
@@ -134,6 +138,10 @@ add_test(NAME bandwidth_allocator COMMAND test_bandwidth_allocator)
 add_executable(test_gcc test_gcc.c)
 target_link_libraries(test_gcc PRIVATE sfu_core)
 add_test(NAME gcc COMMAND test_gcc)
+
+add_executable(test_probe_controller test_probe_controller.c)
+target_link_libraries(test_probe_controller PRIVATE sfu_core)
+add_test(NAME probe_controller COMMAND test_probe_controller)
 
 add_executable(test_layer_selector test_layer_selector.c)
 target_link_libraries(test_layer_selector PRIVATE sfu_core)
