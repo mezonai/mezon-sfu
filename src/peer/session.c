@@ -7,6 +7,7 @@
 #include <string.h>
 #include "congestion/gcc.h"
 #include "congestion/pacer.h"
+#include "congestion/probe_controller.h"
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
@@ -170,8 +171,12 @@ bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session) {
   sfu_twcc_recv_tracker_t *recv = SFU_CALLOC(1, sizeof(*recv));
   sfu_layer_scheduler_slot_t *schedulers = SFU_CALLOC(SFU_LAYER_SCHEDULER_CAP, sizeof(*schedulers));
   sfu_rtx_cache_t *rtx = SFU_CALLOC(1, sizeof(*rtx));
-  bool ok = gcc && history && recv && schedulers && rtx && sfu_rtx_cache_init(rtx) == 0;
+  sfu_probe_controller_t *probe = sfu_probe_controller_create();
+  bool ok = gcc && history && recv && schedulers && rtx && probe && sfu_rtx_cache_init(rtx) == 0;
   if (!ok) {
+    if (probe) {
+      sfu_probe_controller_destroy(probe);
+    }
     if (rtx) {
       SFU_FREE(rtx);
     }
@@ -192,6 +197,7 @@ bool sfu_session_ensure_video_runtime(sfu_peer_session_t *session) {
   session->egress.twcc_recv = recv;
   session->egress.schedulers = schedulers;
   session->egress.rtx_cache = rtx;
+  session->egress.probe_controller = probe;
   atomic_store_explicit(&session->egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY, memory_order_release);
   pthread_mutex_unlock(&session->media.lock);
   return true;
@@ -1172,10 +1178,16 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     SFU_FREE(s->egress.schedulers);
     s->egress.schedulers = NULL;
   }
+  if (s->egress.probe_controller) {
+    sfu_probe_controller_destroy(s->egress.probe_controller);
+    s->egress.probe_controller = NULL;
+  }
   sfu_paced_send_destroy(&s->egress.paced_camera);
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     sfu_paced_send_destroy(&s->egress.paced_screen[i]);
   }
+  sfu_paced_priority_queue_destroy(&s->egress.paced_rtx, &s->egress.pacer);
+  sfu_paced_priority_queue_destroy(&s->egress.paced_probe, NULL);
   if (s->leave_event) {
     assert(!atomic_load_explicit(&s->leave_event_in_use, memory_order_acquire));
     SFU_FREE(s->leave_event);
@@ -1511,6 +1523,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
     sfu_paced_send_init(&s->egress.paced_screen[i]);
   }
   s->egress.last_screen_drain_slot = 0;
+  sfu_paced_priority_queue_init(&s->egress.paced_rtx, false, SFU_PACED_RTX_MAX_RESIDENCE_US, SFU_PACED_RTX_MAX_BYTES);
+  sfu_paced_priority_queue_init(&s->egress.paced_probe, true, SFU_PACED_PROBE_MAX_RESIDENCE_US, SFU_PACED_PROBE_MAX_BYTES);
   sfu_pacer_init(&s->egress.pacer);
   sfu_pacer_set_rate(&s->egress.pacer, SFU_BWE_START_BPS, (int64_t)sfu_now_us());
 

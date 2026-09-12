@@ -137,7 +137,7 @@ bool sfu_pacer_should_send(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes
 }
 
 bool sfu_pacer_rtx_allow(sfu_pacer_t *p, uint32_t bytes, int64_t now_us) {
-  if (!p->active) {
+  if (!p || !p->active) {
     return true;
   }
   if (p->rtx_last_refill_us == 0) {
@@ -160,4 +160,14 @@ bool sfu_pacer_rtx_allow(sfu_pacer_t *p, uint32_t bytes, int64_t now_us) {
   }
   p->rtx_budget_bytes -= (int64_t)bytes;
   return true;
+}
+
+void sfu_pacer_rtx_refund(sfu_pacer_t *p, uint32_t bytes) {
+  if (!p || !p->active || bytes == 0) {
+    return;
+  }
+  p->rtx_budget_bytes += (int64_t)bytes;
+  if (p->rtx_budget_bytes > p->rtx_budget_cap_bytes) {
+    p->rtx_budget_bytes = p->rtx_budget_cap_bytes;
+  }
 }

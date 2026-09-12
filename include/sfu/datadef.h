@@ -97,6 +97,7 @@ typedef struct sfu_twcc_recv_tracker sfu_twcc_recv_tracker_t;
 typedef struct sfu_layer_scheduler_slot sfu_layer_scheduler_slot_t;
 typedef struct sfu_rtx_cache sfu_rtx_cache_t;
 typedef struct sfu_receiver_snapshot sfu_receiver_snapshot_t;
+typedef struct sfu_probe_controller sfu_probe_controller_t;
 
 typedef struct sfu_srtp_ctx {
   srtp_t inbound;
@@ -574,6 +575,9 @@ typedef struct {
   sfu_paced_send_t paced_camera;
   sfu_paced_send_t paced_screen[SFU_MAX_REMOTE_SLOTS];
   uint32_t last_screen_drain_slot;
+  sfu_paced_priority_queue_t paced_rtx;
+  sfu_paced_priority_queue_t paced_probe;
+  sfu_probe_controller_t *probe_controller;
 } sfu_session_egress_t;
 
 typedef struct sfu_peer_session {

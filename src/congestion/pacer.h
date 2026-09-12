@@ -13,5 +13,6 @@ void sfu_pacer_cancel(sfu_pacer_t *p, sfu_pacer_reservation_t *reservation);
 bool sfu_pacer_should_send(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bool allow_congestion_drop, int64_t *inout_now_us);
 int64_t sfu_pacer_debt_after(const sfu_pacer_t *p, uint32_t bytes, int64_t now_us);
 bool sfu_pacer_rtx_allow(sfu_pacer_t *p, uint32_t bytes, int64_t now_us);
+void sfu_pacer_rtx_refund(sfu_pacer_t *p, uint32_t bytes);
 
 #endif /* SFU_CONGESTION_PACER_H */

@@ -79,12 +79,41 @@ static void test_rerecord_and_sequence_wrap(void) {
   assert(sfu_twcc_history_report_loss_once(&history, 0));
 }
 
+static void test_probe_tagging(void) {
+  sfu_twcc_history_t history;
+  gcc_packet_info_t pkt = {0};
+  sfu_twcc_history_init(&history);
+
+  sfu_twcc_history_record(&history, 10, 1000, 500);
+  sfu_twcc_history_record_probe(&history, 11, 1050, 244, 42);
+
+  bool is_probe = false;
+  uint32_t cluster_id = 0;
+
+  assert(sfu_twcc_history_lookup_ext(&history, 10, &pkt, &is_probe, &cluster_id));
+  assert(!is_probe);
+  assert(cluster_id == 0);
+
+  assert(sfu_twcc_history_lookup_ext(&history, 11, &pkt, &is_probe, &cluster_id));
+  assert(is_probe);
+  assert(cluster_id == 42);
+
+  bool was_lost = false;
+  assert(sfu_twcc_history_consume_received_ext(&history, 11, &pkt, &was_lost, &is_probe, &cluster_id));
+  assert(pkt.send_time_us == 1050);
+  assert(pkt.size_bytes == 244);
+  assert(!was_lost);
+  assert(is_probe);
+  assert(cluster_id == 42);
+}
+
 int main(void) {
   test_received_consumes_once();
   test_loss_then_late_receive();
   test_received_blocks_stale_loss();
   test_reorder_overlap_and_overwrite();
   test_rerecord_and_sequence_wrap();
+  test_probe_tagging();
   printf("test_twcc_history: OK\n");
   return 0;
 }

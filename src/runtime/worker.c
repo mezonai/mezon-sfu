@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "config/config.h"
+#include "congestion/probe_controller.h"
 #include "peer/session.h"
 #include "pipeline/dispatch.h"
 #include "pipeline/paced_send.h"
@@ -309,6 +310,14 @@ static void *worker_thread_main(void *arg) {
         sfu_peer_session_t *ls = w->twcc_scratch[li];
         if (sfu_session_accepts_work(ls) && sfu_session_owner_worker(ls) == w->worker_index) {
           if (paced_due) {
+            /* 1. RTX Priority Queue: Head-of-line priority over media */
+            uint32_t rtx_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+            if (sfu_paced_priority_queue_drain(&ls->egress.paced_rtx, w, ls, now_us, &rtx_budget)) {
+              paced_sent = true;
+              did_work = true;
+            }
+
+            /* 2. Media: Screen slots and Camera */
             /* Each active screen slot gets its own full drain budget. Sharing one
              * budget across slots halved throughput for a second concurrent screen
              * and starved its joining keyframe into persistent tile-column
@@ -337,6 +346,27 @@ static void *worker_thread_main(void *arg) {
             if (sfu_paced_send_drain(&ls->egress.paced_camera, w, ls, now_us, &camera_budget)) {
               paced_sent = true;
               did_work = true;
+            }
+
+            /* 3. Probe padding queue, drained only when RTX and active media do not exhaust the scan cycle */
+            bool media_backlogged = ls->egress.paced_camera.count > 0;
+            if (!media_backlogged && slots > 0) {
+              for (uint32_t s = 0; s < slots; s++) {
+                if (ls->egress.paced_screen[s].count > 0) {
+                  media_backlogged = true;
+                  break;
+                }
+              }
+            }
+            if (ls->egress.probe_controller) {
+              sfu_probe_controller_step(ls, w, now_us);
+            }
+            if (ls->egress.paced_rtx.count == 0 && !media_backlogged) {
+              uint32_t probe_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+              if (sfu_paced_priority_queue_drain(&ls->egress.paced_probe, w, ls, now_us, &probe_budget)) {
+                paced_sent = true;
+                did_work = true;
+              }
             }
           }
           if (twcc_due) {

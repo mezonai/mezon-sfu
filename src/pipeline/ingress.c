@@ -8,6 +8,7 @@
 #include "congestion/bandwidth_allocator.h"
 #include "congestion/gcc.h"
 #include "congestion/pacer.h"
+#include "congestion/probe_controller.h"
 #include "congestion/twcc_feedback.h"
 #include "congestion/twcc_history.h"
 #include "congestion/twcc_parser.h"
@@ -135,6 +136,9 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
 
   sfu_bandwidth_allocation_t allocation;
   sfu_bandwidth_allocate(inputs, input_count, bitrate_bps, &allocation);
+  if (session->egress.probe_controller) {
+    sfu_probe_controller_set_unmet_demand(session->egress.probe_controller, sfu_bandwidth_has_unmet_demand(&allocation));
+  }
   uint64_t now_us = sfu_now_us();
 #ifdef SFU_DIAG_LOG
   session->egress.diag.last_allocation_us = now_us;
@@ -321,21 +325,45 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       break;
     }
     if (batch[i].status == TWCC_STATUS_NOT_RECEIVED) {
+      bool is_probe = false;
+      uint32_t probe_cluster_id = 0;
+      sfu_twcc_history_lookup_ext(sender_session->egress.twcc_history, batch[i].sequence_number, NULL, &is_probe, &probe_cluster_id);
       if (sfu_twcc_history_report_loss_once(sender_session->egress.twcc_history, batch[i].sequence_number)) {
-        fresh_lost++;
-        fresh_total++;
+        if (is_probe) {
+          if (sender_session->egress.probe_controller) {
+            sfu_probe_controller_on_packet_lost(sender_session->egress.probe_controller, probe_cluster_id);
+          }
+        } else {
+          fresh_lost++;
+          fresh_total++;
+        }
       }
       continue;
     }
 
     gcc_packet_info_t item = {.sequence_number = batch[i].sequence_number, .receive_time_us = batch[i].receive_time_us};
     bool was_loss_reported = false;
-    if (sfu_twcc_history_consume_received(sender_session->egress.twcc_history, item.sequence_number, &item, &was_loss_reported)) {
-      if (sender_session->egress.gcc_ctx) {
-        estimated_bps = gcc_bwe_process_twcc_packet(sender_session->egress.gcc_ctx, &item);
-      }
-      if (!was_loss_reported) {
-        fresh_total++;
+    bool is_probe = false;
+    uint32_t probe_cluster_id = 0;
+    if (sfu_twcc_history_consume_received_ext(sender_session->egress.twcc_history, item.sequence_number, &item, &was_loss_reported, &is_probe, &probe_cluster_id)) {
+      if (is_probe) {
+        if (sender_session->egress.probe_controller) {
+          /* A packet reported lost earlier may still arrive late; count it as received
+           * only if it was not already counted as lost, mirroring the media path. */
+          if (!was_loss_reported) {
+            sfu_probe_controller_on_packet_received(sender_session->egress.probe_controller, probe_cluster_id, item.size_bytes, item.send_time_us, item.receive_time_us);
+          }
+        }
+        if (sender_session->egress.gcc_ctx) {
+          estimated_bps = gcc_bwe_process_twcc_packet(sender_session->egress.gcc_ctx, &item);
+        }
+      } else {
+        if (sender_session->egress.gcc_ctx) {
+          estimated_bps = gcc_bwe_process_twcc_packet(sender_session->egress.gcc_ctx, &item);
+        }
+        if (!was_loss_reported) {
+          fresh_total++;
+        }
       }
     }
   }
@@ -344,9 +372,23 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     sender_session->egress.twcc_last_feedback_ref_us = parser.current_time_us;
   }
 
+  int64_t now_us = (int64_t)sfu_now_us();
   if (sender_session->egress.gcc_ctx && fresh_lost > 0) {
     gcc_bwe_report_loss(sender_session->egress.gcc_ctx, fresh_lost, fresh_total);
     estimated_bps = sender_session->egress.gcc_ctx->aimd.current_bitrate_bps;
+    if (sender_session->egress.probe_controller) {
+      sfu_probe_controller_abort(sender_session->egress.probe_controller, sender_session->egress.gcc_ctx, now_us, "media_loss");
+    }
+  }
+
+  if (sender_session->egress.probe_controller && sender_session->egress.gcc_ctx) {
+    uint32_t probe_result_bps = 0;
+    if (sfu_probe_controller_check_cluster_done(sender_session->egress.probe_controller, sender_session->egress.gcc_ctx, now_us, &probe_result_bps)) {
+      if (probe_result_bps > 0) {
+        gcc_bwe_on_probe_cluster_completed(sender_session->egress.gcc_ctx, probe_result_bps, now_us);
+        estimated_bps = sender_session->egress.gcc_ctx->aimd.current_bitrate_bps;
+      }
+    }
   }
 
 #ifdef SFU_DIAG_LOG
@@ -427,13 +469,15 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 #endif
     sfu_metric_inc("congestion_rtx_cache_hit");
 
-    if (!sfu_pacer_rtx_allow(&sender_session->egress.pacer, orig_len + 2, now_us)) {
+    uint32_t charged_bytes = orig_len + 2;
+    if (!sfu_pacer_rtx_allow(&sender_session->egress.pacer, charged_bytes, now_us)) {
       sfu_metric_inc("rtx_dropped_budget");
       continue;
     }
 
     sfu_packet_t *rtx_enc = sfu_packet_pool_alloc(w->pp);
     if (!rtx_enc) {
+      sfu_pacer_rtx_refund(&sender_session->egress.pacer, charged_bytes);
       continue;
     }
 
@@ -443,6 +487,7 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     bool translated = sfu_rtp_seq_translate(&sender_session->cold->rtp_seq_translator, rtx_ssrc, source_rtx_seq, &subscriber_rtx_seq);
     if (!translated) {
       pthread_mutex_unlock(&sender_session->crypto_lock);
+      sfu_pacer_rtx_refund(&sender_session->egress.pacer, charged_bytes);
       sfu_metric_inc("rtx_seq_translate_fail");
       sfu_worker_release_packet(w, rtx_enc);
       continue;
@@ -450,6 +495,7 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     size_t rtx_built_len = 0;
     if (!sfu_rtx_build(orig_pkt, orig_len, rtx_pt, subscriber_rtx_seq, rtx_ssrc, rtx_enc->data, rtx_enc->cap, &rtx_built_len)) {
       pthread_mutex_unlock(&sender_session->crypto_lock);
+      sfu_pacer_rtx_refund(&sender_session->egress.pacer, charged_bytes);
       sfu_metric_inc("rtx_build_fail");
       sfu_worker_release_packet(w, rtx_enc);
       continue;
@@ -472,17 +518,17 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     srtp_err_status_t protect_status = sfu_srtp_protect_rtp_status(&sender_session->srtp, rtx_enc->data, &rtx_enc_len, rtx_enc->cap);
     pthread_mutex_unlock(&sender_session->crypto_lock);
     if (protect_status == srtp_err_status_ok) {
-      rtx_enc->len = (uint32_t)rtx_enc_len;
-      if (sfu_net_send(w->send_net, rtx_enc, (const struct sockaddr *)&sender_session->cold->addr, sender_session->cold->addr_len) == 0) {
-        if (twcc_written && sender_session->egress.twcc_history) {
-          sfu_twcc_history_record(sender_session->egress.twcc_history, twcc_seq, now_us, (uint32_t)rtx_enc_len);
-        }
-#ifdef SFU_DIAG_LOG
-        sender_session->egress.diag.rtx_sent++;
-#endif
-        sfu_metric_inc("congestion_rtx_sent");
+      uint64_t owner_val = sfu_session_owner_value(sender_session);
+      uint32_t trans_gen = atomic_load_explicit(&sender_session->cold->transport_generation, memory_order_acquire);
+      uint32_t addr_gen = atomic_load_explicit(&sender_session->cold->address_generation, memory_order_acquire);
+      if (!sfu_paced_priority_queue_enqueue(&sender_session->egress.paced_rtx, rtx_enc->data, (uint16_t)rtx_enc_len,
+                                            &sender_session->cold->addr, sender_session->cold->addr_len,
+                                            owner_val, trans_gen, addr_gen,
+                                            twcc_written, twcc_seq, charged_bytes, now_us)) {
+        sfu_pacer_rtx_refund(&sender_session->egress.pacer, charged_bytes);
       }
     } else {
+      sfu_pacer_rtx_refund(&sender_session->egress.pacer, charged_bytes);
       if (protect_status == srtp_err_status_replay_old) {
         sfu_metric_inc("rtx_protect_replay_old");
       } else if (protect_status == srtp_err_status_replay_fail) {

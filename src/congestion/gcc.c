@@ -185,21 +185,27 @@ static void update_aimd(gcc_aimd_controller_t *aimd, gcc_bwe_usage_t usage, int6
           }
           aimd->current_bitrate_bps = (uint32_t)(next > UINT32_MAX ? UINT32_MAX : next);
           aimd->last_recovery_probe_us = 0;
-        } else if (aimd->have_ack_bitrate) {
-          uint64_t recovery_cap = cap + GCC_RECOVERY_PROBE_MAX_BPS;
-          if (recovery_cap > aimd->max_bitrate_bps) {
-            recovery_cap = aimd->max_bitrate_bps;
-          }
-          if (aimd->current_bitrate_bps < recovery_cap) {
-            if (aimd->last_recovery_probe_us == 0) {
-              aimd->last_recovery_probe_us = now_us;
-            } else if (now_us - aimd->last_recovery_probe_us >= GCC_RECOVERY_PROBE_INTERVAL_US) {
-              uint64_t next = (uint64_t)aimd->current_bitrate_bps + GCC_RECOVERY_PROBE_STEP_BPS;
-              if (next > recovery_cap) {
-                next = recovery_cap;
+        } else if (aimd->have_ack_bitrate && !aimd->active_probing) {
+          /* Subordinated to active probing: passive recovery probe only fires when active probing is idle */
+          if (aimd->last_active_probe_us > 0 && now_us > aimd->last_active_probe_us &&
+              (now_us - aimd->last_active_probe_us) < GCC_RECOVERY_PROBE_INTERVAL_US) {
+            /* Suppress passive recovery probe if active probe recently executed */
+          } else {
+            uint64_t recovery_cap = cap + GCC_RECOVERY_PROBE_MAX_BPS;
+            if (recovery_cap > aimd->max_bitrate_bps) {
+              recovery_cap = aimd->max_bitrate_bps;
+            }
+            if (aimd->current_bitrate_bps < recovery_cap) {
+              if (aimd->last_recovery_probe_us == 0) {
+                aimd->last_recovery_probe_us = now_us;
+              } else if (now_us - aimd->last_recovery_probe_us >= GCC_RECOVERY_PROBE_INTERVAL_US) {
+                uint64_t next = (uint64_t)aimd->current_bitrate_bps + GCC_RECOVERY_PROBE_STEP_BPS;
+                if (next > recovery_cap) {
+                  next = recovery_cap;
+                }
+                aimd->current_bitrate_bps = (uint32_t)next;
+                aimd->last_recovery_probe_us = now_us;
               }
-              aimd->current_bitrate_bps = (uint32_t)next;
-              aimd->last_recovery_probe_us = now_us;
             }
           }
         }
@@ -284,6 +290,10 @@ void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) 
 }
 
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt) {
+  if (pkt->send_time_us > ctx->last_feedback_us) {
+    ctx->last_feedback_us = pkt->send_time_us;
+  }
+
   gcc_arrival_group_t *cg = &ctx->current_group;
 
   bool reordered = cg->packet_count > 0 && pkt->send_time_us < cg->first_send_time_us;
@@ -324,4 +334,80 @@ uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_in
   cg->packet_count = 1;
 
   return ctx->aimd.current_bitrate_bps;
+}
+
+bool gcc_bwe_is_overusing(const gcc_bwe_context_t *ctx) {
+  return ctx != NULL && ctx->trendline.usage_state == GCC_BWE_OVERUSE;
+}
+
+gcc_bwe_usage_t gcc_bwe_get_usage(const gcc_bwe_context_t *ctx) {
+  return ctx ? ctx->trendline.usage_state : GCC_BWE_NORMAL;
+}
+
+uint32_t gcc_bwe_get_bitrate(const gcc_bwe_context_t *ctx) {
+  return ctx ? ctx->aimd.current_bitrate_bps : 0;
+}
+
+uint32_t gcc_bwe_get_ack_bitrate(const gcc_bwe_context_t *ctx) {
+  return (ctx && ctx->aimd.have_ack_bitrate) ? ctx->aimd.ack_bitrate_bps : 0;
+}
+
+bool gcc_bwe_has_recent_feedback(const gcc_bwe_context_t *ctx, int64_t now_us, int64_t max_age_us) {
+  if (!ctx || ctx->last_feedback_us == 0) {
+    return false;
+  }
+  if (now_us <= ctx->last_feedback_us) {
+    return true;
+  }
+  return (now_us - ctx->last_feedback_us) <= max_age_us;
+}
+
+void gcc_bwe_record_feedback(gcc_bwe_context_t *ctx, int64_t now_us) {
+  if (ctx && now_us > ctx->last_feedback_us) {
+    ctx->last_feedback_us = now_us;
+  }
+}
+
+void gcc_bwe_set_active_probing(gcc_bwe_context_t *ctx, bool active) {
+  if (!ctx) {
+    return;
+  }
+  ctx->aimd.active_probing = active;
+  if (active) {
+    ctx->aimd.last_recovery_probe_us = 0;
+  }
+}
+
+void gcc_bwe_on_probe_cluster_completed(gcc_bwe_context_t *ctx, uint32_t probe_bitrate_bps, int64_t now_us) {
+  if (!ctx || probe_bitrate_bps == 0) {
+    return;
+  }
+  /* If currently detecting overuse, do not inflate bitrate */
+  if (ctx->trendline.usage_state == GCC_BWE_OVERUSE) {
+    return;
+  }
+
+  gcc_aimd_controller_t *aimd = &ctx->aimd;
+  if (probe_bitrate_bps > aimd->current_bitrate_bps) {
+    uint32_t new_bps = probe_bitrate_bps;
+    if (new_bps > aimd->max_bitrate_bps) {
+      new_bps = aimd->max_bitrate_bps;
+    }
+    if (new_bps < aimd->min_bitrate_bps) {
+      new_bps = aimd->min_bitrate_bps;
+    }
+    aimd->current_bitrate_bps = new_bps;
+  }
+
+  if (probe_bitrate_bps > aimd->ack_bitrate_bps) {
+    aimd->ack_bitrate_bps = probe_bitrate_bps;
+    aimd->have_ack_bitrate = true;
+  }
+
+  aimd->last_increase_us = now_us;
+  aimd->last_recovery_probe_us = now_us;
+  aimd->last_active_probe_us = now_us;
+  if (aimd->state == GCC_RATE_CTRL_HOLD) {
+    aimd->state = GCC_RATE_CTRL_INCREASE;
+  }
 }

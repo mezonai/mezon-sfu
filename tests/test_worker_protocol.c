@@ -263,13 +263,71 @@ static void test_compound_nack_rtx_dispatch(void) {
   assert(f.session->egress.diag.nack_requests == 1);
   assert(f.session->egress.diag.cache_hits == 1);
   assert(f.session->egress.diag.cache_misses == 0);
-  assert(f.session->egress.diag.rtx_sent == 1);
+  assert(f.session->egress.diag.rtx_sent == 0);
 #endif
   assert(sfu_metric_get("congestion_nack_requested") == 1);
   assert(sfu_metric_get("congestion_rtx_cache_hit") == 1);
-  assert(sfu_metric_get("congestion_rtx_sent") == 1);
+  assert(sfu_metric_get("congestion_rtx_queued") == 1);
+  assert(sfu_metric_get("congestion_rtx_sent") == 0);
   assert(sfu_metric_get("rtcp_compound_malformed") == 0);
   assert(sfu_metric_get("rtcp_nack_bad") == 0);
+  assert(f.session->egress.paced_rtx.count == 1);
+
+  uint32_t budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_priority_queue_drain(&f.session->egress.paced_rtx, &f.w, f.session, sfu_now_us(), &budget));
+  assert(f.session->egress.paced_rtx.count == 0);
+#ifdef SFU_DIAG_LOG
+  assert(f.session->egress.diag.rtx_sent == 1);
+#endif
+  assert(sfu_metric_get("congestion_rtx_sent") == 1);
+  fixture_destroy(&f);
+}
+
+static void test_rtx_priority_over_video_backlog(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  uint8_t pkt_buf[512];
+  size_t pkt_len;
+  build_rtp_video(pkt_buf, 42, 100, &pkt_len);
+  sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
+
+  /* Enqueue camera video packets into paced_camera */
+  sfu_peer_session_t *sub = f.session;
+  sfu_pacer_set_rate(&sub->egress.pacer, 2000000, 1000000);
+  uint8_t payload[1000] = {0};
+  struct sockaddr_storage dst = sub->cold->addr;
+  sfu_paced_send_metadata_t metadata = {
+      .assignment_generation = 1,
+      .owner_value = sfu_session_owner_value(sub),
+      .transport_generation = atomic_load_explicit(&sub->cold->transport_generation, memory_order_acquire),
+      .address_generation = atomic_load_explicit(&sub->cold->address_generation, memory_order_acquire),
+  };
+  sfu_pacer_reservation_t res = {0};
+  assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &res));
+  assert(sfu_paced_send_enqueue(&sub->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_BASE, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &res, &metadata, 1000000, NULL));
+  sub->egress.paced_camera.ready_count++;
+  assert(sub->egress.paced_camera.count == 1);
+
+  /* Incoming NACK enqueues RTX packet */
+  uint8_t nack[64];
+  size_t nack_len = build_nack(nack, (uint16_t[]){42, 0x0000}, 2);
+  feed_rtcp(&f, nack, nack_len);
+  assert(sub->egress.paced_rtx.count == 1);
+
+  /* Pacer drain: RTX drains first, beating media */
+  uint32_t rtx_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_priority_queue_drain(&sub->egress.paced_rtx, &f.w, sub, 1000000, &rtx_budget));
+  assert(sub->egress.paced_rtx.count == 0);
+  assert(sfu_metric_get("congestion_rtx_sent") == 1);
+
+  /* Media is still queued and drains subsequently */
+  assert(sub->egress.paced_camera.count == 1);
+  uint32_t cam_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+  assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.w, sub, 1000000, &cam_budget));
+  assert(sub->egress.paced_camera.count == 0);
+
   fixture_destroy(&f);
 }
 
@@ -1931,6 +1989,7 @@ int main(void) {
   signaling.test_auto_drain = true;
   test_malformed_rtp_dropped_by_ingress_parser();
   test_compound_nack_rtx_dispatch();
+  test_rtx_priority_over_video_backlog();
   test_compound_nack_then_pli();
   test_compound_pli_then_nack();
   test_malformed_tail_drops_remainder();
