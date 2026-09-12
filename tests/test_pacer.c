@@ -223,6 +223,21 @@ static void test_rtx_budget_unpaced_when_inactive(void) {
   assert(p.rtx_dropped_budget == 0);
 }
 
+static void test_rtx_budget_refund(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  sfu_pacer_set_rate(&p, 4000 * KB, 1000000);
+  int64_t now = 1000000;
+  int64_t init_budget = p.rtx_budget_bytes;
+  assert(sfu_pacer_rtx_allow(&p, 1200, now));
+  assert(p.rtx_budget_bytes == init_budget - 1200);
+  sfu_pacer_rtx_refund(&p, 1200);
+  assert(p.rtx_budget_bytes == init_budget);
+  /* Clamping to cap */
+  sfu_pacer_rtx_refund(&p, 5000);
+  assert(p.rtx_budget_bytes == p.rtx_budget_cap_bytes);
+}
+
 static void test_reservation_commit_and_cancel(void) {
   sfu_pacer_t p;
   sfu_pacer_init(&p);
@@ -293,6 +308,7 @@ int main(void) {
   test_vp9_l1t1_10fps_burst_cadence();
   test_rtx_budget_window();
   test_rtx_budget_unpaced_when_inactive();
+  test_rtx_budget_refund();
   test_reservation_commit_and_cancel();
   test_screen_reservation_makes_camera_enh_yield();
   test_audio_and_inactive_reservations_bypass_bucket();

@@ -375,3 +375,261 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session
   }
   return did_work;
 }
+
+void sfu_paced_priority_queue_init(sfu_paced_priority_queue_t *q, bool is_probe_queue, int64_t max_residence_us, uint32_t max_bytes) {
+  if (!q) {
+    return;
+  }
+  memset(q, 0, sizeof(*q));
+  q->is_probe_queue = is_probe_queue;
+  q->max_residence_us = max_residence_us;
+  q->max_bytes = max_bytes;
+}
+
+void sfu_paced_priority_queue_destroy(sfu_paced_priority_queue_t *q, sfu_pacer_t *pacer_to_refund) {
+  if (!q) {
+    return;
+  }
+  if (q->entries) {
+    if (pacer_to_refund) {
+      for (uint32_t i = 0, index = q->head; i < q->count; i++, index = (index + 1u) % q->capacity) {
+        if (q->entries[index].pacer_charged_bytes > 0) {
+          sfu_pacer_rtx_refund(pacer_to_refund, q->entries[index].pacer_charged_bytes);
+        }
+      }
+    }
+    SFU_FREE(q->entries);
+  }
+  memset(q, 0, sizeof(*q));
+}
+
+void sfu_paced_priority_queue_clear(sfu_paced_priority_queue_t *q, sfu_pacer_t *pacer_to_refund) {
+  if (!q) {
+    return;
+  }
+  if (q->entries && pacer_to_refund) {
+    for (uint32_t i = 0, index = q->head; i < q->count; i++, index = (index + 1u) % q->capacity) {
+      if (q->entries[index].pacer_charged_bytes > 0) {
+        sfu_pacer_rtx_refund(pacer_to_refund, q->entries[index].pacer_charged_bytes);
+      }
+    }
+  }
+  q->head = 0;
+  q->tail = 0;
+  q->count = 0;
+  q->byte_count = 0;
+}
+
+bool sfu_paced_priority_queue_enqueue(sfu_paced_priority_queue_t *q, const uint8_t *data, uint16_t len,
+                                      const struct sockaddr_storage *dst, socklen_t dst_len,
+                                      uint64_t owner_value, uint32_t transport_generation,
+                                      uint32_t address_generation, bool twcc_written, uint16_t twcc_seq,
+                                      uint32_t pacer_charged_bytes, int64_t now_us) {
+  if (!q || !data || !dst || len == 0 || len > SFU_PACED_SEND_MAX_PAYLOAD || dst_len == 0) {
+    return false;
+  }
+  if (!q->entries) {
+    q->entries = SFU_CALLOC(SFU_PACED_PRIORITY_QUEUE_CAPACITY, sizeof(*q->entries));
+    if (!q->entries) {
+      return false;
+    }
+    q->capacity = SFU_PACED_PRIORITY_QUEUE_CAPACITY;
+  }
+  if (q->count >= q->capacity || (q->max_bytes > 0 && q->byte_count + (uint32_t)len > q->max_bytes)) {
+    q->dropped_full++;
+    if (q->is_probe_queue) {
+      sfu_metric_inc("congestion_probe_full_drop");
+    } else {
+      sfu_metric_inc("congestion_rtx_full_drop");
+    }
+    return false;
+  }
+
+  sfu_paced_priority_entry_t *e = &q->entries[q->tail];
+  memset(e, 0, sizeof(*e));
+  memcpy(e->data, data, len);
+  e->len = len;
+  e->dst = *dst;
+  e->dst_len = dst_len;
+  e->enqueued_at_us = now_us;
+  e->owner_value = owner_value;
+  e->transport_generation = transport_generation;
+  e->address_generation = address_generation;
+  e->twcc_written = twcc_written;
+  e->twcc_seq = twcc_seq;
+  e->pacer_charged_bytes = pacer_charged_bytes;
+  e->is_probe = q->is_probe_queue;
+  e->probe_cluster_id = 0;
+
+  q->tail = (q->tail + 1u) % q->capacity;
+  q->count++;
+  q->byte_count += (uint32_t)len;
+  q->enqueued++;
+
+  if (q->is_probe_queue) {
+    sfu_metric_inc("congestion_probe_queued");
+  } else {
+    sfu_metric_inc("congestion_rtx_queued");
+    sfu_metric_add("congestion_rtx_bytes", len);
+  }
+  return true;
+}
+
+bool sfu_paced_priority_queue_enqueue_probe(sfu_paced_priority_queue_t *q, const uint8_t *data, uint16_t len,
+                                            const struct sockaddr_storage *dst, socklen_t dst_len,
+                                            uint64_t owner_value, uint32_t transport_generation,
+                                            uint32_t address_generation, bool twcc_written, uint16_t twcc_seq,
+                                            uint32_t probe_cluster_id, int64_t now_us) {
+  if (!q || !data || len == 0 || len > SFU_PACED_SEND_MAX_PAYLOAD || !dst || dst_len == 0) {
+    return false;
+  }
+  if (!q->entries) {
+    q->entries = SFU_CALLOC(SFU_PACED_PRIORITY_QUEUE_CAPACITY, sizeof(*q->entries));
+    if (!q->entries) {
+      return false;
+    }
+    q->capacity = SFU_PACED_PRIORITY_QUEUE_CAPACITY;
+  }
+  if (q->count >= q->capacity || (q->max_bytes > 0 && q->byte_count + (uint32_t)len > q->max_bytes)) {
+    q->dropped_full++;
+    sfu_metric_inc("congestion_probe_full_drop");
+    return false;
+  }
+
+  sfu_paced_priority_entry_t *e = &q->entries[q->tail];
+  memset(e, 0, sizeof(*e));
+  memcpy(e->data, data, len);
+  e->len = len;
+  e->dst = *dst;
+  e->dst_len = dst_len;
+  e->enqueued_at_us = now_us;
+  e->owner_value = owner_value;
+  e->transport_generation = transport_generation;
+  e->address_generation = address_generation;
+  e->twcc_written = twcc_written;
+  e->twcc_seq = twcc_seq;
+  e->pacer_charged_bytes = 0;
+  e->is_probe = true;
+  e->probe_cluster_id = probe_cluster_id;
+
+  q->tail = (q->tail + 1u) % q->capacity;
+  q->count++;
+  q->byte_count += (uint32_t)len;
+  q->enqueued++;
+
+  sfu_metric_inc("congestion_probe_queued");
+  return true;
+}
+
+static bool priority_entry_valid(const sfu_paced_priority_entry_t *e, const sfu_peer_session_t *s) {
+  return s && s->cold && sfu_session_accepts_work(s) && sfu_session_owner_value(s) == e->owner_value &&
+         atomic_load_explicit(&s->cold->transport_generation, memory_order_acquire) == e->transport_generation &&
+         atomic_load_explicit(&s->cold->address_generation, memory_order_acquire) == e->address_generation &&
+         s->cold->addr_len == e->dst_len && memcmp(&s->cold->addr, &e->dst, e->dst_len) == 0;
+}
+
+bool sfu_paced_priority_queue_drain(sfu_paced_priority_queue_t *q, sfu_worker_t *w, sfu_peer_session_t *s,
+                                    int64_t now_us, uint32_t *remaining) {
+  if (!q || !w || !s || !remaining || *remaining == 0 || !q->entries || q->count == 0) {
+    return false;
+  }
+  uint32_t limit = *remaining;
+  bool did_work = false;
+  uint32_t processed = 0, sent = 0;
+
+  while (q->count && processed < limit) {
+    sfu_paced_priority_entry_t *e = &q->entries[q->head];
+    if (!priority_entry_valid(e, s)) {
+      if (e->pacer_charged_bytes > 0) {
+        sfu_pacer_rtx_refund(&s->egress.pacer, e->pacer_charged_bytes);
+      }
+      q->dropped_stale++;
+      if (q->is_probe_queue) {
+        sfu_metric_inc("congestion_probe_stale_drop");
+      } else {
+        sfu_metric_inc("congestion_rtx_stale_drop");
+      }
+      q->byte_count = q->byte_count >= e->len ? q->byte_count - e->len : 0;
+      q->head = (q->head + 1u) % q->capacity;
+      q->count--;
+      processed++;
+      did_work = true;
+      continue;
+    }
+
+    if (q->max_residence_us > 0 && now_us > e->enqueued_at_us && (now_us - e->enqueued_at_us) > q->max_residence_us) {
+      if (e->pacer_charged_bytes > 0) {
+        sfu_pacer_rtx_refund(&s->egress.pacer, e->pacer_charged_bytes);
+      }
+      q->dropped_expired++;
+      if (q->is_probe_queue) {
+        sfu_metric_inc("congestion_probe_expired_drop");
+      } else {
+        sfu_metric_inc("congestion_rtx_expired_drop");
+      }
+      q->byte_count = q->byte_count >= e->len ? q->byte_count - e->len : 0;
+      q->head = (q->head + 1u) % q->capacity;
+      q->count--;
+      processed++;
+      did_work = true;
+      continue;
+    }
+
+    sfu_packet_t *out = sfu_worker_packet_arena_alloc(&w->output_arena);
+    if (!out) {
+      out = sfu_packet_pool_alloc(w->pp);
+    }
+    if (!out || e->len > out->cap) {
+      if (out) {
+        sfu_worker_release_packet(w, out);
+      }
+      break;
+    }
+
+    memcpy(out->data, e->data, e->len);
+    out->len = e->len;
+    if (sfu_net_send(w->send_net, out, (const struct sockaddr *)&e->dst, e->dst_len) != 0) {
+      sfu_worker_release_packet(w, out);
+      sfu_metric_inc("paced_send_sq_full");
+      break;
+    }
+    sfu_worker_release_packet(w, out);
+
+    int64_t accepted_us = (now_us > 0 && now_us <= 3000000000000000LL) ? now_us : (int64_t)sfu_now_us();
+    if (e->twcc_written && sfu_session_video_runtime_ready(s) && s->egress.twcc_history) {
+      if (q->is_probe_queue || e->is_probe) {
+        sfu_twcc_history_record_probe(s->egress.twcc_history, e->twcc_seq, accepted_us, e->len, e->probe_cluster_id);
+      } else {
+        sfu_twcc_history_record(s->egress.twcc_history, e->twcc_seq, accepted_us, e->len);
+      }
+    }
+
+    q->sent++;
+    q->bytes_sent += e->len;
+    if (q->is_probe_queue) {
+      sfu_metric_inc("congestion_probe_sent");
+      sfu_metric_add("congestion_probe_bytes", e->len);
+    } else {
+#ifdef SFU_DIAG_LOG
+      s->egress.diag.rtx_sent++;
+#endif
+      sfu_metric_inc("congestion_rtx_sent");
+    }
+
+    q->byte_count = q->byte_count >= e->len ? q->byte_count - e->len : 0;
+    q->head = (q->head + 1u) % q->capacity;
+    q->count--;
+    processed++;
+    sent++;
+    did_work = true;
+  }
+
+  *remaining -= processed;
+  if (!q->count) {
+    q->head = 0;
+    q->tail = 0;
+    q->byte_count = 0;
+  }
+  return did_work;
+}
+

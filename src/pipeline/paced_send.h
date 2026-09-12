@@ -135,4 +135,60 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
                             sfu_pacer_reservation_t *reservation, const sfu_paced_send_metadata_t *metadata, int64_t now_us, int64_t *release_at_us);
 bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session_t *session, int64_t now_us, uint32_t *remaining);
 
+#define SFU_PACED_PRIORITY_QUEUE_CAPACITY 128u
+#define SFU_PACED_RTX_MAX_RESIDENCE_US 200000LL
+#define SFU_PACED_PROBE_MAX_RESIDENCE_US 50000LL
+#define SFU_PACED_RTX_MAX_BYTES (128u * 1500u)
+#define SFU_PACED_PROBE_MAX_BYTES (64u * 1500u)
+
+typedef struct sfu_paced_priority_entry {
+  uint8_t data[SFU_PACED_SEND_MAX_PAYLOAD];
+  uint16_t len;
+  struct sockaddr_storage dst;
+  socklen_t dst_len;
+  int64_t enqueued_at_us;
+  uint64_t owner_value;
+  uint32_t transport_generation;
+  uint32_t address_generation;
+  uint16_t twcc_seq;
+  bool twcc_written;
+  uint32_t pacer_charged_bytes;
+  bool is_probe;
+  uint32_t probe_cluster_id;
+} sfu_paced_priority_entry_t;
+
+typedef struct sfu_paced_priority_queue {
+  sfu_paced_priority_entry_t *entries;
+  uint32_t capacity;
+  uint32_t head;
+  uint32_t tail;
+  uint32_t count;
+  uint32_t byte_count;
+  uint32_t max_bytes;
+  int64_t max_residence_us;
+  bool is_probe_queue;
+  uint64_t enqueued;
+  uint64_t sent;
+  uint64_t dropped_full;
+  uint64_t dropped_expired;
+  uint64_t dropped_stale;
+  uint64_t bytes_sent;
+} sfu_paced_priority_queue_t;
+
+void sfu_paced_priority_queue_init(sfu_paced_priority_queue_t *q, bool is_probe_queue, int64_t max_residence_us, uint32_t max_bytes);
+void sfu_paced_priority_queue_destroy(sfu_paced_priority_queue_t *q, sfu_pacer_t *pacer_to_refund);
+void sfu_paced_priority_queue_clear(sfu_paced_priority_queue_t *q, sfu_pacer_t *pacer_to_refund);
+bool sfu_paced_priority_queue_enqueue(sfu_paced_priority_queue_t *q, const uint8_t *data, uint16_t len,
+                                      const struct sockaddr_storage *dst, socklen_t dst_len,
+                                      uint64_t owner_value, uint32_t transport_generation,
+                                      uint32_t address_generation, bool twcc_written, uint16_t twcc_seq,
+                                      uint32_t pacer_charged_bytes, int64_t now_us);
+bool sfu_paced_priority_queue_enqueue_probe(sfu_paced_priority_queue_t *q, const uint8_t *data, uint16_t len,
+                                            const struct sockaddr_storage *dst, socklen_t dst_len,
+                                            uint64_t owner_value, uint32_t transport_generation,
+                                            uint32_t address_generation, bool twcc_written, uint16_t twcc_seq,
+                                            uint32_t probe_cluster_id, int64_t now_us);
+bool sfu_paced_priority_queue_drain(sfu_paced_priority_queue_t *q, sfu_worker_t *w, sfu_peer_session_t *session,
+                                    int64_t now_us, uint32_t *remaining);
+
 #endif /* SFU_PIPELINE_PACED_SEND_H */

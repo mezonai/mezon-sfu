@@ -340,6 +340,61 @@ static void test_recovery_probe_escapes_ack_rate_lock(void) {
   assert(ctx.aimd.state == GCC_RATE_CTRL_HOLD);
 }
 
+static void test_active_probing_coordination(void) {
+  gcc_bwe_context_t ctx;
+  gcc_bwe_init(&ctx, START, MINB, MAXB);
+
+  assert(!gcc_bwe_is_overusing(&ctx));
+  assert(gcc_bwe_get_usage(&ctx) == GCC_BWE_NORMAL);
+  assert(gcc_bwe_get_bitrate(&ctx) == START);
+  assert(gcc_bwe_get_ack_bitrate(&ctx) == 0);
+  assert(!gcc_bwe_has_recent_feedback(&ctx, 1000000, 500000));
+
+  gcc_bwe_record_feedback(&ctx, 1000000);
+  assert(gcc_bwe_has_recent_feedback(&ctx, 1100000, 500000));
+  assert(!gcc_bwe_has_recent_feedback(&ctx, 1600000, 500000));
+
+  /* When active probing is enabled, passive recovery probing is subordinated */
+  uint16_t seq = 0;
+  int64_t send_us = 1000000, recv_us = 1000000;
+  feed_group(&ctx, &seq, &send_us, &recv_us, 1, 0, 100000, 100000);
+  ctx.aimd.current_bitrate_bps = 300000;
+  ctx.aimd.ack_bitrate_bps = 100000;
+  ctx.aimd.have_ack_bitrate = true;
+  ctx.aimd.state = GCC_RATE_CTRL_INCREASE;
+  ctx.aimd.last_increase_us = recv_us - 200000;
+
+  gcc_bwe_set_active_probing(&ctx, true);
+  for (int i = 0; i < 25; i++) {
+    feed_group(&ctx, &seq, &send_us, &recv_us, 1, 0, 100000, 100000);
+  }
+  /* Passive recovery probe must NOT have inflated current_bitrate_bps */
+  assert(ctx.aimd.current_bitrate_bps == 300000);
+  assert(ctx.aimd.last_recovery_probe_us == 0);
+
+  gcc_bwe_set_active_probing(&ctx, false);
+}
+
+static void test_probe_cluster_completed(void) {
+  gcc_bwe_context_t ctx;
+  gcc_bwe_init(&ctx, START, MINB, MAXB);
+
+  ctx.aimd.current_bitrate_bps = 300000;
+  ctx.aimd.ack_bitrate_bps = 250000;
+  ctx.aimd.have_ack_bitrate = true;
+
+  /* Successful probe completed at 1.5 Mbps */
+  gcc_bwe_on_probe_cluster_completed(&ctx, 1500000, 2000000);
+  assert(gcc_bwe_get_bitrate(&ctx) == 1500000);
+  assert(gcc_bwe_get_ack_bitrate(&ctx) == 1500000);
+  assert(ctx.aimd.last_active_probe_us == 2000000);
+
+  /* Overuse prevents probe inflation */
+  ctx.trendline.usage_state = GCC_BWE_OVERUSE;
+  gcc_bwe_on_probe_cluster_completed(&ctx, 2500000, 3000000);
+  assert(gcc_bwe_get_bitrate(&ctx) == 1500000);
+}
+
 int main(void) {
   test_steadily_growing_queue_detected();
   test_constant_delay_is_normal();
@@ -353,6 +408,8 @@ int main(void) {
   test_ack_bitrate_uses_aggregate_window();
   test_normal_ack_cap_does_not_decrease();
   test_recovery_probe_escapes_ack_rate_lock();
+  test_active_probing_coordination();
+  test_probe_cluster_completed();
   printf("test_gcc: OK\n");
   return 0;
 }

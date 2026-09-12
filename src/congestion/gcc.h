@@ -59,11 +59,13 @@ typedef struct gcc_aimd_controller {
 
   int64_t last_increase_us;
   int64_t last_recovery_probe_us;
+  int64_t last_active_probe_us;
   uint32_t ack_bitrate_bps;
   uint64_t ack_window_bytes;
   int64_t ack_window_min_recv_us;
   int64_t ack_window_max_recv_us;
   bool have_ack_bitrate;
+  bool active_probing;
 } gcc_aimd_controller_t;
 
 typedef struct gcc_bwe_context {
@@ -71,10 +73,20 @@ typedef struct gcc_bwe_context {
   gcc_arrival_group_t prev_group;
   gcc_trendline_estimator_t trendline;
   gcc_aimd_controller_t aimd;
+  int64_t last_feedback_us;
 } gcc_bwe_context_t;
 
 void gcc_bwe_init(gcc_bwe_context_t *ctx, uint32_t start_bitrate, uint32_t min_bitrate, uint32_t max_bitrate);
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt);
 void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total);
+
+bool gcc_bwe_is_overusing(const gcc_bwe_context_t *ctx);
+gcc_bwe_usage_t gcc_bwe_get_usage(const gcc_bwe_context_t *ctx);
+uint32_t gcc_bwe_get_bitrate(const gcc_bwe_context_t *ctx);
+uint32_t gcc_bwe_get_ack_bitrate(const gcc_bwe_context_t *ctx);
+bool gcc_bwe_has_recent_feedback(const gcc_bwe_context_t *ctx, int64_t now_us, int64_t max_age_us);
+void gcc_bwe_record_feedback(gcc_bwe_context_t *ctx, int64_t now_us);
+void gcc_bwe_set_active_probing(gcc_bwe_context_t *ctx, bool active);
+void gcc_bwe_on_probe_cluster_completed(gcc_bwe_context_t *ctx, uint32_t probe_bitrate_bps, int64_t now_us);
 
 #endif  // SFU_GCC_H
