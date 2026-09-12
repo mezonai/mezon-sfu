@@ -266,7 +266,8 @@ static void test_ack_bitrate_uses_aggregate_window(void) {
   gcc_bwe_init(&ctx, START, MINB, MAXB);
 
   gcc_packet_info_t p = {0};
-  for (int burst = 0; burst <= 5; burst++) {
+  /* Changed to 11 bursts to reach 300ms window threshold (was 6 bursts for 150ms) */
+  for (int burst = 0; burst <= 10; burst++) {
     for (int i = 0; i < 5; i++) {
       p.sequence_number++;
       p.send_time_us = 1000000 + burst * 30000;
@@ -274,7 +275,7 @@ static void test_ack_bitrate_uses_aggregate_window(void) {
       p.size_bytes = 1200;
       gcc_bwe_process_twcc_packet(&ctx, &p);
     }
-    if (burst < 5) {
+    if (burst < 10) {
       assert(!ctx.aimd.have_ack_bitrate);
     }
   }
