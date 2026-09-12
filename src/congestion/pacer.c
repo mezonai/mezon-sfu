@@ -81,7 +81,11 @@ bool sfu_pacer_reserve(sfu_pacer_t *p, sfu_pacer_class_t cls, uint32_t bytes, bo
   if (charged) {
     sfu_pacer_refill(p, now_us);
     int64_t after = p->balance_bytes - p->reserved_bytes - (int64_t)bytes;
-    if (after < 0 && allow_congestion_drop && sfu_pacer_class_droppable(cls) && -after > p->bucket_cap_bytes) {
+    /* Don't drop enhancement layers when they belong to a keyframe - keyframes need
+     * all layers to establish clean decode state, especially during screen scrolling. */
+    bool is_transition_or_base = (cls == SFU_PACER_CLASS_VIDEO_BASE || cls == SFU_PACER_CLASS_VIDEO_TRANSITION);
+    if (after < 0 && allow_congestion_drop && sfu_pacer_class_droppable(cls) &&
+        !is_transition_or_base && -after > p->bucket_cap_bytes) {
       p->dropped_enh++;
       return false;
     }

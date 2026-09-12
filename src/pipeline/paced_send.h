@@ -23,6 +23,7 @@ typedef struct sfu_pacer_reservation {
 #define SFU_PACED_SEND_KEYFRAME_MIN_BPS 5000000u
 #define SFU_PACED_SEND_CAMERA_MAX_DELAY_US 200000LL
 #define SFU_PACED_SEND_SCREEN_MAX_DELAY_US 750000LL
+#define SFU_PACED_SEND_SCREEN_MOTION_MAX_DELAY_US 250000LL
 
 /* Distinct publishers whose frames a single backlog trim may discard. A screen
  * queue is per subscriber, not per publisher, so one trim can span several. */
@@ -111,6 +112,8 @@ typedef struct sfu_paced_send {
   uint64_t dropped_delay_frames;
   uint64_t dropped_frame_packets;
   uint64_t dropped_stale;
+  uint32_t motion_frame_count;
+  int64_t last_frame_size_bytes;
 } sfu_paced_send_t;
 
 void sfu_paced_send_init(sfu_paced_send_t *q);

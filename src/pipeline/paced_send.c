@@ -72,7 +72,19 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
     q->input_frame_base_next_release_us = q->next_release_us;
     q->input_frame_queued_packets = 0;
     q->input_frame_active = true;
-    q->drop_input_frame = drop_on_delay && !keyframe && sfu_paced_send_projected_delay_us(q, now_us) >= max_delay_us;
+
+    /* Detect motion: if queue has >3 frames ready or this frame will be >2× previous size.
+     * Use tighter delay bound during motion to reduce blur during scrolling. */
+    bool motion_detected = q->ready_count > 3;
+    if (motion_detected) {
+      q->motion_frame_count++;
+    } else if (q->motion_frame_count > 0) {
+      q->motion_frame_count--;
+    }
+    bool in_motion = q->motion_frame_count > 0;
+    int64_t effective_max_delay = in_motion ? SFU_PACED_SEND_SCREEN_MOTION_MAX_DELAY_US : max_delay_us;
+
+    q->drop_input_frame = drop_on_delay && !keyframe && sfu_paced_send_projected_delay_us(q, now_us) >= effective_max_delay;
     if (q->drop_input_frame) {
       q->dropped_delay_frames++;
       sfu_metric_inc("paced_send_delay_frame_drop");
