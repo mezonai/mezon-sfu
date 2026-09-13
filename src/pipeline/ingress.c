@@ -162,6 +162,7 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
     }
   }
   if (session->egress.schedulers) {
+    sfu_layer_scheduler_prune(session, snapshot);
     for (size_t i = 0; i < allocation.stream_count; i++) {
       const sfu_bandwidth_stream_allocation_t *stream = &allocation.streams[i];
       sfu_media_kind_t source = stream->kind == SFU_BANDWIDTH_STREAM_SCREEN ? SFU_MEDIA_SCREEN : SFU_MEDIA_VIDEO;

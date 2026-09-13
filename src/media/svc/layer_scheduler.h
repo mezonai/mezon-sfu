@@ -86,6 +86,8 @@ typedef struct sfu_layer_scheduler_slot {
 } sfu_layer_scheduler_slot_t;
 
 void sfu_layer_scheduler_init(sfu_layer_scheduler_t *sched, uint32_t initial_publisher);
+void sfu_layer_scheduler_slot_reset(sfu_layer_scheduler_slot_t *slot);
+void sfu_layer_scheduler_prune(sfu_peer_session_t *session, const sfu_receiver_snapshot_t *snapshot);
 sfu_layer_scheduler_t *sfu_layer_scheduler_for_stream(sfu_peer_session_t *session, uint32_t publisher_id, sfu_media_kind_t source);
 sfu_layer_scheduler_t *sfu_layer_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id);
 sfu_pacer_class_t sfu_layer_scheduler_classify_frame(const sfu_layer_scheduler_t *sched, const sfu_svc_descriptor_t *desc);
