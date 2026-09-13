@@ -5,9 +5,9 @@
 #define SFU_PACER_FACTOR_NUM 5
 #define SFU_PACER_FACTOR_DEN 2
 
-#define SFU_PACER_BURST_US 40000LL
+#define SFU_PACER_BURST_US 10000LL
 
-#define SFU_PACER_MIN_BUCKET_BYTES 4096LL
+#define SFU_PACER_MIN_BUCKET_BYTES 1500LL
 
 static bool sfu_pacer_class_droppable(sfu_pacer_class_t cls) { return cls == SFU_PACER_CLASS_VIDEO_ENH; }
 
@@ -38,6 +38,13 @@ void sfu_pacer_set_rate(sfu_pacer_t *p, uint32_t bps, int64_t now_us) {
     p->rtx_budget_bytes = p->rtx_budget_cap_bytes;
     p->rtx_last_refill_us = now_us;
     p->active = true;
+  } else {
+    if (p->balance_bytes > p->bucket_cap_bytes) {
+      p->balance_bytes = p->bucket_cap_bytes;
+    }
+    if (p->rtx_budget_bytes > p->rtx_budget_cap_bytes) {
+      p->rtx_budget_bytes = p->rtx_budget_cap_bytes;
+    }
   }
 }
 

@@ -10,7 +10,7 @@
 #include "media/svc/layer_scheduler.h"
 #include "sfu/datadef.h"
 
-#define DWELL_EXPIRE(s_) ((s_).last_target_change_us -= 600000)
+#define DWELL_EXPIRE(s_) ((s_).last_target_change_us -= 3500000LL)
 
 static void test_l1t3_bitrate_ladder_stays_on_spatial_zero(void) {
   sfu_layer_scheduler_t s;
@@ -36,12 +36,11 @@ static void test_down_holds_at_rung_rate(void) {
   assert(s.target_sid == 0 && s.target_tid == 2);
 
   /* Falling between rung rate and up threshold holds the rung. */
-  s.last_target_change_us -= 600000;
+  DWELL_EXPIRE(s);
   sfu_layer_scheduler_set_bitrate(&s, 1300000);
   assert(s.target_sid == 0 && s.target_tid == 2);
 
-  /* Breaking the down threshold drops — but only after dwell. */
-  s.last_target_change_us -= 600000;
+  /* Breaking the down threshold drops immediately without dwell. */
   sfu_layer_scheduler_set_bitrate(&s, 1100000);
   assert(s.target_sid == 0 && s.target_tid == 1);
 }
@@ -56,9 +55,19 @@ static void test_dwell_blocks_fast_flap(void) {
   assert(s.target_sid == 0 && s.target_tid == 2);
   assert(s.last_target_change_us != 0);
 
+  /* Congestion: immediate downswitch to T0 */
   sfu_layer_scheduler_set_bitrate(&s, 100000);
-  assert(s.target_sid == 0 && s.target_tid == 2);
+  assert(s.target_sid == 0 && s.target_tid == 0);
   assert(s.allocated_bps == 100000);
+
+  /* Network flaps up immediately: upgrade blocked by 3-second hold-down */
+  sfu_layer_scheduler_set_bitrate(&s, 2000000);
+  assert(s.target_sid == 0 && s.target_tid == 0);
+
+  /* After 3 seconds: upgrade succeeds to T2 */
+  DWELL_EXPIRE(s);
+  sfu_layer_scheduler_set_bitrate(&s, 2000000);
+  assert(s.target_sid == 0 && s.target_tid == 2);
 }
 
 static void test_camera_and_screen_allocations_are_independent(void) {
@@ -81,7 +90,7 @@ static void test_camera_and_screen_allocations_are_independent(void) {
 
   sfu_layer_scheduler_set_bitrate(screen, 100000);
   assert(screen->allocated_bps == 100000);
-  assert(screen->target_tid == 2); /* dwell delays only the target transition */
+  assert(screen->target_tid == 2); /* screen share preserves all temporal layers (T2) */
   assert(camera->allocated_bps == 240000 && camera->target_tid == 0);
 }
 

@@ -374,9 +374,9 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 
   int64_t now_us = (int64_t)sfu_now_us();
   if (sender_session->egress.gcc_ctx && fresh_lost > 0) {
-    gcc_bwe_report_loss(sender_session->egress.gcc_ctx, fresh_lost, fresh_total);
+    bool sustained_loss = gcc_bwe_report_loss(sender_session->egress.gcc_ctx, fresh_lost, fresh_total);
     estimated_bps = sender_session->egress.gcc_ctx->aimd.current_bitrate_bps;
-    if (sender_session->egress.probe_controller) {
+    if (sustained_loss && sender_session->egress.probe_controller) {
       sfu_probe_controller_abort(sender_session->egress.probe_controller, sender_session->egress.gcc_ctx, now_us, "media_loss");
     }
   }
