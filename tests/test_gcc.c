@@ -229,8 +229,8 @@ static void test_feedback_gap_not_counted_as_overuse(void) {
   assert(ctx.trendline.usage_state != GCC_BWE_OVERUSE);
 }
 
-/* CC-13: loss above 10% caps the estimate at the acknowledged rate; moderate
- * loss blocks increases; small loss is a no-op. */
+/* CC-13: loss above 10% requires 3 consecutive windows before applying 0.85x backoff;
+ * moderate loss (2%-10%) blocks increases (HOLD); small loss (<=2%) is a no-op. */
 static void test_loss_has_control_effect(void) {
   gcc_bwe_context_t ctx;
   gcc_bwe_init(&ctx, START, MINB, MAXB);
@@ -238,27 +238,84 @@ static void test_loss_has_control_effect(void) {
   ctx.aimd.have_ack_bitrate = true;
   ctx.aimd.ack_bitrate_bps = 400000;
 
-  /* Heavy loss: capped to ack rate. */
-  gcc_bwe_report_loss(&ctx, 15, 100);
-  assert(ctx.aimd.current_bitrate_bps == 400000);
-  assert(ctx.aimd.state == GCC_RATE_CTRL_HOLD);
+  /* Window 1: isolated heavy loss (15%) is tracked but does NOT back off immediately. */
+  bool backed_off = gcc_bwe_report_loss(&ctx, 15, 100);
+  assert(!backed_off);
+  assert(ctx.aimd.consecutive_high_loss_windows == 1);
+  assert(ctx.aimd.current_bitrate_bps == 1000000);
 
-  /* Moderate loss: holds state, no decrease below current. */
+  /* Window 2: second high loss window. */
+  backed_off = gcc_bwe_report_loss(&ctx, 15, 100);
+  assert(!backed_off);
+  assert(ctx.aimd.consecutive_high_loss_windows == 2);
+  assert(ctx.aimd.current_bitrate_bps == 1000000);
+
+  /* Non-high loss resets the streak. */
+  backed_off = gcc_bwe_report_loss(&ctx, 1, 100);
+  assert(!backed_off);
+  assert(ctx.aimd.consecutive_high_loss_windows == 0);
+  assert(ctx.aimd.current_bitrate_bps == 1000000);
+
+  /* Now deliver 3 consecutive high-loss windows: 3rd window triggers 0.85x backoff. */
+  assert(!gcc_bwe_report_loss(&ctx, 15, 100));
+  assert(!gcc_bwe_report_loss(&ctx, 15, 100));
+  backed_off = gcc_bwe_report_loss(&ctx, 15, 100);
+  assert(backed_off);
+  /* Basis was ack_bitrate_bps (400000) because ack < current; 400000 * 85 / 100 = 340000 */
+  assert(ctx.aimd.current_bitrate_bps == 340000);
+  assert(ctx.aimd.state == GCC_RATE_CTRL_HOLD);
+  assert(ctx.aimd.consecutive_high_loss_windows == 0);
+
+  /* Moderate loss (2% - 10%): holds state, no decrease below current. */
   ctx.aimd.state = GCC_RATE_CTRL_INCREASE;
   ctx.aimd.current_bitrate_bps = 500000;
-  gcc_bwe_report_loss(&ctx, 5, 100);
+  backed_off = gcc_bwe_report_loss(&ctx, 5, 100);
+  assert(!backed_off);
   assert(ctx.aimd.current_bitrate_bps == 500000);
   assert(ctx.aimd.state == GCC_RATE_CTRL_HOLD);
 
-  /* Small loss: no-op. */
+  /* Small loss (<= 2%): no-op. */
   ctx.aimd.state = GCC_RATE_CTRL_INCREASE;
-  gcc_bwe_report_loss(&ctx, 1, 100);
+  backed_off = gcc_bwe_report_loss(&ctx, 2, 100);
+  assert(!backed_off);
   assert(ctx.aimd.state == GCC_RATE_CTRL_INCREASE);
+
+  /* Minimum clamp: repeated sustained loss clamps to min_bitrate_bps */
+  for (int i = 0; i < 60; i++) {
+    gcc_bwe_report_loss(&ctx, 15, 100);
+  }
+  assert(ctx.aimd.current_bitrate_bps == MINB);
 
   /* Degenerate inputs never crash or corrupt. */
   gcc_bwe_report_loss(&ctx, 0, 0);
   gcc_bwe_report_loss(&ctx, 10, 0);
-  assert(ctx.aimd.current_bitrate_bps == 500000);
+  assert(ctx.aimd.current_bitrate_bps == MINB);
+}
+
+static void test_adaptive_threshold_evolution_is_gradual(void) {
+  gcc_bwe_context_t ctx;
+  gcc_bwe_init(&ctx, START, MINB, MAXB);
+  assert(ctx.trendline.threshold_ms == 12.5);
+
+  uint16_t seq = 0;
+  int64_t s = 1000000, r = 1000000;
+  /* Feed groups spaced by 20 ms (20000 us) with mild delay variation */
+  feed_group(&ctx, &seq, &s, &r, 1, 1200, 20000, 25000);
+  double init_thresh = ctx.trendline.threshold_ms;
+
+  /* Run 5 groups (100 ms total elapsed time) */
+  for (int i = 0; i < 5; i++) {
+    feed_group(&ctx, &seq, &s, &r, 1, 1200, 20000, 25000);
+  }
+
+  /* In 100 ms, threshold change must be small and gradual (< 0.5 ms),
+   * proving delta_s is properly in seconds and not overreacting by 1000x */
+  double delta_thresh = ctx.trendline.threshold_ms - init_thresh;
+  if (delta_thresh < 0) {
+    delta_thresh = -delta_thresh;
+  }
+  assert(delta_thresh < 0.5);
+  assert(ctx.trendline.threshold_ms >= 6.0 && ctx.trendline.threshold_ms <= 600.0);
 }
 
 static void test_ack_bitrate_uses_aggregate_window(void) {
@@ -405,6 +462,7 @@ int main(void) {
   test_reorder_ignored();
   test_feedback_gap_not_counted_as_overuse();
   test_loss_has_control_effect();
+  test_adaptive_threshold_evolution_is_gradual();
   test_ack_bitrate_uses_aggregate_window();
   test_normal_ack_cap_does_not_decrease();
   test_recovery_probe_escapes_ack_rate_lock();

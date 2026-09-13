@@ -64,6 +64,7 @@ typedef struct gcc_aimd_controller {
   uint64_t ack_window_bytes;
   int64_t ack_window_min_recv_us;
   int64_t ack_window_max_recv_us;
+  uint32_t consecutive_high_loss_windows;
   bool have_ack_bitrate;
   bool active_probing;
 } gcc_aimd_controller_t;
@@ -78,7 +79,7 @@ typedef struct gcc_bwe_context {
 
 void gcc_bwe_init(gcc_bwe_context_t *ctx, uint32_t start_bitrate, uint32_t min_bitrate, uint32_t max_bitrate);
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt);
-void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total);
+bool gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total);
 
 bool gcc_bwe_is_overusing(const gcc_bwe_context_t *ctx);
 gcc_bwe_usage_t gcc_bwe_get_usage(const gcc_bwe_context_t *ctx);

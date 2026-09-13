@@ -1562,9 +1562,10 @@ static void test_nack_line_rate_throttled_by_rtx_budget(void) {
   assert(f.cache->next_rtx_seq == 48);
   assert(sfu_metric_get("rtx_dropped_budget") == 0);
 
-  /* Arm the session-level pacer with a small estimate: 1 Mbps -> RTX budget
-   * floor cap 4096 bytes. Cache lookup now precedes budgeting and charges the
-   * actual 114-byte retransmission input, so 35 fit before the budget drops. */
+  /* Arm the session-level pacer with a small estimate: 1 Mbps -> pacing
+   * 2.5 Mbps -> RTX budget 625 kbps -> 10 ms window 781 bytes, raised to the
+   * 1500-byte floor. Cache lookup precedes budgeting and charges the actual
+   * 114-byte retransmission input, so 13 fit before the budget drops. */
   sfu_pacer_set_rate(&f.session->egress.pacer, 1000000, (int64_t)sfu_now_us());
 
   uint16_t fci2[2 * 48];
@@ -1575,9 +1576,9 @@ static void test_nack_line_rate_throttled_by_rtx_budget(void) {
   nack_len = build_nack(nack, fci2, 96);
   feed_rtcp(&f, nack, nack_len);
 
-  /* 48 + 35 served; 13 dropped by the budget. */
-  assert(f.cache->next_rtx_seq == 48 + 35);
-  assert(sfu_metric_get("rtx_dropped_budget") == 13);
+  /* 48 + 13 served; 35 dropped by the budget. */
+  assert(f.cache->next_rtx_seq == 48 + 13);
+  assert(sfu_metric_get("rtx_dropped_budget") == 35);
 
   fixture_destroy(&f);
 }
