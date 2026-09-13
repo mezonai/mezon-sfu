@@ -796,6 +796,21 @@ static void test_gcc_estimate_reaches_scheduler(void) {
   assert((uint64_t)camera1->allocated_bps + camera2->allocated_bps <= 85000);
   assert(f.session->egress.pacer.pacing_bps == 250000);
 
+  /* Inactive screen slot was cleared; active camera1 remains intact */
+  assert(camera1->active_publisher_id == 101);
+  assert(camera1->allocated_bps > 0);
+
+  /* Replacement source obtains a fresh scheduler with keyframe gate initialized */
+  sfu_layer_scheduler_t *camera3 = sfu_layer_scheduler_for_stream(f.session, 303, SFU_MEDIA_VIDEO);
+  assert(camera3 != NULL);
+  assert(camera3->active_publisher_id == 303);
+  assert(camera3->needs_keyframe == true);
+
+  /* Re-requesting screen for publisher 101 allocates fresh scheduler with keyframe gate armed */
+  sfu_layer_scheduler_t *fresh_screen = sfu_layer_scheduler_for_stream(f.session, 101, SFU_MEDIA_SCREEN);
+  assert(fresh_screen != NULL);
+  assert(fresh_screen->needs_keyframe == true);
+
   fixture_destroy(&f);
 }
 
