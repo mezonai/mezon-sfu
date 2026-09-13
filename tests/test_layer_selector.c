@@ -8,6 +8,7 @@
 
 #include "congestion/gcc.h"
 #include "media/svc/layer_scheduler.h"
+#include "peer/session.h"
 #include "sfu/datadef.h"
 
 #define DWELL_EXPIRE(s_) ((s_).last_target_change_us -= 3500000LL)
@@ -415,6 +416,273 @@ static void test_screen_share_admits_higher_tid_without_u_bit(void) {
   sfu_layer_scheduler_commit_packet(&sched, &decision);
 }
 
+static void test_audio_does_not_consume_slot(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  sfu_layer_scheduler_slot_t slots[SFU_LAYER_SCHEDULER_CAP] = {0};
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+
+  sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for_stream(&session, 42, SFU_MEDIA_AUDIO);
+  assert(sched == NULL);
+  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+    assert(slots[i].publisher_id == 0);
+  }
+}
+
+static void test_full_table_rejection_and_prune_reclaims_slot(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  sfu_layer_scheduler_slot_t slots[SFU_LAYER_SCHEDULER_CAP] = {0};
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+
+  /* Fill all 16 slots with 16 distinct publishers */
+  for (uint32_t i = 1; i <= SFU_LAYER_SCHEDULER_CAP; i++) {
+    sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for_stream(&session, i, SFU_MEDIA_VIDEO);
+    assert(sched != NULL);
+  }
+
+  /* 17th stream must be rejected when table is full */
+  sfu_layer_scheduler_t *sched17 = sfu_layer_scheduler_for_stream(&session, 17, SFU_MEDIA_VIDEO);
+  assert(sched17 == NULL);
+
+  /* Prepare snapshot with only publishers 1..15 active (publisher 16 departed) */
+  sfu_peer_session_t dummy_sub;
+  memset(&dummy_sub, 0, sizeof(dummy_sub));
+  atomic_store(&dummy_sub.refcount, 1000);
+
+  sfu_receiver_snapshot_t *snap = sfu_receiver_snapshot_alloc();
+  assert(snap != NULL);
+  for (uint32_t i = 1; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+    sfu_receiver_entry_t entry = {
+        .subscriber = &dummy_sub,
+        .publisher_peer_id = i,
+        .has_video = true,
+        .video_active = true,
+    };
+    assert(sfu_receiver_snapshot_set(snap, i - 1, &entry));
+  }
+
+  /* Prune releases slot for departed publisher 16 */
+  sfu_layer_scheduler_prune(&session, snap);
+
+  /* Verify publisher 16's slot was reclaimed (publisher_id == 0) */
+  bool found_free = false;
+  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+    if (slots[i].publisher_id == 0) {
+      found_free = true;
+      break;
+    }
+  }
+  assert(found_free);
+
+  /* Now stream 17 can successfully acquire a slot */
+  sched17 = sfu_layer_scheduler_for_stream(&session, 17, SFU_MEDIA_VIDEO);
+  assert(sched17 != NULL);
+  assert(sched17->active_publisher_id == 17);
+  assert(sched17->needs_keyframe == true);
+
+  sfu_subscriptions_snapshot_release(snap);
+}
+
+static void test_full_state_reset_on_reuse(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  sfu_layer_scheduler_slot_t slots[SFU_LAYER_SCHEDULER_CAP] = {0};
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+
+  sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for_stream(&session, 10, SFU_MEDIA_VIDEO);
+  assert(sched != NULL);
+
+  /* Pollute scheduler fields with active stream state */
+  sched->target_sid = 2;
+  sched->target_tid = 2;
+  sched->current_sid = 2;
+  sched->current_tid = 2;
+  sched->allocated_bps = 800000;
+  sched->needs_keyframe = false;
+  sched->picture_valid = true;
+  sched->picture_timestamp = 12345;
+  sched->transition_active = true;
+  sched->temporal_transition_active = true;
+  sched->pacer_frame_active = true;
+
+  /* Explicit slot reset */
+  sfu_layer_scheduler_slot_reset(&slots[0]);
+  assert(slots[0].publisher_id == 0);
+  assert(slots[0].sched.target_sid == 0);
+  assert(slots[0].sched.target_tid == 0);
+  assert(slots[0].sched.current_sid == 0);
+  assert(slots[0].sched.current_tid == 0);
+  assert(slots[0].sched.allocated_bps == 0);
+  assert(slots[0].sched.needs_keyframe == false);
+  assert(slots[0].sched.picture_valid == false);
+  assert(slots[0].sched.transition_active == false);
+  assert(slots[0].sched.temporal_transition_active == false);
+  assert(slots[0].sched.pacer_frame_active == false);
+
+  /* Reuse the slot for publisher 20 */
+  sfu_layer_scheduler_t *new_sched = sfu_layer_scheduler_for_stream(&session, 20, SFU_MEDIA_VIDEO);
+  assert(new_sched == &slots[0].sched);
+  assert(new_sched->active_publisher_id == 20);
+  assert(new_sched->needs_keyframe == true);
+  assert(new_sched->target_sid == 0);
+  assert(new_sched->target_tid == 2);
+  assert(new_sched->current_sid == 0);
+  assert(new_sched->allocated_bps == 0);
+  assert(!new_sched->transition_active);
+}
+
+static void test_independent_camera_and_screen_pruning(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  sfu_layer_scheduler_slot_t slots[SFU_LAYER_SCHEDULER_CAP] = {0};
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+
+  sfu_layer_scheduler_t *cam = sfu_layer_scheduler_for_stream(&session, 50, SFU_MEDIA_VIDEO);
+  sfu_layer_scheduler_t *scr = sfu_layer_scheduler_for_stream(&session, 50, SFU_MEDIA_SCREEN);
+  assert(cam != NULL && scr != NULL);
+
+  uint64_t cam_key = ((50ULL) << 8) | SFU_MEDIA_VIDEO;
+  uint64_t scr_key = ((50ULL) << 8) | SFU_MEDIA_SCREEN;
+  assert(slots[0].publisher_id == cam_key);
+  assert(slots[1].publisher_id == scr_key);
+
+  sfu_peer_session_t dummy_sub;
+  memset(&dummy_sub, 0, sizeof(dummy_sub));
+  atomic_store(&dummy_sub.refcount, 1000);
+
+  /* Snapshot 1: camera active, screen inactive */
+  sfu_receiver_snapshot_t *snap1 = sfu_receiver_snapshot_alloc();
+  assert(snap1 != NULL);
+  sfu_receiver_entry_t entry1 = {
+      .subscriber = &dummy_sub,
+      .publisher_peer_id = 50,
+      .has_video = true,
+      .video_active = true,
+      .has_screen = true,
+      .screen_active = false,
+  };
+  assert(sfu_receiver_snapshot_set(snap1, 0, &entry1));
+
+  sfu_layer_scheduler_prune(&session, snap1);
+
+  /* Camera slot remains, screen slot is reclaimed */
+  assert(slots[0].publisher_id == cam_key);
+  assert(slots[1].publisher_id == 0);
+
+  /* Snapshot 2: both inactive */
+  sfu_receiver_snapshot_t *snap2 = sfu_receiver_snapshot_alloc();
+  assert(snap2 != NULL);
+  sfu_receiver_entry_t entry2 = {
+      .subscriber = &dummy_sub,
+      .publisher_peer_id = 50,
+      .has_video = true,
+      .video_active = false,
+      .has_screen = true,
+      .screen_active = false,
+  };
+  assert(sfu_receiver_snapshot_set(snap2, 0, &entry2));
+
+  sfu_layer_scheduler_prune(&session, snap2);
+
+  /* Now camera slot is also reclaimed */
+  assert(slots[0].publisher_id == 0);
+  assert(slots[1].publisher_id == 0);
+
+  sfu_subscriptions_snapshot_release(snap1);
+  sfu_subscriptions_snapshot_release(snap2);
+}
+
+static void test_preservation_of_active_entries_with_zero_bitrate(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  sfu_layer_scheduler_slot_t slots[SFU_LAYER_SCHEDULER_CAP] = {0};
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+
+  sfu_layer_scheduler_t *cam = sfu_layer_scheduler_for_stream(&session, 60, SFU_MEDIA_VIDEO);
+  assert(cam != NULL);
+  sfu_layer_scheduler_set_bitrate(cam, 0);
+  assert(cam->allocated_bps == 0);
+
+  uint64_t cam_key = ((60ULL) << 8) | SFU_MEDIA_VIDEO;
+
+  sfu_peer_session_t dummy_sub;
+  memset(&dummy_sub, 0, sizeof(dummy_sub));
+  atomic_store(&dummy_sub.refcount, 1000);
+
+  /* Snapshot has publisher 60 video active, even though bitrate is 0 */
+  sfu_receiver_snapshot_t *snap = sfu_receiver_snapshot_alloc();
+  assert(snap != NULL);
+  sfu_receiver_entry_t entry = {
+      .subscriber = &dummy_sub,
+      .publisher_peer_id = 60,
+      .has_video = true,
+      .video_active = true,
+  };
+  assert(sfu_receiver_snapshot_set(snap, 0, &entry));
+
+  sfu_layer_scheduler_prune(&session, snap);
+
+  /* Active stream must NOT be evicted even if allocated_bps == 0 */
+  assert(slots[0].publisher_id == cam_key);
+  assert(slots[0].sched.allocated_bps == 0);
+
+  /* NULL snapshot must not clear slots either */
+  sfu_layer_scheduler_prune(&session, NULL);
+  assert(slots[0].publisher_id == cam_key);
+
+  sfu_subscriptions_snapshot_release(snap);
+}
+
+static void test_repeated_reconciliation_without_leaks(void) {
+  sfu_peer_session_t session;
+  memset(&session, 0, sizeof(session));
+  sfu_layer_scheduler_slot_t slots[SFU_LAYER_SCHEDULER_CAP] = {0};
+  session.egress.schedulers = slots;
+  atomic_store(&session.egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY);
+
+  sfu_peer_session_t dummy_sub;
+  memset(&dummy_sub, 0, sizeof(dummy_sub));
+  atomic_store(&dummy_sub.refcount, 10000);
+
+  /* Simulate 50 reconnect cycles of a single camera publisher */
+  for (uint32_t peer_id = 1; peer_id <= 50; peer_id++) {
+    sfu_receiver_snapshot_t *snap = sfu_receiver_snapshot_alloc();
+    assert(snap != NULL);
+    sfu_receiver_entry_t entry = {
+        .subscriber = &dummy_sub,
+        .publisher_peer_id = peer_id,
+        .has_video = true,
+        .video_active = true,
+    };
+    assert(sfu_receiver_snapshot_set(snap, 0, &entry));
+
+    /* Prune stale slots from previous peer */
+    sfu_layer_scheduler_prune(&session, snap);
+
+    /* Allocate slot for current peer */
+    sfu_layer_scheduler_t *sched = sfu_layer_scheduler_for_stream(&session, peer_id, SFU_MEDIA_VIDEO);
+    assert(sched != NULL);
+    sfu_layer_scheduler_set_bitrate(sched, 500000);
+
+    /* Count occupied slots: exactly 1 slot must be occupied */
+    uint32_t occupied = 0;
+    for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+      if (slots[i].publisher_id != 0) {
+        occupied++;
+      }
+    }
+    assert(occupied == 1);
+
+    sfu_subscriptions_snapshot_release(snap);
+  }
+}
+
 int main(void) {
   test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
@@ -432,6 +700,12 @@ int main(void) {
   test_temporal_transition_commits_on_end();
   test_enhancement_frame_admission_latches_until_end();
   test_screen_share_admits_higher_tid_without_u_bit();
+  test_audio_does_not_consume_slot();
+  test_full_table_rejection_and_prune_reclaims_slot();
+  test_full_state_reset_on_reuse();
+  test_independent_camera_and_screen_pruning();
+  test_preservation_of_active_entries_with_zero_bitrate();
+  test_repeated_reconciliation_without_leaks();
   printf("test_layer_selector: OK\n");
   return 0;
 }

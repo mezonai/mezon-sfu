@@ -15,6 +15,12 @@ void sfu_layer_scheduler_init(sfu_layer_scheduler_t *sched, uint32_t initial_pub
   sched->target_tid = 2;
 }
 
+void sfu_layer_scheduler_slot_reset(sfu_layer_scheduler_slot_t *slot) {
+  if (slot) {
+    memset(slot, 0, sizeof(*slot));
+  }
+}
+
 sfu_layer_scheduler_t *sfu_layer_scheduler_for_stream(sfu_peer_session_t *session, uint32_t publisher_id, sfu_media_kind_t source) {
   if (!session || !sfu_session_video_runtime_ready(session) || !session->egress.schedulers || publisher_id == 0 || source == SFU_MEDIA_AUDIO) {
     return NULL;
@@ -55,6 +61,56 @@ sfu_layer_scheduler_t *sfu_layer_scheduler_for_stream(sfu_peer_session_t *sessio
 
 sfu_layer_scheduler_t *sfu_layer_scheduler_for(sfu_peer_session_t *session, uint32_t publisher_id) {
   return sfu_layer_scheduler_for_stream(session, publisher_id, SFU_MEDIA_VIDEO);
+}
+
+/**
+ * Reconcile scheduler slots against the subscriber's receiver snapshot.
+ * Reclaims slots for departed publishers or sources that are no longer active
+ * (e.g. camera or screen share turned off).
+ *
+ * NOTE: Must be called on the session's owner-worker thread, as scheduler
+ * fields are non-atomic and egress packet processing accesses them on that thread.
+ */
+void sfu_layer_scheduler_prune(sfu_peer_session_t *session, const sfu_receiver_snapshot_t *snapshot) {
+  if (!session || !sfu_session_video_runtime_ready(session) || !session->egress.schedulers || !snapshot) {
+    return;
+  }
+
+  bool keep[SFU_LAYER_SCHEDULER_CAP] = {false};
+  sfu_receiver_snapshot_iter_t iter;
+  sfu_receiver_snapshot_iter_init(&iter, snapshot);
+  uint32_t remote_slot = 0;
+  const sfu_receiver_entry_t *entry;
+  while ((entry = sfu_receiver_snapshot_iter_next(&iter, &remote_slot)) != NULL) {
+    if (entry->publisher_peer_id == 0) {
+      continue;
+    }
+    bool video_active = entry->has_video && entry->video_active;
+    bool screen_active = entry->has_screen && entry->screen_active;
+    if (!video_active && !screen_active) {
+      continue;
+    }
+    uint64_t video_key = ((uint64_t)entry->publisher_peer_id << 8) | (uint8_t)SFU_MEDIA_VIDEO;
+    uint64_t screen_key = ((uint64_t)entry->publisher_peer_id << 8) | (uint8_t)SFU_MEDIA_SCREEN;
+    for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+      uint64_t slot_key = session->egress.schedulers[i].publisher_id;
+      if (slot_key == 0) {
+        continue;
+      }
+      if (video_active && slot_key == video_key) {
+        keep[i] = true;
+      } else if (screen_active && slot_key == screen_key) {
+        keep[i] = true;
+      }
+    }
+  }
+
+  for (uint32_t i = 0; i < SFU_LAYER_SCHEDULER_CAP; i++) {
+    sfu_layer_scheduler_slot_t *slot = &session->egress.schedulers[i];
+    if (slot->publisher_id != 0 && !keep[i]) {
+      sfu_layer_scheduler_slot_reset(slot);
+    }
+  }
 }
 
 static void layer_scheduler_begin_picture(sfu_layer_scheduler_t *sched, uint32_t rtp_timestamp) {
