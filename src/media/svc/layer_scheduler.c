@@ -355,7 +355,7 @@ static const sfu_layer_rung_t k_layer_ladder[] = {
 #define SFU_LAYER_LADDER_LEN (sizeof(k_layer_ladder) / sizeof(k_layer_ladder[0]))
 #define SFU_LAYER_UP_HEADROOM_NUM 6 /* up threshold = rate * 1.2 */
 #define SFU_LAYER_UP_HEADROOM_DEN 5
-#define SFU_LAYER_DWELL_US 500000LL
+#define SFU_LAYER_UP_DWELL_US 3000000LL /* 3.0s hold-down for recovery/upgrade */
 
 void sfu_layer_scheduler_set_bitrate(sfu_layer_scheduler_t *sched, uint32_t bitrate_bps) {
   if (!sched) {
@@ -392,12 +392,20 @@ void sfu_layer_scheduler_set_bitrate(sfu_layer_scheduler_t *sched, uint32_t bitr
     }
   }
 
+  if (sched->source == SFU_MEDIA_SCREEN) {
+    target_tid = 2;
+  }
+
   if (target_sid == sched->target_sid && target_tid == sched->target_tid) {
     return;
   }
 
+  bool is_upgrade = (target_sid > sched->target_sid) ||
+                    (target_sid == sched->target_sid && target_tid > sched->target_tid);
+
   int64_t now = (int64_t)sfu_now_us();
-  if (sched->last_target_change_us != 0 && now - sched->last_target_change_us < SFU_LAYER_DWELL_US) {
+  if (is_upgrade && sched->last_target_change_us != 0 &&
+      (now - sched->last_target_change_us < SFU_LAYER_UP_DWELL_US)) {
     return;
   }
   sched->last_target_change_us = now;

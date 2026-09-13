@@ -34,22 +34,22 @@ static void test_zero_rate_disables(void) {
 static void test_burst_then_throttle(void) {
   sfu_pacer_t p;
   sfu_pacer_init(&p);
-  /* 1 Mbps estimate -> pacing 2.5 Mbps. Bucket cap = 2.5Mbps/8 * 40ms =
-   * 12500 bytes. */
+  /* 1 Mbps estimate -> pacing 2.5 Mbps. Bucket cap = 2.5Mbps/8 * 10ms =
+   * 3125 bytes. */
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   assert(p.active);
-  assert(p.bucket_cap_bytes == 12500);
+  assert(p.bucket_cap_bytes == 3125);
 
-  /* A fresh bucket admits a 12 KB I-frame at once... */
+  /* A fresh bucket admits a 3000 byte I-frame at once... */
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
-  /* ...but the next base-layer packet borrows almost the whole window... */
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
+  /* ...but the next base-layer packet borrows into debt... */
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
   assert(p.balance_bytes < 0);
   /* ...and an enhancement packet that would exceed a full burst window of
    * debt is dropped instead of queued. */
-  assert(p.balance_bytes == 12500 - 24000);
-  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, true, &now));
+  assert(p.balance_bytes == 3125 - 6000);
+  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 3000, true, &now));
   assert(p.dropped_enh == 1);
 }
 
@@ -58,13 +58,13 @@ static void test_admitted_enhancement_continuation_is_not_dropped(void) {
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
   int64_t before = p.balance_bytes;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, false, &now));
-  assert(p.balance_bytes == before - 12000);
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 3000, false, &now));
+  assert(p.balance_bytes == before - 3000);
   assert(p.dropped_enh == 0);
-  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, true, &now));
+  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 3000, true, &now));
   assert(p.dropped_enh == 1);
 }
 
@@ -75,8 +75,8 @@ static void test_audio_never_dropped_under_debt(void) {
   int64_t now = 1000000;
 
   /* Drive deep into debt with video. */
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
   assert(p.balance_bytes < 0);
 
   /* Audio bypasses the video token bucket; RTX still borrows through it. */
@@ -98,10 +98,10 @@ static void test_transition_video_never_dropped_under_debt(void) {
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
 
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
-  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 12000, true, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_TRANSITION, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
+  assert(!sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 3000, true, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_TRANSITION, 3000, false, &now));
   assert(p.sent[SFU_PACER_CLASS_VIDEO_TRANSITION] == 1);
 }
 
@@ -110,18 +110,18 @@ static void test_refill_restores_budget(void) {
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
 
-  /* 40 ms later the bucket has refilled exactly one burst window: pacing
-   * 2.5 Mbps = 312500 B/s, over 40 ms = 12500 bytes, clamped at the cap.
-   * Debt -11500 + 12500 = +1000. */
-  now += 40000;
-  assert(sfu_pacer_debt_after(&p, 1000, now) == 0);
-  assert(sfu_pacer_debt_after(&p, 2000, now) == 1000);
+  /* 10 ms later the bucket has refilled exactly one burst window: pacing
+   * 2.5 Mbps = 312500 B/s, over 10 ms = 3125 bytes, clamped at the cap.
+   * Debt -2875 + 3125 = +250. */
+  now += 10000;
+  assert(sfu_pacer_debt_after(&p, 250, now) == 0);
+  assert(sfu_pacer_debt_after(&p, 500, now) == 250);
 
   /* Enhancement fits again inside the window. */
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 1000, true, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_ENH, 250, true, &now));
 }
 
 static void test_retune_preserves_debt(void) {
@@ -129,8 +129,8 @@ static void test_retune_preserves_debt(void) {
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 12000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3000, false, &now));
   int64_t debt = p.balance_bytes;
   assert(debt < 0);
 
@@ -190,27 +190,26 @@ static void test_rtx_budget_window(void) {
   sfu_pacer_t p;
   sfu_pacer_init(&p);
   /* 4 Mbps -> pacing 10 Mbps -> RTX budget 2.5 Mbps; cap = 2500000/8 *
-   * 40ms = 12500 bytes (above the 4096 floor, so exact arithmetic). */
+   * 10ms = 3125 bytes (above the 1500 floor). */
   sfu_pacer_set_rate(&p, 4000 * KB, 1000000);
-  assert(p.rtx_budget_cap_bytes == 12500);
+  assert(p.rtx_budget_cap_bytes == 3125);
 
   int64_t now = 1000000;
-  /* Burst: the full window is available at once: floor(12500/1200) = 10. */
+  /* Burst: the full window is available at once: floor(3125/1200) = 2. */
   int served = 0;
   while (sfu_pacer_rtx_allow(&p, 1200, now)) {
     served++;
     assert(served < 100); /* must terminate: budget is finite */
   }
-  assert(served == 10);
+  assert(served == 2);
   assert(p.rtx_dropped_budget == 1); /* the failing call counted */
 
-  /* Sustained: 10 ms later 2500000/8 * 10ms = 3125 bytes refill the 500
-   * remainder -> 3625: exactly 3 more packets (3600). */
+  /* Sustained: 10 ms later 2500000/8 * 10ms = 3125 bytes refill.
+   * 725 remainder + 3125 = 3850, clamped to cap 3125 bytes: exactly 2 more packets. */
   now += 10000;
   assert(sfu_pacer_rtx_allow(&p, 1200, now));
   assert(sfu_pacer_rtx_allow(&p, 1200, now));
-  assert(sfu_pacer_rtx_allow(&p, 1200, now));
-  assert(!sfu_pacer_rtx_allow(&p, 1200, now)); /* 25 bytes left */
+  assert(!sfu_pacer_rtx_allow(&p, 1200, now)); /* 725 bytes left */
 }
 
 static void test_rtx_budget_unpaced_when_inactive(void) {
@@ -267,14 +266,14 @@ static void test_screen_reservation_makes_camera_enh_yield(void) {
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
   int64_t now = 1000000;
-  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 16000, false, &now));
+  assert(sfu_pacer_should_send(&p, SFU_PACER_CLASS_VIDEO_BASE, 3500, false, &now));
 
   sfu_pacer_reservation_t screen = {0};
   sfu_pacer_reservation_t camera = {0};
-  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_BASE, 6000, false, now, &screen));
-  assert(!sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_ENH, 4000, true, now, &camera));
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_BASE, 1800, false, now, &screen));
+  assert(!sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_ENH, 1500, true, now, &camera));
   sfu_pacer_cancel(&p, &screen);
-  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_ENH, 4000, true, now, &camera));
+  assert(sfu_pacer_reserve(&p, SFU_PACER_CLASS_VIDEO_ENH, 1500, true, now, &camera));
   sfu_pacer_cancel(&p, &camera);
 }
 
@@ -295,6 +294,31 @@ static void test_audio_and_inactive_reservations_bypass_bucket(void) {
   assert(p.sent[SFU_PACER_CLASS_AUDIO] == 1);
 }
 
+static void test_downward_retune_clamps_positive_balance(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  /* 4 Mbps -> pacing 10 Mbps -> bucket cap = 12500 bytes */
+  sfu_pacer_set_rate(&p, 4000 * KB, 1000000);
+  assert(p.bucket_cap_bytes == 12500);
+  assert(p.balance_bytes == 12500);
+
+  /* Retune down to 1 Mbps -> pacing 2.5 Mbps -> bucket cap = 3125 bytes */
+  sfu_pacer_set_rate(&p, 1000 * KB, 1000000);
+  assert(p.bucket_cap_bytes == 3125);
+  assert(p.balance_bytes == 3125);
+  assert(p.rtx_budget_cap_bytes == 1500);
+  assert(p.rtx_budget_bytes == 1500);
+}
+
+static void test_low_rate_rtx_admits_datagram(void) {
+  sfu_pacer_t p;
+  sfu_pacer_init(&p);
+  /* 500 kbps -> RTX budget calculation would be ~390 bytes without 1500 floor */
+  sfu_pacer_set_rate(&p, 500 * KB, 1000000);
+  assert(p.rtx_budget_cap_bytes == 1500);
+  assert(sfu_pacer_rtx_allow(&p, 1200, 1000000));
+}
+
 int main(void) {
   test_inactive_admits_everything();
   test_zero_rate_disables();
@@ -304,6 +328,8 @@ int main(void) {
   test_transition_video_never_dropped_under_debt();
   test_refill_restores_budget();
   test_retune_preserves_debt();
+  test_downward_retune_clamps_positive_balance();
+  test_low_rate_rtx_admits_datagram();
   test_admission_timestamp_is_send_time();
   test_vp9_l1t1_10fps_burst_cadence();
   test_rtx_budget_window();

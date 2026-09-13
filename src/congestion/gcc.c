@@ -23,6 +23,7 @@
 #define GCC_RECOVERY_PROBE_INTERVAL_US 1000000LL
 #define GCC_AIMD_DECREASE_FACTOR_NUM 85
 #define GCC_AIMD_DECREASE_FACTOR_DEN 100
+#define GCC_HIGH_LOSS_BACKOFF_WINDOWS 3
 #define GCC_ACK_WINDOW_US 300000LL
 #define GCC_ACK_GAP_RESET_US 300000LL
 #define GCC_ACK_EWMA_OLD_NUM 9
@@ -81,9 +82,12 @@ static void trendline_adapt_threshold(gcc_trendline_estimator_t *te, double modi
     te->last_threshold_update_us = now_us;
     return;
   }
-  double delta_ms = (double)(now_us - te->last_threshold_update_us) / 1000.0;
-  if (delta_ms <= 0) {
+  double delta_s = (double)(now_us - te->last_threshold_update_us) / 1000000.0;
+  if (delta_s <= 0.0) {
     return;
+  }
+  if (delta_s > 0.1) {
+    delta_s = 0.1;
   }
   double abs_trend = fabs(modified_trend);
   if (abs_trend > te->threshold_ms + GCC_THRESHOLD_MAX_DELTA_MS) {
@@ -91,7 +95,7 @@ static void trendline_adapt_threshold(gcc_trendline_estimator_t *te, double modi
     return;
   }
   double k = (abs_trend < te->threshold_ms) ? GCC_THRESHOLD_ADAPT_K_DOWN : GCC_THRESHOLD_ADAPT_K_UP;
-  double next = te->threshold_ms + k * (abs_trend - te->threshold_ms) * delta_ms;
+  double next = te->threshold_ms + k * (abs_trend - te->threshold_ms) * delta_s;
   te->threshold_ms = clampd(next, GCC_THRESHOLD_MIN_MS, GCC_THRESHOLD_MAX_MS);
   te->last_threshold_update_us = now_us;
 }
@@ -268,25 +272,43 @@ static void update_ack_bitrate(gcc_aimd_controller_t *aimd, const gcc_packet_inf
   aimd->ack_window_max_recv_us = 0;
 }
 
-void gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) {
-  if (!ctx || total == 0 || lost == 0) {
-    return;
+bool gcc_bwe_report_loss(gcc_bwe_context_t *ctx, uint32_t lost, uint32_t total) {
+  if (!ctx || total == 0) {
+    return false;
   }
   gcc_aimd_controller_t *aimd = &ctx->aimd;
+  if (lost == 0) {
+    aimd->consecutive_high_loss_windows = 0;
+    return false;
+  }
 
   if (lost * 100 > total * 10) {
-    if (aimd->have_ack_bitrate && aimd->current_bitrate_bps > aimd->ack_bitrate_bps) {
-      aimd->current_bitrate_bps = aimd->ack_bitrate_bps;
-      if (aimd->current_bitrate_bps < aimd->min_bitrate_bps) {
-        aimd->current_bitrate_bps = aimd->min_bitrate_bps;
+    aimd->consecutive_high_loss_windows++;
+    if (aimd->consecutive_high_loss_windows >= GCC_HIGH_LOSS_BACKOFF_WINDOWS) {
+      uint64_t basis = aimd->current_bitrate_bps;
+      if (aimd->have_ack_bitrate && aimd->ack_bitrate_bps < basis) {
+        basis = aimd->ack_bitrate_bps;
       }
+      uint64_t next = basis * GCC_AIMD_DECREASE_FACTOR_NUM / GCC_AIMD_DECREASE_FACTOR_DEN;
+      if (next < aimd->min_bitrate_bps) {
+        next = aimd->min_bitrate_bps;
+      } else if (next > aimd->max_bitrate_bps) {
+        next = aimd->max_bitrate_bps;
+      }
+      aimd->current_bitrate_bps = (uint32_t)next;
+      aimd->state = GCC_RATE_CTRL_HOLD;
+      aimd->last_recovery_probe_us = 0;
+      aimd->consecutive_high_loss_windows = 0;
+      return true;
     }
-    aimd->state = GCC_RATE_CTRL_HOLD;
-    aimd->last_recovery_probe_us = 0;
-  } else if (lost * 100 > total * 2) {
-    aimd->state = GCC_RATE_CTRL_HOLD;
-    aimd->last_recovery_probe_us = 0;
+  } else {
+    aimd->consecutive_high_loss_windows = 0;
+    if (lost * 100 > total * 2) {
+      aimd->state = GCC_RATE_CTRL_HOLD;
+      aimd->last_recovery_probe_us = 0;
+    }
   }
+  return false;
 }
 
 uint32_t gcc_bwe_process_twcc_packet(gcc_bwe_context_t *ctx, const gcc_packet_info_t *pkt) {

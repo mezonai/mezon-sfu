@@ -221,6 +221,48 @@ static void test_probe_explicit_abort(void) {
   assert(pc.cooldown_until_us == now_us + 5000LL + SFU_PROBE_COOLDOWN_FAILURE_US);
 }
 
+static void test_media_loss_probe_abort_sustained_only(void) {
+  sfu_probe_controller_t pc;
+  sfu_probe_controller_init(&pc);
+
+  gcc_bwe_context_t gcc;
+  gcc_bwe_init(&gcc, 1000000u, 50000u, 5000000u);
+
+  int64_t now_us = 1000000LL;
+  sfu_probe_controller_start_probe(&pc, &gcc, now_us);
+  assert(sfu_probe_controller_is_probing(&pc));
+
+  /* Window 1: isolated media loss (15%) reported to GCC */
+  bool sustained = gcc_bwe_report_loss(&gcc, 15, 100);
+  assert(!sustained);
+  if (sustained) {
+    sfu_probe_controller_abort(&pc, &gcc, now_us, "media_loss");
+  }
+  /* Probing remains active on isolated wireless media loss */
+  assert(sfu_probe_controller_is_probing(&pc));
+  assert(gcc.aimd.active_probing);
+
+  /* Window 2: second high-loss window */
+  sustained = gcc_bwe_report_loss(&gcc, 15, 100);
+  assert(!sustained);
+  if (sustained) {
+    sfu_probe_controller_abort(&pc, &gcc, now_us, "media_loss");
+  }
+  assert(sfu_probe_controller_is_probing(&pc));
+
+  /* Window 3: third high-loss window confirms sustained loss */
+  sustained = gcc_bwe_report_loss(&gcc, 15, 100);
+  assert(sustained);
+  if (sustained) {
+    sfu_probe_controller_abort(&pc, &gcc, now_us, "media_loss");
+  }
+  /* Now probe is aborted */
+  assert(!sfu_probe_controller_is_probing(&pc));
+  assert(pc.aborted);
+  assert(!gcc.aimd.active_probing);
+  assert(pc.clusters_aborted == 1);
+}
+
 int main(void) {
   test_lifecycle_and_reset();
   test_eligibility_and_conditions();
@@ -229,6 +271,7 @@ int main(void) {
   test_probe_abort_on_overuse();
   test_probe_abort_on_packet_loss();
   test_probe_explicit_abort();
+  test_media_loss_probe_abort_sustained_only();
   printf("test_probe_controller: OK\n");
   return 0;
 }

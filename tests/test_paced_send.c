@@ -347,7 +347,9 @@ static void test_priority_queue_clear_and_refund(void) {
   sfu_pacer_t p;
   sfu_pacer_init(&p);
   sfu_pacer_set_rate(&p, 4000000, 1000000);
-  p.rtx_budget_bytes = 5000;
+  /* 4 Mbps -> pacing 10 Mbps -> RTX budget 2.5 Mbps -> 10 ms cap = 3125 bytes. */
+  assert(p.rtx_budget_cap_bytes == 3125);
+  p.rtx_budget_bytes = 1000;
 
   assert(sfu_paced_priority_queue_enqueue(&q, payload, sizeof(payload), &dst, dst_len, 1, 1, 1, false, 0, 500, 1000000));
   assert(sfu_paced_priority_queue_enqueue(&q, payload, sizeof(payload), &dst, dst_len, 1, 1, 1, false, 0, 500, 1000000));
@@ -355,7 +357,8 @@ static void test_priority_queue_clear_and_refund(void) {
 
   sfu_paced_priority_queue_clear(&q, &p);
   assert(q.count == 0);
-  assert(p.rtx_budget_bytes == 6000);
+  /* Two 500-byte RTX packets refunded: 1000 + 1000 = 2000, under the 3125 cap. */
+  assert(p.rtx_budget_bytes == 2000);
 
   sfu_paced_priority_queue_destroy(&q, &p);
 }
