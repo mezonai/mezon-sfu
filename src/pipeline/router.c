@@ -19,7 +19,7 @@ typedef struct {
   uint8_t count;
 } sfu_route_batch_builder_t;
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 typedef struct {
   uint32_t recipients, eligible, ineligible, invisible, invalid_owner;
   uint32_t local, local_ok, local_fail, remote_targets;
@@ -87,7 +87,7 @@ static bool ensure_remote_source(sfu_worker_t *w, const sfu_packet_t *plain, sfu
 
 static void flush_remote_batch(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_ingress_media_t *m, uint32_t dst_worker,
                                sfu_route_batch_builder_t *builder, sfu_packet_t **remote_source
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
                                ,
                                sfu_vp9_dispatch_diag_t *diag
 #endif
@@ -95,13 +95,13 @@ static void flush_remote_batch(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
   if (builder->count == 0) {
     return;
   }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (diag) {
     diag->batches++;
   }
 #endif
   if (!ensure_remote_source(w, m->pkt, remote_source)) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (diag) {
       diag->copy_fail++;
     }
@@ -113,7 +113,7 @@ static void flush_remote_batch(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
   sfu_peer_session_t *publisher = m->is_audio ? NULL : sender_session;
   bool enqueued = sfu_fanout_mesh_enqueue_forward_batch(w->mesh, w->worker_index, dst_worker, *remote_source, publisher, builder->targets, builder->count,
                                                         m->is_audio, m->has_svc ? &m->svc : NULL, m->has_svc, m->is_keyframe);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (diag) {
     if (enqueued) {
       diag->enqueued++;
@@ -131,16 +131,16 @@ static void flush_remote_batch(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
 static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu_ingress_media_t *m, sfu_peer_session_t *subscriber, uint32_t video_ssrc,
                          uint32_t video_rtx_ssrc, uint32_t remote_slot, uint64_t assignment_generation, uint8_t video_pt, uint8_t video_rtx_pt, bool has_video,
                          sfu_route_batch_builder_t builders[SFU_MAX_WORKERS], sfu_packet_t **remote_source
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
                          ,
                          sfu_vp9_dispatch_diag_t *diag
 #endif
 ) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   dispatch_record_generation(diag, assignment_generation);
 #endif
   if (!subscriber || subscriber->state != SFU_SESSION_ESTABLISHED || !sfu_session_accepts_work(subscriber)) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (diag) {
       diag->ineligible++;
     }
@@ -148,14 +148,14 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
     return;
   }
   if (!m->is_audio && !atomic_load_explicit(&subscriber->media.visible, memory_order_acquire)) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (diag) {
       diag->invisible++;
     }
 #endif
     return;
   }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (diag) {
     diag->eligible++;
   }
@@ -163,7 +163,7 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
   uint16_t owner_worker = sfu_session_owner_worker(subscriber);
   uint32_t worker_count = w->mesh ? w->mesh->worker_count : 1;
   if (owner_worker == w->worker_index) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     bool ok =
         forward_local(w, sender_session, m, subscriber, video_ssrc, video_rtx_ssrc, remote_slot, assignment_generation, video_pt, video_rtx_pt, has_video);
     if (diag) {
@@ -176,7 +176,7 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
     return;
   }
   if (owner_worker == SFU_SESSION_OWNER_NONE || owner_worker >= worker_count) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (diag) {
       diag->invalid_owner++;
     }
@@ -186,7 +186,7 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
   sfu_route_batch_builder_t *builder = &builders[owner_worker];
   if (builder->count == SFU_FANOUT_BATCH_CAP) {
     flush_remote_batch(w, sender_session, m, owner_worker, builder, remote_source
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
                        ,
                        diag
 #endif
@@ -205,7 +205,7 @@ static void route_target(sfu_worker_t *w, sfu_peer_session_t *sender_session, sf
   target->video_rtx_pt = video_rtx_pt;
   target->source = (uint8_t)m->source;
   target->has_video = has_video;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (diag) {
     diag->remote_targets++;
   }
@@ -224,7 +224,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   sfu_fanout_iter_t iter;
   sfu_fanout_iter_init(&iter, bundle, kind);
   const sfu_fanout_route_t *entry;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   uint32_t audio_dispatched = 0;
   uint32_t audio_skipped_pending = 0;
   uint32_t routed = 0;
@@ -238,12 +238,12 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   }
 #endif
   while ((entry = sfu_fanout_iter_next(&iter, NULL)) != NULL) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     routed++;
 #endif
     if (!sfu_session_remote_slot_authorized(entry->subscriber, entry->remote_slot, entry->assignment_generation)) {
       sfu_metric_inc_id(SFU_METRIC_ROUTER_ASSIGNMENT_PENDING);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       if (kind == SFU_MEDIA_AUDIO) {
         audio_skipped_pending++;
       }
@@ -253,7 +253,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
 #endif
       continue;
     }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (kind == SFU_MEDIA_AUDIO) {
       audio_dispatched++;
     }
@@ -263,7 +263,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
 #endif
     if (kind == SFU_MEDIA_AUDIO) {
       route_target(w, sender_session, m, entry->subscriber, 0, 0, entry->remote_slot, entry->assignment_generation, 0, 0, false, builders, &remote_source
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
                    ,
                    NULL
 #endif
@@ -271,7 +271,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     } else if (kind == SFU_MEDIA_SCREEN) {
       route_target(w, sender_session, m, entry->subscriber, entry->screen_ssrc, entry->screen_rtx_ssrc, entry->remote_slot, entry->assignment_generation,
                    entry->screen_pt, entry->screen_rtx_pt, true, builders, &remote_source
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
                    ,
                    log_dispatch ? &diag : NULL
 #endif
@@ -279,7 +279,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     } else {
       route_target(w, sender_session, m, entry->subscriber, entry->video_ssrc, entry->video_rtx_ssrc, entry->remote_slot, entry->assignment_generation,
                    entry->video_pt, entry->video_rtx_pt, true, builders, &remote_source
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
                    ,
                    NULL
 #endif
@@ -289,14 +289,14 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
   for (uint32_t dst = 0; dst < worker_count; dst++) {
     if (dst != w->worker_index) {
       flush_remote_batch(w, sender_session, m, dst, &builders[dst], &remote_source
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
                          ,
                          log_dispatch ? &diag : NULL
 #endif
       );
     }
   }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (log_dispatch) {
     uint16_t seq = m->pkt->len >= 4 ? sfu_read_be16(m->pkt->data + 2) : 0;
     uint32_t ts = m->pkt->len >= 8 ? sfu_read_be32(m->pkt->data + 4) : m->svc.rtp_timestamp;

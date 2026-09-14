@@ -79,7 +79,7 @@ void sfu_worker_release_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
 #define SFU_WORKER_TWCC_FLUSH_INTERVAL_US 15000LL
 #define SFU_WORKER_REMB_SCAN_INTERVAL_US 50000LL
 #define SFU_WORKER_PACED_SEND_SCAN_INTERVAL_US SFU_PACED_SEND_SCAN_INTERVAL_US
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 #define SFU_WORKER_DIAG_SCAN_INTERVAL_US 100000LL
 #endif
 
@@ -135,23 +135,62 @@ void sfu_worker_unregister_session(sfu_worker_t *w, sfu_peer_session_t *s) {
 
   sfu_peer_session_t *paced_removed = NULL;
   pthread_mutex_lock(&w->paced_active_lock);
-  for (uint32_t i = 0; i < w->paced_active_count; i++) {
-    if (w->paced_active_sessions[i] == s) {
-      paced_removed = w->paced_active_sessions[i];
-      w->paced_active_sessions[i] = w->paced_active_sessions[--w->paced_active_count];
-      atomic_store_explicit(&s->paced_active, false, memory_order_release);
-      break;
+  if (atomic_load_explicit(&s->paced_generation, memory_order_relaxed) == w->paced_generation) {
+    for (uint32_t i = 0; i < w->paced_active_count; i++) {
+      if (w->paced_active_sessions[i] == s) {
+        paced_removed = w->paced_active_sessions[i];
+        w->paced_active_sessions[i] = w->paced_active_sessions[--w->paced_active_count];
+        break;
+      }
     }
   }
+  atomic_store_explicit(&s->paced_active, false, memory_order_release);
+  atomic_store_explicit(&s->paced_generation, 0, memory_order_release);
   pthread_mutex_unlock(&w->paced_active_lock);
   sfu_session_release(paced_removed);
+}
+
+static inline uint64_t sfu_worker_ensure_paced_generation(sfu_worker_t *w) {
+  if (w->paced_generation == 0) {
+    w->paced_generation = ((uint64_t)(w->worker_index + 1) << 48) | 1ULL;
+  }
+  return w->paced_generation;
+}
+
+static inline uint64_t sfu_worker_next_paced_generation(sfu_worker_t *w) {
+  sfu_worker_ensure_paced_generation(w);
+  w->paced_generation++;
+  if ((w->paced_generation & 0xFFFFFFFFFFFFULL) == 0) {
+    w->paced_generation = ((uint64_t)(w->worker_index + 1) << 48) | 1ULL;
+  }
+  return w->paced_generation;
+}
+
+static inline bool sfu_worker_paced_ensure_capacity(sfu_worker_t *w) {
+  if (w->paced_active_count < w->paced_active_capacity) {
+    return true;
+  }
+  uint32_t capacity = w->paced_active_capacity ? w->paced_active_capacity * 2 : 64;
+  if (capacity > SFU_SESSION_TABLE_MAX) {
+    capacity = SFU_SESSION_TABLE_MAX;
+  }
+  if (capacity <= w->paced_active_capacity) {
+    return false;
+  }
+  sfu_peer_session_t **sessions = SFU_REALLOC(w->paced_active_sessions, (size_t)capacity * sizeof(*sessions));
+  if (!sessions) {
+    return false;
+  }
+  w->paced_active_sessions = sessions;
+  w->paced_active_capacity = capacity;
+  return true;
 }
 
 static inline bool sfu_session_has_paced_work(const sfu_peer_session_t *s) {
   if (!s) {
     return false;
   }
-  if (s->egress.paced_rtx.count > 0 || s->egress.paced_camera.count > 0 || s->egress.paced_probe.count > 0) {
+  if (s->egress.paced_rtx.count > 0 || s->egress.paced_camera.ready_count > 0 || s->egress.paced_probe.count > 0) {
     return true;
   }
   uint32_t slots = sfu_session_remote_slot_high_water(s);
@@ -159,7 +198,7 @@ static inline bool sfu_session_has_paced_work(const sfu_peer_session_t *s) {
     slots = SFU_MAX_REMOTE_SLOTS;
   }
   for (uint32_t i = 0; i < slots; i++) {
-    if (s->egress.paced_screen[i].count > 0) {
+    if (s->egress.paced_screen[i].ready_count > 0) {
       return true;
     }
   }
@@ -194,34 +233,20 @@ void sfu_worker_mark_session_paced_active(sfu_worker_t *w, sfu_peer_session_t *s
   atomic_fetch_add_explicit(&s->refcount, 1, memory_order_relaxed);
 
   pthread_mutex_lock(&target_w->paced_active_lock);
-  for (uint32_t i = 0; i < target_w->paced_active_count; i++) {
-    if (target_w->paced_active_sessions[i] == s) {
-      pthread_mutex_unlock(&target_w->paced_active_lock);
-      sfu_session_release(s);
-      return;
-    }
+  uint64_t current_gen = sfu_worker_ensure_paced_generation(target_w);
+  if (atomic_load_explicit(&s->paced_generation, memory_order_relaxed) == current_gen) {
+    pthread_mutex_unlock(&target_w->paced_active_lock);
+    sfu_session_release(s);
+    return;
   }
-  if (target_w->paced_active_count == target_w->paced_active_capacity) {
-    uint32_t capacity = target_w->paced_active_capacity ? target_w->paced_active_capacity * 2 : 64;
-    if (capacity > SFU_SESSION_TABLE_MAX) {
-      capacity = SFU_SESSION_TABLE_MAX;
-    }
-    if (capacity <= target_w->paced_active_capacity) {
-      pthread_mutex_unlock(&target_w->paced_active_lock);
-      atomic_store_explicit(&s->paced_active, false, memory_order_release);
-      sfu_session_release(s);
-      return;
-    }
-    sfu_peer_session_t **sessions = SFU_REALLOC(target_w->paced_active_sessions, (size_t)capacity * sizeof(*sessions));
-    if (!sessions) {
-      pthread_mutex_unlock(&target_w->paced_active_lock);
-      atomic_store_explicit(&s->paced_active, false, memory_order_release);
-      sfu_session_release(s);
-      return;
-    }
-    target_w->paced_active_sessions = sessions;
-    target_w->paced_active_capacity = capacity;
+  if (!sfu_worker_paced_ensure_capacity(target_w)) {
+    pthread_mutex_unlock(&target_w->paced_active_lock);
+    atomic_store_explicit(&s->paced_active, false, memory_order_release);
+    atomic_store_explicit(&s->paced_generation, 0, memory_order_release);
+    sfu_session_release(s);
+    return;
   }
+  atomic_store_explicit(&s->paced_generation, current_gen, memory_order_relaxed);
   target_w->paced_active_sessions[target_w->paced_active_count++] = s;
   pthread_mutex_unlock(&target_w->paced_active_lock);
 }
@@ -250,6 +275,7 @@ bool sfu_worker_drain_paced_active(sfu_worker_t *w, int64_t now_us) {
 
   memcpy(w->paced_drain_scratch, w->paced_active_sessions, (size_t)drain_count * sizeof(sfu_peer_session_t *));
   w->paced_active_count = 0;
+  sfu_worker_next_paced_generation(w);
   pthread_mutex_unlock(&w->paced_active_lock);
 
   bool paced_sent = false;
@@ -262,6 +288,7 @@ bool sfu_worker_drain_paced_active(sfu_worker_t *w, int64_t now_us) {
 
     if (!sfu_session_accepts_work(ls) || sfu_session_owner_worker(ls) != w->worker_index) {
       atomic_store_explicit(&ls->paced_active, false, memory_order_release);
+      atomic_store_explicit(&ls->paced_generation, 0, memory_order_release);
       sfu_session_release(ls);
       continue;
     }
@@ -320,42 +347,23 @@ bool sfu_worker_drain_paced_active(sfu_worker_t *w, int64_t now_us) {
     bool still_has_work = sfu_session_has_paced_work(ls);
     if (still_has_work) {
       pthread_mutex_lock(&w->paced_active_lock);
-      bool already_present = false;
-      for (uint32_t k = 0; k < w->paced_active_count; k++) {
-        if (w->paced_active_sessions[k] == ls) {
-          already_present = true;
-          break;
-        }
-      }
-      if (!already_present) {
-        if (w->paced_active_count == w->paced_active_capacity) {
-          uint32_t capacity = w->paced_active_capacity ? w->paced_active_capacity * 2 : 64;
-          if (capacity > SFU_SESSION_TABLE_MAX) {
-            capacity = SFU_SESSION_TABLE_MAX;
-          }
-          if (capacity > w->paced_active_capacity) {
-            sfu_peer_session_t **sessions = SFU_REALLOC(w->paced_active_sessions, (size_t)capacity * sizeof(*sessions));
-            if (sessions) {
-              w->paced_active_sessions = sessions;
-              w->paced_active_capacity = capacity;
-            }
-          }
-        }
-        if (w->paced_active_count < w->paced_active_capacity) {
-          w->paced_active_sessions[w->paced_active_count++] = ls;
-          pthread_mutex_unlock(&w->paced_active_lock);
-          continue; /* Requeued: keep retained refcount */
-        }
-      }
-      pthread_mutex_unlock(&w->paced_active_lock);
-      if (already_present) {
+      if (atomic_load_explicit(&ls->paced_generation, memory_order_relaxed) == w->paced_generation) {
+        pthread_mutex_unlock(&w->paced_active_lock);
         sfu_session_release(ls);
         continue;
       }
+      if (sfu_worker_paced_ensure_capacity(w)) {
+        atomic_store_explicit(&ls->paced_generation, w->paced_generation, memory_order_relaxed);
+        w->paced_active_sessions[w->paced_active_count++] = ls;
+        pthread_mutex_unlock(&w->paced_active_lock);
+        continue; /* Requeued: keep retained refcount */
+      }
+      pthread_mutex_unlock(&w->paced_active_lock);
       /* Capacity-exhausted: cannot requeue while still_has_work. Clear flag so
        * a concurrent/next mark (CAS false->true) can re-enqueue; pending work
        * will be recovered by that mark or the 15 ms safety scan. */
       atomic_store_explicit(&ls->paced_active, false, memory_order_release);
+      atomic_store_explicit(&ls->paced_generation, 0, memory_order_release);
       sfu_session_release(ls);
       continue;
     }
@@ -366,41 +374,26 @@ bool sfu_worker_drain_paced_active(sfu_worker_t *w, int64_t now_us) {
       bool expected = false;
       if (atomic_compare_exchange_strong_explicit(&ls->paced_active, &expected, true, memory_order_seq_cst, memory_order_seq_cst)) {
         pthread_mutex_lock(&w->paced_active_lock);
-        bool already_present = false;
-        for (uint32_t k = 0; k < w->paced_active_count; k++) {
-          if (w->paced_active_sessions[k] == ls) {
-            already_present = true;
-            break;
-          }
-        }
-        if (!already_present) {
-          if (w->paced_active_count == w->paced_active_capacity) {
-            uint32_t capacity = w->paced_active_capacity ? w->paced_active_capacity * 2 : 64;
-            if (capacity > SFU_SESSION_TABLE_MAX) {
-              capacity = SFU_SESSION_TABLE_MAX;
-            }
-            if (capacity > w->paced_active_capacity) {
-              sfu_peer_session_t **sessions = SFU_REALLOC(w->paced_active_sessions, (size_t)capacity * sizeof(*sessions));
-              if (sessions) {
-                w->paced_active_sessions = sessions;
-                w->paced_active_capacity = capacity;
-              }
-            }
-          }
-          if (w->paced_active_count < w->paced_active_capacity) {
-            w->paced_active_sessions[w->paced_active_count++] = ls;
-            pthread_mutex_unlock(&w->paced_active_lock);
-            continue; /* Reactivated: keep retained refcount */
-          }
-        }
-        pthread_mutex_unlock(&w->paced_active_lock);
-        if (already_present) {
+        if (atomic_load_explicit(&ls->paced_generation, memory_order_relaxed) == w->paced_generation) {
+          pthread_mutex_unlock(&w->paced_active_lock);
           sfu_session_release(ls);
           continue;
         }
+        if (sfu_worker_paced_ensure_capacity(w)) {
+          atomic_store_explicit(&ls->paced_generation, w->paced_generation, memory_order_relaxed);
+          w->paced_active_sessions[w->paced_active_count++] = ls;
+          pthread_mutex_unlock(&w->paced_active_lock);
+          continue; /* Reactivated: keep retained refcount */
+        }
+        pthread_mutex_unlock(&w->paced_active_lock);
         /* CAS succeeded but insert failed (capacity exhausted / realloc failed):
-         * clear flag so future marks are not stuck on CAS false->true. */
+         * clear flag so future marks are not stuck on CAS false->true.
+         * Release the refcount taken by the concurrent mark whose CAS we
+         * just undid. */
         atomic_store_explicit(&ls->paced_active, false, memory_order_release);
+        atomic_store_explicit(&ls->paced_generation, 0, memory_order_release);
+        sfu_session_release(ls);
+        continue;
       }
     }
 
@@ -424,6 +417,7 @@ int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd,
   w->ice_creds = ice_creds;
   w->routing_table = routing_table;
   w->scheduler = scheduler;
+  w->paced_generation = ((uint64_t)(worker_index + 1) << 48) | 1ULL;
 
   if (pthread_mutex_init(&w->local_sessions_lock, NULL) != 0) {
     return -1;
@@ -500,6 +494,7 @@ void sfu_worker_destroy(sfu_worker_t *w) {
     sfu_peer_session_t *s = w->paced_active_sessions[i];
     if (s) {
       atomic_store_explicit(&s->paced_active, false, memory_order_release);
+      atomic_store_explicit(&s->paced_generation, 0, memory_order_release);
       sfu_session_release(s);
     }
   }
@@ -510,6 +505,7 @@ void sfu_worker_destroy(sfu_worker_t *w) {
   w->paced_active_count = 0;
   w->paced_active_capacity = 0;
   w->paced_drain_scratch_capacity = 0;
+  w->paced_generation = 0;
   pthread_mutex_unlock(&w->paced_active_lock);
   pthread_mutex_destroy(&w->paced_active_lock);
 
@@ -563,7 +559,7 @@ static void *worker_thread_main(void *arg) {
     bool paced_due = now_us - w->last_paced_send_scan_us >= SFU_WORKER_PACED_SEND_SCAN_INTERVAL_US;
     bool twcc_due = now_us - w->last_twcc_flush_us >= SFU_WORKER_TWCC_FLUSH_INTERVAL_US;
     bool remb_due = now_us - w->last_remb_scan_us >= SFU_WORKER_REMB_SCAN_INTERVAL_US;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     bool diag_due = now_us - w->last_diag_scan_us >= SFU_WORKER_DIAG_SCAN_INTERVAL_US;
 #else
     bool diag_due = false;
@@ -584,7 +580,7 @@ static void *worker_thread_main(void *arg) {
       if (remb_due) {
         w->last_remb_scan_us = now_us;
       }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       if (diag_due) {
         w->last_diag_scan_us = now_us;
       }
@@ -626,7 +622,7 @@ static void *worker_thread_main(void *arg) {
           if (remb_due && sfu_session_maybe_send_publisher_remb(w, ls, now_us)) {
             scanned_remb = true;
           }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
           if (diag_due) {
             sfu_session_log_congestion_diag(w, ls, (uint64_t)now_us);
           }

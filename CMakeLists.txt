@@ -7,7 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(SFU_ENABLE_ASAN "Build with AddressSanitizer" OFF)
 option(SFU_ENABLE_TSAN "Build with ThreadSanitizer" OFF)
-option(SFU_DIAG_LOG "Compile in diagnostic logging for the SRTP key-desync investigation (ON = verbose drops/dumps, OFF = silent)" ON)
+option(SFU_DIAG_LOG "Compile in diagnostic logging for the SRTP key-desync investigation (ON = verbose drops/dumps, OFF = silent)" OFF)
 set(SFU_NET_BACKEND "af_xdp" CACHE STRING "Media network backend: af_xdp or io_uring")
 set_property(CACHE SFU_NET_BACKEND PROPERTY STRINGS af_xdp io_uring)
 option(SFU_ENABLE_PRIVILEGED_TESTS "Register privileged network integration tests" OFF)

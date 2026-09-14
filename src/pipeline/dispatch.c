@@ -256,7 +256,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
     if (session->cold->active_client_random_valid && memcmp(client_random, session->cold->active_client_random, sizeof(client_random)) == 0) {
       sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_DUPLICATE);
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       char client_random_hex[65];
       for (size_t _dr = 0; _dr < 32; _dr++) {
         snprintf(client_random_hex + _dr * 2, 3, "%02x", (unsigned)client_random[_dr]);
@@ -324,7 +324,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
         session->cold->transport_generation++;
         sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_ESTABLISHED);
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         char client_random_hex[65];
         for (size_t _cr = 0; _cr < 32; _cr++) {
           snprintf(client_random_hex + _cr * 2, 3, "%02x", (unsigned)session->cold->active_client_random[_cr]);
@@ -347,7 +347,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
         session->cold->transport_generation = 1;
         session->state = SFU_SESSION_ESTABLISHED;
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         char client_random_hex[65];
         for (size_t _cr2 = 0; _cr2 < 32; _cr2++) {
           snprintf(client_random_hex + _cr2 * 2, 3, "%02x", (unsigned)session->cold->active_client_random[_cr2]);
