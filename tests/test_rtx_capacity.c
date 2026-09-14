@@ -20,12 +20,13 @@
  *
  * No project-wide failing-allocator hook exists, so the OOM branch in
  * sfu_rtx_cache_init cannot be forced from this binary. Instead we:
- *   1. Verify put/get size gate (room for 2-byte RTX OSN):
+ *   1. Verify the 1024 packet buffers are slices of one contiguous slab.
+ *   2. Verify put/get size gate (room for 2-byte RTX OSN):
  *        len == SFU_MAX_PAYLOAD_SIZE - 2  -> accepted
  *        len == SFU_MAX_PAYLOAD_SIZE - 1  -> rejected
  *        len == SFU_MAX_PAYLOAD_SIZE      -> rejected
- *   2. Verify destroy is safe on a zeroed cache (the state left after an
- *      init-failure cleanup path frees already-allocated entry buffers).
+ *   3. Verify destroy is safe on both a zeroed cache (the state left by a
+ *      slab-allocation failure) and an already-destroyed cache.
  */
 int main(void) {
   /* --- init-failure leftover: zeroed cache must be destroy-safe --- */
@@ -38,6 +39,11 @@ int main(void) {
   /* --- happy-path init --- */
   sfu_rtx_cache_t cache;
   EXPECT(sfu_rtx_cache_init(&cache) == 0);
+  EXPECT(cache.payload_slab != NULL);
+  for (size_t i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
+    EXPECT(cache.entries[i].data == cache.payload_slab + i * SFU_MAX_PAYLOAD_SIZE);
+    EXPECT(!cache.entries[i].valid);
+  }
 
   uint8_t *buf = (uint8_t *)malloc(SFU_MAX_PAYLOAD_SIZE);
   EXPECT(buf != NULL);
@@ -71,8 +77,13 @@ int main(void) {
 
   free(buf);
   sfu_rtx_cache_destroy(&cache);
+  EXPECT(cache.payload_slab == NULL);
+  for (size_t i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
+    EXPECT(cache.entries[i].data == NULL);
+    EXPECT(!cache.entries[i].valid);
+  }
 
-  /* Double-destroy after destroy nulls entry pointers must be safe. */
+  /* Double-destroy after destroy nulls slab and entry pointers must be safe. */
   sfu_rtx_cache_destroy(&cache);
   {
     sfu_rtx_cache_t c2;
