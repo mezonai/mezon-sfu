@@ -128,14 +128,17 @@ static int extract_json_int64(const char *json, size_t json_len, const char *fie
 }
 
 int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret, size_t secret_len, sfu_jwt_claims_t *out) {
-  if (!token || token_len == 0 || !secret || secret_len == 0 || !out) {
+  if (!out) {
+    return -1;
+  }
+  memset(out, 0, sizeof(*out));
+
+  if (!token || token_len == 0 || !secret || secret_len == 0) {
     return -1;
   }
   if (token_len > SFU_JWT_MAX_TOKEN) {
     return -1;
   }
-
-  memset(out, 0, sizeof(*out));
 
   const char *dot1 = memchr(token, '.', token_len);
   if (!dot1) {
@@ -212,8 +215,17 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
     out->nbf = nbf;
   }
 
-  (void)sfu_json_extract_string((const char *)payload_json, payload_json_len, "iss", out->iss, sizeof(out->iss));
-  (void)sfu_json_extract_string((const char *)payload_json, payload_json_len, "metadata", out->metadata, sizeof(out->metadata));
+  if (sfu_json_extract_string((const char *)payload_json, payload_json_len, "iss", out->iss, sizeof(out->iss)) < 0) {
+    out->iss[0] = '\0';
+  } else {
+    out->iss[sizeof(out->iss) - 1] = '\0';
+  }
+
+  if (sfu_json_extract_string((const char *)payload_json, payload_json_len, "metadata", out->metadata, sizeof(out->metadata)) < 0) {
+    out->metadata[0] = '\0';
+  } else {
+    out->metadata[sizeof(out->metadata) - 1] = '\0';
+  }
 
   int64_t room_id = 0;
   if (extract_json_int64((const char *)payload_json, payload_json_len, "room", &room_id) == 0 && room_id > 0) {
@@ -224,11 +236,16 @@ int sfu_jwt_parse_hs256(const char *token, size_t token_len, const char *secret,
 }
 
 int sfu_handshake_verify_token_claims(const char *token, size_t token_len, const char *secret, sfu_jwt_claims_t *out) {
-  if (!token || token_len == 0 || !secret || secret[0] == '\0' || !out) {
+  if (!out) {
+    return -1;
+  }
+  memset(out, 0, sizeof(*out));
+
+  if (!token || token_len == 0 || !secret || secret[0] == '\0') {
     return -1;
   }
 
-  sfu_jwt_claims_t claims;
+  sfu_jwt_claims_t claims = {0};
   if (sfu_jwt_parse_hs256(token, token_len, secret, strlen(secret), &claims) != 0) {
     SFU_LOG_WARN("handshake: JWT parse/verify failed");
     return -1;
@@ -261,7 +278,7 @@ int sfu_handshake_verify_join_token(const char *token, size_t token_len, const c
     return -1;
   }
 
-  sfu_jwt_claims_t claims;
+  sfu_jwt_claims_t claims = {0};
   if (sfu_handshake_verify_token_claims(token, token_len, secret, &claims) != 0) {
     return -1;
   }

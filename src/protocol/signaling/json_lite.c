@@ -38,6 +38,7 @@ int sfu_json_extract_string(const char *json, size_t json_len, const char *field
     char c = *p++;
     if (c == '\\') {
       if (p == end) {
+        out[0] = '\0';
         return -1;
       }
       switch (*p++) {
@@ -51,11 +52,13 @@ int sfu_json_extract_string(const char *json, size_t json_len, const char *field
       }
     }
     if (out_len + 1 >= out_cap) {
+      out[0] = '\0';
       return -1;
     }
     out[out_len++] = c;
   }
   if (p == end || *p != '"') {
+    out[0] = '\0';
     return -1;
   }
 

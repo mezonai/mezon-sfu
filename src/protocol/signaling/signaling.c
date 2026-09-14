@@ -1789,12 +1789,13 @@ static void handle_participant_action(sfu_client_conn_t *c, const char *buf, siz
     return;
   }
 
-  sfu_jwt_claims_t claims;
+  sfu_jwt_claims_t claims = {0};
   if (sfu_handshake_verify_token_claims(token, (size_t)token_len, jwt_secret, &claims) != 0) {
     static const char invalid_token[] = "{\"type\":\"error\",\"message\":\"invalid_token\"}";
     sfu_ws_send_text(c->fd, invalid_token, sizeof(invalid_token) - 1);
     return;
   }
+  claims.metadata[sizeof(claims.metadata) - 1] = '\0';
   if (claims.room_id != c->joined_room_id) {
     static const char room_mismatch[] = "{\"type\":\"error\",\"message\":\"token_room_mismatch\"}";
     sfu_ws_send_text(c->fd, room_mismatch, sizeof(room_mismatch) - 1);
