@@ -340,17 +340,22 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
   }
   sfu_probe_controller_t *pc = session->egress.probe_controller;
 
-  uint32_t media_backlog = session->egress.paced_camera.count;
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS && media_backlog == 0; i++) {
-    if (session->egress.paced_screen[i].count > 0) {
-      media_backlog++;
-    }
-  }
+  /* Resolve outbound RTX parameters outside pc->lock to match generation path */
+  uint32_t rtx_ssrc = 0;
+  uint8_t rtx_pt = 0;
+  bool rtx_available = find_outbound_rtx_params(session, &rtx_ssrc, &rtx_pt);
 
   pthread_mutex_lock(&pc->lock);
   if (pc->state == SFU_PROBE_STATE_IDLE) {
     pthread_mutex_unlock(&pc->lock);
-    bool rtx_available = session->media.screen.rtx_ssrc != 0 || session->media.uplink_video.rtx_ssrc != 0;
+
+    uint32_t media_backlog = session->egress.paced_camera.count;
+    for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS && media_backlog == 0; i++) {
+      if (session->egress.paced_screen[i].count > 0) {
+        media_backlog++;
+      }
+    }
+
     bool should = sfu_probe_controller_should_probe(pc, session->egress.gcc_ctx, now_us,
                                                     session->media.twcc_send_extmap_id != 0,
                                                     rtx_available,
@@ -362,9 +367,27 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
   }
 
   if (pc->state == SFU_PROBE_STATE_PROBING) {
-    if (session->egress.paced_rtx.count > 0 || media_backlog > 0 || gcc_bwe_is_overusing(session->egress.gcc_ctx)) {
+    pthread_mutex_unlock(&pc->lock);
+    /* Pre-lock: check overuse and RTX availability without holding the probe lock */
+    if (gcc_bwe_is_overusing(session->egress.gcc_ctx)) {
+      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "overuse");
+      return;
+    }
+    /* Abort if RTX params disappeared (SSRC renegotiated away or snapshot changed) */
+    if (!rtx_available) {
+      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "no_rtx_params");
+      return;
+    }
+    /* RTX queue backlog represents real congestion / packet loss; abort probe */
+    if (session->egress.paced_rtx.count > 0) {
+      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "backlog");
+      return;
+    }
+
+    pthread_mutex_lock(&pc->lock);
+    if (pc->state != SFU_PROBE_STATE_PROBING) {
+      /* Abort call above may have changed state while we re-acquired the lock. */
       pthread_mutex_unlock(&pc->lock);
-      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "backlog_or_overuse");
       return;
     }
 
@@ -383,15 +406,7 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
       return;
     }
 
-    /* Probe only on a negotiated RTX SSRC to avoid corrupting media sequence space. */
-    uint32_t rtx_ssrc = 0;
-    uint8_t rtx_pt = 0;
-    if (!find_outbound_rtx_params(session, &rtx_ssrc, &rtx_pt)) {
-      pthread_mutex_unlock(&pc->lock);
-      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "no_rtx_params");
-      return;
-    }
-
+    /* Probe only on the negotiated RTX SSRC resolved pre-lock */
     uint32_t generated = 0;
     while (pc->bytes_sent < pc->bytes_target && generated < SFU_PACED_SEND_MAX_DRAIN_PER_SCAN) {
       if (session->egress.paced_probe.capacity > 0 &&

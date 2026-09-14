@@ -460,8 +460,11 @@ void sfu_layer_scheduler_set_bitrate(sfu_layer_scheduler_t *sched, uint32_t bitr
                     (target_sid == sched->target_sid && target_tid > sched->target_tid);
 
   int64_t now = (int64_t)sfu_now_us();
-  if (is_upgrade && sched->last_target_change_us != 0 &&
+  if (sched->source != SFU_MEDIA_SCREEN && is_upgrade && sched->last_target_change_us != 0 &&
       (now - sched->last_target_change_us < SFU_LAYER_UP_DWELL_US)) {
+    /* Camera recovery is held down 3.0s; screen share upgrades immediately so a
+     * bandwidth probe result sharpens the shared desktop instead of staying
+     * blurry for the whole hold-down. */
     return;
   }
   sched->last_target_change_us = now;
