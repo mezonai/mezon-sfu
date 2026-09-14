@@ -43,6 +43,8 @@ typedef struct {
   uint32_t af_xdp_frame_count;
   uint32_t af_xdp_frame_size;
   char af_xdp_mode[16];
+
+  uint32_t alone_participant_timeout_seconds;
 } sfu_config_t;
 
 extern sfu_config_t g_sfu_config;

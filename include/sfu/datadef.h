@@ -644,6 +644,10 @@ typedef struct sfu_room {
   uint32_t peer_count;
   uint32_t free_count;
   uint64_t membership_revision;
+  int64_t alone_user_id;
+  uint64_t alone_deadline_ms;
+  uint64_t alone_generation;
+  bool alone_expiry_claimed;
   pthread_mutex_t lock;
 } sfu_room_t;
 

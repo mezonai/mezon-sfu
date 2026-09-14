@@ -37,3 +37,7 @@ queues = @SFU_AF_XDP_QUEUES@
 frame_count = @SFU_AF_XDP_FRAME_COUNT@
 frame_size = @SFU_AF_XDP_FRAME_SIZE@
 mode = @SFU_AF_XDP_MODE@
+
+[room]
+alone_participant_timeout_seconds = @SFU_ALONE_PARTICIPANT_TIMEOUT_SECONDS@
+

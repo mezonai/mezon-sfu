@@ -6,6 +6,9 @@
 #include <string.h>
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
+#include "room/room.h"
+#include "room/room_media_graph.h"
+#include "room/room_registry.h"
 
 static void test_screen_codec_preference_parsing(void) {
   const char *vp9 = "{\"type\":\"join\",\"screen_codec\":\"vp9\"}";
@@ -393,6 +396,151 @@ static void test_room_message_frame_building(void) {
   assert(sfu_signaling_build_room_message("hello", 5, 1001, 7, exact, sizeof(exact)) == -1);
 }
 
+static void test_alone_participant_scanning(void) {
+  uint64_t next_deadline = 0;
+  assert(sfu_signaling_scan_alone_rooms_at(NULL, 1000, &next_deadline) == 0);
+  assert(next_deadline == 0);
+
+  sfu_signaling_server_t server;
+  memset(&server, 0, sizeof(server));
+  assert(sfu_signaling_scan_alone_rooms_at(&server, 1000, &next_deadline) == 0);
+  assert(next_deadline == 0);
+
+  sfu_room_registry_t reg;
+  assert(sfu_room_registry_init(&reg) == 0);
+  server.room_registry = &reg;
+
+  sfu_room_t *r1 = sfu_room_registry_get_or_create(&reg, 101);
+  sfu_room_t *r2 = sfu_room_registry_get_or_create(&reg, 102);
+  sfu_room_t *r3 = sfu_room_registry_get_or_create(&reg, 103);
+  sfu_room_t *r4 = sfu_room_registry_get_or_create(&reg, 104);
+  assert(r1 && r2 && r3 && r4);
+
+  sfu_peer_session_t p100_s1 = {.user_id = 100};
+  sfu_peer_session_t p100_s2 = {.user_id = 100};
+  sfu_peer_session_t p200 = {.user_id = 200};
+  sfu_peer_session_t p301 = {.user_id = 301};
+  sfu_peer_session_t p400 = {.user_id = 400};
+
+  /* r1: user 100 has 2 connections, deadline = 2000 */
+  pthread_mutex_lock(&r1->lock);
+  r1->occupied[0] = true;
+  r1->peers[0] = &p100_s1;
+  r1->occupied[1] = true;
+  r1->peers[1] = &p100_s2;
+  r1->peer_count = 2;
+  r1->alone_user_id = 100;
+  r1->alone_deadline_ms = 2000;
+  r1->alone_generation = 1;
+  r1->alone_expiry_claimed = false;
+  pthread_mutex_unlock(&r1->lock);
+
+  /* r2: user 200 has 1 connection, deadline = 3000 */
+  pthread_mutex_lock(&r2->lock);
+  r2->occupied[0] = true;
+  r2->peers[0] = &p200;
+  r2->peer_count = 1;
+  r2->alone_user_id = 200;
+  r2->alone_deadline_ms = 3000;
+  r2->alone_generation = 1;
+  r2->alone_expiry_claimed = false;
+  pthread_mutex_unlock(&r2->lock);
+
+  /* r3: user 301 is in room, but alone_user_id was stale 300 */
+  pthread_mutex_lock(&r3->lock);
+  r3->occupied[0] = true;
+  r3->peers[0] = &p301;
+  r3->peer_count = 1;
+  r3->alone_user_id = 300;
+  r3->alone_deadline_ms = 4000;
+  r3->alone_generation = 1;
+  r3->alone_expiry_claimed = false;
+  pthread_mutex_unlock(&r3->lock);
+
+  /* r4: user 400 has 1 connection, deadline = 5000 */
+  pthread_mutex_lock(&r4->lock);
+  r4->occupied[0] = true;
+  r4->peers[0] = &p400;
+  r4->peer_count = 1;
+  r4->alone_user_id = 400;
+  r4->alone_deadline_ms = 5000;
+  r4->alone_generation = 1;
+  r4->alone_expiry_claimed = false;
+  pthread_mutex_unlock(&r4->lock);
+
+  /* Mock client connections in server.connections_head */
+  sfu_client_conn_t c1_1 = {.server = &server, .joined_room = r1, .joined_room_id = 101, .user_id = 100, .fd = -1};
+  sfu_client_conn_t c1_2 = {.server = &server, .joined_room = r1, .joined_room_id = 101, .user_id = 100, .fd = -1};
+  sfu_client_conn_t c2_1 = {.server = &server, .joined_room = r2, .joined_room_id = 102, .user_id = 200, .fd = -1};
+  sfu_client_conn_t c3_1 = {.server = &server, .joined_room = r3, .joined_room_id = 103, .user_id = 301, .fd = -1};
+  sfu_client_conn_t c4_1 = {.server = &server, .joined_room = r4, .joined_room_id = 104, .user_id = 400, .fd = -1};
+
+  c1_1.registry_next = &c1_2;
+  c1_2.registry_prev = &c1_1;
+  c1_2.registry_next = &c2_1;
+  c2_1.registry_prev = &c1_2;
+  c2_1.registry_next = &c3_1;
+  c3_1.registry_prev = &c2_1;
+  c3_1.registry_next = &c4_1;
+  c4_1.registry_prev = &c3_1;
+  c4_1.registry_next = NULL;
+  server.connections_head = &c1_1;
+
+  /* 1. Scan before any deadline (now_ms = 1500) */
+  uint32_t kicked = sfu_signaling_scan_alone_rooms_at(&server, 1500, &next_deadline);
+  assert(kicked == 0);
+  assert(next_deadline == 2000);
+  assert(!c1_1.disconnecting && !c1_2.disconnecting && !c2_1.disconnecting && !c3_1.disconnecting && !c4_1.disconnecting);
+  assert(!r1->alone_expiry_claimed);
+  assert(!r2->alone_expiry_claimed);
+  assert(!r4->alone_expiry_claimed);
+
+  /* 2. Scan at r1 expiry (now_ms = 2500) */
+  kicked = sfu_signaling_scan_alone_rooms_at(&server, 2500, &next_deadline);
+  assert(kicked == 2);
+  assert(c1_1.disconnecting && c1_2.disconnecting);
+  assert(!c2_1.disconnecting && !c3_1.disconnecting && !c4_1.disconnecting);
+  assert(r1->alone_expiry_claimed);
+  assert(!r2->alone_expiry_claimed);
+  assert(!r4->alone_expiry_claimed);
+  assert(next_deadline == 3000);
+
+  /* 3. Repeated scan does not claim r1 again */
+  kicked = sfu_signaling_scan_alone_rooms_at(&server, 2500, &next_deadline);
+  assert(kicked == 0);
+  assert(next_deadline == 3000);
+
+  /* 4. Second distinct user arrives in r2 before r2's deadline */
+  sfu_peer_session_t p201 = {.user_id = 201};
+  pthread_mutex_lock(&r2->lock);
+  r2->occupied[1] = true;
+  r2->peers[1] = &p201;
+  r2->peer_count = 2;
+  pthread_mutex_unlock(&r2->lock);
+
+  /* Scan at now_ms = 3500:
+   * r1 was already claimed.
+   * r2 has 2 distinct users -> alone cancelled, generation bumped.
+   * r3 has stale alone_user_id mismatch -> alone cancelled, generation bumped.
+   * r4 remains active with deadline 5000.
+   */
+  kicked = sfu_signaling_scan_alone_rooms_at(&server, 3500, &next_deadline);
+  assert(kicked == 0);
+  assert(!c2_1.disconnecting && !c3_1.disconnecting && !c4_1.disconnecting);
+  assert(r2->alone_deadline_ms == 0 && r2->alone_user_id == 0 && r2->alone_generation == 2);
+  assert(r3->alone_deadline_ms == 0 && r3->alone_user_id == 0 && r3->alone_generation == 2);
+  assert(next_deadline == 5000);
+
+  /* 5. Scan at now_ms = 5500: r4 expires */
+  kicked = sfu_signaling_scan_alone_rooms_at(&server, 5500, &next_deadline);
+  assert(kicked == 1);
+  assert(c4_1.disconnecting);
+  assert(r4->alone_expiry_claimed);
+  assert(next_deadline == 0);
+
+  sfu_room_registry_destroy(&reg);
+}
+
 int main(void) {
   test_screen_codec_preference_parsing();
   test_room_message_frame_building();
@@ -407,6 +555,7 @@ int main(void) {
   test_unanswered_offer_timeout_requeues_negotiation();
   test_unanswered_offer_watch_stays_queue_eligible();
   test_concurrent_schedule_and_pop_preserves_single_identity();
+  test_alone_participant_scanning();
   printf("test_signaling_membership: OK\n");
   return 0;
 }

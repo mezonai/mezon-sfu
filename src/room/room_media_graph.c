@@ -5,6 +5,7 @@
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
+#include "config/config.h"
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
 #include "runtime/timer.h"
@@ -289,6 +290,85 @@ static void membership_capture_member(sfu_membership_member_t *member, const sfu
   }
 }
 
+uint32_t room_count_distinct_users_locked(const sfu_room_t *room, int64_t *out_sole_user_id) {
+  if (!room) {
+    if (out_sole_user_id) {
+      *out_sole_user_id = 0;
+    }
+    return 0;
+  }
+
+  int64_t unique_users[SFU_ROOM_MAX_PEERS];
+  uint32_t unique_count = 0;
+
+  for (uint32_t i = 0; i < room->peer_capacity; i++) {
+    if (room->occupied[i] && room->peers[i]) {
+      int64_t uid = room->peers[i]->user_id;
+      bool found = false;
+      for (uint32_t j = 0; j < unique_count; j++) {
+        if (unique_users[j] == uid) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        unique_users[unique_count++] = uid;
+      }
+    }
+  }
+
+  if (out_sole_user_id) {
+    *out_sole_user_id = (unique_count == 1) ? unique_users[0] : 0;
+  }
+  return unique_count;
+}
+
+bool room_update_alone_state_locked(sfu_room_t *room, uint64_t timeout_ms, uint64_t now_ms) {
+  if (!room) {
+    return false;
+  }
+
+  if (timeout_ms == 0) {
+    if (room->alone_deadline_ms != 0 || room->alone_user_id != 0) {
+      room->alone_user_id = 0;
+      room->alone_deadline_ms = 0;
+      room->alone_generation++;
+      room->alone_expiry_claimed = false;
+      return true;
+    }
+    return false;
+  }
+
+  int64_t sole_uid = 0;
+  uint32_t distinct_count = room_count_distinct_users_locked(room, &sole_uid);
+
+  if (distinct_count == 1) {
+    if (room->alone_user_id == sole_uid && room->alone_deadline_ms != 0) {
+      /* Same sole user already has an active deadline: preserve it, do not reset or extend */
+      return false;
+    }
+    room->alone_user_id = sole_uid;
+    uint64_t deadline = now_ms + timeout_ms;
+    if (deadline < now_ms) {
+      deadline = UINT64_MAX;
+    }
+    room->alone_deadline_ms = deadline;
+    room->alone_generation++;
+    room->alone_expiry_claimed = false;
+    return true;
+  }
+
+  if (room->alone_deadline_ms != 0 || room->alone_user_id != 0) {
+    room->alone_user_id = 0;
+    room->alone_deadline_ms = 0;
+    room->alone_generation++;
+    room->alone_expiry_claimed = false;
+    return true;
+  }
+
+  return false;
+}
+
 sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_session_t *peer) {
   sfu_deferred_reclaim_t deferred;
   deferred_init(&deferred);
@@ -304,6 +384,7 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
   uint32_t target_count = 0;
   bool admitted = false;
   bool prepared = false;
+  bool alone_changed = false;
   sfu_room_admission_result_t result = SFU_ROOM_ADMISSION_ERROR;
   sfu_membership_event_t *event = NULL;
   sfu_membership_reservation_t event_reservation = {0};
@@ -460,6 +541,7 @@ sfu_room_admission_result_t room_add_peer_result(sfu_room_t *room, sfu_peer_sess
   event = NULL;
   admitted = true;
   result = SFU_ROOM_ADMISSION_OK;
+  alone_changed = room_update_alone_state_locked(room, (uint64_t)g_sfu_config.alone_participant_timeout_seconds * 1000ULL, sfu_now_ms());
 #ifndef NDEBUG
   sfu_session_graph_assert_invariants(peer);
   for (uint32_t i = 0; i < target_count; i++) {
@@ -474,6 +556,9 @@ out:
     }
   }
   pthread_mutex_unlock(&room->lock);
+  if (alone_changed) {
+    sfu_signaling_wake_alone_timer();
+  }
   if (!prepared) {
     for (uint32_t i = 0; i < target_count; i++) {
       sfu_subscriptions_snapshot_release(target_receivers[i]);
@@ -747,7 +832,12 @@ void room_remove_peer_membership_locked(sfu_room_t *room, sfu_peer_session_t *pe
   }
 #endif
 
+  bool alone_changed = room_update_alone_state_locked(room, (uint64_t)g_sfu_config.alone_participant_timeout_seconds * 1000ULL, sfu_now_ms());
+
   pthread_mutex_unlock(&room->lock);
+  if (alone_changed) {
+    sfu_signaling_wake_alone_timer();
+  }
   deferred_flush(&deferred);
 }
 

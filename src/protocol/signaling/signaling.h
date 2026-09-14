@@ -98,6 +98,7 @@ typedef enum sfu_disconnect_reason {
   SFU_DISCONNECT_RECV_ERROR = 4008, /* WebSocket recv failure */
   SFU_DISCONNECT_POLL_START_FAILED = 4009,
   SFU_DISCONNECT_TRANSPORT_ERROR = 4010, /* UV_DISCONNECT / poll error */
+  SFU_DISCONNECT_ALONE_TIMEOUT = 4011,   /* Alone participant timeout */
 } sfu_disconnect_reason_t;
 
 typedef struct sfu_renegotiation_fallback_node {
@@ -148,10 +149,14 @@ typedef struct sfu_signaling_server {
   uv_async_t async_waker;
   uv_async_t renegotiation_waker;
   uv_timer_t renegotiation_timer;
+  uv_async_t alone_waker;
+  uv_timer_t alone_timer;
   bool renegotiation_timer_inited;
+  bool alone_timer_inited;
   bool suppress_wake;
   bool test_auto_drain;
   bool test_membership_only;
+  uint64_t alone_timeout_ms;
   sfu_renegotiation_queue_t renegotiation_queue;
   sfu_membership_queue_t membership_queue;
   const sfu_ice_credentials_t *ice_creds;
@@ -220,5 +225,7 @@ void sfu_signaling_generate_turn_credentials(const char *secret, const char *use
 sfu_video_codec_t sfu_signaling_parse_screen_codec_preference(const char *json, size_t json_len);
 int sfu_signaling_build_room_message(const char *raw_msg, size_t raw_len, int64_t user_id, uint32_t peer_id, char *out, size_t out_cap);
 uint32_t generate_unique_id(void);
+void sfu_signaling_wake_alone_timer(void);
+uint32_t sfu_signaling_scan_alone_rooms_at(sfu_signaling_server_t *server, uint64_t now_ms, uint64_t *out_next_deadline_ms);
 
 #endif /* SFU_PROTOCOL_SIGNALING_H */
