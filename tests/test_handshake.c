@@ -94,7 +94,7 @@ int main(void) {
     assert(user_id == 1843252237590073344LL);
     assert(room_id == 2087757797482565632ULL);
 
-    sfu_jwt_claims_t claims;
+    sfu_jwt_claims_t claims = {0};
     assert(sfu_handshake_verify_token_claims(token, strlen(token), secret, &claims) == 0);
     assert(claims.user_id == 1843252237590073344LL);
     assert(claims.exp == exp);
@@ -113,12 +113,44 @@ int main(void) {
       snprintf(payload, sizeof(payload), "{\"identity\":\"99\",\"metadata\":\"%s\",\"exp\":%" PRId64 ",\"video\":{\"room\":\"101\",\"roomJoin\":true}}",
                actions[i], exp);
       assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
-      sfu_jwt_claims_t claims;
+      sfu_jwt_claims_t claims = {0};
       assert(sfu_handshake_verify_token_claims(token, strlen(token), secret, &claims) == 0);
       assert(claims.user_id == 99);
       assert(claims.room_id == 101);
       assert(strcmp(claims.metadata, actions[i]) == 0);
     }
+  }
+
+  /* Token without metadata leaves claims.metadata safely empty even if claims was uninitialized. */
+  {
+    char payload[256];
+    int64_t exp = (int64_t)time(NULL) + 3600;
+    snprintf(payload, sizeof(payload), "{\"identity\":\"99\",\"exp\":%" PRId64 ",\"video\":{\"room\":\"101\",\"roomJoin\":true}}", exp);
+    assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
+    sfu_jwt_claims_t claims;
+    memset(&claims, 0xCC, sizeof(claims));
+    assert(sfu_handshake_verify_token_claims(token, strlen(token), secret, &claims) == 0);
+    assert(claims.user_id == 99);
+    assert(claims.room_id == 101);
+    assert(claims.metadata[0] == '\0');
+  }
+
+  /* Token with oversized metadata is safely rejected/cleared and null-terminated. */
+  {
+    char payload[512];
+    char huge_meta[128];
+    memset(huge_meta, 'x', sizeof(huge_meta) - 1);
+    huge_meta[sizeof(huge_meta) - 1] = '\0';
+    int64_t exp = (int64_t)time(NULL) + 3600;
+    snprintf(payload, sizeof(payload), "{\"identity\":\"99\",\"metadata\":\"%s\",\"exp\":%" PRId64 ",\"video\":{\"room\":\"101\",\"roomJoin\":true}}",
+             huge_meta, exp);
+    assert(mint_hs256("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, secret, token, sizeof(token)) == 0);
+    sfu_jwt_claims_t claims;
+    memset(&claims, 0xCC, sizeof(claims));
+    assert(sfu_handshake_verify_token_claims(token, strlen(token), secret, &claims) == 0);
+    assert(claims.user_id == 99);
+    assert(claims.room_id == 101);
+    assert(claims.metadata[0] == '\0');
   }
 
   /* sub fallback when identity is absent. */
