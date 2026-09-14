@@ -157,7 +157,7 @@ bool sfu_probe_controller_start_probe(sfu_probe_controller_t *pc, gcc_bwe_contex
   if (gcc) {
     gcc_bwe_set_active_probing(gcc, true);
   }
-  sfu_metric_inc("congestion_probe_started");
+  sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_STARTED);
   pthread_mutex_unlock(&pc->lock);
   return true;
 }
@@ -207,7 +207,7 @@ void sfu_probe_controller_abort(sfu_probe_controller_t *pc, gcc_bwe_context_t *g
     if (gcc) {
       gcc_bwe_set_active_probing(gcc, false);
     }
-    sfu_metric_inc("congestion_probe_aborted");
+    sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_ABORTED);
   }
   pthread_mutex_unlock(&pc->lock);
 }
@@ -241,7 +241,7 @@ bool sfu_probe_controller_check_cluster_done(sfu_probe_controller_t *pc, gcc_bwe
     pc->cooldown_until_us = now_us + SFU_PROBE_COOLDOWN_FAILURE_US;
     pc->clusters_failed++;
     gcc_bwe_set_active_probing(gcc, false);
-    sfu_metric_inc("congestion_probe_failed");
+    sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_FAILED);
     pthread_mutex_unlock(&pc->lock);
     return true;
   }
@@ -280,7 +280,7 @@ bool sfu_probe_controller_check_cluster_done(sfu_probe_controller_t *pc, gcc_bwe
     if (gcc) {
       gcc_bwe_set_active_probing(gcc, false);
     }
-    sfu_metric_inc("congestion_probe_succeeded");
+    sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_SUCCEEDED);
     pthread_mutex_unlock(&pc->lock);
     return true;
   }
@@ -291,7 +291,7 @@ bool sfu_probe_controller_check_cluster_done(sfu_probe_controller_t *pc, gcc_bwe
   if (gcc) {
     gcc_bwe_set_active_probing(gcc, false);
   }
-  sfu_metric_inc("congestion_probe_failed");
+  sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_FAILED);
   pthread_mutex_unlock(&pc->lock);
   return true;
 }
@@ -442,7 +442,7 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
       srtp_err_status_t status = sfu_srtp_protect_rtp_status(&session->srtp, packet_buf, &enc_len, sizeof(packet_buf));
       pthread_mutex_unlock(&session->crypto_lock);
       if (status != srtp_err_status_ok) {
-        sfu_metric_inc("egress_protect_fail");
+        sfu_metric_inc_id(SFU_METRIC_EGRESS_PROTECT_FAIL);
         break;
       }
 
@@ -455,6 +455,7 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
                                                   pc->cluster_id, now_us)) {
         break;
       }
+      sfu_worker_mark_session_paced_active(w, session);
       pc->bytes_sent += (uint32_t)enc_len;
       pc->packets_sent++;
       generated++;

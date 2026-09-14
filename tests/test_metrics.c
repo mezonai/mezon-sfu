@@ -47,6 +47,26 @@ static void test_inc_get(void) {
   EXPECT(sfu_metric_get("not_a_real_counter") == 0);
 }
 
+static void test_id_api(void) {
+  sfu_metrics_init();
+
+  sfu_metric_inc_id(SFU_METRIC_MSG_TRUNC_DROP);
+  sfu_metric_add_id(SFU_METRIC_EGRESS_COPIED_BYTES, 42);
+  EXPECT(sfu_metric_get_id(SFU_METRIC_MSG_TRUNC_DROP) == 1);
+  EXPECT(sfu_metric_get_id(SFU_METRIC_EGRESS_COPIED_BYTES) == 42);
+
+  /* IDs and legacy names address the same counters. */
+  EXPECT(sfu_metric_get("msg_trunc_drop") == 1);
+  sfu_metric_inc("msg_trunc_drop");
+  EXPECT(sfu_metric_get_id(SFU_METRIC_MSG_TRUNC_DROP) == 2);
+
+  /* Defensive bounds handling keeps invalid IDs harmless. */
+  sfu_metric_inc_id(SFU_METRIC_COUNT);
+  sfu_metric_add_id((sfu_metric_id_t)-1, 10);
+  EXPECT(sfu_metric_get_id(SFU_METRIC_COUNT) == 0);
+  EXPECT(sfu_metric_get_id((sfu_metric_id_t)-1) == 0);
+}
+
 static void test_snapshot_format(void) {
   sfu_metrics_init();
   sfu_metric_inc("json_reject");
@@ -156,6 +176,7 @@ static void test_previously_missing_metrics_registered(void) {
 int main(void) {
   test_init_and_get();
   test_inc_get();
+  test_id_api();
   test_snapshot_format();
   test_multithreaded_inc();
   test_previously_missing_metrics_registered();

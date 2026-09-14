@@ -177,6 +177,8 @@ static void fixture_init(fixture_t *f) {
   f->w.pp = &f->pp;
   f->w.sessions = &f->sessions;
   f->w.worker_index = 0;
+  pthread_mutex_init(&f->w.local_sessions_lock, NULL);
+  pthread_mutex_init(&f->w.paced_active_lock, NULL);
   /* Small real send ring over a pipe fd: queueing RTX/keyframe sends stays
    * in-process and never submits, so nothing reaches the kernel. */
   assert(pipe(f->send_fds) == 0);
@@ -185,6 +187,12 @@ static void fixture_init(fixture_t *f) {
 }
 
 static void fixture_destroy(fixture_t *f) {
+  pthread_mutex_destroy(&f->w.local_sessions_lock);
+  pthread_mutex_destroy(&f->w.paced_active_lock);
+  SFU_FREE(f->w.local_sessions);
+  SFU_FREE(f->w.twcc_scratch);
+  SFU_FREE(f->w.paced_active_sessions);
+  SFU_FREE(f->w.paced_drain_scratch);
   sfu_net_destroy(f->w.send_net);
   close(f->send_fds[0]);
   close(f->send_fds[1]);
@@ -1999,10 +2007,75 @@ static void test_congestion_diag_staggered_due_windows(void) {
 }
 #endif
 
+static void test_worker_paced_active_set(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  assert(!atomic_load(&f.session->paced_active));
+  assert(f.w.paced_active_count == 0);
+
+  /* Register session with worker */
+  assert(sfu_worker_register_session(&f.w, f.session));
+
+  /* Mark session active: transitions to active and enqueues in worker */
+  sfu_worker_mark_session_paced_active(&f.w, f.session);
+  assert(atomic_load(&f.session->paced_active));
+  assert(f.w.paced_active_count == 1);
+  assert(f.w.paced_active_sessions[0] == f.session);
+
+  /* Second mark is idempotent */
+  sfu_worker_mark_session_paced_active(&f.w, f.session);
+  assert(f.w.paced_active_count == 1);
+
+  /* Drain when queues are empty: session is cleared from active list */
+  bool sent = sfu_worker_drain_paced_active(&f.w, 1000000);
+  assert(!sent);
+  assert(!atomic_load(&f.session->paced_active));
+  assert(f.w.paced_active_count == 0);
+
+  /* Enqueue packet into camera queue */
+  uint8_t payload[100] = {0};
+  struct sockaddr_storage dst = {0};
+  sfu_paced_send_metadata_t metadata = {
+      .assignment_generation = 1,
+      .owner_value = sfu_session_owner_value(f.session),
+      .transport_generation = atomic_load_explicit(&f.session->cold->transport_generation, memory_order_acquire),
+      .address_generation = atomic_load_explicit(&f.session->cold->address_generation, memory_order_acquire),
+  };
+  sfu_pacer_reservation_t res = {0};
+  assert(sfu_pacer_reserve(&f.session->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &res));
+  assert(sfu_paced_send_enqueue(&f.session->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, f.session->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_BASE, f.session->egress.pacer.pacing_bps, &f.session->egress.pacer, &res, &metadata, 1000000, NULL));
+  f.session->egress.paced_camera.ready_count++;
+  assert(f.session->egress.paced_camera.count == 1);
+
+  /* Marking session active now retains it */
+  sfu_worker_mark_session_paced_active(&f.w, f.session);
+  assert(atomic_load(&f.session->paced_active));
+  assert(f.w.paced_active_count == 1);
+
+  /* Drain sends the camera packet and leaves queues empty, clearing active status */
+  sent = sfu_worker_drain_paced_active(&f.w, 1000000);
+  assert(sent);
+  assert(f.session->egress.paced_camera.count == 0);
+  assert(!atomic_load(&f.session->paced_active));
+  assert(f.w.paced_active_count == 0);
+
+  /* Mark active, then unregister: cleanly removed from active set */
+  sfu_worker_mark_session_paced_active(&f.w, f.session);
+  assert(f.w.paced_active_count == 1);
+  sfu_worker_unregister_session(&f.w, f.session);
+  assert(f.w.paced_active_count == 0);
+  assert(!atomic_load(&f.session->paced_active));
+
+  fixture_destroy(&f);
+}
+
 int main(void) {
   sfu_signaling_server_t signaling;
   sfu_signaling_membership_test_server_init(&signaling);
   signaling.test_auto_drain = true;
+  test_worker_paced_active_set();
   test_malformed_rtp_dropped_by_ingress_parser();
   test_compound_nack_rtx_dispatch();
   test_rtx_priority_over_video_backlog();
