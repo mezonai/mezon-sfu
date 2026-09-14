@@ -5,9 +5,12 @@
 #include "sfu/datadef.h"
 
 #define SFU_MAX_ROOMS 1024
+#define SFU_ROOM_REGISTRY_INDEX_SIZE (SFU_MAX_ROOMS * 2)
 
 typedef struct sfu_room_registry {
   sfu_room_t rooms[SFU_MAX_ROOMS];
+  /* Open-addressed table containing room-array index + 1; zero is empty. */
+  uint32_t room_index[SFU_ROOM_REGISTRY_INDEX_SIZE];
   uint32_t room_count;
   pthread_mutex_t lock;
 } sfu_room_registry_t;

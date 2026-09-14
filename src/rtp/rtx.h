@@ -22,6 +22,7 @@ typedef struct sfu_rtx_entry {
 
 typedef struct sfu_rtx_cache {
   sfu_rtx_entry_t entries[SFU_RTX_CACHE_SIZE];
+  uint8_t *payload_slab;
   _Atomic uint16_t next_rtx_seq;
 } sfu_rtx_cache_t;
 

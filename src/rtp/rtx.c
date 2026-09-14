@@ -72,26 +72,22 @@ bool sfu_nack_parser_next(sfu_nack_parser_t *parser, uint16_t *lost_seq) {
   return false;  // No more lost packets in this RTCP message
 }
 
-// Initialize the cache and pre-allocate packet buffers.
-// Returns 0 on success, -1 if any entry buffer allocation fails (cache left
-// cleaned so the caller can free the cache struct itself).
+// Initialize the cache and pre-allocate one contiguous packet-buffer slab.
+// Returns 0 on success, -1 if the slab allocation fails (cache left cleaned so
+// the caller can free the cache struct itself or safely destroy it).
 int sfu_rtx_cache_init(sfu_rtx_cache_t *cache) {
-  memset(cache, 0, sizeof(sfu_rtx_cache_t));
+  memset(cache, 0, sizeof(*cache));
   cache->next_rtx_seq = 0;
 
-  // Pre-allocate memory for the packet copies to avoid malloc() in the hot path.
-  // 1024 entries * SFU_MAX_PAYLOAD_SIZE bytes per subscriber.
-  for (int i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
-    cache->entries[i].data = (uint8_t *)SFU_CALLOC(1, SFU_MAX_PAYLOAD_SIZE);
-    if (!cache->entries[i].data) {
-      // Free already-allocated buffers and leave the cache zeroed/invalid.
-      for (int j = 0; j < i; j++) {
-        SFU_FREE(cache->entries[j].data);
-        cache->entries[j].data = NULL;
-      }
-      return -1;
-    }
-    cache->entries[i].valid = false;
+  // One allocation keeps the same 1024 fixed-capacity packet slots while
+  // avoiding per-entry allocator metadata and 1024 allocation calls.
+  cache->payload_slab = (uint8_t *)SFU_CALLOC(SFU_RTX_CACHE_SIZE, SFU_MAX_PAYLOAD_SIZE);
+  if (!cache->payload_slab) {
+    return -1;
+  }
+
+  for (size_t i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
+    cache->entries[i].data = cache->payload_slab + i * SFU_MAX_PAYLOAD_SIZE;
   }
   return 0;
 }
@@ -139,15 +135,15 @@ bool sfu_rtx_cache_get(sfu_rtx_cache_t *cache, uint16_t seq, uint8_t *out_data, 
   return sfu_rtx_cache_get_stream(cache, seq, out_data, out_len, out_rtx_ssrc, out_rtx_pt, 0, 0);
 }
 
-// Cleanup function to free pre-allocated buffers when session closes
+// Cleanup function to free the pre-allocated slab when session closes.
 void sfu_rtx_cache_destroy(sfu_rtx_cache_t *cache) {
   if (!cache) {
     return;
   }
-  for (int i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
-    if (cache->entries[i].data) {
-      SFU_FREE(cache->entries[i].data);
-      cache->entries[i].data = NULL;
-    }
+  SFU_FREE(cache->payload_slab);
+  cache->payload_slab = NULL;
+  for (size_t i = 0; i < SFU_RTX_CACHE_SIZE; i++) {
+    cache->entries[i].data = NULL;
+    cache->entries[i].valid = false;
   }
 }
