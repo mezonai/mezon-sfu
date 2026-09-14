@@ -186,6 +186,14 @@ const char *sfu_srtp_status_name(srtp_err_status_t status) {
       return "semaphore_err";
     case srtp_err_status_pfkey_err:
       return "pfkey_err";
+    case srtp_err_status_bad_mki:
+      return "bad_mki";
+    case srtp_err_status_pkt_idx_old:
+      return "pkt_idx_old";
+    case srtp_err_status_pkt_idx_adv:
+      return "pkt_idx_adv";
+    case srtp_err_status_cryptex_err:
+      return "cryptex_err";
     default:
       return "unknown";
   }

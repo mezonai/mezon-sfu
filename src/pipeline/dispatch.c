@@ -71,19 +71,23 @@ static void handle_stun(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool have_ufrag = sfu_stun_extract_client_ufrag(pkt->data, pkt->len, w->ice_creds->ufrag, client_ufrag, sizeof(client_ufrag));
 
   if (!have_ufrag) {
-    SFU_LOG_WARN(
-        "worker %u: STUN request from %s:%u has no parseable client ufrag "
-        "(malformed USERNAME attribute, or doesn't match our local ufrag prefix) "
-        "-- cross-worker ownership tracking and room binding will NOT work for "
-        "this peer until a valid one is seen",
-        w->worker_index, ip, port);
+    if (sfu_log_rate_limit("stun_no_ufrag", 1000000000ULL)) {
+      SFU_LOG_WARN(
+          "worker %u: STUN request from %s:%u has no parseable client ufrag "
+          "(malformed USERNAME attribute, or doesn't match our local ufrag prefix) "
+          "-- cross-worker ownership tracking and room binding will NOT work for "
+          "this peer until a valid one is seen",
+          w->worker_index, ip, port);
+    }
   }
 
   uint8_t response[512] = {0};
   size_t response_len = sfu_stun_handle_binding_request(pkt->data, pkt->len, w->ice_creds, &pkt->peer_addr, pkt->peer_addr_len, response, sizeof(response));
 
   if (response_len == 0) {
-    SFU_LOG_WARN("worker %u: STUN Request from %s:%u FAILED verification (invalid credentials/bad integrity)", w->worker_index, ip, port);
+    if (sfu_log_rate_limit("stun_bad_auth", 1000000000ULL)) {
+      SFU_LOG_WARN("worker %u: STUN Request from %s:%u FAILED verification (invalid credentials/bad integrity)", w->worker_index, ip, port);
+    }
     return;
   }
 
