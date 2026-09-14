@@ -47,7 +47,7 @@ void sfu_session_write_remb_contribution(sfu_peer_session_t *subscriber, uint32_
 bool sfu_session_read_remb_contribution(const sfu_peer_session_t *subscriber, uint32_t remote_slot, uint64_t assignment_generation, uint64_t now_us,
                                         uint64_t max_age_us, uint32_t *camera_bitrate_bps, uint32_t *screen_bitrate_bps);
 bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *publisher, int64_t now_us);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 bool sfu_session_congestion_diag_due(const sfu_peer_session_t *session, uint64_t now_us);
 void sfu_session_log_congestion_diag(sfu_worker_t *w, sfu_peer_session_t *session, uint64_t now_us);
 #endif

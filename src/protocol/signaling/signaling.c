@@ -1483,7 +1483,7 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
     pthread_mutex_lock(&session->media.lock);
     uint8_t mid_recv_extmap_id = session->media.mid_recv_extmap_id;
     pthread_mutex_unlock(&session->media.lock);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     uint32_t high_water = sfu_session_remote_slot_high_water(session);
     uint64_t applied0 = high_water > 0 ? atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[0], memory_order_acquire) : 0;
     uint64_t applied1 = high_water > 1 ? atomic_load_explicit(&session->graph.remote_slots.applied_assignment_generations[1], memory_order_acquire) : 0;
@@ -1597,7 +1597,7 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
     static const char rejected[] = "{\"type\":\"error\",\"message\":\"push_to_talk_rejected\"}";
     sfu_ws_send_text(c->fd, rejected, sizeof(rejected) - 1);
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (!has_session) {
       SFU_LOG_WARN("signaling: push_to_talk rejected user_id=%" PRId64 " ufrag=%s requested_active=%d reason=no_session", c->user_id, c->client_ufrag, active);
     } else {
@@ -1619,7 +1619,7 @@ static void handle_push_to_talk(sfu_client_conn_t *c, const char *buf, size_t n)
       sfu_ws_send_text(c->fd, response, (size_t)response_len);
     }
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     sfu_media_snapshot_t snap = sfu_session_load_media(session);
     bool ptt_active = atomic_load_explicit(&session->media.ptt_active, memory_order_acquire);
     bool vis = atomic_load_explicit(&session->media.visible, memory_order_acquire);

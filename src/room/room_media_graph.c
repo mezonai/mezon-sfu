@@ -204,7 +204,7 @@ static bool fanout_route_fill_from(sfu_fanout_route_t *route, uint8_t *eligibili
       *eligibility |= SFU_FANOUT_SCREEN;
     }
   }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   SFU_LOG_INFO("fanout: fill pub=%u sub=%u remote_slot=%u gen=%" PRIu64 " elig=0x%x audio=%d video=%d screen=%d audience=%d", publisher->peer_id,
                subscriber->peer_id, entry->remote_slot, entry->assignment_generation, (unsigned)*eligibility, audio ? 1 : 0, video ? 1 : 0, screen ? 1 : 0,
                audience ? 1 : 0);
@@ -870,7 +870,7 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
   bool allowed = in_room && is_audience;
   if (!allowed) {
     pthread_mutex_unlock(&room->lock);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     SFU_LOG_WARN("ptt: rejected peer=%u user_id=%" PRId64 " ufrag=%s active=%d in_room=%d is_audience=%d", peer->peer_id, peer->user_id,
                  peer->cold ? peer->cold->ufrag : "", active, in_room, is_audience);
 #endif
@@ -884,7 +884,7 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
   bool audio_active = active && peer->media.uplink_audio.ssrc != 0;
   peer->media.uplink_audio.active = audio_active;
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   uint32_t uplink_ssrc = peer->media.uplink_audio.ssrc;
 #endif
 
@@ -909,12 +909,12 @@ bool room_set_peer_ptt_active(sfu_room_t *room, sfu_peer_session_t *peer, bool a
   pthread_mutex_unlock(&room->lock);
   deferred_flush(&deferred);
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   SFU_LOG_INFO("ptt: applied peer=%u user_id=%" PRId64 " ufrag=%s active=%d old_active=%d uplink_ssrc=%u audio_active=%d", peer->peer_id, peer->user_id,
                peer->cold ? peer->cold->ufrag : "", active, old_active, uplink_ssrc, audio_active);
 #endif
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (active && !old_active) {
     sfu_ptt_diag_t *d = &peer->media.ptt_diag;
     atomic_fetch_add_explicit(&d->generation, 1, memory_order_relaxed);

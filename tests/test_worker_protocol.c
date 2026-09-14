@@ -2071,11 +2071,116 @@ static void test_worker_paced_active_set(void) {
   fixture_destroy(&f);
 }
 
+static void test_worker_paced_generation_dedup(void) {
+  fixture_t f;
+  fixture_init(&f);
+
+  struct sockaddr_in addr2 = {0};
+  addr2.sin_family = AF_INET;
+  addr2.sin_port = htons(5001);
+  addr2.sin_addr.s_addr = htonl(0x7f000002u);
+  sfu_peer_session_t *s2 = sfu_session_table_get_or_create(&f.sessions, (const struct sockaddr_storage *)&addr2, sizeof(addr2));
+  assert(s2 != NULL);
+  s2->state = SFU_SESSION_ESTABLISHED;
+  sfu_session_set_owner_worker(s2, 0);
+
+  struct sockaddr_in addr3 = {0};
+  addr3.sin_family = AF_INET;
+  addr3.sin_port = htons(5002);
+  addr3.sin_addr.s_addr = htonl(0x7f000003u);
+  sfu_peer_session_t *s3 = sfu_session_table_get_or_create(&f.sessions, (const struct sockaddr_storage *)&addr3, sizeof(addr3));
+  assert(s3 != NULL);
+  s3->state = SFU_SESSION_ESTABLISHED;
+  sfu_session_set_owner_worker(s3, 0);
+
+  assert(sfu_worker_register_session(&f.w, f.session));
+  assert(sfu_worker_register_session(&f.w, s2));
+  assert(sfu_worker_register_session(&f.w, s3));
+
+  /* Initially none are paced active and generation is 0 */
+  assert(atomic_load(&f.session->paced_generation) == 0);
+  assert(atomic_load(&s2->paced_generation) == 0);
+  assert(atomic_load(&s3->paced_generation) == 0);
+
+  /* Mark all three active */
+  sfu_worker_mark_session_paced_active(&f.w, f.session);
+  sfu_worker_mark_session_paced_active(&f.w, s2);
+  sfu_worker_mark_session_paced_active(&f.w, s3);
+  assert(f.w.paced_active_count == 3);
+
+  uint64_t gen1 = f.w.paced_generation;
+  assert(gen1 != 0);
+  assert(atomic_load(&f.session->paced_generation) == gen1);
+  assert(atomic_load(&s2->paced_generation) == gen1);
+  assert(atomic_load(&s3->paced_generation) == gen1);
+
+  /* Redundant marks do not add duplicates or change count */
+  sfu_worker_mark_session_paced_active(&f.w, f.session);
+  sfu_worker_mark_session_paced_active(&f.w, s2);
+  sfu_worker_mark_session_paced_active(&f.w, s3);
+  assert(f.w.paced_active_count == 3);
+
+  /* Enqueue packets in s2 camera queue and mark it with work so it requeues */
+  atomic_store_explicit(&s2->graph.remote_slots.applied_assignment_generations[0], 1, memory_order_release);
+  s2->graph.remote_slots.high_water_slots = 1;
+  uint8_t payload[100] = {0};
+  struct sockaddr_storage dst = {0};
+  memcpy(&dst, &s2->cold->addr, s2->cold->addr_len);
+  sfu_paced_send_metadata_t metadata = {
+      .assignment_generation = 1,
+      .remote_slot = 0,
+      .owner_value = sfu_session_owner_value(s2),
+      .transport_generation = atomic_load_explicit(&s2->cold->transport_generation, memory_order_acquire),
+      .address_generation = atomic_load_explicit(&s2->cold->address_generation, memory_order_acquire),
+  };
+  sfu_pacer_reservation_t res = {0};
+  assert(sfu_pacer_reserve(&s2->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &res));
+  assert(sfu_paced_send_enqueue(&s2->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, s2->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_BASE, s2->egress.pacer.pacing_bps, &s2->egress.pacer, &res, &metadata, 1000000, NULL));
+  assert(sfu_pacer_reserve(&s2->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 2000000, &res));
+  assert(sfu_paced_send_enqueue(&s2->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, s2->cold->addr_len,
+                                SFU_PACER_CLASS_VIDEO_BASE, s2->egress.pacer.pacing_bps, &s2->egress.pacer, &res, &metadata, 2000000, NULL));
+  s2->egress.paced_camera.ready_count = 2;
+
+  /* Drain tick: s2 has remaining work and requeues; f.session and s3 have no work and clear active */
+  (void)sfu_worker_drain_paced_active(&f.w, 1000000);
+
+  /* Generation has advanced */
+  uint64_t gen2 = f.w.paced_generation;
+  assert(gen2 > gen1);
+
+  /* s2 was requeued with the new generation stamp */
+  assert(f.w.paced_active_count == 1);
+  assert(f.w.paced_active_sessions[0] == s2);
+  assert(atomic_load(&s2->paced_active));
+  assert(atomic_load(&s2->paced_generation) == gen2);
+
+  /* f.session and s3 are no longer active */
+  assert(!atomic_load(&f.session->paced_active));
+  assert(!atomic_load(&s3->paced_active));
+
+  /* Unregistering inactive session f.session does not affect s2 in active queue */
+  sfu_worker_unregister_session(&f.w, f.session);
+  assert(f.w.paced_active_count == 1);
+  assert(f.w.paced_active_sessions[0] == s2);
+
+  /* Unregistering active session s2 cleanly removes it and clears generation */
+  sfu_worker_unregister_session(&f.w, s2);
+  assert(f.w.paced_active_count == 0);
+  assert(!atomic_load(&s2->paced_active));
+  assert(atomic_load(&s2->paced_generation) == 0);
+
+  sfu_session_release(s2);
+  sfu_session_release(s3);
+  fixture_destroy(&f);
+}
+
 int main(void) {
   sfu_signaling_server_t signaling;
   sfu_signaling_membership_test_server_init(&signaling);
   signaling.test_auto_drain = true;
   test_worker_paced_active_set();
+  test_worker_paced_generation_dedup();
   test_malformed_rtp_dropped_by_ingress_parser();
   test_compound_nack_rtx_dispatch();
   test_rtx_priority_over_video_backlog();

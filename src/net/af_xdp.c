@@ -817,7 +817,7 @@ static unsigned reap_rx_queue(sfu_xdp_queue_t *q, unsigned max_count, sfu_packet
     pkt->buf_source = SFU_BUF_SOURCE_AF_XDP;
     pkt->buf_owner = q;
     q->frames[frame_id].state = SFU_XDP_FRAME_RX_APP;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (pkt->len >= 20 && (pkt->data[0] & 0xc0) == 0 && pkt->data[4] == 0x21 && pkt->data[5] == 0x12 && pkt->data[6] == 0xa4 && pkt->data[7] == 0x42) {
       const struct sockaddr_in *peer = (const struct sockaddr_in *)&pkt->peer_addr;
       char ip[INET_ADDRSTRLEN] = "?";
