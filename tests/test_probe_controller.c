@@ -49,7 +49,7 @@ static void test_eligibility_and_conditions(void) {
   /* RTX queue has packets -> cannot probe (HOL priority protects playout) */
   assert(!sfu_probe_controller_should_probe(&pc, &gcc, now_us, true, true, 1, 0));
 
-  /* Media queue has backlog -> cannot probe */
+  /* Media queue has backlog -> cannot probe (worker.c blocks probe drain while media backlogged) */
   assert(!sfu_probe_controller_should_probe(&pc, &gcc, now_us, true, true, 0, 1));
 
   /* Stale feedback (> 500ms) -> cannot probe */
