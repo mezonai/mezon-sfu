@@ -416,6 +416,26 @@ static void test_screen_share_admits_higher_tid_without_u_bit(void) {
   sfu_layer_scheduler_commit_packet(&sched, &decision);
 }
 
+static void test_screen_share_upgrades_immediately_without_dwell(void) {
+  sfu_layer_scheduler_t s;
+  sfu_layer_scheduler_init(&s, 1);
+  s.source = SFU_MEDIA_SCREEN;
+
+  s.target_sid = 0;
+  s.target_tid = 0;
+  sfu_layer_scheduler_set_bitrate(&s, 2000000);
+  assert(s.target_sid == 0 && s.target_tid == 2);
+  assert(s.last_target_change_us != 0);
+
+  /* Congestion: immediate downswitch */
+  sfu_layer_scheduler_set_bitrate(&s, 100000);
+  assert(s.target_sid == 0 && s.target_tid == 2); /* screen always forces tid=2 */
+
+  /* Screen share: upgrade applies immediately (no 3s dwell) */
+  sfu_layer_scheduler_set_bitrate(&s, 2000000);
+  assert(s.target_sid == 0 && s.target_tid == 2);
+}
+
 static void test_audio_does_not_consume_slot(void) {
   sfu_peer_session_t session;
   memset(&session, 0, sizeof(session));
@@ -700,6 +720,7 @@ int main(void) {
   test_temporal_transition_commits_on_end();
   test_enhancement_frame_admission_latches_until_end();
   test_screen_share_admits_higher_tid_without_u_bit();
+  test_screen_share_upgrades_immediately_without_dwell();
   test_audio_does_not_consume_slot();
   test_full_table_rejection_and_prune_reclaims_slot();
   test_full_state_reset_on_reuse();

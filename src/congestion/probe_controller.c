@@ -84,10 +84,15 @@ bool sfu_probe_controller_is_probing(sfu_probe_controller_t *pc) {
 bool sfu_probe_controller_should_probe(sfu_probe_controller_t *pc, const gcc_bwe_context_t *gcc, int64_t now_us,
                                        bool twcc_negotiated, bool rtx_available,
                                        uint32_t rtx_queue_count, uint32_t media_backlog_count) {
+  (void)media_backlog_count;
   if (!pc || !gcc || !twcc_negotiated || !rtx_available) {
     return false;
   }
-  if (rtx_queue_count > 0 || media_backlog_count > 0) {
+  /* Probe packets are RTX-budget-free (paced_probe); only RTX backlog signals
+   * real congestion worth deferring to.  Media backlog during a screen-share
+   * keyframe is transient buffering, not network congestion — gating on it
+   * delays the bandwidth probe ramp-up and keeps the desktop blurry. */
+  if (rtx_queue_count > 0) {
     return false;
   }
   pthread_mutex_lock(&pc->lock);
@@ -350,7 +355,27 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
   pthread_mutex_lock(&pc->lock);
   if (pc->state == SFU_PROBE_STATE_IDLE) {
     pthread_mutex_unlock(&pc->lock);
-    bool rtx_available = session->media.screen.rtx_ssrc != 0 || session->media.uplink_video.rtx_ssrc != 0;
+    /* RTX gate: use the same discovery path that generates probe packets
+     * so the gate matches the actual capability (snapshot + local SSRCs). */
+    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
+    bool rtx_available = false;
+    if (snap) {
+      sfu_receiver_snapshot_iter_t iter;
+      sfu_receiver_snapshot_iter_init(&iter, snap);
+      uint32_t slot = 0;
+      const sfu_receiver_entry_t *entry;
+      while ((entry = sfu_receiver_snapshot_iter_next(&iter, &slot)) != NULL) {
+        if ((entry->has_screen && entry->screen_rtx_ssrc != 0) ||
+            (entry->has_video && entry->video_rtx_ssrc != 0)) {
+          rtx_available = true;
+          break;
+        }
+      }
+      sfu_subscriptions_snapshot_release(snap);
+    }
+    if (!rtx_available) {
+      rtx_available = session->media.screen.rtx_ssrc != 0 || session->media.uplink_video.rtx_ssrc != 0;
+    }
     bool should = sfu_probe_controller_should_probe(pc, session->egress.gcc_ctx, now_us,
                                                     session->media.twcc_send_extmap_id != 0,
                                                     rtx_available,
@@ -362,9 +387,37 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
   }
 
   if (pc->state == SFU_PROBE_STATE_PROBING) {
-    if (session->egress.paced_rtx.count > 0 || media_backlog > 0 || gcc_bwe_is_overusing(session->egress.gcc_ctx)) {
+    pthread_mutex_unlock(&pc->lock);
+    /* Pre-lock: check overuse and RTX availability without holding the probe lock
+     * (find_outbound_rtx_params acquires subscription snapshot internally). */
+    if (gcc_bwe_is_overusing(session->egress.gcc_ctx)) {
+      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "overuse");
+      return;
+    }
+    /* Abort if RTX params disappeared (SSRC renegotiated away or snapshot changed). */
+    {
+      uint32_t dummy_ssrc = 0;
+      uint8_t dummy_pt = 0;
+      if (!find_outbound_rtx_params(session, &dummy_ssrc, &dummy_pt)) {
+        sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "no_rtx_params");
+        return;
+      }
+    }
+    /* Allow probing to proceed even when media is queued during the initial
+     * keyframe window.  At startup the large screen keyframe keeps paced_screen
+     * non-empty for 200-300ms at the initial low estimate; blocking probes
+     * until it drains delays bandwidth ramp-up and keeps the desktop blurry.
+     * Only RTX backlog aborts — probe padding shares RTX sequencing and a
+     * queued retransmission is a real queuing signal. */
+    if (session->egress.paced_rtx.count > 0) {
+      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "backlog");
+      return;
+    }
+
+    pthread_mutex_lock(&pc->lock);
+    if (pc->state != SFU_PROBE_STATE_PROBING) {
+      /* Abort call above may have changed state while we re-acquired the lock. */
       pthread_mutex_unlock(&pc->lock);
-      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "backlog_or_overuse");
       return;
     }
 
