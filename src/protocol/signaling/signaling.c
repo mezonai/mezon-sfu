@@ -448,13 +448,14 @@ static void schedule_peer_renegotiation(sfu_peer_session_t *session, bool bump_r
   }
   pthread_mutex_unlock(&session->negotiation.lock);
 
-  if (renegotiation_queue_enqueue_owned(&server->renegotiation_queue, session)) {
+  bool enqueued = renegotiation_queue_enqueue_owned(&server->renegotiation_queue, session);
+  if (enqueued) {
     session = NULL;
   }
   if (session) {
     sfu_session_release(session);
   }
-  if (!server->suppress_wake) {
+  if (enqueued && !server->suppress_wake) {
     uv_async_send(&server->renegotiation_waker);
   }
   signaling_producer_release();
@@ -2534,7 +2535,7 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
         }
         continue;
       }
-      SFU_LOG_WARN("signaling: debounced offer for peer %u was concurrently queued or became ineligible", session->peer_id);
+      SFU_LOG_DEBUG("signaling: debounced offer for peer %u was concurrently queued or became ineligible", session->peer_id);
       if (earliest_due_ms == 0 || due_ms < earliest_due_ms) {
         earliest_due_ms = due_ms;
       }
@@ -2557,7 +2558,7 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
           }
           continue;
         }
-        SFU_LOG_WARN("signaling: unanswered offer watch for peer %u was concurrently queued or became ineligible", session->peer_id);
+        SFU_LOG_DEBUG("signaling: unanswered offer watch for peer %u was concurrently queued or became ineligible", session->peer_id);
       } else if (send) {
         pthread_mutex_lock(&session->negotiation.lock);
         if (session->negotiation.offer_outstanding) {
@@ -2584,7 +2585,7 @@ static void flush_pending_offers(sfu_signaling_server_t *s) {
           continue;
         }
         if (requeue) {
-          SFU_LOG_WARN("signaling: retry offer for peer %u was concurrently queued or became ineligible", session->peer_id);
+          SFU_LOG_DEBUG("signaling: retry offer for peer %u was concurrently queued or became ineligible", session->peer_id);
           if (earliest_due_ms == 0 || due_ms < earliest_due_ms) {
             earliest_due_ms = due_ms;
           }
