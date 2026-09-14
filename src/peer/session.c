@@ -26,7 +26,7 @@
 #include "util/log.h"
 #include "util/metrics.h"
 
-#define SFU_SESSION_KF_THROTTLE_MS 1000
+#define SFU_SESSION_KF_THROTTLE_MS 300
 #define SFU_SNAPSHOT_HAZARD_SLOTS 256
 #define SFU_BWE_START_BPS 1500000u
 #define SFU_BWE_MIN_BPS 100000u

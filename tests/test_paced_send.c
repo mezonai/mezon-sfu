@@ -363,6 +363,51 @@ static void test_priority_queue_clear_and_refund(void) {
   sfu_paced_priority_queue_destroy(&q, &p);
 }
 
+static void test_keyframe_latching_across_packets(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+  uint8_t payload[100] = {0};
+  struct sockaddr_storage dst = {0};
+
+  /* Packet 0: keyframe = true, marker = false */
+  assert(sfu_paced_send_admit_frame_packet(&q, 1000, false, true, false, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+  assert(q.input_frame_active);
+  assert(q.input_frame_is_keyframe);
+  sfu_pacer_reservation_t r0 = {.bytes = sizeof(payload), .pacer_class = SFU_PACER_CLASS_VIDEO_BASE, .active = true};
+  sfu_paced_send_metadata_t m0 = {.is_keyframe = q.input_frame_is_keyframe};
+  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), NULL, 0, &dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE,
+                                SFU_PACED_SEND_MIN_BPS, NULL, &r0, &m0, 1000000, NULL));
+  q.input_frame_queued_packets++;
+
+  /* Packet 1: keyframe = false, marker = false (typical VP9 packet 1..N) */
+  assert(sfu_paced_send_admit_frame_packet(&q, 1000, false, false, false, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+  assert(q.input_frame_is_keyframe);
+  sfu_pacer_reservation_t r1 = {.bytes = sizeof(payload), .pacer_class = SFU_PACER_CLASS_VIDEO_BASE, .active = true};
+  sfu_paced_send_metadata_t m1 = {.is_keyframe = q.input_frame_is_keyframe};
+  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), NULL, 0, &dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE,
+                                SFU_PACED_SEND_MIN_BPS, NULL, &r1, &m1, 1000000, NULL));
+  q.input_frame_queued_packets++;
+
+  /* Packet 2: keyframe = false, marker = true (end of frame) */
+  assert(sfu_paced_send_admit_frame_packet(&q, 1000, true, false, false, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+  assert(q.input_frame_is_keyframe);
+  sfu_pacer_reservation_t r2 = {.bytes = sizeof(payload), .pacer_class = SFU_PACER_CLASS_VIDEO_BASE, .active = true};
+  sfu_paced_send_metadata_t m2 = {.is_keyframe = q.input_frame_is_keyframe};
+  assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), NULL, 0, &dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE,
+                                SFU_PACED_SEND_MIN_BPS, NULL, &r2, &m2, 1000000, NULL));
+  q.input_frame_queued_packets++;
+
+  sfu_paced_send_finish_input_frame(&q);
+  assert(!q.input_frame_active);
+  assert(!q.input_frame_is_keyframe);
+  assert(q.count == 3);
+  assert(q.entries[0].metadata.is_keyframe);
+  assert(q.entries[1].metadata.is_keyframe);
+  assert(q.entries[2].metadata.is_keyframe);
+
+  sfu_paced_send_destroy(&q);
+}
+
 int main(void) {
   test_enqueue_spacing_and_copy();
   test_size_and_rate_floor();
@@ -377,6 +422,7 @@ int main(void) {
   test_backlog_report_attributes_dropped_publishers();
   test_backlog_report_counts_frames_with_unknown_publisher();
   test_rollback_records_publisher();
+  test_keyframe_latching_across_packets();
   test_priority_queue_enqueue_and_bounds();
   test_priority_queue_clear_and_refund();
   return 0;
