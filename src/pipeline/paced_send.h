@@ -102,6 +102,7 @@ typedef struct sfu_paced_send {
   uint32_t max_drain_packets;
   bool input_frame_active;
   bool drop_input_frame;
+  bool input_frame_is_keyframe;
   /* Publisher whose packets were discarded by an incomplete-frame rollback. The
    * rolled-back frame was already committed by the layer scheduler, which now
    * believes it was delivered; egress reads this and forces needs_keyframe so

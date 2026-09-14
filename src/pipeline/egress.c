@@ -252,6 +252,10 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     bool under_delay = sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, now_us, drop_report);
     if (!under_delay && !media->is_keyframe) {
       sfu_metric_inc_id(SFU_METRIC_PACED_SEND_SCREEN_BACKLOG_DROP);
+      if (media->publisher && media->publisher->peer_id != 0) {
+        sfu_egress_invalidate_publisher_scheduler(sub_session, media->source, media->publisher->peer_id);
+        sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
+      }
       return false;
     }
   }
@@ -412,7 +416,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
         .rtx_pt = media->video_rtx_pt,
         .twcc_written = twcc_written,
         .cache_rtx = cache_rtx && rtx_plaintext_len > 0,
-        .is_keyframe = media->is_keyframe,
+        .is_keyframe = media->is_keyframe || (paced_queue && paced_queue->input_frame_is_keyframe),
     };
     if (enc_len <= 0 || (uint32_t)enc_len > SFU_PACED_SEND_MAX_PAYLOAD ||
         !sfu_paced_send_enqueue(paced_queue, pkt->data, (uint16_t)enc_len, rtx_plaintext, rtx_plaintext_len, dst, dst_len, cls,

@@ -703,6 +703,40 @@ static void test_repeated_reconciliation_without_leaks(void) {
   }
 }
 
+static void test_screen_share_reject_arms_needs_keyframe(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.source = SFU_MEDIA_SCREEN;
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Keyframe at timestamp 1000 */
+  sfu_svc_descriptor_t kf = make_desc(1000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+
+  /* Delta frame at timestamp 2000 */
+  sfu_svc_descriptor_t delta = make_desc(2000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &delta, false, &decision));
+  /* Packet rejected in egress (e.g. backlog bound or pacing drop) */
+  sfu_layer_scheduler_reject_packet(&sched, &decision);
+
+  /* For screen share, dropping a delta frame breaks the decoder reference chain,
+   * so reject_packet must set needs_keyframe = true */
+  assert(sched.needs_keyframe);
+
+  /* Subsequent delta frame at timestamp 3000 must be suppressed */
+  sfu_svc_descriptor_t delta2 = make_desc(3000, 0, 0, 0, 0, 0, 1, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &delta2, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_KEYFRAME_REQUIRED);
+
+  /* Fresh keyframe at timestamp 4000 recovers */
+  sfu_svc_descriptor_t kf2 = make_desc(4000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf2, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+}
+
 int main(void) {
   test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
@@ -721,6 +755,7 @@ int main(void) {
   test_enhancement_frame_admission_latches_until_end();
   test_screen_share_admits_higher_tid_without_u_bit();
   test_screen_share_upgrades_immediately_without_dwell();
+  test_screen_share_reject_arms_needs_keyframe();
   test_audio_does_not_consume_slot();
   test_full_table_rejection_and_prune_reclaims_slot();
   test_full_state_reset_on_reuse();
