@@ -387,6 +387,9 @@ void sfu_layer_scheduler_reject_packet(sfu_layer_scheduler_t *sched, const sfu_l
     sched->keyframe_active = false;
     sched->keyframe_failed = true;
   }
+  if (sched->source == SFU_MEDIA_SCREEN) {
+    sched->needs_keyframe = true;
+  }
   if ((decision->start_transition || sched->transition_active) && sched->transition_timestamp == decision->rtp_timestamp &&
       sched->transition_sid == decision->sid) {
     sched->transition_failed = true;

@@ -55,6 +55,7 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
       sfu_paced_send_rollback_input_frame(q);
       q->input_frame_active = false;
       q->drop_input_frame = false;
+      q->input_frame_is_keyframe = false;
       sfu_metric_inc_id(SFU_METRIC_PACED_SEND_INCOMPLETE_FRAME_DROP);
     }
     if (q->input_frame_active && now_us >= q->input_frame_started_us) {
@@ -72,6 +73,7 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
     q->input_frame_base_next_release_us = q->next_release_us;
     q->input_frame_queued_packets = 0;
     q->input_frame_active = true;
+    q->input_frame_is_keyframe = keyframe;
 
     /* Detect motion: if queue has >3 frames ready or this frame will be >2× previous size.
      * Use tighter delay bound during motion to reduce blur during scrolling. */
@@ -90,6 +92,9 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
       sfu_metric_inc_id(SFU_METRIC_PACED_SEND_DELAY_FRAME_DROP);
     }
   }
+  if (keyframe) {
+    q->input_frame_is_keyframe = true;
+  }
   bool admitted = !q->drop_input_frame;
   if (!admitted) {
     q->dropped_frame_packets++;
@@ -98,6 +103,7 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
   if (marker && !admitted) {
     q->input_frame_active = false;
     q->drop_input_frame = false;
+    q->input_frame_is_keyframe = false;
   }
   return admitted;
 }
@@ -114,6 +120,7 @@ void sfu_paced_send_finish_input_frame(sfu_paced_send_t *q) {
   q->input_frame_queued_packets = 0;
   q->input_frame_active = false;
   q->drop_input_frame = false;
+  q->input_frame_is_keyframe = false;
 }
 
 void sfu_paced_send_reject_input_frame(sfu_paced_send_t *q) {
@@ -138,6 +145,7 @@ void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q) {
   }
   q->next_release_us = q->input_frame_base_next_release_us;
   q->input_frame_queued_packets = 0;
+  q->input_frame_is_keyframe = false;
   if (!q->count) {
     q->head = q->tail = 0;
     q->next_release_us = 0;
