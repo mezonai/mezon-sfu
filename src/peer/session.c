@@ -35,7 +35,7 @@
 #define SFU_REMB_NORMAL_INTERVAL_US 500000LL
 #define SFU_REMB_DECREASE_INTERVAL_US 100000LL
 #define SFU_REMB_REFRESH_INTERVAL_US 2000000LL
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 #define SFU_CONGESTION_DIAG_INTERVAL_US 2000000ULL
 #define SFU_CONGESTION_DIAG_LINE_CAP 2048u
 #endif
@@ -950,7 +950,7 @@ bool sfu_session_remote_offer_apply_answer(sfu_peer_session_t *session, const sf
   for (uint32_t i = 0; i < table->high_water_slots; i++) {
     uint64_t offered = i < manifest->high_water_slots ? manifest->assignment_generations[i] : 0;
     atomic_store_explicit(&table->applied_assignment_generations[i], offered, memory_order_release);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (offered != 0 || table->slots[i].state != SFU_REMOTE_SLOT_FREE) {
       SFU_LOG_INFO("session: apply_answer peer=%u slot=%u offered_gen=%" PRIu64 " slot_gen=%" PRIu64 " state=%d offer_gen=%" PRIu64, session->peer_id, i,
                    offered, table->slots[i].assignment_generation, (int)table->slots[i].state, manifest->offer_generation);
@@ -1498,6 +1498,8 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
   atomic_store_explicit(&s->media.screen_send_negotiated_pending, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.screen_keyframe_recovery_pending, false, memory_order_relaxed);
   atomic_store_explicit(&s->media.visible, true, memory_order_relaxed);
+  atomic_store_explicit(&s->paced_active, false, memory_order_relaxed);
+  atomic_store_explicit(&s->paced_generation, 0, memory_order_relaxed);
 
   /* Initialize the seqlock-protected media snapshot to match the zeroed transceivers. */
   atomic_store_explicit(&s->media.snapshot_words[0], 0, memory_order_relaxed);
@@ -1920,7 +1922,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   bool audio_active = false;
   bool current_audience = false;
   bool ptt_active = false;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   bool video_active_after = false;
 #endif
 
@@ -1996,7 +1998,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   session->media.mid_recv_extmap_id = answer->mid_recv_extmap_id;
   bool activity_changed = sfu_session_recompute_video_activity_locked(session);
   changed = changed || activity_changed || old_video_active != session->media.uplink_video.active || old_screen_active != session->media.screen.active;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   video_active_after = session->media.uplink_video.active;
 #endif
   sfu_session_publish_media(session);
@@ -2013,7 +2015,7 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
   atomic_store_explicit(&session->applied_answer_generation, answer->generation, memory_order_release);
   pthread_mutex_unlock(&session->answer_lock);
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   SFU_LOG_INFO("session: apply_pending_answer peer=%u gen=%u audio_sends=%d audio_ssrc=%" PRIu32
                " audio_active=%d"
                " video_sends=%d video_ssrc=%" PRIu32 " video_active=%d screen_sends=%d screen_ssrc=%" PRIu32 " audience=%d ptt=%d audio_neg=%d video_neg=%d",
@@ -2067,7 +2069,7 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
   int64_t *last_pli = source == SFU_MEDIA_SCREEN ? &publisher->egress.last_screen_pli_time : &publisher->egress.last_pli_time;
   int64_t throttle_window_ms = SFU_SESSION_KF_THROTTLE_MS;
   if (*last_pli != 0 && now - *last_pli < throttle_window_ms) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     publisher->egress.diag.pli_coalesced++;
 #endif
     sfu_metric_inc_id(SFU_METRIC_CONGESTION_PLI_COALESCED);
@@ -2116,7 +2118,7 @@ void sfu_session_request_keyframe_for_source(sfu_worker_t *w, sfu_peer_session_t
          * coalesced away — for screen share that is a full second of smear
          * because the publisher never re-keys. */
         *last_pli = now;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         publisher->egress.diag.pli_sent++;
 #endif
         sfu_metric_inc_id(SFU_METRIC_CONGESTION_PLI_SENT);
@@ -2243,7 +2245,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
   }
 
   uint32_t targets[2] = {0, 0};
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   uint32_t fresh_by_source[2] = {0, 0};
   uint32_t stale_by_source[2] = {0, 0};
   uint32_t winner_peer_id[2] = {0, 0};
@@ -2268,18 +2270,18 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
         uint32_t contribution_bps = source == SFU_MEDIA_SCREEN ? screen_bps : camera_bps;
         if (contribution_bps > targets[pass]) {
           targets[pass] = contribution_bps;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
           winner_peer_id[pass] = route->subscriber->peer_id;
           winner_remote_slot[pass] = route->remote_slot;
           winner_generation[pass] = route->assignment_generation;
 #endif
         }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         fresh_by_source[pass]++;
 #endif
         fresh++;
       } else {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         stale_by_source[pass]++;
 #endif
         stale++;
@@ -2288,7 +2290,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
   }
   sfu_fanout_bundle_release(bundle);
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   sfu_media_snapshot_t media = sfu_session_load_media(publisher);
   sfu_remb_source_diag_t *source_diag[2] = {&publisher->egress.diag.remb_camera, &publisher->egress.diag.remb_screen};
   for (unsigned pass = 0; pass < 2; pass++) {
@@ -2305,7 +2307,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
   uint32_t previous_target_bps = publisher->egress.last_remb_target_bps;
   uint32_t aggregate_target_bps = targets[0] > targets[1] ? targets[0] : targets[1];
   publisher->egress.last_remb_target_bps = aggregate_target_bps;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   publisher->egress.diag.remb_fresh = fresh;
   publisher->egress.diag.remb_stale = stale;
   publisher->egress.diag.remb_target_bps = aggregate_target_bps;
@@ -2329,7 +2331,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_VIDEO, targets[0])) {
         publisher->egress.last_camera_remb_bps = targets[0];
         publisher->egress.last_camera_remb_time_us = now_us;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         source_diag[0]->last_sent_bps = targets[0];
         source_diag[0]->last_sent_us = now_us;
         source_diag[0]->sent_count++;
@@ -2337,13 +2339,13 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
         sfu_metric_inc_id(SFU_METRIC_REMB_CAMERA_SENT);
         sent = true;
       } else {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         source_diag[0]->rejected_count++;
 #endif
         sfu_metric_inc_id(SFU_METRIC_REMB_CAMERA_REJECTED);
       }
     } else {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       source_diag[0]->throttled_count++;
 #endif
       sfu_metric_inc_id(SFU_METRIC_REMB_CAMERA_THROTTLED);
@@ -2355,7 +2357,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
       if (sfu_session_send_remb_for_source(w, publisher, SFU_MEDIA_SCREEN, targets[1])) {
         publisher->egress.last_screen_remb_bps = targets[1];
         publisher->egress.last_screen_remb_time_us = now_us;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         source_diag[1]->last_sent_bps = targets[1];
         source_diag[1]->last_sent_us = now_us;
         source_diag[1]->sent_count++;
@@ -2363,13 +2365,13 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
         sfu_metric_inc_id(SFU_METRIC_REMB_SCREEN_SENT);
         sent = true;
       } else {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         source_diag[1]->rejected_count++;
 #endif
         sfu_metric_inc_id(SFU_METRIC_REMB_SCREEN_REJECTED);
       }
     } else {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       source_diag[1]->throttled_count++;
 #endif
       sfu_metric_inc_id(SFU_METRIC_REMB_SCREEN_THROTTLED);
@@ -2377,7 +2379,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
     }
   }
   if (sent) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     publisher->egress.diag.remb_sent = true;
 #endif
     sfu_metric_inc_id(SFU_METRIC_REMB_AGGREGATE_SENT);
@@ -2385,7 +2387,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
   return sent;
 }
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 bool sfu_session_congestion_diag_due(const sfu_peer_session_t *session, uint64_t now_us) {
   if (!session || now_us == 0 || !sfu_session_video_runtime_ready(session)) {
     return false;

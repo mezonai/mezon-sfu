@@ -610,7 +610,7 @@ bool sfu_paced_priority_queue_drain(sfu_paced_priority_queue_t *q, sfu_worker_t 
       sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_SENT);
       sfu_metric_add_id(SFU_METRIC_CONGESTION_PROBE_BYTES, e->len);
     } else {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       s->egress.diag.rtx_sent++;
 #endif
       sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_SENT);

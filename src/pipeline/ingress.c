@@ -39,7 +39,7 @@
 #define SFU_INGRESS_NACK_REQUEST_CAP 48
 #define SFU_INGRESS_TWCC_BATCH_CAP 256
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 static void record_screen_ingress_packet(sfu_peer_session_t *session, const sfu_packet_t *pkt, const sfu_rtp_packet_t *rtp) {
   if (!session || !pkt || !rtp || pkt->recv_ts_ns == 0) {
     return;
@@ -140,7 +140,7 @@ void sfu_svc_update_layers(sfu_peer_session_t *session, uint32_t bitrate_bps) {
     sfu_probe_controller_set_unmet_demand(session->egress.probe_controller, sfu_bandwidth_has_unmet_demand(&allocation));
   }
   uint64_t now_us = sfu_now_us();
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   session->egress.diag.last_allocation_us = now_us;
   session->egress.diag.allocation_streams = (uint32_t)allocation.stream_count;
   session->egress.diag.allocation_pool_bps = allocation.video_pool_bps > UINT32_MAX ? UINT32_MAX : (uint32_t)allocation.video_pool_bps;
@@ -392,7 +392,7 @@ static void handle_twcc_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     }
   }
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   sender_session->egress.diag.last_twcc_us = sfu_now_us();
   sender_session->egress.diag.latest_twcc_lost = fresh_lost;
   sender_session->egress.diag.latest_twcc_total = fresh_total;
@@ -447,7 +447,7 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
       break;
     }
     requested[requested_count++] = lost_seq;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     sender_session->egress.diag.nack_requests++;
 #endif
     sfu_metric_inc_id(SFU_METRIC_CONGESTION_NACK_REQUESTED);
@@ -458,14 +458,14 @@ static void handle_nack_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessi
     uint8_t rtx_pt = 0;
 
     if (!sfu_rtx_cache_get_stream(sender_session->egress.rtx_cache, lost_seq, orig_pkt, &orig_len, &rtx_ssrc, &rtx_pt, nack_media_ssrc, nack_generation)) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       sender_session->egress.diag.cache_misses++;
 #endif
       sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_CACHE_MISS);
       unrecoverable_loss = true;
       continue;
     }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     sender_session->egress.diag.cache_hits++;
 #endif
     sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_CACHE_HIT);
@@ -559,7 +559,7 @@ static void handle_pli_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessio
     return;
   }
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   sender_session->egress.diag.pli_received++;
 #endif
   sfu_metric_inc_id(SFU_METRIC_CONGESTION_PLI_RECEIVED);
@@ -572,7 +572,7 @@ static void handle_fir_member(sfu_worker_t *w, sfu_peer_session_t *sender_sessio
     sfu_metric_inc_id(SFU_METRIC_RTCP_FIR_BAD);
     return;
   }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   sender_session->egress.diag.fir_received++;
 #endif
   sfu_metric_inc_id(SFU_METRIC_RTCP_FIR_RECEIVED);
@@ -688,7 +688,7 @@ static sfu_svc_parse_status_t extract_svc_metadata(sfu_peer_session_t *sender_se
   }
 
   if (sfu_svc_parse_descriptor(codec, m->rtp.payload, m->rtp.payload_len, &m->svc) != 0) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     static _Atomic uint32_t malformed_logs;
     uint32_t n = atomic_fetch_add_explicit(&malformed_logs, 1, memory_order_relaxed);
     if (n == 0 || (n & 127u) == 0) {
@@ -702,7 +702,7 @@ static sfu_svc_parse_status_t extract_svc_metadata(sfu_peer_session_t *sender_se
   m->svc.rtp_timestamp = m->rtp.timestamp;
   m->has_svc = true;
   m->is_keyframe = sfu_svc_descriptor_is_keyframe(&m->svc);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (m->source == SFU_MEDIA_SCREEN && m->svc.b_bit != 0) {
     static _Atomic uint32_t picture_logs;
     uint32_t n = atomic_fetch_add_explicit(&picture_logs, 1, memory_order_relaxed);
@@ -750,7 +750,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   atomic_fetch_add_explicit(&sender_session->media.ptt_diag.datagrams, 1, memory_order_relaxed);
 #endif
 
@@ -760,7 +760,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   srtp_err_status_t unprotect_status;
   bool used_previous_generation = false;
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   bool has_inbound_ctx = false;
   bool has_previous_ctx = false;
   int64_t previous_remaining_ms = 0;
@@ -785,7 +785,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   if (can_retry_previous || can_recover_roc) {
     memcpy(ciphertext, pkt->data, pkt->len);
   }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   uint8_t diag_ciphertext_header[12] = {0};
   if (!is_rtcp && pkt->len >= sizeof(diag_ciphertext_header)) {
     memcpy(diag_ciphertext_header, pkt->data, sizeof(diag_ciphertext_header));
@@ -806,7 +806,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   bool roc_recovered = false;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   uint32_t diag_roc_before = 0;
   uint32_t diag_roc_after = 0;
   bool diag_roc_valid = false;
@@ -820,7 +820,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
     uint32_t roc = 0;
     if (sfu_srtp_get_roc(&sender_session->srtp, raw_ssrc, &roc) == srtp_err_status_ok) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       diag_roc_before = roc;
       diag_roc_valid = true;
 #endif
@@ -829,7 +829,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
         memcpy(pkt->data, ciphertext, pkt->len);
         plain_len = (int)pkt->len;
         srtp_err_status_t retry_status = sfu_srtp_unprotect_rtp_status(&sender_session->srtp, pkt->data, &plain_len);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         diag_roc_retry = true;
         diag_roc_after = next_roc;
 #endif
@@ -840,14 +840,14 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
           sfu_srtp_set_roc(&sender_session->srtp, raw_ssrc, roc);
           memcpy(pkt->data, ciphertext, pkt->len);
           plain_len = (int)pkt->len;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
           diag_roc_after = roc;
 #endif
         }
       }
     } else if (ct_ssrc != 0 && ct_ssrc != raw_ssrc) {
       if (sfu_srtp_get_roc(&sender_session->srtp, ct_ssrc, &roc) == srtp_err_status_ok) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         diag_roc_before = roc;
         diag_roc_valid = true;
 #endif
@@ -856,7 +856,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
           memcpy(pkt->data, ciphertext, pkt->len);
           plain_len = (int)pkt->len;
           srtp_err_status_t retry_status = sfu_srtp_unprotect_rtp_status(&sender_session->srtp, pkt->data, &plain_len);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
           diag_roc_retry = true;
           diag_roc_after = next_roc;
 #endif
@@ -867,7 +867,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
             sfu_srtp_set_roc(&sender_session->srtp, ct_ssrc, roc);
             memcpy(pkt->data, ciphertext, pkt->len);
             plain_len = (int)pkt->len;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
             diag_roc_after = roc;
 #endif
           }
@@ -876,7 +876,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
   }
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   has_inbound_ctx = sender_session->srtp.inbound != NULL;
   has_previous_ctx = sender_session->previous_srtp.inbound != NULL;
   if (has_previous_ctx) {
@@ -893,7 +893,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (roc_recovered) {
     sfu_metric_inc_id(SFU_METRIC_INGRESS_ROC_RECOVERED);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     {
       uint32_t raw_ssrc = 0;
       uint16_t raw_seq = 0;
@@ -908,7 +908,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   if (unprotect_status != srtp_err_status_ok) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     atomic_fetch_add_explicit(&sender_session->media.ptt_diag.srtp_fail, 1, memory_order_relaxed);
 #endif
     sfu_metric_inc_id(is_rtcp ? SFU_METRIC_INGRESS_UNPROTECT_FAIL_RTCP : SFU_METRIC_INGRESS_UNPROTECT_FAIL_RTP);
@@ -924,7 +924,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       sfu_metric_inc_id(SFU_METRIC_INGRESS_UNPROTECT_OTHER);
     }
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     {
       uint32_t raw_ssrc = 0;
       uint16_t raw_pt = 0;
@@ -980,7 +980,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   pkt->len = (uint32_t)plain_len;
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   atomic_fetch_add_explicit(&sender_session->media.ptt_diag.srtp_ok, 1, memory_order_relaxed);
 #endif
 
@@ -1006,7 +1006,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint8_t in_pt = m.rtp.payload_type;
   m.source = classify_media_source(&pt_msnap, &m.rtp);
   m.is_audio = m.source == SFU_MEDIA_AUDIO;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (m.is_audio) {
     atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_packets, 1, memory_order_relaxed);
   }
@@ -1015,7 +1015,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool ptt_active = atomic_load_explicit(&sender_session->media.ptt_active, memory_order_acquire);
   if (is_audience && (!m.is_audio || !ptt_active)) {
     sfu_metric_inc_id(m.is_audio ? SFU_METRIC_PTT_INACTIVE_AUDIO_DROP : SFU_METRIC_AUDIENCE_RTP_DROP);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (m.is_audio) {
       atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
     }
@@ -1027,7 +1027,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (m.is_audio && atomic_load_explicit(&sender_session->media.is_mute, memory_order_acquire)) {
     sfu_metric_inc_id(SFU_METRIC_MUTED_AUDIO_DROP);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
 #endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
@@ -1082,7 +1082,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       return;
     }
     sfu_metric_inc_id(SFU_METRIC_UNNEGOTIATED_RTP_DROP);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     if (m.is_audio) {
       atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
     }
@@ -1106,7 +1106,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (m.source == SFU_MEDIA_VIDEO && !atomic_load_explicit(&sender_session->media.camera_enabled, memory_order_acquire)) {
     sfu_metric_inc_id(SFU_METRIC_CAMERA_DISABLED_RTP_DROP);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     static _Atomic uint32_t camera_disabled_logs;
     uint32_t n = atomic_fetch_add_explicit(&camera_disabled_logs, 1, memory_order_relaxed);
     if (n == 0 || (n & 127u) == 0) {
@@ -1128,7 +1128,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
   if (is_audience && !atomic_load_explicit(&sender_session->media.ptt_active, memory_order_acquire)) {
     sfu_metric_inc_id(SFU_METRIC_PTT_INACTIVE_AUDIO_DROP);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     atomic_fetch_add_explicit(&sender_session->media.ptt_diag.audio_gate_drops, 1, memory_order_relaxed);
 #endif
     pthread_mutex_unlock(&sender_session->ingress_lock);
@@ -1154,7 +1154,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     }
     if (is_rtx) {
       if (m.rtp.ssrc != 0 && source->rtx_ssrc != m.rtp.ssrc) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         SFU_LOG_INFO("ingress: SSRC learn RTX peer=%u ufrag=%s source=%d old_rtx=%" PRIu32 " new=%" PRIu32 " pt=%u rtx_pt=%u active=%d",
                      sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->rtx_ssrc, m.rtp.ssrc, in_pt, rtx_pt, active ? 1 : 0);
 #endif
@@ -1163,12 +1163,12 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       }
     } else if (m.rtp.ssrc != 0 && source->ssrc != m.rtp.ssrc) {
       if (source->rtx_ssrc != 0 && m.rtp.ssrc == source->rtx_ssrc) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         SFU_LOG_INFO("ingress: skip media SSRC learn of RTX ssrc peer=%u ufrag=%s source=%d ssrc=%" PRIu32 " pt=%u rtx_pt=%u", sender_session->peer_id,
                      sender_session->cold->ufrag, (int)m.source, m.rtp.ssrc, in_pt, rtx_pt);
 #endif
       } else {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         SFU_LOG_WARN("ingress: SSRC learn media peer=%u ufrag=%s source=%d old_ssrc=%" PRIu32 " new=%" PRIu32 " pt=%u rtx_pt=%u is_rtx=%d known_ssrc=%" PRIu32
                      " known_rtx=%" PRIu32 " active=%d",
                      sender_session->peer_id, sender_session->cold->ufrag, (int)m.source, source->ssrc, m.rtp.ssrc, in_pt, rtx_pt, is_rtx ? 1 : 0, known_ssrc,
@@ -1206,7 +1206,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       atomic_exchange_explicit(&sender_session->media.screen_keyframe_recovery_pending, true, memory_order_acq_rel) == false) {
     sfu_worker_request_keyframe_throttled_for_source(w, sender_session, m.source);
   }
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   if (m.source == SFU_MEDIA_SCREEN && !is_rtx) {
     record_screen_ingress_packet(sender_session, pkt, &m.rtp);
   }
@@ -1222,7 +1222,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   }
 
   if (m.is_audio) {
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     atomic_fetch_add_explicit(&sender_session->media.ptt_diag.router_admissions, 1, memory_order_relaxed);
 #endif
   }
@@ -1234,7 +1234,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
     uint32_t learned_video_ssrc = sender_session->media.uplink_video.ssrc;
     uint32_t learned_screen_ssrc = sender_session->media.screen.ssrc;
     pthread_mutex_unlock(&sender_session->media.lock);
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
     SFU_LOG_INFO(
         "worker %u: learned uplink SSRCs from RTP peer=%u ufrag=%s source=%d is_rtx=%d pt=%u rtx_pt=%u"
         " (audio=%u camera=%u screen=%u audio_active=%d video_active=%d screen_active=%d); refreshing forwarding",

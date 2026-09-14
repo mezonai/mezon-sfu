@@ -358,7 +358,7 @@ typedef struct {
   sfu_remb_contribution_t remb_contributions[SFU_MAX_REMOTE_SLOTS];
 } sfu_session_graph_t;
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 typedef enum {
   SFU_PTT_DIAG_NONE = 0,
   SFU_PTT_DIAG_NO_INGRESS,
@@ -473,12 +473,12 @@ typedef struct {
   _Atomic bool visible;
   _Atomic bool is_mute;
   _Atomic bool uplink_ssrc_dirty;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   sfu_ptt_diag_t ptt_diag;
 #endif
 } sfu_session_media_t;
 
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
 typedef struct sfu_remb_source_diag {
   uint32_t target_bps;
   uint32_t media_ssrc;
@@ -556,7 +556,7 @@ typedef struct {
   sfu_layer_scheduler_slot_t *schedulers;
   sfu_pacer_t pacer;
   sfu_rtx_cache_t *rtx_cache;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   sfu_congestion_diag_t diag;
 #endif
   int64_t last_pli_time;
@@ -607,6 +607,7 @@ typedef struct sfu_peer_session {
   _Atomic bool is_audience;
   _Atomic uint8_t screen_codec_preference;
   _Atomic bool paced_active;
+  _Atomic uint64_t paced_generation;
   int fd;
   uint8_t state;
   bool active;

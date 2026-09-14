@@ -49,7 +49,7 @@ typedef struct sfu_worker {
   int64_t last_twcc_flush_us;
   int64_t last_remb_scan_us;
   int64_t last_paced_send_scan_us;
-#ifdef SFU_DIAG_LOG
+#if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
   int64_t last_diag_scan_us;
 #endif
   uint32_t worker_index;
@@ -66,6 +66,7 @@ typedef struct sfu_worker {
   sfu_peer_session_t **paced_active_sessions;
   uint32_t paced_active_count;
   uint32_t paced_active_capacity;
+  uint64_t paced_generation;
   sfu_peer_session_t **paced_drain_scratch;
   uint32_t paced_drain_scratch_capacity;
   pthread_mutex_t paced_active_lock;
