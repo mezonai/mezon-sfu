@@ -5,167 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char *const k_metric_names[] = {
-    "msg_trunc_drop",
-    "json_reject",
-    "rtcp_compound_malformed",
-    "rtcp_member_unknown",
-    "rtcp_twcc_bad",
-    "rtcp_nack_bad",
-    "rtcp_pli_bad",
-    "rtcp_fir_bad",
-    "rtcp_fir_received",
-    "rtcp_nack_dropped",
-    "rtx_build_fail",
-    "rtx_seq_translate_fail",
-    "rtx_protect_fail",
-    "rtx_protect_replay_old",
-    "rtx_protect_replay_fail",
-    "rtcp_kf_unresolved",
-    "remb_sent",
-    "remb_contribution_written",
-    "remb_contribution_stale",
-    "remb_aggregate_empty",
-    "remb_aggregate_no_fresh",
-    "remb_aggregate_target_changed",
-    "remb_aggregate_throttled",
-    "remb_aggregate_sent",
-    "remb_send_rejected",
-    "remb_no_media_ssrc",
-    "remb_protect_fail",
-    "remb_packet_alloc_fail",
-    "remb_camera_sent",
-    "remb_screen_sent",
-    "remb_camera_throttled",
-    "remb_screen_throttled",
-    "remb_camera_rejected",
-    "remb_screen_rejected",
-    "congestion_diag_log",
-    "bandwidth_allocator_runs",
-    "bandwidth_allocator_active_streams",
-    "bandwidth_allocator_unallocated_bps",
-    "bandwidth_screen_preferred",
-    "bandwidth_screen_below_preferred",
-    "bandwidth_camera_deferred_for_screen",
-    "congestion_twcc_feedback",
-    "congestion_twcc_lost",
-    "congestion_nack_requested",
-    "congestion_rtx_cache_hit",
-    "congestion_rtx_cache_miss",
-    "congestion_rtx_sent",
-    "congestion_pli_received",
-    "congestion_pli_sent",
-    "congestion_pli_coalesced",
-    "twcc_write_fail",
-    "egress_protect_fail",
-    "egress_protect_replay_old",
-    "egress_protect_replay_fail",
-    "egress_protect_fail_audio",
-    "egress_protect_fail_video",
-    "egress_seq_translate_fail",
-    "egress_seq_translate_table_full",
-    "dtls_restart_detected",
-    "dtls_restart_established",
-    "dtls_restart_failed",
-    "dtls_restart_timeout",
-    "dtls_restart_duplicate",
-    "ingress_unprotect_fail_rtp",
-    "ingress_unprotect_fail_rtcp",
-    "ingress_unprotect_auth_fail",
-    "ingress_unprotect_replay_fail",
-    "ingress_unprotect_replay_old",
-    "ingress_unprotect_no_ctx",
-    "ingress_unprotect_other",
-    "ingress_unprotect_previous_generation",
-    "egress_send_full",
-    "pacer_dropped_enh",
-    "pacer_dropped_enh_frames",
-    "vp9_enh_orphan_continuation",
-    "rtx_dropped_budget",
-    "audience_rtp_drop",
-    "rtp_parse_fail",
-    "muted_audio_drop",
-    "unnegotiated_rtp_drop",
-    "vp9_descriptor_parse_fail",
-    "packet_pool_exhausted",
-    "packet_meta_pool_exhausted",
-    "worker_inbox_full",
-    "fanout_ring_full",
-    "fanout_job_pool_exhausted",
-    "release_queue_full",
-    "send_sq_full",
-    "egress_admission_drop",
-    "egress_mid_not_negotiated",
-    "egress_output_alloc",
-    "egress_copied_bytes",
-    "fanout_batch_jobs",
-    "fanout_batch_targets",
-    "paced_send_enqueued",
-    "paced_send_sent",
-    "paced_send_full_drop",
-    "paced_send_enqueue_drop",
-    "paced_send_sq_full",
-    "paced_send_delay_frame_drop",
-    "paced_send_frame_packet_drop",
-    "paced_send_incomplete_frame_drop",
-    "paced_send_incomplete_frame_invalidate",
-    "paced_send_delay_crossing",
-    "paced_send_screen_backlog_drop",
-    "paced_send_backlog_drop_frames",
-    "paced_send_rate_floor",
-    "paced_send_drain_cap_hit",
-    "paced_send_release_late",
-    "paced_send_input_frame_slow",
-    "dispatch_null_payload",
-    "af_xdp_invalid_rx_frame",
-    "af_xdp_invalid_rx_return",
-    "af_xdp_neighbor_miss",
-    "af_xdp_tx_kernel_fallback",
-    "af_xdp_tx_kernel_fallback_backpressure",
-    "af_xdp_tx_kernel_fallback_error",
-    "af_xdp_invalid_tx_completion",
-    "af_xdp_tx_frame_starvation",
-    "af_xdp_tx_kernel_fallback_completed",
-    "af_xdp_tx_permanent_failure",
-    "af_xdp_tx_ring_backpressure",
-    "af_xdp_tx_canceled_shutdown",
-    "send_control_accepted",
-    "send_control_queue_full",
-    "send_normal_queue_full",
-    "send_control_dispatched",
-    "send_normal_dispatched",
-    "send_control_bypass",
-    "send_fairness_normal",
-    "send_control_canceled",
-    "send_normal_canceled",
-    "io_uring_pending_full",
-    "io_uring_send_queued",
-    "af_xdp_pending_full",
-    "af_xdp_send_queued",
-    "camera_disabled_rtp_drop",
-    "screen_disabled_rtp_drop",
-    "ingress_roc_recovered",
-    "mid_write_fail",
-    "ptt_inactive_audio_drop",
-    "router_assignment_pending",
-    "congestion_rtx_queued",
-    "congestion_rtx_bytes",
-    "congestion_rtx_full_drop",
-    "congestion_rtx_expired_drop",
-    "congestion_rtx_stale_drop",
-    "congestion_probe_started",
-    "congestion_probe_succeeded",
-    "congestion_probe_failed",
-    "congestion_probe_aborted",
-    "congestion_probe_queued",
-    "congestion_probe_sent",
-    "congestion_probe_bytes",
-    "congestion_probe_full_drop",
-    "congestion_probe_expired_drop",
-    "congestion_probe_stale_drop",
-};
-
-enum { SFU_METRIC_COUNT = sizeof(k_metric_names) / sizeof(k_metric_names[0]) };
+#define SFU_METRIC_NAME(id, name) name,
+static const char *const k_metric_names[SFU_METRIC_COUNT] = {SFU_METRIC_LIST(SFU_METRIC_NAME)};
+#undef SFU_METRIC_NAME
 
 static _Atomic uint64_t g_counters[SFU_METRIC_COUNT];
 
@@ -230,22 +72,34 @@ void sfu_metrics_init(void) {
   }
 }
 
+void sfu_metric_inc_id(sfu_metric_id_t id) { sfu_metric_add_id(id, 1); }
+
+void sfu_metric_add_id(sfu_metric_id_t id, uint64_t value) {
+  if ((unsigned)id >= SFU_METRIC_COUNT) {
+    return;
+  }
+  atomic_fetch_add_explicit(&g_counters[id], value, memory_order_relaxed);
+}
+
+uint64_t sfu_metric_get_id(sfu_metric_id_t id) {
+  if ((unsigned)id >= SFU_METRIC_COUNT) {
+    return 0;
+  }
+  return atomic_load_explicit(&g_counters[id], memory_order_relaxed);
+}
+
 void sfu_metric_inc(const char *name) { sfu_metric_add(name, 1); }
 
 void sfu_metric_add(const char *name, uint64_t value) {
   int idx = find_metric(name);
-  if (idx < 0) {
-    return;
+  if (idx >= 0) {
+    sfu_metric_add_id((sfu_metric_id_t)idx, value);
   }
-  atomic_fetch_add_explicit(&g_counters[idx], value, memory_order_relaxed);
 }
 
 uint64_t sfu_metric_get(const char *name) {
   int idx = find_metric(name);
-  if (idx < 0) {
-    return 0;
-  }
-  return atomic_load_explicit(&g_counters[idx], memory_order_relaxed);
+  return idx < 0 ? 0 : sfu_metric_get_id((sfu_metric_id_t)idx);
 }
 
 size_t sfu_metrics_snapshot(char *buf, size_t cap) {

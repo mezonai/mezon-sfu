@@ -78,17 +78,17 @@ static void record_allocation_metrics(const sfu_bandwidth_allocation_t *allocati
       camera_deferred = true;
     }
   }
-  sfu_metric_inc("bandwidth_allocator_runs");
-  sfu_metric_add("bandwidth_allocator_active_streams", allocation->stream_count);
-  sfu_metric_add("bandwidth_allocator_unallocated_bps", allocation->unallocated_bps);
+  sfu_metric_inc_id(SFU_METRIC_BANDWIDTH_ALLOCATOR_RUNS);
+  sfu_metric_add_id(SFU_METRIC_BANDWIDTH_ALLOCATOR_ACTIVE_STREAMS, allocation->stream_count);
+  sfu_metric_add_id(SFU_METRIC_BANDWIDTH_ALLOCATOR_UNALLOCATED_BPS, allocation->unallocated_bps);
   if (screen_at_preferred) {
-    sfu_metric_inc("bandwidth_screen_preferred");
+    sfu_metric_inc_id(SFU_METRIC_BANDWIDTH_SCREEN_PREFERRED);
   }
   if (screen_below_preferred) {
-    sfu_metric_inc("bandwidth_screen_below_preferred");
+    sfu_metric_inc_id(SFU_METRIC_BANDWIDTH_SCREEN_BELOW_PREFERRED);
   }
   if (has_screen && camera_deferred) {
-    sfu_metric_inc("bandwidth_camera_deferred_for_screen");
+    sfu_metric_inc_id(SFU_METRIC_BANDWIDTH_CAMERA_DEFERRED_FOR_SCREEN);
   }
 }
 

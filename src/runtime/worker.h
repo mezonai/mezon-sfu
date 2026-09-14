@@ -62,6 +62,13 @@ typedef struct sfu_worker {
   sfu_peer_session_t **twcc_scratch;
   uint32_t twcc_scratch_capacity;
   pthread_mutex_t local_sessions_lock;
+
+  sfu_peer_session_t **paced_active_sessions;
+  uint32_t paced_active_count;
+  uint32_t paced_active_capacity;
+  sfu_peer_session_t **paced_drain_scratch;
+  uint32_t paced_drain_scratch_capacity;
+  pthread_mutex_t paced_active_lock;
 } sfu_worker_t;
 
 int sfu_worker_init(sfu_worker_t *w, int core_id, uint32_t worker_index, int fd, sfu_packet_pool_t *pp, sfu_room_registry_t *room_registry,
@@ -74,5 +81,7 @@ bool sfu_worker_drain_finished(const sfu_worker_t *w);
 bool sfu_worker_register_session(sfu_worker_t *w, sfu_peer_session_t *s);
 void sfu_worker_unregister_session(sfu_worker_t *w, sfu_peer_session_t *s);
 void sfu_worker_release_packet(sfu_worker_t *w, sfu_packet_t *pkt);
+void sfu_worker_mark_session_paced_active(sfu_worker_t *w, sfu_peer_session_t *s);
+bool sfu_worker_drain_paced_active(sfu_worker_t *w, int64_t now_us);
 
 #endif /* SFU_RUNTIME_WORKER_H */
