@@ -84,15 +84,10 @@ bool sfu_probe_controller_is_probing(sfu_probe_controller_t *pc) {
 bool sfu_probe_controller_should_probe(sfu_probe_controller_t *pc, const gcc_bwe_context_t *gcc, int64_t now_us,
                                        bool twcc_negotiated, bool rtx_available,
                                        uint32_t rtx_queue_count, uint32_t media_backlog_count) {
-  (void)media_backlog_count;
   if (!pc || !gcc || !twcc_negotiated || !rtx_available) {
     return false;
   }
-  /* Probe packets are RTX-budget-free (paced_probe); only RTX backlog signals
-   * real congestion worth deferring to.  Media backlog during a screen-share
-   * keyframe is transient buffering, not network congestion — gating on it
-   * delays the bandwidth probe ramp-up and keeps the desktop blurry. */
-  if (rtx_queue_count > 0) {
+  if (rtx_queue_count > 0 || media_backlog_count > 0) {
     return false;
   }
   pthread_mutex_lock(&pc->lock);
@@ -345,37 +340,22 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
   }
   sfu_probe_controller_t *pc = session->egress.probe_controller;
 
-  uint32_t media_backlog = session->egress.paced_camera.count;
-  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS && media_backlog == 0; i++) {
-    if (session->egress.paced_screen[i].count > 0) {
-      media_backlog++;
-    }
-  }
+  /* Resolve outbound RTX parameters outside pc->lock to match generation path */
+  uint32_t rtx_ssrc = 0;
+  uint8_t rtx_pt = 0;
+  bool rtx_available = find_outbound_rtx_params(session, &rtx_ssrc, &rtx_pt);
 
   pthread_mutex_lock(&pc->lock);
   if (pc->state == SFU_PROBE_STATE_IDLE) {
     pthread_mutex_unlock(&pc->lock);
-    /* RTX gate: use the same discovery path that generates probe packets
-     * so the gate matches the actual capability (snapshot + local SSRCs). */
-    sfu_receiver_snapshot_t *snap = sfu_session_subscriptions_acquire(session);
-    bool rtx_available = false;
-    if (snap) {
-      sfu_receiver_snapshot_iter_t iter;
-      sfu_receiver_snapshot_iter_init(&iter, snap);
-      uint32_t slot = 0;
-      const sfu_receiver_entry_t *entry;
-      while ((entry = sfu_receiver_snapshot_iter_next(&iter, &slot)) != NULL) {
-        if ((entry->has_screen && entry->screen_rtx_ssrc != 0) ||
-            (entry->has_video && entry->video_rtx_ssrc != 0)) {
-          rtx_available = true;
-          break;
-        }
+
+    uint32_t media_backlog = session->egress.paced_camera.count;
+    for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS && media_backlog == 0; i++) {
+      if (session->egress.paced_screen[i].count > 0) {
+        media_backlog++;
       }
-      sfu_subscriptions_snapshot_release(snap);
     }
-    if (!rtx_available) {
-      rtx_available = session->media.screen.rtx_ssrc != 0 || session->media.uplink_video.rtx_ssrc != 0;
-    }
+
     bool should = sfu_probe_controller_should_probe(pc, session->egress.gcc_ctx, now_us,
                                                     session->media.twcc_send_extmap_id != 0,
                                                     rtx_available,
@@ -388,27 +368,17 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
 
   if (pc->state == SFU_PROBE_STATE_PROBING) {
     pthread_mutex_unlock(&pc->lock);
-    /* Pre-lock: check overuse and RTX availability without holding the probe lock
-     * (find_outbound_rtx_params acquires subscription snapshot internally). */
+    /* Pre-lock: check overuse and RTX availability without holding the probe lock */
     if (gcc_bwe_is_overusing(session->egress.gcc_ctx)) {
       sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "overuse");
       return;
     }
-    /* Abort if RTX params disappeared (SSRC renegotiated away or snapshot changed). */
-    {
-      uint32_t dummy_ssrc = 0;
-      uint8_t dummy_pt = 0;
-      if (!find_outbound_rtx_params(session, &dummy_ssrc, &dummy_pt)) {
-        sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "no_rtx_params");
-        return;
-      }
+    /* Abort if RTX params disappeared (SSRC renegotiated away or snapshot changed) */
+    if (!rtx_available) {
+      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "no_rtx_params");
+      return;
     }
-    /* Allow probing to proceed even when media is queued during the initial
-     * keyframe window.  At startup the large screen keyframe keeps paced_screen
-     * non-empty for 200-300ms at the initial low estimate; blocking probes
-     * until it drains delays bandwidth ramp-up and keeps the desktop blurry.
-     * Only RTX backlog aborts — probe padding shares RTX sequencing and a
-     * queued retransmission is a real queuing signal. */
+    /* RTX queue backlog represents real congestion / packet loss; abort probe */
     if (session->egress.paced_rtx.count > 0) {
       sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "backlog");
       return;
@@ -436,15 +406,7 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
       return;
     }
 
-    /* Probe only on a negotiated RTX SSRC to avoid corrupting media sequence space. */
-    uint32_t rtx_ssrc = 0;
-    uint8_t rtx_pt = 0;
-    if (!find_outbound_rtx_params(session, &rtx_ssrc, &rtx_pt)) {
-      pthread_mutex_unlock(&pc->lock);
-      sfu_probe_controller_abort(pc, session->egress.gcc_ctx, now_us, "no_rtx_params");
-      return;
-    }
-
+    /* Probe only on the negotiated RTX SSRC resolved pre-lock */
     uint32_t generated = 0;
     while (pc->bytes_sent < pc->bytes_target && generated < SFU_PACED_SEND_MAX_DRAIN_PER_SCAN) {
       if (session->egress.paced_probe.capacity > 0 &&
