@@ -812,7 +812,8 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
   bool diag_roc_valid = false;
   bool diag_roc_retry = false;
 #endif
-  if ((unprotect_status == srtp_err_status_replay_old || unprotect_status == srtp_err_status_replay_fail) && can_recover_roc) {
+  if ((unprotect_status == srtp_err_status_replay_old || unprotect_status == srtp_err_status_replay_fail ||
+       unprotect_status == srtp_err_status_pkt_idx_old) && can_recover_roc) {
     uint32_t raw_ssrc = sfu_read_be32(pkt->data + 8);
     uint32_t ct_ssrc = sfu_read_be32(ciphertext + 8);
     if (raw_ssrc == 0) {
@@ -916,7 +917,7 @@ void sfu_ingress_process(sfu_worker_t *w, sfu_packet_t *pkt) {
       sfu_metric_inc_id(SFU_METRIC_INGRESS_UNPROTECT_AUTH_FAIL);
     } else if (unprotect_status == srtp_err_status_replay_fail) {
       sfu_metric_inc_id(SFU_METRIC_INGRESS_UNPROTECT_REPLAY_FAIL);
-    } else if (unprotect_status == srtp_err_status_replay_old) {
+    } else if (unprotect_status == srtp_err_status_replay_old || unprotect_status == srtp_err_status_pkt_idx_old) {
       sfu_metric_inc_id(SFU_METRIC_INGRESS_UNPROTECT_REPLAY_OLD);
     } else if (unprotect_status == srtp_err_status_no_ctx) {
       sfu_metric_inc_id(SFU_METRIC_INGRESS_UNPROTECT_NO_CTX);

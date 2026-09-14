@@ -313,7 +313,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     uint32_t n = atomic_fetch_add_explicit(&empty_fanout_logs, 1, memory_order_relaxed);
     if (n == 0 || (n & 127u) == 0) {
       uint32_t stored = bundle ? bundle->count : 0;
-      SFU_LOG_WARN("router: empty fanout n=%u peer=%u kind=%d stored=%u", n + 1, sender_session->peer_id, (int)kind, stored);
+      SFU_LOG_DEBUG("router: empty fanout n=%u peer=%u kind=%d stored=%u", n + 1, sender_session->peer_id, (int)kind, stored);
     }
   }
 
