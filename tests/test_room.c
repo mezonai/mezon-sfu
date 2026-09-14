@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "config/config.h"
 #include "peer/session.h"
 #include "protocol/signaling/signaling.h"
 #include "room/room.h"
@@ -1381,9 +1382,138 @@ static void test_ptt_diag_generation_baselines_and_classification(void) {
 }
 #endif
 
+static void test_alone_participant_state_transitions(void) {
+  sfu_config_set_defaults();
+  sfu_room_t room;
+  assert(sfu_room_init(&room, 12345) == 0);
+  assert(room.alone_user_id == 0);
+  assert(room.alone_deadline_ms == 0);
+  assert(room.alone_generation == 0);
+  assert(!room.alone_expiry_claimed);
+
+  int64_t sole = -1;
+  assert(room_count_distinct_users_locked(&room, &sole) == 0);
+  assert(sole == 0);
+
+  /* User 100 first session joins */
+  sfu_peer_session_t *s1 = mock_session("u1_s1");
+  s1->user_id = 100;
+  assert(room_add_peer(&room, s1));
+
+  assert(room_count_distinct_users_locked(&room, &sole) == 1);
+  assert(sole == 100);
+
+  pthread_mutex_lock(&room.lock);
+  assert(room.alone_user_id == 100);
+  assert(room.alone_deadline_ms > 0);
+  uint64_t deadline1 = room.alone_deadline_ms;
+  uint64_t gen1 = room.alone_generation;
+  assert(gen1 == 1);
+  assert(!room.alone_expiry_claimed);
+
+  /* Same user: deadline and generation must not reset or extend */
+  bool changed = room_update_alone_state_locked(&room, 1800000, 2000);
+  assert(!changed);
+  assert(room.alone_user_id == 100);
+  assert(room.alone_deadline_ms == deadline1);
+  assert(room.alone_generation == gen1);
+  pthread_mutex_unlock(&room.lock);
+
+  /* User 100 second session joins (e.g. mobile) */
+  sfu_peer_session_t *s2 = mock_session("u1_s2");
+  s2->user_id = 100;
+  assert(room_add_peer(&room, s2));
+
+  assert(room_count_distinct_users_locked(&room, &sole) == 1);
+  assert(sole == 100);
+
+  pthread_mutex_lock(&room.lock);
+  assert(room.alone_user_id == 100);
+  assert(room.alone_deadline_ms == deadline1);
+  assert(room.alone_generation == gen1);
+  pthread_mutex_unlock(&room.lock);
+
+  /* User 100 leaves secondary session (s2 leaves, s1 remains) */
+  room_remove_peer(&room, s2);
+  assert(room_count_distinct_users_locked(&room, &sole) == 1);
+  assert(sole == 100);
+
+  pthread_mutex_lock(&room.lock);
+  assert(room.alone_user_id == 100);
+  assert(room.alone_deadline_ms == deadline1);
+  assert(room.alone_generation == gen1);
+  pthread_mutex_unlock(&room.lock);
+  sfu_session_release(s2);
+
+  /* Second distinct user (user 200) joins: room is no longer alone */
+  sfu_peer_session_t *s3 = mock_session("u2_s1");
+  s3->user_id = 200;
+  assert(room_add_peer(&room, s3));
+
+  assert(room_count_distinct_users_locked(&room, &sole) == 2);
+  assert(sole == 0);
+
+  pthread_mutex_lock(&room.lock);
+  assert(room.alone_user_id == 0);
+  assert(room.alone_deadline_ms == 0);
+  assert(room.alone_generation > gen1);
+  uint64_t gen2 = room.alone_generation;
+  pthread_mutex_unlock(&room.lock);
+
+  /* User 200 leaves: room returns to 1 distinct user (user 100). Fresh deadline! */
+  room_remove_peer(&room, s3);
+  assert(room_count_distinct_users_locked(&room, &sole) == 1);
+  assert(sole == 100);
+
+  pthread_mutex_lock(&room.lock);
+  assert(room.alone_user_id == 100);
+  assert(room.alone_deadline_ms > 0);
+  assert(room.alone_generation > gen2);
+  uint64_t gen3 = room.alone_generation;
+  pthread_mutex_unlock(&room.lock);
+  sfu_session_release(s3);
+
+  /* Test injected timestamps on room_update_alone_state_locked */
+  pthread_mutex_lock(&room.lock);
+  room.alone_deadline_ms = 0;
+  room.alone_user_id = 0;
+  changed = room_update_alone_state_locked(&room, 50000, 100000);
+  assert(changed);
+  assert(room.alone_user_id == 100);
+  assert(room.alone_deadline_ms == 150000);
+  assert(room.alone_generation > gen3);
+
+  /* Overflow protection */
+  room.alone_deadline_ms = 0;
+  room.alone_user_id = 0;
+  changed = room_update_alone_state_locked(&room, 1000, UINT64_MAX - 500);
+  assert(changed);
+  assert(room.alone_deadline_ms == UINT64_MAX);
+
+  /* Timeout 0 disables alone tracking */
+  changed = room_update_alone_state_locked(&room, 0, 200000);
+  assert(changed);
+  assert(room.alone_user_id == 0);
+  assert(room.alone_deadline_ms == 0);
+  changed = room_update_alone_state_locked(&room, 0, 200000);
+  assert(!changed);
+  pthread_mutex_unlock(&room.lock);
+
+  /* Remove final session */
+  room_remove_peer(&room, s1);
+  assert(room_count_distinct_users_locked(&room, &sole) == 0);
+  pthread_mutex_lock(&room.lock);
+  assert(room.alone_user_id == 0);
+  assert(room.alone_deadline_ms == 0);
+  pthread_mutex_unlock(&room.lock);
+  sfu_session_release(s1);
+  sfu_room_destroy(&room);
+}
+
 int main(void) {
   sfu_signaling_membership_test_server_init(&signaling_test_server);
   signaling_test_server.test_auto_drain = true;
+  test_alone_participant_state_transitions();
   test_membership_revision_and_capture_failure();
   test_chunked_subscription_root_copy();
   test_add_remove();

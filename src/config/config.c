@@ -1,5 +1,6 @@
 #include "config/config.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,36 @@ static char *trim_whitespace(char *str) {
   end[1] = '\0';
   return str;
 }
+
+static bool parse_uint32(const char *str, uint32_t *out) {
+  if (!str || *str == '\0') {
+    return false;
+  }
+  while (isspace((unsigned char)*str)) {
+    str++;
+  }
+  if (!isdigit((unsigned char)*str)) {
+    return false;
+  }
+  char *end = NULL;
+  errno = 0;
+  unsigned long long val = strtoull(str, &end, 10);
+  if (errno != 0 || end == str) {
+    return false;
+  }
+  while (isspace((unsigned char)*end)) {
+    end++;
+  }
+  if (*end != '\0') {
+    return false;
+  }
+  if (val > UINT32_MAX) {
+    return false;
+  }
+  *out = (uint32_t)val;
+  return true;
+}
+
 void sfu_config_set_defaults(void) {
   memset(&g_sfu_config, 0, sizeof(g_sfu_config));
 
@@ -62,6 +93,8 @@ void sfu_config_set_defaults(void) {
   g_sfu_config.af_xdp_frame_count = 16384;
   g_sfu_config.af_xdp_frame_size = 4096;
   snprintf(g_sfu_config.af_xdp_mode, sizeof(g_sfu_config.af_xdp_mode), "native");
+
+  g_sfu_config.alone_participant_timeout_seconds = 1800;
 }
 
 int sfu_config_validate(const sfu_config_t *config) {
@@ -103,6 +136,10 @@ int sfu_config_validate(const sfu_config_t *config) {
                   config->bandwidth_screen_cap_bps, config->bandwidth_camera_mid_bps, config->bandwidth_camera_cap_bps);
     return -1;
   }
+  if (config->alone_participant_timeout_seconds > 86400) {
+    SFU_LOG_ERROR("alone_participant_timeout_seconds (%u) exceeds maximum 86400 (24h)", config->alone_participant_timeout_seconds);
+    return -1;
+  }
 #undef REQUIRE_POWER_OF_TWO
   return 0;
 }
@@ -122,6 +159,7 @@ int sfu_config_load_ini(const char *filepath) {
 
   char line[512];
   char section[64] = "";
+  bool parse_error = false;
 
   while (fgets(line, sizeof(line), fp)) {
     char *p = trim_whitespace(line);
@@ -207,10 +245,24 @@ int sfu_config_load_ini(const char *filepath) {
       g_sfu_config.af_xdp_frame_size = (uint32_t)atoi(val);
     } else if (strcmp(key, "mode") == 0 && strcmp(section, "af_xdp") == 0) {
       snprintf(g_sfu_config.af_xdp_mode, sizeof(g_sfu_config.af_xdp_mode), "%s", val);
+    } else if ((strcmp(key, "alone_participant_timeout_seconds") == 0 || strcmp(key, "alone_timeout") == 0 ||
+                strcmp(key, "alone_timeout_sec") == 0) &&
+               strcmp(section, "room") == 0) {
+      uint32_t parsed_val = 0;
+      if (parse_uint32(val, &parsed_val)) {
+        g_sfu_config.alone_participant_timeout_seconds = parsed_val;
+      } else {
+        g_sfu_config.alone_participant_timeout_seconds = UINT32_MAX;
+        SFU_LOG_ERROR("invalid alone_participant_timeout_seconds value '%s' in [room]", val);
+        parse_error = true;
+      }
     }
   }
 
   fclose(fp);
+  if (parse_error) {
+    return -1;
+  }
   SFU_LOG_INFO("successfully loaded runtime config from '%s'", filepath);
   return 0;
 }
