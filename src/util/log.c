@@ -81,12 +81,29 @@ void sfu_log(sfu_log_level_t level, const char *file, int line, const char *fmt,
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
 
-  fprintf(stderr, "[%ld.%03ld] %s %s:%d: ", (long)ts.tv_sec, ts.tv_nsec / 1000000L, level_name(level), file, line);
+  char buf[2048];
+  int prefix_len = snprintf(buf, sizeof(buf), "[%ld.%03ld] %s %s:%d: ", (long)ts.tv_sec, ts.tv_nsec / 1000000L, level_name(level), file, line);
+  if (prefix_len < 0) {
+    prefix_len = 0;
+  } else if ((size_t)prefix_len >= sizeof(buf)) {
+    prefix_len = (int)sizeof(buf) - 1;
+  }
 
   va_list ap;
   va_start(ap, fmt);
-  vfprintf(stderr, fmt, ap);
+  int msg_len = vsnprintf(buf + prefix_len, sizeof(buf) - (size_t)prefix_len, fmt, ap);
   va_end(ap);
 
-  fputc('\n', stderr);
+  size_t total_len = (size_t)prefix_len;
+  if (msg_len > 0) {
+    total_len += (size_t)msg_len;
+  }
+  if (total_len >= sizeof(buf) - 1) {
+    total_len = sizeof(buf) - 2;
+  }
+  buf[total_len++] = '\n';
+
+  flockfile(stderr);
+  fwrite(buf, 1, total_len, stderr);
+  funlockfile(stderr);
 }
