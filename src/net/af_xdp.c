@@ -391,7 +391,7 @@ static void refill_rx(sfu_xdp_queue_t *q) {
 
 static void recycle_rx_frame(sfu_xdp_queue_t *q, uint32_t frame) {
   if (!q || frame >= q->rx_frame_count || q->rx_free_count >= q->rx_frame_count) {
-    sfu_metric_inc("af_xdp_invalid_rx_frame");
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_INVALID_RX_FRAME);
     return;
   }
   q->frames[frame].state = SFU_XDP_FRAME_RX_FREE;
@@ -674,7 +674,7 @@ int sfu_net_send_ex(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst,
   if (r->queue_bound && r->queue) {
     sfu_xdp_queue_t *q = r->queue;
     if (q->tx_free_count == 0) {
-      sfu_metric_inc("af_xdp_tx_frame_starvation");
+      sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_FRAME_STARVATION);
       return -1;
     }
 
@@ -690,14 +690,14 @@ int sfu_net_send_ex(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst,
       }
       if (fallback > 0) {
         delivered_by_fallback = true;
-        sfu_metric_inc("af_xdp_tx_kernel_fallback_completed");
+        sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_KERNEL_FALLBACK_COMPLETED);
       }
       build_result = SFU_AF_XDP_TX_BUILD_ERROR;
     }
 
     if (build_result == SFU_AF_XDP_TX_BUILD_ERROR) {
       if (!delivered_by_fallback) {
-        sfu_metric_inc("af_xdp_tx_permanent_failure");
+        sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_PERMANENT_FAILURE);
         q->tx_free[q->tx_free_count++] = frame;
         return -1;
       }
@@ -711,14 +711,14 @@ int sfu_net_send_ex(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst,
       }
       r->outstanding_sends--;
       (void)sfu_packet_release(pkt);
-      sfu_metric_inc("af_xdp_tx_ring_backpressure");
+      sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_RING_BACKPRESSURE);
       return -1;
     }
 
     uint32_t tx_index;
     if (xsk_ring_prod__reserve(&q->tx, 1, &tx_index) != 1) {
       q->tx_free[q->tx_free_count++] = frame;
-      sfu_metric_inc("af_xdp_tx_ring_backpressure");
+      sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_RING_BACKPRESSURE);
       return -1;
     }
 
@@ -755,12 +755,12 @@ int sfu_net_send_ex(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst,
   if ((priority == SFU_NET_PRIORITY_CONTROL && sfu_spsc_ring_size(lane) >= SFU_AF_XDP_CONTROL_CAPACITY) || !sfu_spsc_ring_push(lane, send)) {
     (void)sfu_packet_release(pkt);
     SFU_FREE(send);
-    sfu_metric_inc(priority == SFU_NET_PRIORITY_CONTROL ? "send_control_queue_full" : "send_normal_queue_full");
-    sfu_metric_inc("af_xdp_pending_full");
+    sfu_metric_inc_id(priority == SFU_NET_PRIORITY_CONTROL ? SFU_METRIC_SEND_CONTROL_QUEUE_FULL : SFU_METRIC_SEND_NORMAL_QUEUE_FULL);
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_PENDING_FULL);
     return -1;
   }
-  if (priority == SFU_NET_PRIORITY_CONTROL) sfu_metric_inc("send_control_accepted");
-  sfu_metric_inc("af_xdp_send_queued");
+  if (priority == SFU_NET_PRIORITY_CONTROL) sfu_metric_inc_id(SFU_METRIC_SEND_CONTROL_ACCEPTED);
+  sfu_metric_inc_id(SFU_METRIC_AF_XDP_SEND_QUEUED);
   r->outstanding_sends++;
   return 0;
 }
@@ -931,7 +931,7 @@ bool sfu_net_worker_release_packet_routed(sfu_net_t *r, sfu_packet_pool_t *pp, s
   uint32_t frame = pkt->kbuf_index;
   sfu_packet_pool_free_meta(pp, pkt);
   if (!q || q->slot >= g_xdp.queue_count || frame >= q->rx_frame_count) {
-    sfu_metric_inc("af_xdp_invalid_rx_return");
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_INVALID_RX_RETURN);
     return true;
   }
   if (q->slot == current_worker) {
@@ -940,7 +940,7 @@ bool sfu_net_worker_release_packet_routed(sfu_net_t *r, sfu_packet_pool_t *pp, s
     return true;
   }
   if (!owner_worker || !token || !sfu_af_xdp_encode_rx_return(q->slot, frame, token)) {
-    sfu_metric_inc("af_xdp_invalid_rx_return");
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_INVALID_RX_RETURN);
     return true;
   }
   *owner_worker = q->slot;
@@ -957,7 +957,7 @@ void sfu_net_worker_release_packet(sfu_packet_pool_t *pp, sfu_spsc_ring_t *to_di
     sfu_packet_pool_free_meta(pp, pkt);
     uintptr_t token;
     if (!sfu_af_xdp_encode_rx_return(q->slot, frame, &token)) {
-      sfu_metric_inc("af_xdp_invalid_rx_return");
+      sfu_metric_inc_id(SFU_METRIC_AF_XDP_INVALID_RX_RETURN);
       return;
     }
     void *item = (void *)token;
@@ -975,7 +975,7 @@ bool sfu_net_recycle_rx_token(sfu_net_t *r, uintptr_t token) {
   uint32_t slot, frame;
   if (!r || !r->queue_bound || !r->queue || !sfu_af_xdp_decode_rx_return(token, &slot, &frame) || slot != r->queue_slot ||
       frame >= r->queue->rx_frame_count) {
-    sfu_metric_inc("af_xdp_invalid_rx_return");
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_INVALID_RX_RETURN);
     return false;
   }
   recycle_rx_frame(r->queue, frame);
@@ -990,7 +990,7 @@ unsigned sfu_net_drain_buffer_returns(sfu_net_t *r, sfu_spsc_ring_t *from_worker
   while (count < max_count && sfu_spsc_ring_pop(from_worker, &item)) {
     uint32_t slot, frame;
     if (!sfu_af_xdp_decode_rx_return((uintptr_t)item, &slot, &frame) || slot >= g_xdp.queue_count || frame >= g_xdp.queues[slot].rx_frame_count) {
-      sfu_metric_inc("af_xdp_invalid_rx_return");
+      sfu_metric_inc_id(SFU_METRIC_AF_XDP_INVALID_RX_RETURN);
       count++;
       continue;
     }
@@ -1005,7 +1005,7 @@ static sfu_af_xdp_tx_build_result_t build_tx_frame(sfu_xdp_queue_t *q, uint32_t 
   struct sockaddr_in *destination = (struct sockaddr_in *)&pkt->peer_addr;
   uint8_t destination_mac[ETH_ALEN];
   if (lookup_neighbor(&destination->sin_addr, destination_mac) != 0) {
-    sfu_metric_inc("af_xdp_neighbor_miss");
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_NEIGHBOR_MISS);
     return SFU_AF_XDP_TX_KERNEL_FALLBACK;
   }
   uint8_t *frame = xsk_umem__get_data(q->umem_area, (uint64_t)frame_id * q->frame_size);
@@ -1025,14 +1025,14 @@ static sfu_af_xdp_tx_build_result_t build_tx_frame(sfu_xdp_queue_t *q, uint32_t 
 static int kernel_fallback_send(sfu_packet_t *pkt) {
   ssize_t sent = sendto(g_xdp.socket_fd, pkt->data, pkt->len, MSG_DONTWAIT, (const struct sockaddr *)&pkt->peer_addr, pkt->peer_addr_len);
   if (sent == (ssize_t)pkt->len) {
-    sfu_metric_inc("af_xdp_tx_kernel_fallback");
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_KERNEL_FALLBACK);
     return 1;
   }
   if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOBUFS)) {
-    sfu_metric_inc("af_xdp_tx_kernel_fallback_backpressure");
+    sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_KERNEL_FALLBACK_BACKPRESSURE);
     return 0;
   }
-  sfu_metric_inc("af_xdp_tx_kernel_fallback_error");
+  sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_KERNEL_FALLBACK_ERROR);
   return -1;
 }
 
@@ -1067,7 +1067,7 @@ static unsigned reap_tx_completions(sfu_xdp_queue_t *q) {
       q->frames[frame].state = SFU_XDP_FRAME_TX_FREE;
       q->tx_free[q->tx_free_count++] = frame;
     } else {
-      sfu_metric_inc("af_xdp_invalid_tx_completion");
+      sfu_metric_inc_id(SFU_METRIC_AF_XDP_INVALID_TX_COMPLETION);
     }
   }
   if (count) {
@@ -1112,7 +1112,7 @@ unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_
         retry = &ring->tx_retry_normal;
         lane = &ring->tx_pending_normal;
         if ((ring->tx_retry_control || sfu_spsc_ring_size(&ring->tx_pending_control)) && ring->control_streak >= SFU_AF_XDP_CONTROL_BURST)
-          sfu_metric_inc("send_fairness_normal");
+          sfu_metric_inc_id(SFU_METRIC_SEND_FAIRNESS_NORMAL);
         ring->control_streak = 0;
       } else break;
       sfu_xdp_send_t *send = *retry;
@@ -1128,7 +1128,7 @@ unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_
 
       sfu_xdp_queue_t *q = next_tx_queue();
       if (!q) {
-        sfu_metric_inc("af_xdp_tx_frame_starvation");
+        sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_FRAME_STARVATION);
         break;
       }
       uint32_t frame = (uint32_t)q->tx_free[--q->tx_free_count];
@@ -1143,16 +1143,16 @@ unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_
         }
         if (fallback > 0) {
           delivered_by_fallback = true;
-          sfu_metric_inc("af_xdp_tx_kernel_fallback_completed");
+          sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_KERNEL_FALLBACK_COMPLETED);
         }
         build_result = SFU_AF_XDP_TX_BUILD_ERROR;
       }
       if (build_result == SFU_AF_XDP_TX_BUILD_ERROR) {
         if (!delivered_by_fallback) {
-          sfu_metric_inc("af_xdp_tx_permanent_failure");
+          sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_PERMANENT_FAILURE);
         }
         *retry = NULL;
-        sfu_metric_inc(send->priority == SFU_NET_PRIORITY_CONTROL ? "send_control_dispatched" : "send_normal_dispatched");
+        sfu_metric_inc_id(send->priority == SFU_NET_PRIORITY_CONTROL ? SFU_METRIC_SEND_CONTROL_DISPATCHED : SFU_METRIC_SEND_NORMAL_DISPATCHED);
         SFU_FREE(send);
         if (sfu_spsc_ring_push(&ring->tx_completed, pkt)) {
           q->tx_free[q->tx_free_count++] = frame;
@@ -1168,7 +1168,7 @@ unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_
       uint32_t tx_index;
       if (xsk_ring_prod__reserve(&q->tx, 1, &tx_index) != 1) {
         q->tx_free[q->tx_free_count++] = frame;
-        sfu_metric_inc("af_xdp_tx_ring_backpressure");
+        sfu_metric_inc_id(SFU_METRIC_AF_XDP_TX_RING_BACKPRESSURE);
         break;
       }
       struct xdp_desc *desc = xsk_ring_prod__tx_desc(&q->tx, tx_index);
@@ -1178,7 +1178,7 @@ unsigned sfu_net_service(sfu_net_t *recv_net, sfu_net_t *send_net, unsigned max_
       q->frames[frame].origin = ring;
       q->frames[frame].state = SFU_XDP_FRAME_TX_KERNEL;
       *retry = NULL;
-        sfu_metric_inc(send->priority == SFU_NET_PRIORITY_CONTROL ? "send_control_dispatched" : "send_normal_dispatched");
+        sfu_metric_inc_id(send->priority == SFU_NET_PRIORITY_CONTROL ? SFU_METRIC_SEND_CONTROL_DISPATCHED : SFU_METRIC_SEND_NORMAL_DISPATCHED);
         SFU_FREE(send);
       xsk_ring_prod__submit(&q->tx, 1);
       if (xsk_ring_prod__needs_wakeup(&q->tx)) {

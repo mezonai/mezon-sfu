@@ -109,7 +109,7 @@ static sfu_fanout_job_t *mesh_job_alloc(sfu_fanout_mesh_t *mesh, uint32_t src_wo
   uint32_t job_idx;
   sfu_fanout_job_t *job = sfu_pool_alloc(&mesh->job_pools[dst_worker], &job_idx);
   if (!job) {
-    sfu_metric_inc("fanout_job_pool_exhausted");
+    sfu_metric_inc_id(SFU_METRIC_FANOUT_JOB_POOL_EXHAUSTED);
     SFU_LOG_WARN("fanout mesh: job pool exhausted (worker %u -> %u)", src_worker, dst_worker);
     return NULL;
   }
@@ -134,7 +134,7 @@ bool sfu_fanout_mesh_enqueue(sfu_fanout_mesh_t *mesh, uint32_t src_worker, uint3
   job->kind = SFU_FANOUT_JOB_READY;
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
-    sfu_metric_inc("fanout_ring_full");
+    sfu_metric_inc_id(SFU_METRIC_FANOUT_RING_FULL);
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
     sfu_fanout_mesh_free_job(mesh, job);
     return false;
@@ -173,7 +173,7 @@ bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src
   }
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
-    sfu_metric_inc("fanout_ring_full");
+    sfu_metric_inc_id(SFU_METRIC_FANOUT_RING_FULL);
     for (uint8_t i = 0; i < target_count; i++) {
       sfu_session_release(job->targets[i].subscriber);
     }
@@ -183,8 +183,8 @@ bool sfu_fanout_mesh_enqueue_forward_batch(sfu_fanout_mesh_t *mesh, uint32_t src
     sfu_fanout_mesh_free_job(mesh, job);
     return false;
   }
-  sfu_metric_inc("fanout_batch_jobs");
-  sfu_metric_add("fanout_batch_targets", target_count);
+  sfu_metric_inc_id(SFU_METRIC_FANOUT_BATCH_JOBS);
+  sfu_metric_add_id(SFU_METRIC_FANOUT_BATCH_TARGETS, target_count);
   return true;
 }
 
@@ -228,7 +228,7 @@ bool sfu_fanout_mesh_enqueue_keyframe_request_for_source(sfu_fanout_mesh_t *mesh
   atomic_fetch_add_explicit(&publisher->refcount, 1, memory_order_relaxed);
 
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
-    sfu_metric_inc("fanout_ring_full");
+    sfu_metric_inc_id(SFU_METRIC_FANOUT_RING_FULL);
     SFU_LOG_WARN("fanout mesh: ring %u->%u full, dropping", src_worker, dst_worker);
     sfu_session_release(publisher);
     sfu_fanout_mesh_free_job(mesh, job);
@@ -253,7 +253,7 @@ bool sfu_fanout_mesh_enqueue_ingress(sfu_fanout_mesh_t *mesh, uint32_t src_worke
   job->kind = SFU_FANOUT_JOB_INGRESS;
   job->pkt = pkt;
   if (!sfu_spsc_ring_push(mesh_ring(mesh, src_worker, dst_worker), job)) {
-    sfu_metric_inc("fanout_ring_full");
+    sfu_metric_inc_id(SFU_METRIC_FANOUT_RING_FULL);
     SFU_LOG_WARN("fanout mesh: ingress ring %u->%u full, dropping", src_worker, dst_worker);
     sfu_fanout_mesh_free_job(mesh, job);
     return false;

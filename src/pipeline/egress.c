@@ -161,7 +161,7 @@ static void sfu_egress_invalidate_backlog_drops(sfu_worker_t *w, sfu_peer_sessio
   if (!w || !sub_session || !report || report->frames == 0) {
     return;
   }
-  sfu_metric_add("paced_send_backlog_drop_frames", report->frames);
+  sfu_metric_add_id(SFU_METRIC_PACED_SEND_BACKLOG_DROP_FRAMES, report->frames);
   /* publisher_count is 0 when the publisher identity was unknown, in which case
    * there is no layer scheduler to invalidate either. */
   if (report->publisher_count == 0) {
@@ -197,7 +197,7 @@ static void sfu_egress_invalidate_rolled_back_frame(sfu_worker_t *w, sfu_peer_se
   }
   uint32_t publisher_peer_id = q->rolled_back_publisher_peer_id;
   q->rolled_back_publisher_peer_id = 0;
-  sfu_metric_inc("paced_send_incomplete_frame_invalidate");
+  sfu_metric_inc_id(SFU_METRIC_PACED_SEND_INCOMPLETE_FRAME_INVALIDATE);
   sfu_egress_invalidate_publisher_scheduler(sub_session, source, publisher_peer_id);
   if (w && media && media->publisher && media->publisher->peer_id == publisher_peer_id) {
     sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, source);
@@ -210,7 +210,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   int enc_len = (int)pkt->len;
 
   if (!sfu_session_remote_slot_authorized(sub_session, media->remote_slot, media->assignment_generation)) {
-    sfu_metric_inc("egress_mid_not_negotiated");
+    sfu_metric_inc_id(SFU_METRIC_EGRESS_MID_NOT_NEGOTIATED);
 #ifdef SFU_DIAG_LOG
     static _Atomic uint32_t unauthorized_logs;
     uint32_t n = atomic_fetch_add_explicit(&unauthorized_logs, 1, memory_order_relaxed);
@@ -236,7 +236,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
 
   if (pkt->len < 12) {
-    sfu_metric_inc("egress_seq_translate_fail");
+    sfu_metric_inc_id(SFU_METRIC_EGRESS_SEQ_TRANSLATE_FAIL);
     return false;
   }
 
@@ -251,7 +251,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   if (screen_packet && paced_queue && !paced_queue->input_frame_active) {
     bool under_delay = sfu_paced_send_bound_backlog(paced_queue, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, now_us, drop_report);
     if (!under_delay && !media->is_keyframe) {
-      sfu_metric_inc("paced_send_screen_backlog_drop");
+      sfu_metric_inc_id(SFU_METRIC_PACED_SEND_SCREEN_BACKLOG_DROP);
       return false;
     }
   }
@@ -279,13 +279,13 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   bool translated = sfu_rtp_seq_translate(&sub_session->cold->rtp_seq_translator, outbound_ssrc, source_seq, &subscriber_seq);
   if (!translated) {
     pthread_mutex_unlock(&sub_session->crypto_lock);
-    sfu_metric_inc("egress_seq_translate_fail");
-    sfu_metric_inc("egress_seq_translate_table_full");
+    sfu_metric_inc_id(SFU_METRIC_EGRESS_SEQ_TRANSLATE_FAIL);
+    sfu_metric_inc_id(SFU_METRIC_EGRESS_SEQ_TRANSLATE_TABLE_FULL);
     return false;
   }
   if (!sfu_rtp_packet_set_seq(pkt->data, pkt->len, subscriber_seq)) {
     pthread_mutex_unlock(&sub_session->crypto_lock);
-    sfu_metric_inc("egress_seq_translate_fail");
+    sfu_metric_inc_id(SFU_METRIC_EGRESS_SEQ_TRANSLATE_FAIL);
     return false;
   }
   if (sched && decision && !sfu_rtp_packet_set_marker(pkt->data, pkt->len, decision->set_marker)) {
@@ -312,7 +312,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid_text) ||
         !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid_text, &new_len)) {
       pthread_mutex_unlock(&sub_session->crypto_lock);
-      sfu_metric_inc("mid_write_fail");
+      sfu_metric_inc_id(SFU_METRIC_MID_WRITE_FAIL);
 #ifdef SFU_DIAG_LOG
       static _Atomic uint32_t mid_write_fail_logs;
       uint32_t n = atomic_fetch_add_explicit(&mid_write_fail_logs, 1, memory_order_relaxed);
@@ -348,7 +348,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
       enc_len = (int)new_len;
       twcc_written = true;
     } else {
-      sfu_metric_inc("twcc_write_fail");
+      sfu_metric_inc_id(SFU_METRIC_TWCC_WRITE_FAIL);
     }
   }
 
@@ -360,12 +360,12 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   }
   if (protect_status != srtp_err_status_ok) {
     if (protect_status == srtp_err_status_replay_old) {
-      sfu_metric_inc("egress_protect_replay_old");
+      sfu_metric_inc_id(SFU_METRIC_EGRESS_PROTECT_REPLAY_OLD);
     } else if (protect_status == srtp_err_status_replay_fail) {
-      sfu_metric_inc("egress_protect_replay_fail");
+      sfu_metric_inc_id(SFU_METRIC_EGRESS_PROTECT_REPLAY_FAIL);
     }
-    sfu_metric_inc(media->is_audio ? "egress_protect_fail_audio" : "egress_protect_fail_video");
-    sfu_metric_inc("egress_protect_fail");
+    sfu_metric_inc_id(media->is_audio ? SFU_METRIC_EGRESS_PROTECT_FAIL_AUDIO : SFU_METRIC_EGRESS_PROTECT_FAIL_VIDEO);
+    sfu_metric_inc_id(SFU_METRIC_EGRESS_PROTECT_FAIL);
 #ifdef SFU_DIAG_LOG
     static _Atomic uint32_t protect_fail_logs;
     uint32_t n = atomic_fetch_add_explicit(&protect_fail_logs, 1, memory_order_relaxed);
@@ -390,8 +390,8 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   sfu_pacer_reservation_t reservation = {0};
   if (!sfu_pacer_reserve(&sub_session->egress.pacer, cls, (uint32_t)enc_len, allow_congestion_drop, now_us, &reservation)) {
-    sfu_metric_inc("pacer_dropped_enh");
-    sfu_metric_inc("pacer_dropped_enh_frames");
+    sfu_metric_inc_id(SFU_METRIC_PACER_DROPPED_ENH);
+    sfu_metric_inc_id(SFU_METRIC_PACER_DROPPED_ENH_FRAMES);
     return false;
   }
 
@@ -421,7 +421,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
       sfu_paced_send_rollback_input_frame(paced_queue);
       sfu_paced_send_reject_input_frame(paced_queue);
       sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
-      sfu_metric_inc("paced_send_enqueue_drop");
+      sfu_metric_inc_id(SFU_METRIC_PACED_SEND_ENQUEUE_DROP);
       return false;
     }
     if (source_marker) {
@@ -431,6 +431,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
       }
     }
     w->hot.output_queued++;
+    sfu_worker_mark_session_paced_active(w, sub_session);
     return true;
   }
 
@@ -439,8 +440,8 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     if (sfu_log_rate_limit("egress_send_full", 1000000000ULL)) {
       SFU_LOG_WARN("worker %u: [EGRESS DROP] send queue full", w->worker_index);
     }
-    sfu_metric_inc("egress_send_full");
-    sfu_metric_inc("send_sq_full");
+    sfu_metric_inc_id(SFU_METRIC_EGRESS_SEND_FULL);
+    sfu_metric_inc_id(SFU_METRIC_SEND_SQ_FULL);
     return false;
   }
 
@@ -493,7 +494,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         if (reserved_output) {
           sfu_worker_release_packet(w, reserved_output);
         }
-        sfu_metric_inc("egress_admission_drop");
+        sfu_metric_inc_id(SFU_METRIC_EGRESS_ADMISSION_DROP);
         return false;
       }
       if (sched->needs_keyframe || sched->target_sid > sched->current_sid) {
@@ -507,13 +508,13 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         sfu_log_vp9_scheduler_drop(sub_session, media, sched, &decision);
 #endif
         if (decision.pacer_frame_continuation) {
-          sfu_metric_inc("vp9_enh_orphan_continuation");
+          sfu_metric_inc_id(SFU_METRIC_VP9_ENH_ORPHAN_CONTINUATION);
         }
         sfu_layer_scheduler_reject_packet(sched, &decision);
         if (reserved_output) {
           sfu_worker_release_packet(w, reserved_output);
         }
-        sfu_metric_inc("egress_admission_drop");
+        sfu_metric_inc_id(SFU_METRIC_EGRESS_ADMISSION_DROP);
         return false;
       }
       video_class = decision.pacer_class;
@@ -558,8 +559,8 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
   }
   output->len = plain->len;
   w->hot.copied_bytes += output->len;
-  sfu_metric_inc("egress_output_alloc");
-  sfu_metric_add("egress_copied_bytes", output->len);
+  sfu_metric_inc_id(SFU_METRIC_EGRESS_OUTPUT_ALLOC);
+  sfu_metric_add_id(SFU_METRIC_EGRESS_COPIED_BYTES, output->len);
 
   sfu_paced_send_drop_report_t local_drop_report;
   sfu_paced_send_drop_report_init(&local_drop_report);
@@ -642,7 +643,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
         sfu_log_vp9_scheduler_drop(sub_session, media, sched, &decision);
 #endif
         if (decision.pacer_frame_continuation) {
-          sfu_metric_inc("vp9_enh_orphan_continuation");
+          sfu_metric_inc_id(SFU_METRIC_VP9_ENH_ORPHAN_CONTINUATION);
         }
         sfu_layer_scheduler_reject_packet(sched, &decision);
         sfu_worker_release_packet(w, pkt);

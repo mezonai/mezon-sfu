@@ -132,7 +132,7 @@ static void on_recv(void *user_data, sfu_packet_t *pkt) {
   uint32_t worker_idx = sfu_scheduler_select_worker(s, pkt, h);
 
   if (!sfu_spsc_ring_push(&s->workers[worker_idx].inbox, pkt)) {
-    sfu_metric_inc("worker_inbox_full");
+    sfu_metric_inc_id(SFU_METRIC_WORKER_INBOX_FULL);
     SFU_LOG_WARN("worker %u inbox full, dropping packet", worker_idx);
     sfu_net_release_packet(s->recv_net, s->pp, pkt);
   }

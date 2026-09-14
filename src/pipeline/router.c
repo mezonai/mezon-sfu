@@ -79,8 +79,8 @@ static bool ensure_remote_source(sfu_worker_t *w, const sfu_packet_t *plain, sfu
   }
   memcpy(copy->data, plain->data, plain->len);
   copy->len = plain->len;
-  sfu_metric_inc("egress_output_alloc");
-  sfu_metric_add("egress_copied_bytes", plain->len);
+  sfu_metric_inc_id(SFU_METRIC_EGRESS_OUTPUT_ALLOC);
+  sfu_metric_add_id(SFU_METRIC_EGRESS_COPIED_BYTES, plain->len);
   *source = copy;
   return true;
 }
@@ -242,7 +242,7 @@ void sfu_router_forward(sfu_worker_t *w, sfu_peer_session_t *sender_session, sfu
     routed++;
 #endif
     if (!sfu_session_remote_slot_authorized(entry->subscriber, entry->remote_slot, entry->assignment_generation)) {
-      sfu_metric_inc("router_assignment_pending");
+      sfu_metric_inc_id(SFU_METRIC_ROUTER_ASSIGNMENT_PENDING);
 #ifdef SFU_DIAG_LOG
       if (kind == SFU_MEDIA_AUDIO) {
         audio_skipped_pending++;

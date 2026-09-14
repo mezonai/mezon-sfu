@@ -55,7 +55,7 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
       sfu_paced_send_rollback_input_frame(q);
       q->input_frame_active = false;
       q->drop_input_frame = false;
-      sfu_metric_inc("paced_send_incomplete_frame_drop");
+      sfu_metric_inc_id(SFU_METRIC_PACED_SEND_INCOMPLETE_FRAME_DROP);
     }
     if (q->input_frame_active && now_us >= q->input_frame_started_us) {
       int64_t span = now_us - q->input_frame_started_us;
@@ -64,7 +64,7 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
       }
       if (span > max_delay_us) {
         q->input_frames_over_delay++;
-        sfu_metric_inc("paced_send_input_frame_slow");
+        sfu_metric_inc_id(SFU_METRIC_PACED_SEND_INPUT_FRAME_SLOW);
       }
     }
     q->input_timestamp = rtp_timestamp;
@@ -87,13 +87,13 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
     q->drop_input_frame = drop_on_delay && !keyframe && sfu_paced_send_projected_delay_us(q, now_us) >= effective_max_delay;
     if (q->drop_input_frame) {
       q->dropped_delay_frames++;
-      sfu_metric_inc("paced_send_delay_frame_drop");
+      sfu_metric_inc_id(SFU_METRIC_PACED_SEND_DELAY_FRAME_DROP);
     }
   }
   bool admitted = !q->drop_input_frame;
   if (!admitted) {
     q->dropped_frame_packets++;
-    sfu_metric_inc("paced_send_frame_packet_drop");
+    sfu_metric_inc_id(SFU_METRIC_PACED_SEND_FRAME_PACKET_DROP);
   }
   if (marker && !admitted) {
     q->input_frame_active = false;
@@ -205,7 +205,7 @@ bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int
       q->ready_count--;
     }
     q->dropped_delay_frames++;
-    sfu_metric_inc("paced_send_delay_frame_drop");
+    sfu_metric_inc_id(SFU_METRIC_PACED_SEND_DELAY_FRAME_DROP);
     if (report) {
       report->frames++;
       sfu_paced_send_drop_report_add(report, frame_publisher);
@@ -234,7 +234,7 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
   }
   if (q->count >= q->capacity) {
     q->dropped_full++;
-    sfu_metric_inc("paced_send_full_drop");
+    sfu_metric_inc_id(SFU_METRIC_PACED_SEND_FULL_DROP);
     return false;
   }
   uint32_t min_rate = (metadata && metadata->is_keyframe) ? SFU_PACED_SEND_KEYFRAME_MIN_BPS : SFU_PACED_SEND_MIN_BPS;
@@ -271,7 +271,7 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
   if (release_at_us) {
     *release_at_us = base;
   }
-  sfu_metric_inc("paced_send_enqueued");
+  sfu_metric_inc_id(SFU_METRIC_PACED_SEND_ENQUEUED);
   return true;
 }
 
@@ -331,7 +331,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session
     out->len = e->len;
     if (sfu_net_send(w->send_net, out, (const struct sockaddr *)&e->dst, e->dst_len) != 0) {
       sfu_worker_release_packet(w, out);
-      sfu_metric_inc("paced_send_sq_full");
+      sfu_metric_inc_id(SFU_METRIC_PACED_SEND_SQ_FULL);
       break;
     }
     sfu_worker_release_packet(w, out);
@@ -359,7 +359,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session
     processed++;
     sent++;
     did_work = true;
-    sfu_metric_inc("paced_send_sent");
+    sfu_metric_inc_id(SFU_METRIC_PACED_SEND_SENT);
   }
   if (sent > q->max_drain_packets) {
     q->max_drain_packets = sent;
@@ -367,7 +367,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session
   *remaining -= processed;
   if (processed == limit && q->ready_count && q->entries[q->head].release_at_us <= now_us) {
     q->drain_cap_hits++;
-    sfu_metric_inc("paced_send_drain_cap_hit");
+    sfu_metric_inc_id(SFU_METRIC_PACED_SEND_DRAIN_CAP_HIT);
   }
   if (!q->count) {
     q->head = q->tail = 0;
@@ -438,9 +438,9 @@ bool sfu_paced_priority_queue_enqueue(sfu_paced_priority_queue_t *q, const uint8
   if (q->count >= q->capacity || (q->max_bytes > 0 && q->byte_count + (uint32_t)len > q->max_bytes)) {
     q->dropped_full++;
     if (q->is_probe_queue) {
-      sfu_metric_inc("congestion_probe_full_drop");
+      sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_FULL_DROP);
     } else {
-      sfu_metric_inc("congestion_rtx_full_drop");
+      sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_FULL_DROP);
     }
     return false;
   }
@@ -467,10 +467,10 @@ bool sfu_paced_priority_queue_enqueue(sfu_paced_priority_queue_t *q, const uint8
   q->enqueued++;
 
   if (q->is_probe_queue) {
-    sfu_metric_inc("congestion_probe_queued");
+    sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_QUEUED);
   } else {
-    sfu_metric_inc("congestion_rtx_queued");
-    sfu_metric_add("congestion_rtx_bytes", len);
+    sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_QUEUED);
+    sfu_metric_add_id(SFU_METRIC_CONGESTION_RTX_BYTES, len);
   }
   return true;
 }
@@ -492,7 +492,7 @@ bool sfu_paced_priority_queue_enqueue_probe(sfu_paced_priority_queue_t *q, const
   }
   if (q->count >= q->capacity || (q->max_bytes > 0 && q->byte_count + (uint32_t)len > q->max_bytes)) {
     q->dropped_full++;
-    sfu_metric_inc("congestion_probe_full_drop");
+    sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_FULL_DROP);
     return false;
   }
 
@@ -517,7 +517,7 @@ bool sfu_paced_priority_queue_enqueue_probe(sfu_paced_priority_queue_t *q, const
   q->byte_count += (uint32_t)len;
   q->enqueued++;
 
-  sfu_metric_inc("congestion_probe_queued");
+  sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_QUEUED);
   return true;
 }
 
@@ -545,9 +545,9 @@ bool sfu_paced_priority_queue_drain(sfu_paced_priority_queue_t *q, sfu_worker_t 
       }
       q->dropped_stale++;
       if (q->is_probe_queue) {
-        sfu_metric_inc("congestion_probe_stale_drop");
+        sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_STALE_DROP);
       } else {
-        sfu_metric_inc("congestion_rtx_stale_drop");
+        sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_STALE_DROP);
       }
       q->byte_count = q->byte_count >= e->len ? q->byte_count - e->len : 0;
       q->head = (q->head + 1u) % q->capacity;
@@ -563,9 +563,9 @@ bool sfu_paced_priority_queue_drain(sfu_paced_priority_queue_t *q, sfu_worker_t 
       }
       q->dropped_expired++;
       if (q->is_probe_queue) {
-        sfu_metric_inc("congestion_probe_expired_drop");
+        sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_EXPIRED_DROP);
       } else {
-        sfu_metric_inc("congestion_rtx_expired_drop");
+        sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_EXPIRED_DROP);
       }
       q->byte_count = q->byte_count >= e->len ? q->byte_count - e->len : 0;
       q->head = (q->head + 1u) % q->capacity;
@@ -590,7 +590,7 @@ bool sfu_paced_priority_queue_drain(sfu_paced_priority_queue_t *q, sfu_worker_t 
     out->len = e->len;
     if (sfu_net_send(w->send_net, out, (const struct sockaddr *)&e->dst, e->dst_len) != 0) {
       sfu_worker_release_packet(w, out);
-      sfu_metric_inc("paced_send_sq_full");
+      sfu_metric_inc_id(SFU_METRIC_PACED_SEND_SQ_FULL);
       break;
     }
     sfu_worker_release_packet(w, out);
@@ -607,13 +607,13 @@ bool sfu_paced_priority_queue_drain(sfu_paced_priority_queue_t *q, sfu_worker_t 
     q->sent++;
     q->bytes_sent += e->len;
     if (q->is_probe_queue) {
-      sfu_metric_inc("congestion_probe_sent");
-      sfu_metric_add("congestion_probe_bytes", e->len);
+      sfu_metric_inc_id(SFU_METRIC_CONGESTION_PROBE_SENT);
+      sfu_metric_add_id(SFU_METRIC_CONGESTION_PROBE_BYTES, e->len);
     } else {
 #ifdef SFU_DIAG_LOG
       s->egress.diag.rtx_sent++;
 #endif
-      sfu_metric_inc("congestion_rtx_sent");
+      sfu_metric_inc_id(SFU_METRIC_CONGESTION_RTX_SENT);
     }
 
     q->byte_count = q->byte_count >= e->len ? q->byte_count - e->len : 0;

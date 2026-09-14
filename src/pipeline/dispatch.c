@@ -247,14 +247,14 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
   uint64_t now_ms = sfu_now_ms();
   if (session->cold->pending_dtls_active && now_ms - session->cold->pending_dtls_started_ms > SFU_DTLS_RESTART_TIMEOUT_MS) {
     clear_pending_dtls(session);
-    sfu_metric_inc("dtls_restart_timeout");
+    sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_TIMEOUT);
   }
 
   uint8_t client_random[32];
   bool is_client_hello = sfu_dtls_extract_client_hello_random(pkt->data, pkt->len, client_random);
   if (session->state == SFU_SESSION_ESTABLISHED && is_client_hello && !session->cold->pending_dtls_active) {
     if (session->cold->active_client_random_valid && memcmp(client_random, session->cold->active_client_random, sizeof(client_random)) == 0) {
-      sfu_metric_inc("dtls_restart_duplicate");
+      sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_DUPLICATE);
 
 #ifdef SFU_DIAG_LOG
       char client_random_hex[65];
@@ -271,7 +271,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
       return;
     }
     if (sfu_dtls_conn_init(&session->cold->pending_dtls, w->sessions->dtls_ctx) != 0) {
-      sfu_metric_inc("dtls_restart_failed");
+      sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_FAILED);
       pthread_mutex_unlock(&session->answer_lock);
       sfu_session_release(session);
       return;
@@ -279,7 +279,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
     memcpy(session->cold->pending_client_random, client_random, sizeof(client_random));
     session->cold->pending_dtls_started_ms = now_ms;
     session->cold->pending_dtls_active = true;
-    sfu_metric_inc("dtls_restart_detected");
+    sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_DETECTED);
   } else if (session->state != SFU_SESSION_ESTABLISHED && is_client_hello && !session->cold->active_client_random_valid) {
     memcpy(session->cold->active_client_random, client_random, sizeof(client_random));
     session->cold->active_client_random_valid = true;
@@ -302,7 +302,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
         memset(&next_srtp, 0, sizeof(next_srtp));
         if (sfu_srtp_ctx_init_from_dtls(&next_srtp, dtls->srtp_keying_material, dtls->srtp_profile_id, true) != 0) {
           clear_pending_dtls(session);
-          sfu_metric_inc("dtls_restart_failed");
+          sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_FAILED);
           break;
         }
 
@@ -322,7 +322,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
         session->cold->pending_dtls_active = false;
         session->cold->pending_dtls_started_ms = 0;
         session->cold->transport_generation++;
-        sfu_metric_inc("dtls_restart_established");
+        sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_ESTABLISHED);
 
 #ifdef SFU_DIAG_LOG
         char client_random_hex[65];
@@ -372,7 +372,7 @@ static void handle_dtls(sfu_worker_t *w, sfu_packet_t *pkt) {
     case SFU_DTLS_FEED_ERROR:
       if (restarting) {
         clear_pending_dtls(session);
-        sfu_metric_inc("dtls_restart_failed");
+        sfu_metric_inc_id(SFU_METRIC_DTLS_RESTART_FAILED);
       } else {
         session->state = SFU_SESSION_FAILED;
         SFU_LOG_WARN("worker %u: DTLS handshake failed for peer %s:%u", w->worker_index, ip, port);
@@ -389,7 +389,7 @@ void sfu_dispatch_packet(sfu_worker_t *w, sfu_packet_t *pkt) {
     return;
   }
   if (!pkt->data || pkt->len == 0) {
-    sfu_metric_inc("dispatch_null_payload");
+    sfu_metric_inc_id(SFU_METRIC_DISPATCH_NULL_PAYLOAD);
     SFU_LOG_WARN("worker %u: dropping packet with null payload len=%u cap=%u src=%u", w->worker_index, pkt->len, pkt->cap, pkt->buf_source);
     if (pkt->data) {
       sfu_worker_release_packet(w,pkt);

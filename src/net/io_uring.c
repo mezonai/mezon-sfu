@@ -260,7 +260,7 @@ static sfu_send_lane_t *select_lane(sfu_net_t *r) {
     return &r->control;
   }
   if (r->normal.count) {
-    if (r->control.count && r->control_streak >= SFU_CONTROL_BURST) sfu_metric_inc("send_fairness_normal");
+    if (r->control.count && r->control_streak >= SFU_CONTROL_BURST) sfu_metric_inc_id(SFU_METRIC_SEND_FAIRNESS_NORMAL);
     r->control_streak = 0;
     return &r->normal;
   }
@@ -271,7 +271,7 @@ static void prep_send(sfu_net_t *r, struct io_uring_sqe *sqe, sfu_pending_send_t
   io_uring_prep_send_zc(sqe, r->fd, send->pkt->data, send->pkt->len, 0, 0);
   io_uring_prep_send_set_addr(sqe, (const struct sockaddr *)&send->dst, send->dst_len);
   io_uring_sqe_set_data(sqe, send);
-  sfu_metric_inc(send->priority == SFU_NET_PRIORITY_CONTROL ? "send_control_dispatched" : "send_normal_dispatched");
+  sfu_metric_inc_id(send->priority == SFU_NET_PRIORITY_CONTROL ? SFU_METRIC_SEND_CONTROL_DISPATCHED : SFU_METRIC_SEND_NORMAL_DISPATCHED);
 }
 
 static unsigned drain_pending(sfu_net_t *r) {
@@ -292,8 +292,8 @@ int sfu_net_send_ex(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst,
   sfu_send_lane_t *lane = priority == SFU_NET_PRIORITY_CONTROL ? &r->control : &r->normal;
   struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
   if (!sqe && lane->count == lane->capacity) {
-    sfu_metric_inc(priority == SFU_NET_PRIORITY_CONTROL ? "send_control_queue_full" : "send_normal_queue_full");
-    sfu_metric_inc("io_uring_pending_full");
+    sfu_metric_inc_id(priority == SFU_NET_PRIORITY_CONTROL ? SFU_METRIC_SEND_CONTROL_QUEUE_FULL : SFU_METRIC_SEND_NORMAL_QUEUE_FULL);
+    sfu_metric_inc_id(SFU_METRIC_IO_URING_PENDING_FULL);
     return -1;
   }
   sfu_pending_send_t *send;
@@ -311,11 +311,11 @@ int sfu_net_send_ex(sfu_net_t *r, sfu_packet_t *pkt, const struct sockaddr *dst,
   memcpy(&send->dst, dst, dst_len);
   sfu_packet_retain(pkt, 1);
   atomic_fetch_add_explicit(&r->outstanding_sends, 1, memory_order_relaxed);
-  if (priority == SFU_NET_PRIORITY_CONTROL) sfu_metric_inc("send_control_accepted");
+  if (priority == SFU_NET_PRIORITY_CONTROL) sfu_metric_inc_id(SFU_METRIC_SEND_CONTROL_ACCEPTED);
   if (sqe) prep_send(r, sqe, send);
   else {
     (void)lane_push(lane, send);
-    sfu_metric_inc("io_uring_send_queued");
+    sfu_metric_inc_id(SFU_METRIC_IO_URING_SEND_QUEUED);
   }
   return 0;
 }
@@ -595,7 +595,7 @@ unsigned sfu_net_cancel(sfu_net_t *send_net) {
     while ((send = lane_pop(lanes[i])) != NULL) {
       atomic_fetch_sub_explicit(&send_net->outstanding_sends, 1, memory_order_relaxed);
       (void)sfu_packet_release(send->pkt);
-      sfu_metric_inc(i == 0 ? "send_control_canceled" : "send_normal_canceled");
+      sfu_metric_inc_id(i == 0 ? SFU_METRIC_SEND_CONTROL_CANCELED : SFU_METRIC_SEND_NORMAL_CANCELED);
       free_pending_send(send_net, send);
       canceled++;
     }
