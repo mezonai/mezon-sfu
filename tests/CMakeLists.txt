@@ -67,6 +67,10 @@ add_executable(test_handshake test_handshake.c)
 target_link_libraries(test_handshake PRIVATE sfu_core)
 add_test(NAME handshake COMMAND test_handshake)
 
+add_executable(test_config test_config.c)
+target_link_libraries(test_config PRIVATE sfu_core)
+add_test(NAME config COMMAND test_config)
+
 add_executable(test_session_table test_session_table.c)
 target_link_libraries(test_session_table PRIVATE sfu_core)
 add_test(NAME session_table COMMAND test_session_table)

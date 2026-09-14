@@ -11,6 +11,11 @@ int sfu_room_init(sfu_room_t *room, uint64_t room_id) {
     room->free_slots[i] = (uint16_t)(SFU_ROOM_MAX_PEERS - 1 - i);
   }
 
+  room->alone_user_id = 0;
+  room->alone_deadline_ms = 0;
+  room->alone_generation = 0;
+  room->alone_expiry_claimed = false;
+
   if (pthread_mutex_init(&room->lock, NULL) != 0) {
     return -1;
   }

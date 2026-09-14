@@ -1087,17 +1087,34 @@ static void disconnect_client(sfu_client_conn_t *c, sfu_disconnect_reason_t reas
     sfu_ws_send_close(c->fd, (uint16_t)reason, NULL, 0);
   }
 
-  if (c->keepalive_inited) {
+  if (c->keepalive_inited && c->keepalive_timer.loop) {
     uv_timer_stop(&c->keepalive_timer);
     if (!uv_is_closing((uv_handle_t *)&c->keepalive_timer)) {
       uv_close((uv_handle_t *)&c->keepalive_timer, on_client_handle_closed);
     }
   }
 
-  if (!uv_is_closing((uv_handle_t *)&c->poll_handle)) {
+  if (c->poll_handle.loop && !uv_is_closing((uv_handle_t *)&c->poll_handle)) {
     uv_poll_stop(&c->poll_handle);
     uv_close((uv_handle_t *)&c->poll_handle, on_client_handle_closed);
   }
+}
+
+static uint32_t disconnect_room_user_connections(sfu_signaling_server_t *server, sfu_room_t *room, uint64_t room_id, int64_t user_id,
+                                                sfu_disconnect_reason_t reason) {
+  if (!server) {
+    return 0;
+  }
+  uint32_t count = 0;
+  for (sfu_client_conn_t *target = server->connections_head; target;) {
+    sfu_client_conn_t *next = target->registry_next;
+    if (!target->disconnecting && target->joined_room == room && target->joined_room_id == room_id && target->user_id == user_id) {
+      disconnect_client(target, reason);
+      count++;
+    }
+    target = next;
+  }
+  return count;
 }
 
 static void handle_ping(sfu_client_conn_t *c) {
@@ -1848,13 +1865,7 @@ static void handle_participant_action(sfu_client_conn_t *c, const char *buf, siz
     send_participant_action_completed(c, "kick", claims.user_id, target_count);
     SFU_LOG_INFO("signaling: participant action=kick target_user_id=%" PRId64 " room=%" PRIu64 " affected=%u (fd=%d)", claims.user_id, claims.room_id,
                  target_count, c->fd);
-    for (sfu_client_conn_t *target = c->server->connections_head; target;) {
-      sfu_client_conn_t *next = target->registry_next;
-      if (!target->disconnecting && target->joined_room == c->joined_room && target->joined_room_id == claims.room_id && target->user_id == claims.user_id) {
-        disconnect_client(target, SFU_DISCONNECT_KICKED);
-      }
-      target = next;
-    }
+    disconnect_room_user_connections(c->server, c->joined_room, claims.room_id, claims.user_id, SFU_DISCONNECT_KICKED);
     return;
   }
 
@@ -2617,6 +2628,118 @@ static void on_renegotiation_wake(uv_async_t *handle) {
   }
 }
 
+uint32_t sfu_signaling_scan_alone_rooms_at(sfu_signaling_server_t *server, uint64_t now_ms, uint64_t *out_next_deadline_ms) {
+  if (out_next_deadline_ms) {
+    *out_next_deadline_ms = 0;
+  }
+  if (!server || !server->room_registry) {
+    return 0;
+  }
+
+  sfu_room_registry_t *reg = server->room_registry;
+  pthread_mutex_lock(&reg->lock);
+  uint32_t room_count = reg->room_count;
+  pthread_mutex_unlock(&reg->lock);
+
+  typedef struct {
+    sfu_room_t *room;
+    uint64_t room_id;
+    int64_t user_id;
+  } sfu_alone_kick_candidate_t;
+
+  sfu_alone_kick_candidate_t kick_candidates[SFU_MAX_ROOMS];
+  uint32_t kick_count = 0;
+  uint64_t earliest_future_deadline_ms = 0;
+
+  for (uint32_t i = 0; i < room_count; i++) {
+    sfu_room_t *room = &reg->rooms[i];
+    pthread_mutex_lock(&room->lock);
+
+    if (room->alone_deadline_ms == 0 || room->alone_expiry_claimed) {
+      pthread_mutex_unlock(&room->lock);
+      continue;
+    }
+
+    int64_t sole_uid = 0;
+    uint32_t distinct = room_count_distinct_users_locked(room, &sole_uid);
+    if (distinct != 1 || sole_uid != room->alone_user_id) {
+      room->alone_user_id = 0;
+      room->alone_deadline_ms = 0;
+      room->alone_generation++;
+      room->alone_expiry_claimed = false;
+      pthread_mutex_unlock(&room->lock);
+      continue;
+    }
+
+    if (room->alone_deadline_ms <= now_ms) {
+      room->alone_expiry_claimed = true;
+      if (kick_count < SFU_MAX_ROOMS) {
+        kick_candidates[kick_count++] = (sfu_alone_kick_candidate_t){
+            .room = room,
+            .room_id = room->room_id,
+            .user_id = sole_uid,
+        };
+      }
+    } else {
+      if (earliest_future_deadline_ms == 0 || room->alone_deadline_ms < earliest_future_deadline_ms) {
+        earliest_future_deadline_ms = room->alone_deadline_ms;
+      }
+    }
+
+    pthread_mutex_unlock(&room->lock);
+  }
+
+  uint32_t total_disconnected = 0;
+  for (uint32_t k = 0; k < kick_count; k++) {
+    sfu_alone_kick_candidate_t *c = &kick_candidates[k];
+    SFU_LOG_INFO("signaling: alone participant timeout expired for user_id=%" PRId64 " in room %" PRIu64, c->user_id, c->room_id);
+    total_disconnected += disconnect_room_user_connections(server, c->room, c->room_id, c->user_id, SFU_DISCONNECT_ALONE_TIMEOUT);
+  }
+
+  if (out_next_deadline_ms) {
+    *out_next_deadline_ms = earliest_future_deadline_ms;
+  }
+  return total_disconnected;
+}
+
+void sfu_signaling_wake_alone_timer(void) {
+  sfu_signaling_server_t *server = signaling_producer_acquire();
+  if (!server) {
+    return;
+  }
+  if (!server->suppress_wake) {
+    uv_async_send(&server->alone_waker);
+  }
+  signaling_producer_release();
+}
+
+static void on_alone_timer(uv_timer_t *timer);
+
+static void process_alone_rooms(sfu_signaling_server_t *s) {
+  if (!s || !atomic_load(&s->running)) {
+    return;
+  }
+  uint64_t next_deadline_ms = 0;
+  sfu_signaling_scan_alone_rooms_at(s, sfu_now_ms(), &next_deadline_ms);
+  if (s->alone_timer_inited) {
+    if (next_deadline_ms != 0) {
+      uint64_t now_ms = sfu_now_ms();
+      uint64_t timeout = (next_deadline_ms > now_ms) ? (next_deadline_ms - now_ms) : 0;
+      uv_timer_start(&s->alone_timer, on_alone_timer, timeout, 0);
+    } else {
+      uv_timer_stop(&s->alone_timer);
+    }
+  }
+}
+
+static void on_alone_timer(uv_timer_t *timer) {
+  process_alone_rooms((sfu_signaling_server_t *)timer->data);
+}
+
+static void on_alone_wake(uv_async_t *handle) {
+  process_alone_rooms((sfu_signaling_server_t *)handle->data);
+}
+
 static void on_async_wake(uv_async_t *handle) { uv_stop(handle->loop); }
 
 static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
@@ -2628,6 +2751,15 @@ static void on_shutdown_walk(uv_handle_t *handle, void *arg) {
 
   if (s->renegotiation_timer_inited && handle == (uv_handle_t *)&s->renegotiation_timer) {
     uv_timer_stop(&s->renegotiation_timer);
+    uv_close(handle, NULL);
+    return;
+  }
+  if (s->alone_timer_inited && handle == (uv_handle_t *)&s->alone_timer) {
+    uv_timer_stop(&s->alone_timer);
+    uv_close(handle, NULL);
+    return;
+  }
+  if (handle == (uv_handle_t *)&s->alone_waker) {
     uv_close(handle, NULL);
     return;
   }
@@ -2658,6 +2790,16 @@ static void *signaling_loop_main(void *arg) {
   } else {
     s->renegotiation_timer_inited = false;
     SFU_LOG_ERROR("signaling: failed to initialize renegotiation timer");
+  }
+
+  uv_async_init(&loop, &s->alone_waker, on_alone_wake);
+  s->alone_waker.data = s;
+  if (uv_timer_init(&loop, &s->alone_timer) == 0) {
+    s->alone_timer.data = s;
+    s->alone_timer_inited = true;
+  } else {
+    s->alone_timer_inited = false;
+    SFU_LOG_ERROR("signaling: failed to initialize alone timer");
   }
 
   uv_poll_t listen_poll;
@@ -2709,6 +2851,7 @@ int sfu_signaling_server_start(sfu_signaling_server_t *s, uint16_t listen_port, 
   s->sessions = sessions;
   s->room_registry = room_registry;
   s->routing_table = routing_table;
+  s->alone_timeout_ms = (uint64_t)g_sfu_config.alone_participant_timeout_seconds * 1000ULL;
   if (pthread_mutex_init(&s->renegotiation_queue.lock, NULL) != 0) {
     return -1;
   }
