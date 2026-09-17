@@ -1182,7 +1182,9 @@ static void sfu_session_free_resources(sfu_peer_session_t *s) {
     sfu_probe_controller_destroy(s->egress.probe_controller);
     s->egress.probe_controller = NULL;
   }
-  sfu_paced_send_destroy(&s->egress.paced_camera);
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_paced_send_destroy(&s->egress.paced_camera[i]);
+  }
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     sfu_paced_send_destroy(&s->egress.paced_screen[i]);
   }
@@ -1520,7 +1522,10 @@ sfu_peer_session_t *sfu_session_table_get_or_create(sfu_session_table_t *t, cons
 
   atomic_store_explicit(&s->egress.video_runtime_state, SFU_VIDEO_RUNTIME_UNINITIALIZED, memory_order_relaxed);
   sfu_rtp_seq_translator_init(&s->cold->rtp_seq_translator);
-  sfu_paced_send_init(&s->egress.paced_camera);
+  for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+    sfu_paced_send_init(&s->egress.paced_camera[i]);
+  }
+  s->egress.last_camera_drain_slot = 0;
   for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
     sfu_paced_send_init(&s->egress.paced_screen[i]);
   }

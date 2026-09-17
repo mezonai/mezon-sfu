@@ -190,7 +190,7 @@ static inline bool sfu_session_has_paced_work(const sfu_peer_session_t *s) {
   if (!s) {
     return false;
   }
-  if (s->egress.paced_rtx.count > 0 || s->egress.paced_camera.ready_count > 0 || s->egress.paced_probe.count > 0) {
+  if (s->egress.paced_rtx.count > 0 || s->egress.paced_probe.count > 0) {
     return true;
   }
   uint32_t slots = sfu_session_remote_slot_high_water(s);
@@ -198,7 +198,7 @@ static inline bool sfu_session_has_paced_work(const sfu_peer_session_t *s) {
     slots = SFU_MAX_REMOTE_SLOTS;
   }
   for (uint32_t i = 0; i < slots; i++) {
-    if (s->egress.paced_screen[i].ready_count > 0) {
+    if (s->egress.paced_camera[i].ready_count > 0 || s->egress.paced_screen[i].ready_count > 0) {
       return true;
     }
   }
@@ -317,17 +317,25 @@ bool sfu_worker_drain_paced_active(sfu_worker_t *w, int64_t now_us) {
           ls->egress.last_screen_drain_slot = (slot + 1u) % slots;
         }
       }
-    }
-    uint32_t camera_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-    if (sfu_paced_send_drain(&ls->egress.paced_camera, w, ls, now_us, &camera_budget)) {
-      paced_sent = true;
+      uint32_t start_camera_slot = ls->egress.last_camera_drain_slot % slots;
+      for (uint32_t s = 0; s < slots; s++) {
+        uint32_t slot = (start_camera_slot + s) % slots;
+        if (ls->egress.paced_camera[slot].count == 0) {
+          continue;
+        }
+        uint32_t per_slot = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
+        if (sfu_paced_send_drain(&ls->egress.paced_camera[slot], w, ls, now_us, &per_slot)) {
+          paced_sent = true;
+          ls->egress.last_camera_drain_slot = (slot + 1u) % slots;
+        }
+      }
     }
 
     /* Probe padding queue */
-    bool media_backlogged = ls->egress.paced_camera.count > 0;
-    if (!media_backlogged && slots > 0) {
+    bool media_backlogged = false;
+    if (slots > 0) {
       for (uint32_t s = 0; s < slots; s++) {
-        if (ls->egress.paced_screen[s].count > 0) {
+        if (ls->egress.paced_screen[s].count > 0 || ls->egress.paced_camera[s].count > 0) {
           media_backlogged = true;
           break;
         }
