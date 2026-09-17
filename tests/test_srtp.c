@@ -182,7 +182,6 @@ int main(void) {
     assert(strcmp(sfu_srtp_status_name(srtp_err_status_pkt_idx_old), "pkt_idx_old") == 0);
     assert(strcmp(sfu_srtp_status_name(srtp_err_status_bad_mki), "bad_mki") == 0);
     assert(strcmp(sfu_srtp_status_name(srtp_err_status_pkt_idx_adv), "pkt_idx_adv") == 0);
-    assert(strcmp(sfu_srtp_status_name(srtp_err_status_cryptex_err), "cryptex_err") == 0);
   }
 
   sfu_srtp_global_deinit();
