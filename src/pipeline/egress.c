@@ -243,7 +243,7 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
   bool screen_packet = media->source == SFU_MEDIA_SCREEN && media->has_video && !media->is_audio;
   bool camera_packet = media->source == SFU_MEDIA_VIDEO && media->has_video && !media->is_audio;
   sfu_paced_send_t *paced_queue = screen_packet   ? (media->remote_slot < SFU_MAX_REMOTE_SLOTS ? &sub_session->egress.paced_screen[media->remote_slot] : NULL)
-                                  : camera_packet ? &sub_session->egress.paced_camera
+                                  : camera_packet ? (media->remote_slot < SFU_MAX_REMOTE_SLOTS ? &sub_session->egress.paced_camera[media->remote_slot] : NULL)
                                                   : NULL;
   uint32_t source_timestamp = sfu_read_be32(pkt->data + 4);
   bool source_marker = decision ? decision->set_marker : (pkt->data[1] & 0x80u) != 0;
