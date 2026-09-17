@@ -572,8 +572,9 @@ typedef struct {
   _Atomic uint16_t next_twcc_seq;
   _Atomic uint8_t video_runtime_state;
   uint8_t fir_seq;
-  sfu_paced_send_t paced_camera;
+  sfu_paced_send_t paced_camera[SFU_MAX_REMOTE_SLOTS];
   sfu_paced_send_t paced_screen[SFU_MAX_REMOTE_SLOTS];
+  uint32_t last_camera_drain_slot;
   uint32_t last_screen_drain_slot;
   sfu_paced_priority_queue_t paced_rtx;
   sfu_paced_priority_queue_t paced_probe;

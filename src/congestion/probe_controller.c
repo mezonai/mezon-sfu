@@ -349,7 +349,10 @@ void sfu_probe_controller_step(sfu_peer_session_t *session, sfu_worker_t *w, int
   if (pc->state == SFU_PROBE_STATE_IDLE) {
     pthread_mutex_unlock(&pc->lock);
 
-    uint32_t media_backlog = session->egress.paced_camera.count;
+    uint32_t media_backlog = 0;
+    for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS; i++) {
+      media_backlog += session->egress.paced_camera[i].count;
+    }
     for (uint32_t i = 0; i < SFU_MAX_REMOTE_SLOTS && media_backlog == 0; i++) {
       if (session->egress.paced_screen[i].count > 0) {
         media_backlog++;

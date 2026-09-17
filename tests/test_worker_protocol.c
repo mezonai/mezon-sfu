@@ -174,6 +174,9 @@ static void fixture_init(fixture_t *f) {
   assert(f->session->egress.schedulers != NULL);
   atomic_store_explicit(&f->session->egress.video_runtime_state, SFU_VIDEO_RUNTIME_READY, memory_order_release);
 
+  /* Set remote slot high water to 1 so worker drain logic processes slot 0 */
+  f->session->graph.remote_slots.high_water_slots = 1;
+
   f->w.pp = &f->pp;
   f->w.sessions = &f->sessions;
   f->w.worker_index = 0;
@@ -300,7 +303,7 @@ static void test_rtx_priority_over_video_backlog(void) {
   build_rtp_video(pkt_buf, 42, 100, &pkt_len);
   sfu_rtx_cache_put_stream(f.cache, 42, pkt_buf, (uint32_t)pkt_len, RTX_SSRC, RTX_PT, MEDIA_SSRC, 0);
 
-  /* Enqueue camera video packets into paced_camera */
+  /* Enqueue camera video packets into paced_camera[0] */
   sfu_peer_session_t *sub = f.session;
   sfu_pacer_set_rate(&sub->egress.pacer, 2000000, 1000000);
   uint8_t payload[1000] = {0};
@@ -313,10 +316,10 @@ static void test_rtx_priority_over_video_backlog(void) {
   };
   sfu_pacer_reservation_t res = {0};
   assert(sfu_pacer_reserve(&sub->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &res));
-  assert(sfu_paced_send_enqueue(&sub->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
+  assert(sfu_paced_send_enqueue(&sub->egress.paced_camera[0], payload, sizeof(payload), NULL, 0, &dst, sub->cold->addr_len,
                                 SFU_PACER_CLASS_VIDEO_BASE, sub->egress.pacer.pacing_bps, &sub->egress.pacer, &res, &metadata, 1000000, NULL));
-  sub->egress.paced_camera.ready_count++;
-  assert(sub->egress.paced_camera.count == 1);
+  sub->egress.paced_camera[0].ready_count++;
+  assert(sub->egress.paced_camera[0].count == 1);
 
   /* Incoming NACK enqueues RTX packet */
   uint8_t nack[64];
@@ -331,10 +334,10 @@ static void test_rtx_priority_over_video_backlog(void) {
   assert(sfu_metric_get("congestion_rtx_sent") == 1);
 
   /* Media is still queued and drains subsequently */
-  assert(sub->egress.paced_camera.count == 1);
+  assert(sub->egress.paced_camera[0].count == 1);
   uint32_t cam_budget = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-  assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.w, sub, 1000000, &cam_budget));
-  assert(sub->egress.paced_camera.count == 0);
+  assert(sfu_paced_send_drain(&sub->egress.paced_camera[0], &f.w, sub, 1000000, &cam_budget));
+  assert(sub->egress.paced_camera[0].count == 0);
 
   fixture_destroy(&f);
 }
@@ -1224,7 +1227,7 @@ static void test_svc_filter_rewrites_sequence_and_cache_identity(void) {
   feed_publisher_vp9(&f, 101, 9001, upper, sizeof(upper));
   feed_publisher_vp9(&f, 102, 9002, base_delta, sizeof(base_delta));
   uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-  assert(sfu_paced_send_drain(&f.base.session->egress.paced_camera, &f.base.w, f.base.session, INT64_MAX, &remaining));
+  assert(sfu_paced_send_drain(&f.base.session->egress.paced_camera[0], &f.base.w, f.base.session, INT64_MAX, &remaining));
 
   uint8_t cached[512];
   uint32_t cached_len = sizeof(cached);
@@ -1717,7 +1720,7 @@ static void test_visibility_false_stops_forward(void) {
     gcc_packet_info_t info = {0};
     assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
     uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-    assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.base.w, sub, INT64_MAX, &remaining));
+    assert(sfu_paced_send_drain(&sub->egress.paced_camera[0], &f.base.w, sub, INT64_MAX, &remaining));
     assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 0, &info));
   }
 
@@ -1791,7 +1794,7 @@ static void test_visibility_false_stops_forward(void) {
     gcc_packet_info_t info = {0};
     assert(!sfu_twcc_history_lookup(sub->egress.twcc_history, 2, &info));
     uint32_t remaining = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-    assert(sfu_paced_send_drain(&sub->egress.paced_camera, &f.base.w, sub, INT64_MAX, &remaining));
+    assert(sfu_paced_send_drain(&sub->egress.paced_camera[0], &f.base.w, sub, INT64_MAX, &remaining));
     assert(sfu_twcc_history_lookup(sub->egress.twcc_history, 2, &info));
   }
 
@@ -2044,10 +2047,10 @@ static void test_worker_paced_active_set(void) {
   };
   sfu_pacer_reservation_t res = {0};
   assert(sfu_pacer_reserve(&f.session->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &res));
-  assert(sfu_paced_send_enqueue(&f.session->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, f.session->cold->addr_len,
+  assert(sfu_paced_send_enqueue(&f.session->egress.paced_camera[0], payload, sizeof(payload), NULL, 0, &dst, f.session->cold->addr_len,
                                 SFU_PACER_CLASS_VIDEO_BASE, f.session->egress.pacer.pacing_bps, &f.session->egress.pacer, &res, &metadata, 1000000, NULL));
-  f.session->egress.paced_camera.ready_count++;
-  assert(f.session->egress.paced_camera.count == 1);
+  f.session->egress.paced_camera[0].ready_count++;
+  assert(f.session->egress.paced_camera[0].count == 1);
 
   /* Marking session active now retains it */
   sfu_worker_mark_session_paced_active(&f.w, f.session);
@@ -2057,7 +2060,7 @@ static void test_worker_paced_active_set(void) {
   /* Drain sends the camera packet and leaves queues empty, clearing active status */
   sent = sfu_worker_drain_paced_active(&f.w, 1000000);
   assert(sent);
-  assert(f.session->egress.paced_camera.count == 0);
+  assert(f.session->egress.paced_camera[0].count == 0);
   assert(!atomic_load(&f.session->paced_active));
   assert(f.w.paced_active_count == 0);
 
@@ -2135,12 +2138,12 @@ static void test_worker_paced_generation_dedup(void) {
   };
   sfu_pacer_reservation_t res = {0};
   assert(sfu_pacer_reserve(&s2->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 1000000, &res));
-  assert(sfu_paced_send_enqueue(&s2->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, s2->cold->addr_len,
+  assert(sfu_paced_send_enqueue(&s2->egress.paced_camera[0], payload, sizeof(payload), NULL, 0, &dst, s2->cold->addr_len,
                                 SFU_PACER_CLASS_VIDEO_BASE, s2->egress.pacer.pacing_bps, &s2->egress.pacer, &res, &metadata, 1000000, NULL));
   assert(sfu_pacer_reserve(&s2->egress.pacer, SFU_PACER_CLASS_VIDEO_BASE, sizeof(payload), false, 2000000, &res));
-  assert(sfu_paced_send_enqueue(&s2->egress.paced_camera, payload, sizeof(payload), NULL, 0, &dst, s2->cold->addr_len,
+  assert(sfu_paced_send_enqueue(&s2->egress.paced_camera[0], payload, sizeof(payload), NULL, 0, &dst, s2->cold->addr_len,
                                 SFU_PACER_CLASS_VIDEO_BASE, s2->egress.pacer.pacing_bps, &s2->egress.pacer, &res, &metadata, 2000000, NULL));
-  s2->egress.paced_camera.ready_count = 2;
+  s2->egress.paced_camera[0].ready_count = 2;
 
   /* Drain tick: s2 has remaining work and requeues; f.session and s3 have no work and clear active */
   (void)sfu_worker_drain_paced_active(&f.w, 1000000);
