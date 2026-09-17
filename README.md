@@ -348,22 +348,20 @@ See [`examples/webrtc_test_client.html`](examples/webrtc_test_client.html) and i
 
 ## Agent integration
 
-[mezon-call-translation](https://github.com/mezonai/mezon-call-translation) is a companion service that adds real-time speech-to-text and translation to calls running on the SFU, via a general-purpose Voice AI Agent (not tied to any specific WebRTC provider).
+[mezon-call-translation](https://github.com/mezonai/mezon-call-translation) is a companion project that joins calls on this SFU to record them, transcribe speech in real time, and optionally speak synthesized audio back into the call. It talks to mezon-sfu's own WebSocket/WebRTC signaling directly.
 
 **What it does:**
-* Joins a call as a Voice AI Agent and pulls audio through voice activity detection (VAD) to filter out silence before transcription.
-* Transcribes speech with the [Vosk](https://alphacephei.com/vosk/) offline STT engine and can synthesize translated audio back with Kokoro TTS.
-* Runs behind a FastAPI server that fans work out to multiple STT workers, so one deployment can serve many simultaneous calls.
-* Scales horizontally — an Nginx load balancer sits in front of multiple server instances, each with its own worker pool, so agent capacity can grow independently of the SFU.
+* `agents/cmd/agent` (Go, `pion/webrtc`) joins a room as a regular WebRTC participant over mezon-sfu's JWT-authenticated signaling — same track/`mid` layout as any other client, no special-cased negotiation.
+* It forwards each mic track's decoded PCM to a `record-service` for durable recording and, per track, to a realtime speech-to-text service — the STT engine is [Nemotron](https://huggingface.co/onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4) (NVIDIA's cache-aware streaming ASR model), not Vosk.
+* In `speaker` mode, it synthesizes speech with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) TTS, Opus-encodes it, and publishes it back into the room as its own outgoing track — e.g. for speaking translated audio into a call.
+* A separate long-lived process, `agents-bot`, logs into Mezon itself to resolve participant identities and bridge chat, since mezon-sfu has no data channel or identity API of its own.
 
 **How it connects:**
-* The agent is dispatched into a call through the server's `POST /agent/join` REST endpoint.
-* Audio and results flow over a WebSocket API (`ws://<host>:8000/ws/vosk/`), which accepts per-client parameters (`client_id`, `session_id`, `language`, and whether transcript and/or translation output is wanted) and returns JSON transcript/translation events.
-* Health is exposed via `/health` and `/health/simple`, which the load balancer polls to route around unhealthy instances.
+* Agent lifecycle is driven by a NATS start/stop event published by BE mezon, not a REST call into the SFU or the agent: `agents/cmd/worker-manager` subscribes to that subject and spawns/kills one `agent` subprocess per active room.
+* The agent dials mezon-sfu's signaling WebSocket directly (`SFU_WS_URL`) with an HS256-signed JWT for the WebRTC session itself; audio/transcript exchange with the STT backend happens over a separate WebSocket (`/ws/transcription/`) to the `stt_service` process, not to mezon-sfu.
+* `stt_service` health is exposed via `/health` and `/health/simple`; each connected track gets its own dedicated STT pipeline, up to a configured concurrency limit.
 
-**Setup:** see the [mezon-call-translation Quick Start](https://github.com/mezonai/mezon-call-translation#-quick-start) and [Setup Guide](https://github.com/mezonai/mezon-call-translation/blob/main/docs/setup/SETUP-GUIDE.md) for environment configuration and the Vosk/Kokoro models downloaded via the provided scripts.
-
-> Note: some of mezon-call-translation's published docs still describe the agent as LiveKit-specific — treat that framing as outdated; the agent itself is provider-agnostic.
+**Setup:** see [`agents/README.md`](https://github.com/mezonai/mezon-call-translation/blob/main/agents/README.md) for build/run instructions and full environment configuration, and [`agents-bot/README.md`](https://github.com/mezonai/mezon-call-translation/blob/main/agents-bot/README.md) for the companion bot process.
 
 ## Editor & debugger integration (Zed / VS Code)
 
