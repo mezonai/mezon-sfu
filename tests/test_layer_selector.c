@@ -737,6 +737,94 @@ static void test_screen_share_reject_arms_needs_keyframe(void) {
   assert(!sched.needs_keyframe);
 }
 
+static void test_camera_video_reject_arms_needs_keyframe(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.source = SFU_MEDIA_VIDEO;
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Keyframe at timestamp 1000 */
+  sfu_svc_descriptor_t kf = make_desc(1000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+
+  /* Delta frame at timestamp 2000 on active spatial layer 0 */
+  sfu_svc_descriptor_t delta = make_desc(2000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &delta, false, &decision));
+  /* Rejected due to queue delay/drop */
+  sfu_layer_scheduler_reject_packet(&sched, &decision);
+
+  /* For camera video, dropping an active layer delta packet must arm needs_keyframe */
+  assert(sched.needs_keyframe);
+
+  /* Next delta frame at timestamp 3000 must be gated */
+  sfu_svc_descriptor_t delta2 = make_desc(3000, 0, 0, 0, 0, 0, 1, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &delta2, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_KEYFRAME_REQUIRED);
+
+  /* Keyframe at timestamp 4000 recovers */
+  sfu_svc_descriptor_t kf2 = make_desc(4000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf2, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+}
+
+static void test_incomplete_picture_timestamp_transition_arms_needs_keyframe(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.source = SFU_MEDIA_SCREEN;
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Keyframe at timestamp 1000 completes cleanly */
+  sfu_svc_descriptor_t kf = make_desc(1000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+
+  /* Delta frame at timestamp 2000 with 2 packets: packet 1 has b_bit=1, e_bit=0 */
+  sfu_svc_descriptor_t pkt1 = make_desc(2000, 0, 0, 0, 0, 0, 1, 0);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &pkt1, false, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+
+  /* Packet 2 is lost/dropped. Next packet belongs to timestamp 3000 */
+  sfu_svc_descriptor_t pkt_next = make_desc(3000, 0, 0, 0, 0, 0, 1, 1);
+  /* Preparing pkt_next triggers layer_scheduler_begin_picture(3000) which detects
+   * timestamp 2000 was started but never completed (missing e_bit), arming needs_keyframe */
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &pkt_next, false, &decision));
+  assert(sched.needs_keyframe);
+  assert(decision.reject_reason == SFU_LAYER_REJECT_KEYFRAME_REQUIRED);
+}
+
+static void test_camera_over_target_must_not_arm_keyframe(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.source = SFU_MEDIA_VIDEO;
+
+  sfu_layer_scheduler_decision_t decision;
+  sfu_svc_descriptor_t kf = make_desc(1000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  /* target/current remain 0/0 so sid=1 is an unselected enhancement layer.
+   * Dropping it is normal bandwidth adaptation and must NOT trigger a PLI. */
+  assert(sched.target_sid == 0 && sched.current_sid == 0);
+
+  sfu_svc_descriptor_t enh = make_desc(2000, 1, 0, 0, 0, 1, 1, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &enh, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_OVER_TARGET_OR_FAILED);
+  sfu_layer_scheduler_reject_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+
+  /* Active-layer deltas must still be gated — proves the negative case is
+   * narrowly scoped to over-target enhancement, not a blanket suppression. */
+  sfu_svc_descriptor_t delta = make_desc(3000, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &delta, false, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+}
+
 int main(void) {
   test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
@@ -756,6 +844,9 @@ int main(void) {
   test_screen_share_admits_higher_tid_without_u_bit();
   test_screen_share_upgrades_immediately_without_dwell();
   test_screen_share_reject_arms_needs_keyframe();
+  test_camera_video_reject_arms_needs_keyframe();
+  test_incomplete_picture_timestamp_transition_arms_needs_keyframe();
+  test_camera_over_target_must_not_arm_keyframe();
   test_audio_does_not_consume_slot();
   test_full_table_rejection_and_prune_reclaims_slot();
   test_full_state_reset_on_reuse();
