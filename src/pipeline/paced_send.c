@@ -77,7 +77,7 @@ bool sfu_paced_send_admit_frame_packet(sfu_paced_send_t *q, uint32_t rtp_timesta
 
     /* Detect motion: if queue has >3 frames ready or this frame will be >2× previous size.
      * Use tighter delay bound during motion to reduce blur during scrolling. */
-    bool motion_detected = q->ready_count > 3;
+    bool motion_detected = q->ready_frame_count > 3;
     if (motion_detected) {
       q->motion_frame_count++;
     } else if (q->motion_frame_count > 0) {
@@ -115,6 +115,7 @@ void sfu_paced_send_finish_input_frame(sfu_paced_send_t *q) {
   if (q->input_frame_queued_packets) {
     uint32_t last = q->tail == 0 ? q->capacity - 1u : q->tail - 1u;
     q->entries[last].metadata.frame_end = true;
+    q->ready_frame_count++;
   }
   q->ready_count += q->input_frame_queued_packets;
   q->input_frame_queued_packets = 0;
@@ -149,6 +150,7 @@ void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q) {
   if (!q->count) {
     q->head = q->tail = 0;
     q->next_release_us = 0;
+    q->ready_frame_count = 0;
   }
 }
 
@@ -212,6 +214,9 @@ bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int
       q->count--;
       q->ready_count--;
     }
+    if (frame_end && q->ready_frame_count > 0) {
+      q->ready_frame_count--;
+    }
     q->dropped_delay_frames++;
     sfu_metric_inc_id(SFU_METRIC_PACED_SEND_DELAY_FRAME_DROP);
     if (report) {
@@ -222,6 +227,7 @@ bool sfu_paced_send_bound_backlog(sfu_paced_send_t *q, int64_t max_delay_us, int
   }
   if (!q->count) {
     q->head = q->tail = 0;
+    q->ready_frame_count = 0;
   }
   return sfu_paced_send_projected_delay_us(q, now_us) < max_delay_us;
 }
@@ -284,6 +290,9 @@ bool sfu_paced_send_enqueue(sfu_paced_send_t *q, const uint8_t *data, uint16_t l
 }
 
 static void pop_entry(sfu_paced_send_t *q) {
+  if (q->entries[q->head].metadata.frame_end && q->ready_frame_count > 0) {
+    q->ready_frame_count--;
+  }
   q->head = (q->head + 1u) % q->capacity;
   q->count--;
   q->ready_count--;
@@ -292,6 +301,9 @@ static void pop_entry(sfu_paced_send_t *q) {
 static void cancel_and_pop_entry(sfu_paced_send_t *q) {
   sfu_paced_send_entry_t *e = &q->entries[q->head];
   sfu_pacer_cancel(e->pacer, &e->reservation);
+  if (e->metadata.frame_end && q->ready_frame_count > 0) {
+    q->ready_frame_count--;
+  }
   q->head = (q->head + 1u) % q->capacity;
   q->count--;
   q->ready_count--;
@@ -380,6 +392,7 @@ bool sfu_paced_send_drain(sfu_paced_send_t *q, sfu_worker_t *w, sfu_peer_session
   if (!q->count) {
     q->head = q->tail = 0;
     q->next_release_us = 0;
+    q->ready_frame_count = 0;
   }
   return did_work;
 }

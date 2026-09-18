@@ -134,11 +134,13 @@ static void test_screen_backlog_evicts_whole_frames(void) {
   q.entries[2].release_at_us = 1400000;
   q.entries[3].release_at_us = 1600000;
   q.next_release_us = 1800000;
+  q.ready_frame_count = 2;
 
   sfu_paced_send_drop_report_t report;
   sfu_paced_send_drop_report_init(&report);
   assert(sfu_paced_send_bound_backlog(&q, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000, &report));
   assert(report.frames == 1);
+  assert(q.ready_frame_count == 1);
   assert(q.count == 2);
   assert(q.ready_count == 2);
   assert(q.head == 2);
@@ -408,6 +410,76 @@ static void test_keyframe_latching_across_packets(void) {
   sfu_paced_send_destroy(&q);
 }
 
+static void test_keyframe_burst_does_not_trigger_motion_drop(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+  uint8_t payload[100] = {0};
+  struct sockaddr_storage dst = {0};
+
+  /* Admit and enqueue a single large keyframe consisting of 10 packets. */
+  for (int i = 0; i < 10; i++) {
+    bool marker = (i == 9);
+    assert(sfu_paced_send_admit_frame_packet(&q, 1000, marker, true, false, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+    sfu_pacer_reservation_t r = {.bytes = sizeof(payload), .pacer_class = SFU_PACER_CLASS_VIDEO_BASE, .active = true};
+    sfu_paced_send_metadata_t m = {.is_keyframe = true};
+    assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), NULL, 0, &dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE,
+                                  SFU_PACED_SEND_MIN_BPS, NULL, &r, &m, 1000000, NULL));
+  }
+  sfu_paced_send_finish_input_frame(&q);
+
+  /* Single frame enqueued with 10 packets: ready_count is 10, ready_frame_count is 1 */
+  assert(q.count == 10);
+  assert(q.ready_count == 10);
+  assert(q.ready_frame_count == 1);
+  assert(q.motion_frame_count == 0);
+
+  /* Artificially adjust release timing so projected delay is 400ms.
+   * 400ms is below SFU_PACED_SEND_SCREEN_MAX_DELAY_US (750ms), but above SFU_PACED_SEND_SCREEN_MOTION_MAX_DELAY_US (250ms). */
+  q.next_release_us = 1400000;
+  assert(sfu_paced_send_projected_delay_us(&q, 1000000) == 400000);
+
+  /* Now a subsequent delta frame arrives (timestamp 1001, keyframe = false, drop_on_delay = true).
+   * Since ready_frame_count is 1 (<= 3 frames), motion detection must NOT engage.
+   * Effective max delay remains 750ms, so this delta frame must be admitted. */
+  assert(sfu_paced_send_admit_frame_packet(&q, 1001, true, false, true, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+  assert(q.motion_frame_count == 0);
+  assert(!q.drop_input_frame);
+
+  sfu_paced_send_destroy(&q);
+}
+
+static void test_motion_detection_engages_when_frame_count_exceeds_threshold(void) {
+  sfu_paced_send_t q;
+  sfu_paced_send_init(&q);
+  uint8_t payload[100] = {0};
+  struct sockaddr_storage dst = {0};
+
+  /* Enqueue 4 distinct completed frames (ready_frame_count becomes 4 > 3). */
+  for (uint32_t f = 0; f < 4; f++) {
+    assert(sfu_paced_send_admit_frame_packet(&q, 1000 + f, true, false, false, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+    sfu_pacer_reservation_t r = {.bytes = sizeof(payload), .pacer_class = SFU_PACER_CLASS_VIDEO_BASE, .active = true};
+    sfu_paced_send_metadata_t m = {0};
+    assert(sfu_paced_send_enqueue(&q, payload, sizeof(payload), NULL, 0, &dst, sizeof(struct sockaddr_in), SFU_PACER_CLASS_VIDEO_BASE,
+                                  SFU_PACED_SEND_MIN_BPS, NULL, &r, &m, 1000000, NULL));
+    sfu_paced_send_finish_input_frame(&q);
+  }
+
+  assert(q.ready_frame_count == 4);
+
+  /* Set projected delay to 300ms (between 250ms motion limit and 750ms screen limit). */
+  q.next_release_us = 1300000;
+  assert(sfu_paced_send_projected_delay_us(&q, 1000000) == 300000);
+
+  /* 5th frame arrives with drop_on_delay = true. Because ready_frame_count is 4 > 3,
+   * motion detection engages (motion_frame_count becomes 1), tightening max delay to 250ms.
+   * Projected delay 300ms exceeds 250ms, so this frame is dropped. */
+  assert(!sfu_paced_send_admit_frame_packet(&q, 1004, true, false, true, SFU_PACED_SEND_SCREEN_MAX_DELAY_US, 1000000));
+  assert(q.motion_frame_count == 1);
+  assert(q.dropped_delay_frames == 1);
+
+  sfu_paced_send_destroy(&q);
+}
+
 int main(void) {
   test_enqueue_spacing_and_copy();
   test_size_and_rate_floor();
@@ -417,6 +489,8 @@ int main(void) {
   test_frame_rejected_after_enqueue_failure();
   test_keyframe_bypasses_delay_drop();
   test_screen_backlog_evicts_whole_frames();
+  test_keyframe_burst_does_not_trigger_motion_drop();
+  test_motion_detection_engages_when_frame_count_exceeds_threshold();
   test_backlog_preserves_keyframe();
   test_backlog_drops_delta_before_keyframe();
   test_backlog_report_attributes_dropped_publishers();
