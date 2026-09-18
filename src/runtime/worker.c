@@ -197,7 +197,8 @@ static inline bool sfu_session_has_paced_work(const sfu_peer_session_t *s) {
   if (slots > SFU_MAX_REMOTE_SLOTS) {
     slots = SFU_MAX_REMOTE_SLOTS;
   }
-  for (uint32_t i = 0; i < slots; i++) {
+  uint32_t check_slots = slots > 0 ? slots : 1;
+  for (uint32_t i = 0; i < check_slots; i++) {
     if (s->egress.paced_camera[i].ready_count > 0 || s->egress.paced_screen[i].ready_count > 0) {
       return true;
     }
@@ -299,46 +300,41 @@ bool sfu_worker_drain_paced_active(sfu_worker_t *w, int64_t now_us) {
       paced_sent = true;
     }
 
-    /* Media: Screen slots and Camera */
+    /* Media: Screen slots and Camera (interleaved round-robin to prevent screen bursts from starving camera) */
     uint32_t slots = sfu_session_remote_slot_high_water(ls);
     if (slots > SFU_MAX_REMOTE_SLOTS) {
       slots = SFU_MAX_REMOTE_SLOTS;
     }
-    if (slots > 0) {
-      uint32_t start_slot = ls->egress.last_screen_drain_slot % slots;
-      for (uint32_t s = 0; s < slots; s++) {
-        uint32_t slot = (start_slot + s) % slots;
-        if (ls->egress.paced_screen[slot].count == 0) {
-          continue;
-        }
+    uint32_t drain_slots = slots > 0 ? slots : 1;
+
+    uint32_t start_screen_slot = ls->egress.last_screen_drain_slot % drain_slots;
+    uint32_t start_camera_slot = ls->egress.last_camera_drain_slot % drain_slots;
+
+    for (uint32_t s = 0; s < drain_slots; s++) {
+      uint32_t screen_slot = (start_screen_slot + s) % drain_slots;
+      if (ls->egress.paced_screen[screen_slot].count > 0) {
         uint32_t per_slot = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-        if (sfu_paced_send_drain(&ls->egress.paced_screen[slot], w, ls, now_us, &per_slot)) {
+        if (sfu_paced_send_drain(&ls->egress.paced_screen[screen_slot], w, ls, now_us, &per_slot)) {
           paced_sent = true;
-          ls->egress.last_screen_drain_slot = (slot + 1u) % slots;
+          ls->egress.last_screen_drain_slot = (screen_slot + 1u) % drain_slots;
         }
       }
-      uint32_t start_camera_slot = ls->egress.last_camera_drain_slot % slots;
-      for (uint32_t s = 0; s < slots; s++) {
-        uint32_t slot = (start_camera_slot + s) % slots;
-        if (ls->egress.paced_camera[slot].count == 0) {
-          continue;
-        }
+      uint32_t camera_slot = (start_camera_slot + s) % drain_slots;
+      if (ls->egress.paced_camera[camera_slot].count > 0) {
         uint32_t per_slot = SFU_PACED_SEND_MAX_DRAIN_PER_SCAN;
-        if (sfu_paced_send_drain(&ls->egress.paced_camera[slot], w, ls, now_us, &per_slot)) {
+        if (sfu_paced_send_drain(&ls->egress.paced_camera[camera_slot], w, ls, now_us, &per_slot)) {
           paced_sent = true;
-          ls->egress.last_camera_drain_slot = (slot + 1u) % slots;
+          ls->egress.last_camera_drain_slot = (camera_slot + 1u) % drain_slots;
         }
       }
     }
 
     /* Probe padding queue */
     bool media_backlogged = false;
-    if (slots > 0) {
-      for (uint32_t s = 0; s < slots; s++) {
-        if (ls->egress.paced_screen[s].count > 0 || ls->egress.paced_camera[s].count > 0) {
-          media_backlogged = true;
-          break;
-        }
+    for (uint32_t s = 0; s < drain_slots; s++) {
+      if (ls->egress.paced_screen[s].count > 0 || ls->egress.paced_camera[s].count > 0) {
+        media_backlogged = true;
+        break;
       }
     }
     if (ls->egress.probe_controller) {

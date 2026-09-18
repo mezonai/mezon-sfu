@@ -177,9 +177,9 @@ static void cleanup_mock_session(sfu_peer_session_t *session, sfu_peer_session_t
      * sfu_subscriptions_snapshot_release (which would sfu_session_release and
      * ultimately free them) cannot be used here. */
     for (uint32_t i = 0; i < SFU_RECEIVER_CHUNK_COUNT; i++) {
-      free(snap->chunks[i]);
+      SFU_FREE(snap->chunks[i]);
     }
-    free(snap);
+    SFU_FREE(snap);
   }
   pthread_mutex_destroy(&session->graph.lock);
   pthread_mutex_destroy(&session->media.lock);
@@ -771,10 +771,10 @@ static void *sdp_race_publisher(void *arg) {
     e->mid_screen = SFU_REMOTE_MID_BASE + 2;
     assert(sfu_receiver_snapshot_set(snap, 0, e));
 
-    pthread_mutex_lock(&ctx->room.lock);
+    pthread_mutex_lock(&ctx->subscriber->graph.lock);
     ctx->subscriber->graph.remote_slots.high_water_slots = 1;
+    pthread_mutex_unlock(&ctx->subscriber->graph.lock);
     sfu_session_publish_receivers(ctx->subscriber, snap);
-    pthread_mutex_unlock(&ctx->room.lock);
   }
   return NULL;
 }
@@ -835,7 +835,7 @@ static void test_concurrent_build_vs_teardown(void) {
   printf("test_sdp: concurrent build vs teardown OK (build_failures=%d)\n", atomic_load(&ctx.build_failures));
 }
 
-static void test_299_audio_only_remote_offer(void) {
+static void test_299_full_remote_slot_offer_layout(void) {
   sfu_peer_session_t session;
   sfu_transceiver_t audio[SFU_MAX_REMOTE_SLOTS], video[SFU_MAX_REMOTE_SLOTS];
   sfu_peer_session_t remotes[SFU_MAX_REMOTE_SLOTS];
@@ -1016,7 +1016,7 @@ static void *run_sdp_tests(void *unused) {
   test_audience_offer_with_active_remote_speaker();
   test_offer_uses_snapshot_remote_mid_bound();
   test_screen_only_remote_offer();
-  test_299_audio_only_remote_offer();
+  test_299_full_remote_slot_offer_layout();
   test_twcc_extmap_extraction();
   test_answer_media_is_scoped_by_mid_and_direction();
   test_local_codec_offer_and_answer_contracts();
@@ -1033,7 +1033,7 @@ int main(void) {
   pthread_attr_t attr;
   pthread_t thread;
   assert(pthread_attr_init(&attr) == 0);
-  assert(pthread_attr_setstacksize(&attr, 128u * 1024u * 1024u) == 0);
+  assert(pthread_attr_setstacksize(&attr, 256u * 1024u * 1024u) == 0);
   assert(pthread_create(&thread, &attr, run_sdp_tests, NULL) == 0);
   pthread_attr_destroy(&attr);
   assert(pthread_join(thread, NULL) == 0);

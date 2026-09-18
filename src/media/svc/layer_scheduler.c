@@ -118,6 +118,12 @@ static void layer_scheduler_begin_picture(sfu_layer_scheduler_t *sched, uint32_t
     return;
   }
 
+  if (sched->picture_valid && sched->started_sid_mask != 0 &&
+      (((sched->started_sid_mask & ~sched->completed_sid_mask) != 0) ||
+       ((sched->started_sid_mask & sched->failed_sid_mask) != 0))) {
+    sched->needs_keyframe = true;
+  }
+
   if (sched->keyframe_active) {
     sched->needs_keyframe = true;
     sched->keyframe_active = false;
@@ -214,6 +220,17 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
     }
     decision->keyframe_packet = true;
     decision->transition_packet = true;
+  } else if (is_keyframe || sched->keyframe_active) {
+    if (!sched->keyframe_active) {
+      if (desc->b_bit != 0 && desc->sid == 0) {
+        decision->start_keyframe = true;
+        decision->keyframe_packet = true;
+        decision->transition_packet = true;
+      }
+    } else if (sched->keyframe_timestamp == desc->rtp_timestamp && desc->sid == 0 && desc->p_bit == 0) {
+      decision->keyframe_packet = true;
+      decision->transition_packet = true;
+    }
   }
 
   if (desc->sid > sched->current_sid) {
@@ -387,7 +404,14 @@ void sfu_layer_scheduler_reject_packet(sfu_layer_scheduler_t *sched, const sfu_l
     sched->keyframe_active = false;
     sched->keyframe_failed = true;
   }
-  if (sched->source == SFU_MEDIA_SCREEN) {
+  bool is_active_camera_layer =
+      sched->source == SFU_MEDIA_VIDEO && (decision->sid <= sched->current_sid || (sched->started_sid_mask & (1u << decision->sid)) != 0);
+  bool is_expected_reject = decision->reject_reason == SFU_LAYER_REJECT_NONE ||
+                            decision->reject_reason == SFU_LAYER_REJECT_KEYFRAME_REQUIRED ||
+                            decision->reject_reason == SFU_LAYER_REJECT_KEYFRAME_MISMATCH ||
+                            decision->reject_reason == SFU_LAYER_REJECT_MISSING_FRAME_START ||
+                            (sched->started_sid_mask & (1u << decision->sid)) != 0;
+  if (sched->source == SFU_MEDIA_SCREEN || (is_active_camera_layer && is_expected_reject)) {
     sched->needs_keyframe = true;
   }
   if ((decision->start_transition || sched->transition_active) && sched->transition_timestamp == decision->rtp_timestamp &&
