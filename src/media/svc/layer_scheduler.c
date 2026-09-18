@@ -144,6 +144,7 @@ static void layer_scheduler_begin_picture(sfu_layer_scheduler_t *sched, uint32_t
   sched->transition_timestamp = 0;
   sched->temporal_transition_tid = 0;
   sched->temporal_transition_timestamp = 0;
+  sched->frame_corrupted = false;
 }
 
 sfu_pacer_class_t sfu_layer_scheduler_classify_frame(const sfu_layer_scheduler_t *sched, const sfu_svc_descriptor_t *desc) {
@@ -167,6 +168,7 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
 
   memset(decision, 0, sizeof(*decision));
   decision->rtp_timestamp = desc->rtp_timestamp;
+  decision->seq = desc->seq;
   decision->sid = desc->sid;
   decision->tid = desc->tid;
   decision->b_bit = desc->b_bit;
@@ -179,6 +181,31 @@ bool sfu_layer_scheduler_prepare_packet(sfu_layer_scheduler_t *sched, const sfu_
   }
 
   layer_scheduler_begin_picture(sched, desc->rtp_timestamp);
+
+  /* Sequence continuity validation: detect intra-frame drops and inter-frame delta drops */
+  if (desc->b_bit == 0) {
+    if (!sched->seq_initialized || desc->seq != sched->expected_seq || sched->frame_corrupted) {
+      sched->frame_corrupted = true;
+      sched->needs_keyframe = true;
+      sched->expected_seq = (uint16_t)(desc->seq + 1u);
+      return layer_scheduler_reject(decision, SFU_LAYER_REJECT_SEQUENCE_GAP);
+    }
+    sched->expected_seq = (uint16_t)(desc->seq + 1u);
+  } else if (!is_keyframe) {
+    if (sched->seq_initialized && desc->seq != sched->expected_seq) {
+      sched->frame_corrupted = true;
+      sched->needs_keyframe = true;
+      sched->expected_seq = (uint16_t)(desc->seq + 1u);
+      return layer_scheduler_reject(decision, SFU_LAYER_REJECT_SEQUENCE_GAP);
+    }
+    sched->frame_corrupted = false;
+    sched->expected_seq = (uint16_t)(desc->seq + 1u);
+  } else {
+    /* Clean keyframe start */
+    sched->seq_initialized = true;
+    sched->frame_corrupted = false;
+    sched->expected_seq = (uint16_t)(desc->seq + 1u);
+  }
 
   if (sched->source == SFU_MEDIA_SCREEN) {
     sched->target_tid = 2;
@@ -322,6 +349,9 @@ void sfu_layer_scheduler_commit_packet(sfu_layer_scheduler_t *sched, const sfu_l
     return;
   }
 
+  sched->seq_initialized = true;
+  sched->expected_seq = (uint16_t)(decision->seq + 1u);
+
   uint8_t sid_mask = (uint8_t)(1u << decision->sid);
   if (decision->b_bit != 0) {
     sched->started_sid_mask |= sid_mask;
@@ -410,9 +440,13 @@ void sfu_layer_scheduler_reject_packet(sfu_layer_scheduler_t *sched, const sfu_l
                             decision->reject_reason == SFU_LAYER_REJECT_KEYFRAME_REQUIRED ||
                             decision->reject_reason == SFU_LAYER_REJECT_KEYFRAME_MISMATCH ||
                             decision->reject_reason == SFU_LAYER_REJECT_MISSING_FRAME_START ||
+                            decision->reject_reason == SFU_LAYER_REJECT_SEQUENCE_GAP ||
                             (sched->started_sid_mask & (1u << decision->sid)) != 0;
   if (sched->source == SFU_MEDIA_SCREEN || (is_active_camera_layer && is_expected_reject)) {
     sched->needs_keyframe = true;
+  }
+  if (decision->reject_reason == SFU_LAYER_REJECT_SEQUENCE_GAP) {
+    sched->frame_corrupted = true;
   }
   if ((decision->start_transition || sched->transition_active) && sched->transition_timestamp == decision->rtp_timestamp &&
       sched->transition_sid == decision->sid) {
@@ -523,6 +557,9 @@ void sfu_layer_scheduler_switch_source(sfu_peer_session_t *session, uint32_t new
   sched->keyframe_active = false;
   sched->keyframe_failed = false;
   sched->pacer_frame_active = false;
+  sched->expected_seq = 0;
+  sched->seq_initialized = false;
+  sched->frame_corrupted = false;
 
   atomic_fetch_add_explicit(&session->egress.generation, 1, memory_order_acq_rel);
 }

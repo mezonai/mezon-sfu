@@ -79,12 +79,40 @@ static void test_rtx_same_ssrc_restart(void) {
   }
 }
 
+static void test_rollback(void) {
+  sfu_rtp_seq_translator_t translator;
+  sfu_rtp_seq_translator_init(&translator);
+
+  uint16_t seq = 0;
+  assert(sfu_rtp_seq_translate(&translator, 0x11223344u, 100, &seq) && seq == 100);
+  assert(sfu_rtp_seq_translate(&translator, 0x11223344u, 101, &seq) && seq == 101);
+  assert(sfu_rtp_seq_translate(&translator, 0x11223344u, 102, &seq) && seq == 102);
+
+  /* Rollback 2 packets: next translated seq should be 101 */
+  assert(sfu_rtp_seq_translator_rollback(&translator, 0x11223344u, 2));
+  assert(sfu_rtp_seq_translate(&translator, 0x11223344u, 200, &seq) && seq == 101);
+  assert(sfu_rtp_seq_translate(&translator, 0x11223344u, 201, &seq) && seq == 102);
+
+  /* Rollback over 0 (wrap-around) */
+  assert(sfu_rtp_seq_translate(&translator, 0x99u, 1, &seq) && seq == 1);
+  assert(sfu_rtp_seq_translate(&translator, 0x99u, 2, &seq) && seq == 2);
+  /* next_output_seq is 3. Rollback 5 -> (uint16_t)(3 - 5) = 65534 */
+  assert(sfu_rtp_seq_translator_rollback(&translator, 0x99u, 5));
+  assert(sfu_rtp_seq_translate(&translator, 0x99u, 10, &seq) && seq == 65534);
+
+  /* Edge cases: NULL translator, count 0, non-existent SSRC */
+  assert(!sfu_rtp_seq_translator_rollback(NULL, 0x11223344u, 1));
+  assert(!sfu_rtp_seq_translator_rollback(&translator, 0x11223344u, 0));
+  assert(!sfu_rtp_seq_translator_rollback(&translator, 0xdeadbeefu, 1));
+}
+
 int main(void) {
   test_initial_seed_and_restart();
   test_wrap();
   test_independent_ssrcs();
   test_capacity_failure_preserves_entries();
   test_rtx_same_ssrc_restart();
+  test_rollback();
   printf("test_rtp_seq_translate: OK\n");
   return 0;
 }

@@ -42,3 +42,24 @@ bool sfu_rtp_seq_translate(sfu_rtp_seq_translator_t *translator, uint32_t ssrc, 
 
   return false;
 }
+
+bool sfu_rtp_seq_translator_rollback(sfu_rtp_seq_translator_t *translator, uint32_t ssrc, uint16_t count) {
+  if (!translator || count == 0) {
+    return false;
+  }
+
+  uint32_t index = hash_ssrc(ssrc) & (SFU_RTP_SEQ_TRANSLATOR_CAP - 1u);
+  for (uint32_t probe = 0; probe < SFU_RTP_SEQ_TRANSLATOR_CAP; probe++) {
+    sfu_rtp_seq_translation_entry_t *entry = &translator->entries[index];
+    if (!entry->valid) {
+      return false;
+    }
+    if (entry->ssrc == ssrc) {
+      entry->next_output_seq = (uint16_t)(entry->next_output_seq - count);
+      return true;
+    }
+    index = (index + 1u) & (SFU_RTP_SEQ_TRANSLATOR_CAP - 1u);
+  }
+
+  return false;
+}

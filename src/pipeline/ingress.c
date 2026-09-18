@@ -700,6 +700,7 @@ static sfu_svc_parse_status_t extract_svc_metadata(sfu_peer_session_t *sender_se
   }
 
   m->svc.rtp_timestamp = m->rtp.timestamp;
+  m->svc.seq = m->rtp.sequence_number;
   m->has_svc = true;
   m->is_keyframe = sfu_svc_descriptor_is_keyframe(&m->svc);
 #if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
