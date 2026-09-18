@@ -29,6 +29,7 @@ typedef struct sfu_layer_scheduler {
   uint8_t temporal_transition_tid;
   uint8_t pacer_frame_sid;
   uint8_t pacer_frame_tid;
+  uint16_t expected_seq;
   sfu_media_kind_t source;
   bool needs_keyframe;
   bool is_pinned;
@@ -40,6 +41,8 @@ typedef struct sfu_layer_scheduler {
   bool keyframe_active;
   bool keyframe_failed;
   bool pacer_frame_active;
+  bool seq_initialized;
+  bool frame_corrupted;
 } sfu_layer_scheduler_t;
 
 typedef enum sfu_layer_reject_reason {
@@ -57,10 +60,12 @@ typedef enum sfu_layer_reject_reason {
   SFU_LAYER_REJECT_TEMPORAL_SWITCH,
   SFU_LAYER_REJECT_PACER_OVERLAP,
   SFU_LAYER_REJECT_PACER_ORPHAN,
+  SFU_LAYER_REJECT_SEQUENCE_GAP,
 } sfu_layer_reject_reason_t;
 
 typedef struct sfu_layer_scheduler_decision {
   uint32_t rtp_timestamp;
+  uint16_t seq;
   uint8_t sid;
   uint8_t tid;
   uint8_t b_bit;

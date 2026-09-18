@@ -62,6 +62,8 @@ static const char *sfu_vp9_reject_reason_name(sfu_layer_reject_reason_t reason) 
       return "pacer_overlap";
     case SFU_LAYER_REJECT_PACER_ORPHAN:
       return "pacer_orphan";
+    case SFU_LAYER_REJECT_SEQUENCE_GAP:
+      return "sequence_gap";
     default:
       return "none";
   }
@@ -138,6 +140,9 @@ static void sfu_egress_reset_scheduler_for_keyframe(sfu_layer_scheduler_t *sched
   sched->temporal_transition_active = false;
   sched->temporal_transition_failed = false;
   sched->pacer_frame_active = false;
+  sched->expected_seq = 0;
+  sched->seq_initialized = false;
+  sched->frame_corrupted = false;
 }
 
 static void sfu_egress_invalidate_publisher_scheduler(sfu_peer_session_t *sub_session, sfu_media_kind_t source, uint32_t publisher_peer_id) {
@@ -192,15 +197,49 @@ static void sfu_egress_invalidate_backlog_drops(sfu_worker_t *w, sfu_peer_sessio
  * a second screen's keyframe stalls and is rolled back. */
 static void sfu_egress_invalidate_rolled_back_frame(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_media_kind_t source, sfu_paced_send_t *q,
                                                     const sfu_egress_media_t *media) {
-  if (!q || q->rolled_back_publisher_peer_id == 0) {
+  if (!q || (q->rolled_back_publisher_peer_id == 0 && q->rolled_back_packet_count == 0)) {
     return;
   }
   uint32_t publisher_peer_id = q->rolled_back_publisher_peer_id;
+  uint32_t media_ssrc = q->rolled_back_media_ssrc;
+  uint16_t packet_count = q->rolled_back_packet_count;
   q->rolled_back_publisher_peer_id = 0;
+  q->rolled_back_media_ssrc = 0;
+  q->rolled_back_packet_count = 0;
+  if (sub_session && sub_session->cold && media_ssrc != 0 && packet_count > 0) {
+    pthread_mutex_lock(&sub_session->crypto_lock);
+    sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, media_ssrc, packet_count);
+    pthread_mutex_unlock(&sub_session->crypto_lock);
+  }
   sfu_metric_inc_id(SFU_METRIC_PACED_SEND_INCOMPLETE_FRAME_INVALIDATE);
-  sfu_egress_invalidate_publisher_scheduler(sub_session, source, publisher_peer_id);
-  if (w && media && media->publisher && media->publisher->peer_id == publisher_peer_id) {
+  if (publisher_peer_id == 0 && media && media->publisher) {
+    publisher_peer_id = media->publisher->peer_id;
+  }
+  if (publisher_peer_id != 0) {
+    sfu_egress_invalidate_publisher_scheduler(sub_session, source, publisher_peer_id);
+  }
+  if (w && media && media->publisher && (publisher_peer_id == 0 || media->publisher->peer_id == publisher_peer_id)) {
     sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, source);
+  }
+}
+
+static void sfu_egress_handle_scheduler_rejection(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_layer_scheduler_t *sched,
+                                                  const sfu_layer_scheduler_decision_t *decision, const sfu_egress_media_t *media) {
+  if (sched && decision) {
+    sfu_layer_scheduler_reject_packet(sched, decision);
+  }
+  bool screen_packet = media->source == SFU_MEDIA_SCREEN && media->has_video && !media->is_audio;
+  bool camera_packet = media->source == SFU_MEDIA_VIDEO && media->has_video && !media->is_audio;
+  sfu_paced_send_t *paced_queue = screen_packet   ? (media->remote_slot < SFU_MAX_REMOTE_SLOTS ? &sub_session->egress.paced_screen[media->remote_slot] : NULL)
+                                  : camera_packet ? (media->remote_slot < SFU_MAX_REMOTE_SLOTS ? &sub_session->egress.paced_camera[media->remote_slot] : NULL)
+                                                  : NULL;
+  if (paced_queue) {
+    sfu_paced_send_rollback_input_frame(paced_queue);
+    sfu_paced_send_reject_input_frame(paced_queue);
+    sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
+  }
+  if (sched && sched->needs_keyframe && media->publisher && media->publisher->peer_id != 0) {
+    sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
   }
 }
 
@@ -292,12 +331,24 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     return false;
   }
   if (!sfu_rtp_packet_set_seq(pkt->data, pkt->len, subscriber_seq)) {
+    sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, outbound_ssrc, 1);
     pthread_mutex_unlock(&sub_session->crypto_lock);
+    if (paced_queue) {
+      sfu_paced_send_rollback_input_frame(paced_queue);
+      sfu_paced_send_reject_input_frame(paced_queue);
+      sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
+    }
     sfu_metric_inc_id(SFU_METRIC_EGRESS_SEQ_TRANSLATE_FAIL);
     return false;
   }
   if (sched && decision && !sfu_rtp_packet_set_marker(pkt->data, pkt->len, decision->set_marker)) {
+    sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, outbound_ssrc, 1);
     pthread_mutex_unlock(&sub_session->crypto_lock);
+    if (paced_queue) {
+      sfu_paced_send_rollback_input_frame(paced_queue);
+      sfu_paced_send_reject_input_frame(paced_queue);
+      sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
+    }
     return false;
   }
   uint8_t mid_send_extmap_id = sub_session->media.mid_recv_extmap_id;
@@ -319,7 +370,13 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     size_t new_len = (size_t)enc_len;
     if (mid_len <= 0 || (size_t)mid_len >= sizeof(mid_text) ||
         !sfu_rtp_ext_write_mid(pkt->data, (size_t)enc_len, pkt->cap, mid_send_extmap_id, mid_text, &new_len)) {
+      sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, outbound_ssrc, 1);
       pthread_mutex_unlock(&sub_session->crypto_lock);
+      if (paced_queue) {
+        sfu_paced_send_rollback_input_frame(paced_queue);
+        sfu_paced_send_reject_input_frame(paced_queue);
+        sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
+      }
       sfu_metric_inc_id(SFU_METRIC_MID_WRITE_FAIL);
 #if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
       static _Atomic uint32_t mid_write_fail_logs;
@@ -362,11 +419,19 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   uint64_t crypto_start = profile ? sfu_egress_profile_cycles() : 0;
   srtp_err_status_t protect_status = sfu_srtp_protect_rtp_status(&sub_session->srtp, pkt->data, &enc_len, pkt->cap);
+  if (protect_status != srtp_err_status_ok) {
+    sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, outbound_ssrc, 1);
+  }
   pthread_mutex_unlock(&sub_session->crypto_lock);
   if (profile) {
     w->hot.crypto_cycles += sfu_egress_profile_cycles() - crypto_start;
   }
   if (protect_status != srtp_err_status_ok) {
+    if (paced_queue) {
+      sfu_paced_send_rollback_input_frame(paced_queue);
+      sfu_paced_send_reject_input_frame(paced_queue);
+      sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
+    }
     if (protect_status == srtp_err_status_replay_old) {
       sfu_metric_inc_id(SFU_METRIC_EGRESS_PROTECT_REPLAY_OLD);
     } else if (protect_status == srtp_err_status_replay_fail) {
@@ -398,6 +463,14 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   sfu_pacer_reservation_t reservation = {0};
   if (!sfu_pacer_reserve(&sub_session->egress.pacer, cls, (uint32_t)enc_len, allow_congestion_drop, now_us, &reservation)) {
+    pthread_mutex_lock(&sub_session->crypto_lock);
+    sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, outbound_ssrc, 1);
+    pthread_mutex_unlock(&sub_session->crypto_lock);
+    if (paced_queue) {
+      sfu_paced_send_rollback_input_frame(paced_queue);
+      sfu_paced_send_reject_input_frame(paced_queue);
+      sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
+    }
     sfu_metric_inc_id(SFU_METRIC_PACER_DROPPED_ENH);
     sfu_metric_inc_id(SFU_METRIC_PACER_DROPPED_ENH_FRAMES);
     return false;
@@ -426,6 +499,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
         !sfu_paced_send_enqueue(paced_queue, pkt->data, (uint16_t)enc_len, rtx_plaintext, rtx_plaintext_len, dst, dst_len, cls,
                                 sub_session->egress.pacer.pacing_bps, &sub_session->egress.pacer, &reservation, &paced_metadata, now_us, &release_at_us)) {
       sfu_pacer_cancel(&sub_session->egress.pacer, &reservation);
+      pthread_mutex_lock(&sub_session->crypto_lock);
+      sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, outbound_ssrc, 1);
+      pthread_mutex_unlock(&sub_session->crypto_lock);
       sfu_paced_send_rollback_input_frame(paced_queue);
       sfu_paced_send_reject_input_frame(paced_queue);
       sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
@@ -445,6 +521,9 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
 
   if (sfu_net_send(w->send_net, pkt, (const struct sockaddr *)dst, dst_len) != 0) {
     sfu_pacer_cancel(&sub_session->egress.pacer, &reservation);
+    pthread_mutex_lock(&sub_session->crypto_lock);
+    sfu_rtp_seq_translator_rollback(&sub_session->cold->rtp_seq_translator, outbound_ssrc, 1);
+    pthread_mutex_unlock(&sub_session->crypto_lock);
     if (sfu_log_rate_limit("egress_send_full", 1000000000ULL)) {
       SFU_LOG_WARN("worker %u: [EGRESS DROP] send queue full", w->worker_index);
     }
@@ -518,7 +597,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
         if (decision.pacer_frame_continuation) {
           sfu_metric_inc_id(SFU_METRIC_VP9_ENH_ORPHAN_CONTINUATION);
         }
-        sfu_layer_scheduler_reject_packet(sched, &decision);
+        sfu_egress_handle_scheduler_rejection(w, sub_session, sched, &decision, media);
         if (reserved_output) {
           sfu_worker_release_packet(w, reserved_output);
         }
@@ -553,7 +632,7 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
       sfu_worker_release_packet(w, output);
     }
     if (has_decision) {
-      sfu_layer_scheduler_reject_packet(sched, &decision);
+      sfu_egress_handle_scheduler_rejection(w, sub_session, sched, &decision, media);
     }
     return false;
   }
@@ -656,7 +735,7 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
         if (decision.pacer_frame_continuation) {
           sfu_metric_inc_id(SFU_METRIC_VP9_ENH_ORPHAN_CONTINUATION);
         }
-        sfu_layer_scheduler_reject_packet(sched, &decision);
+        sfu_egress_handle_scheduler_rejection(w, sub_session, sched, &decision, media);
         sfu_worker_release_packet(w, pkt);
         return false;
       }

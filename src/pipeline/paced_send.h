@@ -108,6 +108,8 @@ typedef struct sfu_paced_send {
    * believes it was delivered; egress reads this and forces needs_keyframe so
    * the next frames do not decode against a reference that never went out. */
   uint32_t rolled_back_publisher_peer_id;
+  uint32_t rolled_back_media_ssrc;
+  uint16_t rolled_back_packet_count;
   uint64_t sent;
   uint64_t dropped_full;
   uint64_t dropped_delay_frames;
