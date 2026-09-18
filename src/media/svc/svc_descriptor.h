@@ -8,6 +8,7 @@
 
 typedef struct sfu_svc_descriptor {
   uint32_t rtp_timestamp;
+  uint16_t seq;
   uint8_t sid;
   uint8_t tid;
   uint8_t p_bit;

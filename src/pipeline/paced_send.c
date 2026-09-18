@@ -134,11 +134,15 @@ void sfu_paced_send_rollback_input_frame(sfu_paced_send_t *q) {
   if (!q || !q->entries || q->input_frame_queued_packets == 0 || q->input_frame_queued_packets > q->count) {
     return;
   }
+  q->rolled_back_packet_count = (uint16_t)q->input_frame_queued_packets;
   for (uint32_t i = 0; i < q->input_frame_queued_packets; i++) {
     q->tail = q->tail == 0 ? q->capacity - 1u : q->tail - 1u;
     sfu_paced_send_entry_t *e = &q->entries[q->tail];
     if (e->metadata.publisher_peer_id != 0) {
       q->rolled_back_publisher_peer_id = e->metadata.publisher_peer_id;
+    }
+    if (e->metadata.media_ssrc != 0) {
+      q->rolled_back_media_ssrc = e->metadata.media_ssrc;
     }
     sfu_pacer_cancel(e->pacer, &e->reservation);
     memset(e, 0, sizeof(*e));

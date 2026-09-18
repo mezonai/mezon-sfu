@@ -138,8 +138,25 @@ static void test_switch_source_transaction(void) {
 }
 
 static sfu_svc_descriptor_t make_desc(uint32_t timestamp, uint8_t sid, uint8_t tid, uint8_t p, uint8_t u, uint8_t d, uint8_t b, uint8_t e) {
+  static uint16_t g_seq = 0;
   sfu_svc_descriptor_t desc = {0};
   desc.rtp_timestamp = timestamp;
+  desc.seq = g_seq++;
+  desc.sid = sid;
+  desc.tid = tid;
+  desc.p_bit = p;
+  desc.u_bit = u;
+  desc.d_bit = d;
+  desc.b_bit = b;
+  desc.e_bit = e;
+  desc.l_bit = 1;
+  return desc;
+}
+
+static sfu_svc_descriptor_t make_desc_seq(uint32_t timestamp, uint16_t seq, uint8_t sid, uint8_t tid, uint8_t p, uint8_t u, uint8_t d, uint8_t b, uint8_t e) {
+  sfu_svc_descriptor_t desc = {0};
+  desc.rtp_timestamp = timestamp;
+  desc.seq = seq;
   desc.sid = sid;
   desc.tid = tid;
   desc.p_bit = p;
@@ -182,6 +199,7 @@ static void test_spatial_dependency_requires_completed_lower_layer(void) {
   assert(decision.pacer_class == SFU_PACER_CLASS_VIDEO_TRANSITION);
   sfu_layer_scheduler_commit_packet(&sched, &decision);
 
+  upper = make_desc(100, 1, 0, 0, 0, 1, 1, 1);
   assert(sfu_layer_scheduler_prepare_packet(&sched, &upper, false, &decision));
   assert(sched.current_sid == 0);
   sfu_layer_scheduler_commit_packet(&sched, &decision);
@@ -825,6 +843,140 @@ static void test_camera_over_target_must_not_arm_keyframe(void) {
   assert(!sched.needs_keyframe);
 }
 
+static void test_intra_frame_sequence_gap_rejects_and_arms_keyframe(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Clean keyframe start: packet 0 has seq=10, b_bit=1, e_bit=0 */
+  sfu_svc_descriptor_t kf_start = make_desc_seq(1000, 10, 0, 0, 0, 0, 0, 1, 0);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf_start, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(sched.seq_initialized);
+  assert(sched.expected_seq == 11);
+  assert(!sched.frame_corrupted);
+
+  /* Intra-frame packet with sequence gap (seq=12 instead of 11, b_bit=0) */
+  sfu_svc_descriptor_t pkt_gap = make_desc_seq(1000, 12, 0, 0, 0, 0, 0, 0, 0);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &pkt_gap, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_SEQUENCE_GAP);
+  assert(sched.needs_keyframe);
+  assert(sched.frame_corrupted);
+
+  /* Subsequent intra-frame packet (seq=13, b_bit=0) must also be rejected */
+  sfu_svc_descriptor_t pkt_cont = make_desc_seq(1000, 13, 0, 0, 0, 0, 0, 0, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &pkt_cont, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_SEQUENCE_GAP);
+  assert(sched.needs_keyframe);
+  assert(sched.frame_corrupted);
+
+  /* Clean keyframe recovers sequence tracking and resets frame_corrupted */
+  sfu_svc_descriptor_t recovery = make_desc_seq(2000, 20, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &recovery, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(!sched.frame_corrupted);
+  assert(sched.expected_seq == 21);
+}
+
+static void test_inter_frame_delta_sequence_gap_rejects_and_arms_keyframe(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Clean keyframe at timestamp 1000 (seq=100) */
+  sfu_svc_descriptor_t kf = make_desc_seq(1000, 100, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(sched.expected_seq == 101);
+
+  /* Delta frame start at timestamp 2000 with sequence gap (seq=105 instead of 101, b_bit=1) */
+  sfu_svc_descriptor_t delta_gap = make_desc_seq(2000, 105, 0, 0, 1, 0, 0, 1, 0);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &delta_gap, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_SEQUENCE_GAP);
+  assert(sched.needs_keyframe);
+  assert(sched.frame_corrupted);
+
+  /* Next delta frame at timestamp 3000 must be gated because needs_keyframe is armed */
+  sfu_svc_descriptor_t delta_next = make_desc_seq(3000, 106, 0, 0, 1, 0, 0, 1, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &delta_next, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_KEYFRAME_REQUIRED);
+
+  /* Fresh keyframe recovers */
+  sfu_svc_descriptor_t kf_rec = make_desc_seq(4000, 200, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf_rec, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(!sched.frame_corrupted);
+  assert(sched.expected_seq == 201);
+}
+
+static void test_sequence_wraparound_and_gap(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Clean keyframe at timestamp 1000 with seq=65535 */
+  sfu_svc_descriptor_t kf = make_desc_seq(1000, 65535, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(sched.expected_seq == 0);
+
+  /* Clean delta frame at timestamp 2000 with wrapped seq=0 */
+  sfu_svc_descriptor_t delta0 = make_desc_seq(2000, 0, 0, 0, 1, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &delta0, false, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(sched.expected_seq == 1);
+
+  /* Next delta frame with gap across wrap boundary: seq=3 instead of 1 */
+  sfu_svc_descriptor_t delta_gap = make_desc_seq(3000, 3, 0, 0, 1, 0, 0, 1, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &delta_gap, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_SEQUENCE_GAP);
+  assert(sched.needs_keyframe);
+}
+
+static void test_screen_share_sequence_gap(void) {
+  sfu_layer_scheduler_t sched;
+  sfu_layer_scheduler_init(&sched, 1);
+  sched.source = SFU_MEDIA_SCREEN;
+
+  sfu_layer_scheduler_decision_t decision;
+  /* Clean keyframe at timestamp 1000, seq=50 */
+  sfu_svc_descriptor_t kf = make_desc_seq(1000, 50, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+
+  /* Delta frame with packet 1 (seq=51, b=1, e=0) */
+  sfu_svc_descriptor_t p1 = make_desc_seq(2000, 51, 0, 0, 1, 0, 0, 1, 0);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &p1, false, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+
+  /* Packet 2 dropped on uplink! Packet 3 arrives with seq=53 (b=0, e=1) */
+  sfu_svc_descriptor_t p3 = make_desc_seq(2000, 53, 0, 0, 1, 0, 0, 0, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &p3, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_SEQUENCE_GAP);
+  assert(sched.needs_keyframe);
+  assert(sched.frame_corrupted);
+
+  /* Delta frame at timestamp 3000 must be gated */
+  sfu_svc_descriptor_t delta_gated = make_desc_seq(3000, 54, 0, 0, 1, 0, 0, 1, 1);
+  assert(!sfu_layer_scheduler_prepare_packet(&sched, &delta_gated, false, &decision));
+  assert(decision.reject_reason == SFU_LAYER_REJECT_KEYFRAME_REQUIRED);
+
+  /* Fresh keyframe recovers */
+  sfu_svc_descriptor_t kf_rec = make_desc_seq(4000, 100, 0, 0, 0, 0, 0, 1, 1);
+  assert(sfu_layer_scheduler_prepare_packet(&sched, &kf_rec, true, &decision));
+  sfu_layer_scheduler_commit_packet(&sched, &decision);
+  assert(!sched.needs_keyframe);
+  assert(!sched.frame_corrupted);
+  assert(sched.expected_seq == 101);
+}
+
 int main(void) {
   test_l1t3_bitrate_ladder_stays_on_spatial_zero();
   test_down_holds_at_rung_rate();
@@ -847,6 +999,10 @@ int main(void) {
   test_camera_video_reject_arms_needs_keyframe();
   test_incomplete_picture_timestamp_transition_arms_needs_keyframe();
   test_camera_over_target_must_not_arm_keyframe();
+  test_intra_frame_sequence_gap_rejects_and_arms_keyframe();
+  test_inter_frame_delta_sequence_gap_rejects_and_arms_keyframe();
+  test_sequence_wraparound_and_gap();
+  test_screen_share_sequence_gap();
   test_audio_does_not_consume_slot();
   test_full_table_rejection_and_prune_reclaims_slot();
   test_full_state_reset_on_reuse();

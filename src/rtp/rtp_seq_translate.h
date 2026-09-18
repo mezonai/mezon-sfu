@@ -18,5 +18,6 @@ typedef struct sfu_rtp_seq_translator {
 
 void sfu_rtp_seq_translator_init(sfu_rtp_seq_translator_t *translator);
 bool sfu_rtp_seq_translate(sfu_rtp_seq_translator_t *translator, uint32_t ssrc, uint16_t source_seq, uint16_t *out_seq);
+bool sfu_rtp_seq_translator_rollback(sfu_rtp_seq_translator_t *translator, uint32_t ssrc, uint16_t count);
 
 #endif /* SFU_RTP_SEQ_TRANSLATE_H */
