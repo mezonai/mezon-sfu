@@ -124,6 +124,8 @@ sudo apt install clang libxdp-dev libbpf-dev linux-headers-$(uname -r)
 To build libxdp-dev from source instead:
 
 ```sh
+sudo apt install libpcap-dev
+
 git clone --recurse-submodules https://github.com/xdp-project/xdp-tools.git
 cd xdp-tools
 
