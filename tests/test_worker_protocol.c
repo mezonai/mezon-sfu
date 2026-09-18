@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "congestion/bandwidth_allocator.h"
 #include "congestion/pacer.h"
 #include "congestion/twcc_history.h"
 #include "media/svc/layer_scheduler.h"
@@ -906,6 +907,48 @@ static void test_publisher_remb_aggregates_fresh_maximum_and_throttles(void) {
   assert(sfu_metric_get("remb_aggregate_target_changed") >= 3);
 
   sfu_session_release(second);
+  kf_fixture_destroy(&f);
+}
+
+static void test_publisher_remb_startup_bootstrap_screen(void) {
+  kf_fixture_t f;
+  kf_fixture_init(&f);
+
+  f.publisher->media.screen.ssrc = 0x55667788u;
+  f.publisher->media.screen.active = true;
+  sfu_session_publish_media(f.publisher);
+
+  sfu_fanout_bundle_t *old = sfu_session_fanout_acquire(f.publisher);
+  assert(old != NULL);
+  const sfu_fanout_route_t *existing = sfu_fanout_bundle_find_peer(old, f.base.session, NULL);
+  assert(existing != NULL);
+  sfu_fanout_route_t route = *existing;
+  sfu_fanout_bundle_t *bundle = sfu_fanout_bundle_alloc();
+  assert(bundle != NULL);
+  assert(sfu_fanout_bundle_set(bundle, 0, &route, SFU_FANOUT_VIDEO | SFU_FANOUT_SCREEN));
+  sfu_fanout_bundle_release(old);
+  sfu_session_publish_fanout(f.publisher, bundle);
+
+  /* At startup: route exists for screen (routes_for_source > 0), but subscriber TWCC feedback
+   * has not arrived yet (fresh_for_source == 0) and publisher has sent no screen REMB yet
+   * (last_screen_remb_bps == 0).
+   * sfu_session_maybe_send_publisher_remb must bootstrap screen REMB using preferred bitrate
+   * (SFU_BANDWIDTH_SCREEN_PREFERRED_BPS) to prevent browser encoder startup blur at 300 kbps floor. */
+  assert(f.publisher->egress.last_screen_remb_bps == 0);
+  uint32_t free_before = pool_free_count(&f.base.pp);
+  uint64_t now_us = sfu_now_us();
+  assert(sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)now_us));
+
+  assert(f.publisher->egress.last_screen_remb_bps == SFU_BANDWIDTH_SCREEN_PREFERRED_BPS);
+  assert(f.publisher->egress.last_screen_remb_time_us == (int64_t)now_us);
+  /* Exactly one REMB packet was sent for screen */
+  assert(pool_free_count(&f.base.pp) == free_before - 1);
+
+  /* Subsequent run before fresh feedback arrives does not re-send because last_screen_remb_bps != 0 */
+  assert(!sfu_session_maybe_send_publisher_remb(&f.base.w, f.publisher, (int64_t)(now_us + 50000)));
+  assert(f.publisher->egress.last_screen_remb_bps == SFU_BANDWIDTH_SCREEN_PREFERRED_BPS);
+  assert(pool_free_count(&f.base.pp) == free_before - 1);
+
   kf_fixture_destroy(&f);
 }
 
@@ -2201,6 +2244,7 @@ int main(void) {
   test_pli_unknown_ssrc_dropped();
   test_gcc_estimate_reaches_scheduler();
   test_publisher_remb_aggregates_fresh_maximum_and_throttles();
+  test_publisher_remb_startup_bootstrap_screen();
   test_egress_writes_twcc_extension();
   test_egress_rejects_new_generation_before_answer();
   test_egress_rejects_old_assignment_generation();

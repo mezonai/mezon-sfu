@@ -113,6 +113,7 @@ typedef struct sfu_paced_send {
   uint64_t dropped_delay_frames;
   uint64_t dropped_frame_packets;
   uint64_t dropped_stale;
+  uint32_t ready_frame_count;
   uint32_t motion_frame_count;
   int64_t last_frame_size_bytes;
 } sfu_paced_send_t;

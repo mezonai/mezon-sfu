@@ -5,6 +5,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include "config/config.h"
+#include "congestion/bandwidth_allocator.h"
 #include "congestion/gcc.h"
 #include "congestion/pacer.h"
 #include "congestion/probe_controller.h"
@@ -28,7 +30,7 @@
 
 #define SFU_SESSION_KF_THROTTLE_MS 300
 #define SFU_SNAPSHOT_HAZARD_SLOTS 256
-#define SFU_BWE_START_BPS 1500000u
+#define SFU_BWE_START_BPS 2500000u
 #define SFU_BWE_MIN_BPS 100000u
 #define SFU_BWE_MAX_BPS 5000000u
 #define SFU_REMB_CONTRIBUTION_MAX_AGE_US 2000000ULL
@@ -1912,6 +1914,8 @@ bool sfu_session_apply_pending_answer(sfu_peer_session_t *session, const sfu_pen
     bool old_screen_neg = atomic_load_explicit(&session->media.screen_send_negotiated, memory_order_acquire);
     if (new_screen_neg && !old_screen_neg) {
       atomic_store_explicit(&session->media.screen_keyframe_recovery_pending, false, memory_order_release);
+      session->egress.last_screen_remb_bps = 0;
+      session->egress.last_screen_remb_time_us = 0;
     }
     atomic_store_explicit(&session->media.screen_send_negotiated, new_screen_neg, memory_order_release);
     if (new_screen_neg) {
@@ -2266,8 +2270,11 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
     sfu_fanout_iter_t iter;
     sfu_fanout_iter_init(&iter, bundle, source);
     const sfu_fanout_route_t *route;
+    uint32_t routes_for_source = 0;
+    uint32_t fresh_for_source = 0;
     while ((route = sfu_fanout_iter_next(&iter, NULL)) != NULL) {
       saw_route = true;
+      routes_for_source++;
       uint32_t camera_bps = 0;
       uint32_t screen_bps = 0;
       if (route->subscriber && sfu_session_read_remb_contribution(route->subscriber, route->remote_slot, route->assignment_generation, (uint64_t)now_us,
@@ -2284,6 +2291,7 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
 #if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
         fresh_by_source[pass]++;
 #endif
+        fresh_for_source++;
         fresh++;
       } else {
 #if defined(SFU_DIAG_LOG) && (SFU_DIAG_LOG)
@@ -2291,6 +2299,12 @@ bool sfu_session_maybe_send_publisher_remb(sfu_worker_t *w, sfu_peer_session_t *
 #endif
         stale++;
       }
+    }
+    if (pass == 1 && targets[1] == 0 && routes_for_source > 0 && fresh_for_source == 0 && publisher->egress.last_screen_remb_bps == 0) {
+      /* Screen share startup bootstrap: before subscriber TWCC feedback arrives,
+       * signal preferred screen bitrate to lift the browser encoder from its 300 kbps floor. */
+      uint32_t screen_pref = g_sfu_config.bandwidth_screen_preferred_bps ? g_sfu_config.bandwidth_screen_preferred_bps : SFU_BANDWIDTH_SCREEN_PREFERRED_BPS;
+      targets[1] = screen_pref;
     }
   }
   sfu_fanout_bundle_release(bundle);
