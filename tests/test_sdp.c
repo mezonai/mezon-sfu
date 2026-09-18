@@ -1033,7 +1033,11 @@ int main(void) {
   pthread_attr_t attr;
   pthread_t thread;
   assert(pthread_attr_init(&attr) == 0);
-  assert(pthread_attr_setstacksize(&attr, 128u * 1024u * 1024u) == 0);
+  // TODO: picks up oversized sfu_peer_session_t (paced_camera/screen per
+  // SFU_MAX_REMOTE_SLOTS, ~100 MiB stacks). Reduce session footprint or
+  // SFU_MAX_REMOTE_SLOTS memory rather than growing thread stacks — see
+  // worker.c paced-queue review follow-up.
+  assert(pthread_attr_setstacksize(&attr, 256u * 1024u * 1024u) == 0);
   assert(pthread_create(&thread, &attr, run_sdp_tests, NULL) == 0);
   pthread_attr_destroy(&attr);
   assert(pthread_join(thread, NULL) == 0);

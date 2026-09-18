@@ -270,6 +270,10 @@ static bool sfu_egress_process_local(sfu_worker_t *w, sfu_peer_session_t *sub_se
     sfu_egress_invalidate_rolled_back_frame(w, sub_session, media->source, paced_queue, media);
   }
   if (!admitted) {
+    if (media->has_video && !media->is_audio && media->publisher && media->publisher->peer_id != 0) {
+      sfu_egress_invalidate_publisher_scheduler(sub_session, media->source, media->publisher->peer_id);
+      sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
+    }
     return false;
   }
 
@@ -575,6 +579,9 @@ static bool sfu_egress_process_plaintext_output(sfu_worker_t *w, sfu_peer_sessio
       sfu_layer_scheduler_commit_packet(sched, &decision);
     } else {
       sfu_layer_scheduler_reject_packet(sched, &decision);
+      if (sched->needs_keyframe && media->publisher && media->publisher->peer_id != 0) {
+        sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
+      }
     }
   }
   /* Runs after commit_packet: a completed keyframe clears needs_keyframe, so the
@@ -666,6 +673,9 @@ bool sfu_egress_process(sfu_worker_t *w, sfu_peer_session_t *sub_session, sfu_pa
       sfu_layer_scheduler_commit_packet(sched, &decision);
     } else {
       sfu_layer_scheduler_reject_packet(sched, &decision);
+      if (sched->needs_keyframe && media->publisher && media->publisher->peer_id != 0) {
+        sfu_worker_request_keyframe_throttled_for_source(w, media->publisher, media->source);
+      }
     }
   }
   /* Runs after commit_packet: a completed keyframe clears needs_keyframe, so the
