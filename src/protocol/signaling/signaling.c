@@ -894,13 +894,19 @@ bool sfu_test_parse_answer_screen(const char *sdp, size_t sdp_len, uint32_t *scr
   return true;
 }
 
-static void emit_hook_event(const char *event, int64_t user_id, uint64_t room_id) {
+static void emit_hook_event(const char *event, int64_t user_id, uint64_t room_id, const char *role) {
   if (!event || event[0] == '\0' || room_id == 0) {
     return;
   }
 
   char msg[384];
-  int n = snprintf(msg, sizeof(msg), "{\"user_id\":\"%" PRId64 "\",\"room_id\":\"%" PRIu64 "\",\"name\":\"\",\"event\":\"%s\"}", user_id, room_id, event);
+  int n;
+  if (role && role[0] != '\0') {
+    n = snprintf(msg, sizeof(msg), "{\"user_id\":\"%" PRId64 "\",\"room_id\":\"%" PRIu64 "\",\"name\":\"\",\"event\":\"%s\",\"role\":\"%s\"}", user_id, room_id,
+                 event, role);
+  } else {
+    n = snprintf(msg, sizeof(msg), "{\"user_id\":\"%" PRId64 "\",\"room_id\":\"%" PRIu64 "\",\"name\":\"\",\"event\":\"%s\"}", user_id, room_id, event);
+  }
   if (n <= 0 || (size_t)n >= sizeof(msg)) {
     SFU_LOG_WARN("signaling: hook payload too large for event=%s", event);
     return;
@@ -1016,7 +1022,7 @@ static void finish_client_close(sfu_client_conn_t *c) {
   }
 
   if (was_in_room) {
-    emit_hook_event("leave", user_id, room_id);
+    emit_hook_event("leave", user_id, room_id, c->is_audience ? "audience" : "speaker");
   }
 
   if (c->fd >= 0) {
@@ -1233,9 +1239,9 @@ static void handle_join(sfu_client_conn_t *c, sfu_signaling_server_t *s, const c
 
   c->joined_room = room;
   c->joined_room_id = room_id;
-  emit_hook_event("join", c->user_id, room_id);
+  emit_hook_event("join", c->user_id, room_id, c->is_audience ? "audience" : "speaker");
   if (!c->is_audience) {
-    emit_hook_event("publish", c->user_id, room_id);
+    emit_hook_event("publish", c->user_id, room_id, NULL);
   }
 
   SFU_LOG_INFO("signaling: peer %s joined room_id=%" PRIu64 " room=%p fd=%d", c->peer_ip, room_id, (void *)room, c->fd);
@@ -1482,11 +1488,11 @@ static void handle_answer(sfu_client_conn_t *c, sfu_signaling_server_t *s, const
       broadcast_peer_updated((sfu_room_t *)session->room, session);
       if (camera_activity_changed && !newly_bound) {
         atomic_store_explicit(&session->media.camera_announced_active, media_after_answer.video_active, memory_order_release);
-        emit_hook_event(media_after_answer.video_active ? "publish" : "unpublish", session->user_id, c->joined_room_id);
+        emit_hook_event(media_after_answer.video_active ? "publish" : "unpublish", session->user_id, c->joined_room_id, NULL);
       }
       if (screen_activity_changed && !newly_bound) {
         atomic_store_explicit(&session->media.screen_announced_active, media_after_answer.screen_active, memory_order_release);
-        emit_hook_event(media_after_answer.screen_active ? "share_screen" : "unshare_screen", session->user_id, c->joined_room_id);
+        emit_hook_event(media_after_answer.screen_active ? "share_screen" : "unshare_screen", session->user_id, c->joined_room_id, NULL);
       }
     }
   }
@@ -1581,10 +1587,10 @@ static void flush_media_state_events(sfu_signaling_server_t *s) {
       broadcast_peer_updated((sfu_room_t *)session->room, session);
       uint64_t room_id = ((sfu_room_t *)session->room)->room_id;
       if (camera_changed) {
-        emit_hook_event(media.video_active ? "publish" : "unpublish", session->user_id, room_id);
+        emit_hook_event(media.video_active ? "publish" : "unpublish", session->user_id, room_id, NULL);
       }
       if (screen_changed) {
-        emit_hook_event(media.screen_active ? "share_screen" : "unshare_screen", session->user_id, room_id);
+        emit_hook_event(media.screen_active ? "share_screen" : "unshare_screen", session->user_id, room_id, NULL);
       }
     }
     sfu_session_release(session);
@@ -1704,7 +1710,7 @@ static void handle_camera(sfu_client_conn_t *c, const char *buf, size_t n) {
   if (effective_changed) {
     atomic_store_explicit(&session->media.camera_announced_active, effective_active, memory_order_release);
     room_refresh_peer_streams(c->joined_room, session);
-    emit_hook_event(effective_active ? "publish" : "unpublish", c->user_id, c->joined_room_id);
+    emit_hook_event(effective_active ? "publish" : "unpublish", c->user_id, c->joined_room_id, NULL);
   }
   if (requested_changed || effective_changed) {
     broadcast_peer_updated(c->joined_room, session);
@@ -1756,7 +1762,7 @@ static void handle_screen_share(sfu_client_conn_t *c, const char *buf, size_t n)
   if (effective_changed) {
     atomic_store_explicit(&session->media.screen_announced_active, effective_active, memory_order_release);
     room_refresh_peer_streams(c->joined_room, session);
-    emit_hook_event(effective_active ? "share_screen" : "unshare_screen", c->user_id, c->joined_room_id);
+    emit_hook_event(effective_active ? "share_screen" : "unshare_screen", c->user_id, c->joined_room_id, NULL);
   }
   if (requested_changed || effective_changed) {
     broadcast_peer_updated(c->joined_room, session);
